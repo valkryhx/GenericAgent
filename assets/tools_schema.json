@@ -67,6 +67,17 @@
       "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for the user"}}}
   }},
   {"type": "function", "function": {
+    "name": "codex_lesson_update",
+    "description": "Record one LLM-proposed reusable coding lesson from a redacted Codex packet. The tool validates, deduplicates, and stores candidates; do not use for raw logs, secrets, private paths, or project-specific facts.",
+    "parameters": {"type": "object", "properties": {
+      "title": {"type": "string", "description": "Short reusable lesson title"},
+      "guidance": {"type": "string", "description": "Concrete reusable guidance, not project-specific"},
+      "category": {"type": "string", "description": "workflow/debugging/testing/git/security/frontend/planning/communication/quality", "default": "workflow"},
+      "evidence": {"type": "array", "items": {"type": "string"}, "description": "Short evidence signals from the redacted packet"},
+      "source_hash": {"type": "string", "description": "Packet/session hash prefix if available"},
+      "confidence": {"type": "number", "description": "0.0-1.0 confidence", "default": 0.5}}}
+  }},
+  {"type": "function", "function": {
     "name": "start_long_term_update",
     "description": "Start distilling long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed",
     "parameters": {"type": "object", "properties": {}}}

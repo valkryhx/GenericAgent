@@ -67,6 +67,17 @@
       "candidates": {"type": "array", "items": {"type": "string"}, "description": "提供给用户的可选快捷选项列表"}}}
   }},
   {"type": "function", "function": {
+    "name": "codex_lesson_update",
+    "description": "记录一条LLM从脱敏Codex packet中提议的可复用编码经验。工具会校验、去重并写入候选库；禁止用于原始日志、密钥、私有路径或项目特定事实。",
+    "parameters": {"type": "object", "properties": {
+      "title": {"type": "string", "description": "简短的可复用经验标题"},
+      "guidance": {"type": "string", "description": "具体可复用做法，不能是项目特定事实"},
+      "category": {"type": "string", "description": "workflow/debugging/testing/git/security/frontend/planning/communication/quality", "default": "workflow"},
+      "evidence": {"type": "array", "items": {"type": "string"}, "description": "来自脱敏packet的短证据信号"},
+      "source_hash": {"type": "string", "description": "packet/session hash前缀，如有"},
+      "confidence": {"type": "number", "description": "0.0-1.0置信度", "default": 0.5}}}
+  }},
+  {"type": "function", "function": {
     "name": "start_long_term_update",
     "description": "准备开始提炼记忆。发现值得长期记忆的信息（环境事实/用户偏好/避坑经验）时调用此工具。已记忆更新或在自主流程内时无需调用。超15轮完成的任务必须调用以沉淀经验",
     "parameters": {"type": "object", "properties": {}}}

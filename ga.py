@@ -516,6 +516,32 @@ class GenericAgentHandler(BaseHandler):
         else: result = "Memory Management SOP not found. Do not update memory."
         return StepOutcome(result, next_prompt=prompt)
 
+    def do_codex_lesson_update(self, args, response):
+        '''记录从Codex蒸馏packet中由LLM提议的候选经验；工具负责校验、去重和候选落盘。'''
+        try:
+            from memory.codex_session_distill import DistillState, codex_lesson_update
+        except Exception:
+            import codex_session_distill
+            DistillState = codex_session_distill.DistillState
+            codex_lesson_update = codex_session_distill.codex_lesson_update
+        state_dir = args.get("state_dir") or os.path.join(script_dir, "memory", "codex_distill")
+        evidence = args.get("evidence") or args.get("evidence_signals") or []
+        if isinstance(evidence, str): evidence = [evidence]
+        result = codex_lesson_update(
+            DistillState(state_dir),
+            title=args.get("title", ""),
+            guidance=args.get("guidance", ""),
+            category=args.get("category", "workflow"),
+            evidence=evidence,
+            source_hash=args.get("source_hash", ""),
+            confidence=args.get("confidence", 0.5),
+        )
+        if result.get("status") == "candidate_recorded":
+            yield f"[Info] Codex lesson candidate recorded: {result['candidate'].get('id')}\n"
+        else:
+            yield f"[Warn] Codex lesson candidate rejected: {result.get('reason')}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
     def _fold_earlier(self, lines):
         FALLBACK = '直接回答了用户问题'
         parts, cnt, last = [], 0, ''
