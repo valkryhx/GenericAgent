@@ -50,6 +50,9 @@ class NativeImageInputTest(unittest.TestCase):
         self.assertEqual(content[1]["source"]["media_type"], "image/png")
         self.assertEqual(base64.b64decode(content[1]["source"]["data"]), b"\x89PNG\r\n\x1a\nfake")
 
+    def test_agentmain_leaves_plain_text_on_original_path(self):
+        self.assertIsNone(_build_user_content_with_images("你好"))
+
     def test_openai_converters_preserve_native_image_blocks(self):
         msg = {
             "role": "user",

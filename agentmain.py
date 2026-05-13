@@ -38,6 +38,8 @@ def _build_user_content_with_images(text, images=None):
         path = p if os.path.isabs(str(p)) else os.path.join(script_dir, str(p))
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in _IMAGE_EXTS and path not in image_paths:
             image_paths.append(path)
+    if not image_paths:
+        return None
     content = [{"type": "text", "text": text or ""}]
     for path in image_paths:
         try:
@@ -106,14 +108,19 @@ class GenericAgent:
                 if 'mixin' in k: llm_sessions += [{'mixin_cfg': cfg}]
                 elif c := resolve_client(k): llm_sessions += [c]
             except: pass
+        resolved_sessions = []
         for i, s in enumerate(llm_sessions):
             if isinstance(s, dict) and 'mixin_cfg' in s:
                 try:
                     mixin = MixinSession(llm_sessions, s['mixin_cfg'])
-                    if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)
-                    else: llm_sessions[i] = ToolClient(mixin)
+                    if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): resolved_sessions.append(NativeToolClient(mixin))
+                    else: resolved_sessions.append(ToolClient(mixin))
                 except Exception as e: print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
-        self.llmclients = llm_sessions
+            else:
+                resolved_sessions.append(s)
+        if not resolved_sessions: raise Exception('[ERROR] No available LLM sessions: Check your mykey.py')
+        self.llmclients = resolved_sessions
+        self.llm_no %= len(self.llmclients)
         self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
         if oldhistory: self.llmclient.backend.history = oldhistory
     
