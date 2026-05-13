@@ -298,6 +298,7 @@ native_oai_config = {
     'apibase': 'https://api.openai.com/v1',          # 补齐到 /v1/chat/completions
     'model': 'gpt-5.4',                              # gpt-5/o 系列
     'api_mode': 'chat_completions',                  # 'chat_completions'（默认）|'responses'
+    # 'native_image_input': True,                    # 仅支持原生图片输入的 OpenAI 模型开启；本地图片路径会转图片块
     # 'reasoning_effort': 'high',                    # none|minimal|low|medium|high|xhigh
                                                      # chat_completions → payload.reasoning_effort
                                                      # responses        → payload.reasoning.effort
@@ -319,6 +320,7 @@ native_oai_config = {
 #     'apibase': 'https://api.openai.com/v1',        # 补齐到 /v1/responses（因为 api_mode=responses）
 #     'model': 'gpt-5.4',                            # gpt-5/o 系列
 #     'api_mode': 'responses',                       # 改走 /v1/responses 端点
+#     'native_image_input': True,                    # 仅支持原生图片输入的 OpenAI 模型开启
 #     'reasoning_effort': 'high',                    # none|minimal|low|medium|high|xhigh
 #                                                    # responses 模式下写进 payload.reasoning.effort
 #     'max_retries': 2,                              # int 默认 1

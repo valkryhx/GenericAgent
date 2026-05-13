@@ -696,6 +696,10 @@ class NativeClaudeSession(BaseSession):
         return MockResponse(thinking, content, tool_calls, str(content_blocks))
 
 class NativeOAISession(NativeClaudeSession):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.native_image_input = bool(cfg.get("native_image_input", False))
+
     def raw_ask(self, messages):
         messages = _fix_messages(messages)
         messages = _ensure_thinking_blocks(messages, self.model)
@@ -994,8 +998,12 @@ class NativeToolClient:
         for tid in self._pending_tool_ids:
             if tid not in tr_id_set: tool_result_blocks.append({"type": "tool_result", "tool_use_id": tid, "content": ""})
         self._pending_tool_ids = []
-        # Filter whitespace-only text blocks that cause 400 on strict API proxies
-        filtered_content = [c for c in combined_content if c.get("text", "").strip()]
+        # Filter whitespace-only text blocks that cause 400 on strict API proxies,
+        # but keep native multimodal blocks such as image/image_url.
+        filtered_content = [
+            c for c in combined_content
+            if c.get("type") != "text" or c.get("text", "").strip()
+        ]
         final_content = tool_result_blocks + filtered_content
         if not final_content: final_content = [{"type": "text", "text": "."}]
         merged = {"role": "user", "content": final_content}

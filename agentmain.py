@@ -1,4 +1,4 @@
-import os, sys, threading, queue, time, json, re, random, locale
+import os, sys, threading, queue, time, json, re, random, locale, base64, mimetypes
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 elif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
@@ -11,6 +11,48 @@ from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
+
+
+def _extract_image_paths(text):
+    paths = []
+    for raw in re.findall(r'"([^"]+\.(?:png|jpe?g|webp|gif|bmp))"|\'([^\']+\.(?:png|jpe?g|webp|gif|bmp))\'|(\S+\.(?:png|jpe?g|webp|gif|bmp))', text or '', re.I):
+        p = next((x for x in raw if x), '')
+        if not p: continue
+        path = p if os.path.isabs(p) else os.path.join(script_dir, p)
+        if os.path.isfile(path) and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _image_block(path):
+    media_type = mimetypes.guess_type(path)[0] or 'image/png'
+    with open(path, 'rb') as f:
+        data = base64.b64encode(f.read()).decode('ascii')
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+def _build_user_content_with_images(text, images=None):
+    image_paths = []
+    for p in list(images or []) + _extract_image_paths(text):
+        path = p if os.path.isabs(str(p)) else os.path.join(script_dir, str(p))
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in _IMAGE_EXTS and path not in image_paths:
+            image_paths.append(path)
+    content = [{"type": "text", "text": text or ""}]
+    for path in image_paths:
+        try:
+            content.append(_image_block(path))
+        except Exception as e:
+            content[0]["text"] += f"\n[图片附件读取失败: {path}: {e}]"
+    return content
+
+
+def _native_image_input_enabled(llmclient):
+    backend = getattr(llmclient, 'backend', None)
+    backend = getattr(backend, 'primary', backend)
+    return isinstance(backend, NativeOAISession) and bool(getattr(backend, 'native_image_input', False))
+
+
 def load_tool_schema(suffix=''):
     global TOOLS_SCHEMA
     TS = open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8').read()
@@ -125,7 +167,7 @@ class GenericAgent:
     def run(self):
         while True:
             task = self.task_queue.get()
-            raw_query, source, display_queue = task["query"], task["source"], task["output"]
+            raw_query, source, images, display_queue = task["query"], task["source"], task.get("images") or [], task["output"]
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
@@ -143,8 +185,10 @@ class GenericAgent:
                 if ps > 0: handler.working['key_info'] += f'\n[SYSTEM] 此为 {ps} 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n'
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
-            gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query, 
-                                handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose)
+            initial_content = _build_user_content_with_images(raw_query, images) if _native_image_input_enabled(self.llmclient) else None
+            gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
+                                handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose,
+                                initial_user_content=initial_content)
             try:
                 full_resp = ""; last_pos = 0
                 for chunk in gen:
