@@ -500,7 +500,11 @@ def _msgs_claude2oai(messages):
                         text_parts.append({"type": "image_url", "image_url": {"url": f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"}})
                 elif b.get("type") == "image_url": text_parts.append(b)
                 elif b.get("type") == "text" and b.get("text"): text_parts.append({"type": "text", "text": b.get("text", "")})
-            if text_parts: result.append({"role": "user", "content": text_parts})
+            if text_parts:
+                if all(p.get("type") == "text" for p in text_parts):
+                    result.append({"role": "user", "content": "\n".join(p.get("text", "") for p in text_parts)})
+                else:
+                    result.append({"role": "user", "content": text_parts})
         else: result.append(msg)
     return result
 
@@ -699,6 +703,7 @@ class NativeOAISession(NativeClaudeSession):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.native_image_input = bool(cfg.get("native_image_input", False))
+        self.native_tools = bool(cfg.get("native_tools", True))
 
     def raw_ask(self, messages):
         messages = _fix_messages(messages)
@@ -973,19 +978,27 @@ class NativeToolClient:
         self.backend.system = self._thinking_prompt()
         self.name = self.backend.name
         self._pending_tool_ids = []
+        self.last_tools = ''
         self.log_path = None
-    def set_system(self, extra_system):
+    def _uses_native_tools(self):
+        return bool(getattr(self.backend, 'native_tools', True))
+    def _text_tool_instruction(self, tools):
+        return ToolClient(self.backend, auto_save_tokens=False)._prepare_tool_instruction(tools)
+    def set_system(self, extra_system, tools=None):
         combined = f"{extra_system}\n\n{self._thinking_prompt()}" if extra_system else self._thinking_prompt()
+        if tools and not self._uses_native_tools():
+            combined = f"{combined}\n\n{self._text_tool_instruction(tools)}"
         if combined != self.backend.system: print(f"[Debug] Updated system prompt, length {len(combined)} chars.")
         self.backend.system = combined
     def chat(self, messages, tools=None):
-        if tools: self.backend.tools = tools
+        if tools and self._uses_native_tools(): self.backend.tools = tools
+        else: self.backend.tools = None
         if not self.backend.history: self._pending_tool_ids = []
         combined_content = []; resp = None; tool_results = []
         for msg in messages:
             c = msg.get('content', '')
             if msg['role'] == 'system': 
-                self.set_system(c); continue
+                self.set_system(c, tools); continue
             if isinstance(c, str): combined_content.append({"type": "text", "text": c})
             elif isinstance(c, list): combined_content.extend(c)
             if msg['role'] == 'user' and msg.get('tool_results'): tool_results.extend(msg['tool_results'])

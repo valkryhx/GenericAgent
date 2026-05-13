@@ -53,6 +53,13 @@ class NativeImageInputTest(unittest.TestCase):
     def test_agentmain_leaves_plain_text_on_original_path(self):
         self.assertIsNone(_build_user_content_with_images("你好"))
 
+    def test_openai_converter_collapses_text_only_user_content(self):
+        chat = _msgs_claude2oai([
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        ])
+
+        self.assertEqual(chat[0]["content"], "hi")
+
     def test_openai_converters_preserve_native_image_blocks(self):
         msg = {
             "role": "user",
@@ -93,6 +100,29 @@ class NativeImageInputTest(unittest.TestCase):
         )
 
         self.assertEqual(backend.merged["content"][1]["type"], "image_url")
+
+    def test_native_tool_client_can_disable_native_tools(self):
+        class Backend:
+            name = "fake"
+            history = []
+            system = ""
+            tools = "unset"
+            native_tools = False
+
+            def ask(self, merged):
+                self.merged = merged
+                if False:
+                    yield ""
+                return None
+
+        backend = Backend()
+        client = NativeToolClient(backend)
+        tools = [{"type": "function", "function": {"name": "code_run", "parameters": {"type": "object", "properties": {}}}}]
+        list(client.chat(messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}], tools=tools))
+
+        self.assertIsNone(backend.tools)
+        self.assertIn("Tools (mounted", backend.system)
+        self.assertEqual(backend.merged["content"][0]["text"], "hi")
 
     def test_agent_runner_uses_initial_multimodal_content(self):
         class Response:

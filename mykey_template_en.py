@@ -56,6 +56,7 @@ native_oai_config = {
     'apibase': 'https://api.openai.com/v1',
     'model': 'gpt-5.4',                       # or 'o4', 'gpt-5.3-codex', etc.
     'api_mode': 'chat_completions',           # or 'responses' for /v1/responses
+    # 'native_tools': False,                  # disable if an OpenAI-compatible provider rejects the tools field
     # 'native_image_input': True,             # enable only for OpenAI-native models that support image input
     # 'reasoning_effort': 'high',             # none|minimal|low|medium|high|xhigh
     # 'max_retries': 3,
