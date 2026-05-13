@@ -420,10 +420,25 @@ def _recent_sidebar_sessions(sessions, limit: int):
     return list(sessions or [])[:max(0, int(limit or 0))]
 
 
+def _clamp_sidebar_width(width: int, screen_width: int) -> int:
+    max_width = min(70, max(24, int(screen_width) - 40))
+    return max(24, min(int(width), max_width))
+
+
+def _is_sidebar_resizer_hit(screen_x: int, boundary_x: int) -> bool:
+    return int(screen_x) in {int(boundary_x) - 1, int(boundary_x), int(boundary_x) + 1}
+
+
+def _recent_preview_width(sidebar_width: int) -> int:
+    # Sidebar padding + index/status columns consume roughly 18 cells.
+    return max(12, int(sidebar_width) - 22)
+
+
 def render_sidebar(
     sessions: dict[int, AgentSession],
     current_id: Optional[int],
     recent_sessions=None,
+    width: int = 34,
 ) -> Table:
     outer = Table.grid(expand=True)
     outer.add_column()
@@ -461,6 +476,7 @@ def render_sidebar(
     outer.add_row(sess_tbl)
     recent = list(recent_sessions or [])
     if recent:
+        preview_width = _recent_preview_width(width)
         recent_tbl = Table.grid(expand=True)
         recent_tbl.add_column(width=2)
         recent_tbl.add_column(width=2)
@@ -472,7 +488,7 @@ def render_sidebar(
             recent_tbl.add_row(
                 blank,
                 Text(str(idx), style=C_DIM),
-                Text(_truncate(preview_text, 18), style=C_MUTED),
+                Text(_truncate(preview_text, preview_width), style=C_MUTED),
                 Text(f"{_rel_time(mtime)} · {n}轮", style=C_DIM),
                 blank,
             )
@@ -503,9 +519,18 @@ class GenericAgentTUI(App[None]):
         height: 100%;
         background: #0d1117;
         padding: 1 2;
-        border-right: solid #21262d;
+        border-right: solid #30363d;
     }
     #sidebar.-hidden, #sidebar.-narrow { display: none; }
+    #sidebar-resizer {
+        width: 1;
+        height: 100%;
+        background: #0d1117;
+    }
+    #sidebar-resizer:hover {
+        background: #161b22;
+    }
+    #sidebar-resizer.-hidden, #sidebar-resizer.-narrow { display: none; }
 
     #main {
         height: 100%;
@@ -603,11 +628,14 @@ class GenericAgentTUI(App[None]):
         self._last_width: int = -1            # 轮询时检测变化用（Windows 窗口吸附/全屏不发 resize 时的兜底）
         self._recent_sessions_limit: int = _tui_recent_sessions_limit()
         self._recent_sessions: list = []
+        self._sidebar_width: Optional[int] = None
+        self._resizing_sidebar: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
         with Horizontal(id="body"):
             yield Static("", id="sidebar")
+            yield Static("", id="sidebar-resizer")
             with Vertical(id="main"):
                 yield VerticalScroll(id="messages")
                 yield OptionList(id="palette")
@@ -743,6 +771,7 @@ class GenericAgentTUI(App[None]):
 
     def action_toggle_sidebar(self) -> None:
         self.query_one("#sidebar", Static).toggle_class("-hidden")
+        self.query_one("#sidebar-resizer", Static).toggle_class("-hidden")
 
     def action_toggle_fold(self) -> None:
         self.fold_mode = not self.fold_mode
@@ -798,6 +827,46 @@ class GenericAgentTUI(App[None]):
         if 0 <= y < len(self._recent_sessions):
             self._restore_recent_session(y)
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if getattr(event, "button", None) != 1:
+            return
+        try:
+            sidebar = self.query_one("#sidebar", Static)
+            resizer = self.query_one("#sidebar-resizer", Static)
+        except Exception:
+            return
+        boundary_x = int(getattr(resizer.region, "x", 0) or (sidebar.region.x + sidebar.region.width))
+        if event.widget is not resizer and not _is_sidebar_resizer_hit(event.screen_x, boundary_x):
+            return
+        self._resizing_sidebar = True
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if not self._resizing_sidebar:
+            return
+        try:
+            sidebar = self.query_one("#sidebar", Static)
+            origin_x = int(sidebar.region.x)
+        except Exception:
+            origin_x = 0
+        width = _clamp_sidebar_width(int(event.screen_x) - origin_x, self.size.width)
+        self._sidebar_width = width
+        try:
+            self.query_one("#sidebar", Static).styles.width = width
+        except Exception:
+            pass
+        self._remount_current_session()
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if not self._resizing_sidebar:
+            return
+        self._resizing_sidebar = False
+        event.stop()
+        event.prevent_default()
+
     # ---------------- input + palette ----------------
     def on_resize(self, event) -> None:
         self._apply_responsive_layout()
@@ -808,6 +877,7 @@ class GenericAgentTUI(App[None]):
         """按终端宽度调侧栏宽 + 主区横向 padding。<70 列隐藏侧栏，宽屏按比例放大。"""
         try:
             sidebar = self.query_one("#sidebar", Static)
+            resizer = self.query_one("#sidebar-resizer", Static)
             main = self.query_one("#main", Vertical)
         except Exception:
             return
@@ -816,9 +886,12 @@ class GenericAgentTUI(App[None]):
         # 自动隐藏走 -narrow 类，跟用户手动 Ctrl+B 切的 -hidden 互不干扰
         if w < 70:
             sidebar.add_class("-narrow")
+            resizer.add_class("-narrow")
         else:
             sidebar.remove_class("-narrow")
-            sidebar.styles.width = max(30, min(50, w // 5))
+            resizer.remove_class("-narrow")
+            default_width = max(30, min(50, w // 5))
+            sidebar.styles.width = _clamp_sidebar_width(self._sidebar_width or default_width, w)
         main.styles.padding = (1, 2) if w < 90 else (1, 6)
         self._remount_current_session()  # 宽度变了 → markdown 要按新宽重渲
 
@@ -1339,7 +1412,13 @@ class GenericAgentTUI(App[None]):
         except Exception:
             recent = []
         self._recent_sessions = _recent_sidebar_sessions(recent, self._recent_sessions_limit)
-        self.query_one("#sidebar", Static).update(render_sidebar(self.sessions, self.current_id, self._recent_sessions))
+        try:
+            sidebar_width = int(self.query_one("#sidebar", Static).region.width)
+        except Exception:
+            sidebar_width = self._sidebar_width or 34
+        self.query_one("#sidebar", Static).update(
+            render_sidebar(self.sessions, self.current_id, self._recent_sessions, width=sidebar_width)
+        )
 
     def _refresh_messages(self):
         if not self.is_mounted or self.current_id is None: return

@@ -17,7 +17,10 @@ for name in ("agentmain", "chatapp_common", "continue_cmd", "llmcore"):
 
 from tuiapp_v2 import (  # noqa: E402
     AgentSession,
+    _clamp_sidebar_width,
+    _is_sidebar_resizer_hit,
     _recent_sidebar_sessions,
+    _recent_preview_width,
     _session_rows,
     _tui_recent_sessions_limit,
 )
@@ -46,6 +49,23 @@ class TUIRecentSessionsTest(unittest.TestCase):
 
         sess.messages.append(type("Msg", (), {"role": "user", "content": "hello"})())
         self.assertEqual(_session_rows(sess), 4)
+
+    def test_sidebar_width_is_clamped_to_safe_layout_range(self):
+        self.assertEqual(_clamp_sidebar_width(10, 120), 24)
+        self.assertEqual(_clamp_sidebar_width(40, 120), 40)
+        self.assertEqual(_clamp_sidebar_width(90, 120), 70)
+        self.assertEqual(_clamp_sidebar_width(50, 80), 40)
+
+    def test_sidebar_resizer_hit_uses_boundary_coordinate(self):
+        self.assertTrue(_is_sidebar_resizer_hit(33, 34))
+        self.assertTrue(_is_sidebar_resizer_hit(34, 34))
+        self.assertTrue(_is_sidebar_resizer_hit(35, 34))
+        self.assertFalse(_is_sidebar_resizer_hit(36, 34))
+
+    def test_recent_preview_width_tracks_sidebar_width(self):
+        self.assertEqual(_recent_preview_width(30), 12)
+        self.assertEqual(_recent_preview_width(50), 28)
+        self.assertEqual(_recent_preview_width(70), 48)
 
 
 if __name__ == "__main__":
