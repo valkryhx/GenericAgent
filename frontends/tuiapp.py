@@ -50,6 +50,8 @@ if ROOT_DIR not in sys.path:
 
 AgentFactory = Callable[[], Any]
 
+from tui_input_history import InputHistoryMixin
+
 
 @dataclass
 class ChatMessage:
@@ -161,7 +163,7 @@ def default_agent_factory() -> Any:
     return agent
 
 
-class PromptInput(TextArea):
+class PromptInput(InputHistoryMixin, TextArea):
     """Multi-line input: Enter submits, Ctrl+Enter (ctrl+j) inserts newline, paste never auto-submits."""
 
     BINDINGS = [
@@ -170,21 +172,29 @@ class PromptInput(TextArea):
 
     class Submitted(Message):
         """Posted when the user presses Enter to submit."""
-        def __init__(self, value: str) -> None:
+        def __init__(self, input_area: "PromptInput", value: str) -> None:
             super().__init__()
+            self.input_area = input_area
             self.value = value
 
     def __init__(self, placeholder: str = "", **kwargs) -> None:
         super().__init__(language=None, show_line_numbers=False, compact=True, placeholder=placeholder, **kwargs)
+        self._init_input_history()
 
     def _on_key(self, event: events.Key) -> None:
-        if event.key == "enter":
+        if event.key == "up" and self.show_previous_history():
+            event.stop()
+            event.prevent_default()
+        elif event.key == "down" and self.show_next_history():
+            event.stop()
+            event.prevent_default()
+        elif event.key == "enter":
             # Enter → submit
             event.stop()
             event.prevent_default()
             value = self.text.rstrip()
             self.clear()
-            self.post_message(self.Submitted(value))
+            self.post_message(self.Submitted(self, value))
         elif event.key == "ctrl+j":
             # Ctrl+Enter (ctrl+j) → insert newline
             event.stop()
@@ -307,6 +317,7 @@ class GenericAgentTUI(App[None]):
         if not value:
             self._system("Empty input ignored. Type /help for commands.")
             return
+        event.input_area.add_history(value)
         parsed = parse_local_command(value)
         if parsed:
             cmd, args = parsed

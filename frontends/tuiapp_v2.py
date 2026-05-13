@@ -111,6 +111,7 @@ if FRONTENDS_DIR not in sys.path:
 
 # Side-effect imports: activate /btw + /continue monkey-patches on GenericAgent
 import chatapp_common  # noqa: F401
+from tui_input_history import InputHistoryMixin
 from chatapp_common import format_restore
 from btw_cmd import handle_frontend_command as btw_handle
 from continue_cmd import handle_frontend_command as continue_handle, list_sessions as continue_list, extract_ui_messages as continue_extract
@@ -220,7 +221,7 @@ class SelectableStatic(Static):
         return selection.extract("\n".join(lines)), "\n"
 
 
-class InputArea(TextArea):
+class InputArea(InputHistoryMixin, TextArea):
     """多行输入框：Enter 发送 / Ctrl+J 等换行 / 粘贴 >2 行收为 [Pasted text #N +M lines]。"""
     _PASTE_RE = re.compile(r'\[Pasted text #(\d+) \+\d+ lines\]')
 
@@ -247,6 +248,7 @@ class InputArea(TextArea):
         super().__init__(*args, **kwargs)
         self._pastes: dict[int, str] = {}
         self._paste_counter = 0
+        self._init_input_history()
 
     def expand_placeholders(self, text: str) -> str:
         def repl(m):
@@ -292,6 +294,10 @@ class InputArea(TextArea):
             fn = routes.get(event.key)
             if fn:
                 fn(); event.stop(); event.prevent_default(); return
+        if event.key == "up" and self.show_previous_history():
+            event.stop(); event.prevent_default(); return
+        if event.key == "down" and self.show_next_history():
+            event.stop(); event.prevent_default(); return
         if event.key == "enter":  # 换行键已被 BINDINGS 拦走
             event.stop(); event.prevent_default()
             self.post_message(self.Submitted(self, self.text))
@@ -572,9 +578,12 @@ class GenericAgentTUI(App[None]):
 
     def _patch_auto_scroll_for_selection(self) -> None:
         """让选区拖拽到 #input 上时仍能滚动 #messages：把 _select_start 也当候选源，鼠标在 scrollable 下/上方也触发。"""
-        from textual._auto_scroll import get_auto_scroll_regions
-        from textual.geometry import Offset
-        from textual.widget import Widget as _W
+        try:
+            from textual._auto_scroll import get_auto_scroll_regions
+            from textual.geometry import Offset
+            from textual.widget import Widget as _W
+        except ModuleNotFoundError:
+            return
 
         screen = self.screen
         app = self
@@ -802,6 +811,7 @@ class GenericAgentTUI(App[None]):
         self._resize_input(inp)
         if not text:
             return
+        inp.add_history(text)
         if text.startswith("/"):
             parts = text.split(maxsplit=1)
             cmd = parts[0][1:].lower()
