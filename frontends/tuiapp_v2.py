@@ -112,9 +112,16 @@ if FRONTENDS_DIR not in sys.path:
 # Side-effect imports: activate /btw + /continue monkey-patches on GenericAgent
 import chatapp_common  # noqa: F401
 from tui_input_history import InputHistoryMixin
+from llmcore import reload_mykeys
 from chatapp_common import format_restore
 from btw_cmd import handle_frontend_command as btw_handle
-from continue_cmd import handle_frontend_command as continue_handle, list_sessions as continue_list, extract_ui_messages as continue_extract
+from continue_cmd import (
+    handle_frontend_command as continue_handle,
+    list_sessions as continue_list,
+    extract_ui_messages as continue_extract,
+    reset_conversation as continue_reset,
+    restore as continue_restore,
+)
 from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
 
 AgentFactory = Callable[[], Any]
@@ -368,6 +375,14 @@ def _truncate(text: str, max_w: int) -> str:
     return "".join(out)
 
 
+def _rel_time(mtime: float) -> str:
+    d = int(time.time() - mtime)
+    if d < 60: return f"{d}秒前"
+    if d < 3600: return f"{d // 60}分前"
+    if d < 86400: return f"{d // 3600}小时前"
+    return f"{d // 86400}天前"
+
+
 def _sidebar_last_user(sess: AgentSession) -> str:
     for m in reversed(sess.messages):
         if m.role == "user":
@@ -385,7 +400,31 @@ def _sidebar_last_summary(sess: AgentSession) -> str:
     return ""
 
 
-def render_sidebar(sessions: dict[int, AgentSession], current_id: Optional[int]) -> Table:
+def _session_rows(sess: AgentSession) -> int:
+    rows = 3
+    if _sidebar_last_user(sess): rows += 1
+    if _sidebar_last_summary(sess): rows += 1
+    return rows
+
+
+def _tui_recent_sessions_limit(mykeys: Optional[dict[str, Any]] = None) -> int:
+    if mykeys is None:
+        try: mykeys = reload_mykeys()[0]
+        except Exception: mykeys = {}
+    try: limit = int((mykeys or {}).get("tui_recent_sessions_limit", 10))
+    except Exception: limit = 10
+    return limit if limit > 0 else 10
+
+
+def _recent_sidebar_sessions(sessions, limit: int):
+    return list(sessions or [])[:max(0, int(limit or 0))]
+
+
+def render_sidebar(
+    sessions: dict[int, AgentSession],
+    current_id: Optional[int],
+    recent_sessions=None,
+) -> Table:
     outer = Table.grid(expand=True)
     outer.add_column()
 
@@ -420,6 +459,27 @@ def render_sidebar(sessions: dict[int, AgentSession], current_id: Optional[int])
     outer.add_row(Text("SESSIONS", style=f"bold {C_DIM}"))
     outer.add_row(Text(""))
     outer.add_row(sess_tbl)
+    recent = list(recent_sessions or [])
+    if recent:
+        recent_tbl = Table.grid(expand=True)
+        recent_tbl.add_column(width=2)
+        recent_tbl.add_column(width=2)
+        recent_tbl.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        recent_tbl.add_column(justify="right")
+        recent_tbl.add_column(width=2)
+        for idx, (_, mtime, first, n) in enumerate(recent, 1):
+            preview_text = re.sub(r"\s+", " ", first or "（无法预览）").strip()
+            recent_tbl.add_row(
+                blank,
+                Text(str(idx), style=C_DIM),
+                Text(_truncate(preview_text, 18), style=C_MUTED),
+                Text(f"{_rel_time(mtime)} · {n}轮", style=C_DIM),
+                blank,
+            )
+        outer.add_row(Text(""))
+        outer.add_row(Text("RECENT", style=f"bold {C_DIM}"))
+        outer.add_row(Text(""))
+        outer.add_row(recent_tbl)
     return outer
 
 
@@ -541,6 +601,8 @@ class GenericAgentTUI(App[None]):
         self._suppress_palette_open = False   # 选中 option 后抑制下一次 on_input_changed 重开 palette
         self.fold_mode: bool = True           # 折叠已完成的 turn，Ctrl+F 切
         self._last_width: int = -1            # 轮询时检测变化用（Windows 窗口吸附/全屏不发 resize 时的兜底）
+        self._recent_sessions_limit: int = _tui_recent_sessions_limit()
+        self._recent_sessions: list = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
@@ -711,7 +773,7 @@ class GenericAgentTUI(App[None]):
             palette.action_select()
 
     def on_click(self, event: events.Click) -> None:
-        """点击侧栏会话条目 → 切换。"""
+        """点击侧栏会话条目 → 切换；点击 RECENT 条目 → 恢复历史会话。"""
         try:
             sidebar = self.query_one("#sidebar", Static)
         except Exception:
@@ -724,15 +786,17 @@ class GenericAgentTUI(App[None]):
         if y < 0:
             return
         for sid, sess in self.sessions.items():
-            rows = 3  # top spacer + name + bottom spacer
-            if _sidebar_last_user(sess): rows += 1
-            if _sidebar_last_summary(sess): rows += 1
+            rows = _session_rows(sess)
             if y < rows:
                 if sid != self.current_id:
                     self.current_id = sid
                     self._refresh_all()
                 return
             y -= rows
+        # RECENT 区块：空行 + "RECENT" + 空行，然后每条历史 1 行。
+        y -= 3
+        if 0 <= y < len(self._recent_sessions):
+            self._restore_recent_session(y)
 
     # ---------------- input + palette ----------------
     def on_resize(self, event) -> None:
@@ -1107,6 +1171,24 @@ class GenericAgentTUI(App[None]):
         self._system(result)
         self._refresh_all()
 
+    def _restore_recent_session(self, idx: int) -> None:
+        if not (0 <= idx < len(self._recent_sessions)):
+            return
+        path = self._recent_sessions[idx][0]
+        sess = self.current
+        try:
+            continue_reset(sess.agent, message=None)
+            result, _ = continue_restore(sess.agent, path)
+        except Exception as e:
+            result = f"❌ /continue 失败: {e}"
+        if result.startswith("✅"):
+            sess.messages.clear()
+            for h in continue_extract(path):
+                sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
+            self._remount_current_session()
+        self._system(result)
+        self._refresh_all()
+
     def _cmd_export(self, args):
         sess = self.current
         sub = args[0].lower() if args else ""
@@ -1252,7 +1334,12 @@ class GenericAgentTUI(App[None]):
 
     def _refresh_sidebar(self):
         if not self.is_mounted: return
-        self.query_one("#sidebar", Static).update(render_sidebar(self.sessions, self.current_id))
+        try:
+            recent = continue_list(exclude_pid=os.getpid())
+        except Exception:
+            recent = []
+        self._recent_sessions = _recent_sidebar_sessions(recent, self._recent_sessions_limit)
+        self.query_one("#sidebar", Static).update(render_sidebar(self.sessions, self.current_id, self._recent_sessions))
 
     def _refresh_messages(self):
         if not self.is_mounted or self.current_id is None: return

@@ -23,6 +23,13 @@
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── TUI settings ────────────────────────────────────────────────────────────
+# Number of recoverable historical sessions shown in tuiapp_v2's RECENT area.
+tui_recent_sessions_limit = 10
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+
 
 # ── 1. NativeClaudeSession — Anthropic direct ────────────────────────────────
 #  Official Anthropic endpoint. apikey starting with 'sk-ant-' is auto-sent
