@@ -1,0 +1,12 @@
+# GenericAgent dependency reference generated from the local environment.
+# Local Python version: 3.12.4
+# This file pins the README-mentioned packages for comparison/installation.
+
+requests==2.31.0
+
+# Desktop GUI (launch.pyw)
+streamlit==1.48.0
+pywebview==6.2.1
+
+# Terminal UI (frontends/tuiapp.py)
+textual==7.5.0
