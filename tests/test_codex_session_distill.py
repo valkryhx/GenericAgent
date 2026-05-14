@@ -12,8 +12,10 @@ if str(MEMORY_DIR) not in sys.path:
 
 
 from codex_session_distill import (  # noqa: E402
+    build_parser,
     DistillState,
     codex_lesson_update,
+    deep_distill_instructions,
     discover_codex_session_roots,
     extract_session_packet,
     learn_from_packets,
@@ -29,7 +31,7 @@ def _write_jsonl(path, rows):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _function_call(name, arguments=None):
+def _function_call(name, arguments=None, call_id=None):
     return {
         "timestamp": "2026-05-09T12:00:00Z",
         "type": "response_item",
@@ -37,7 +39,7 @@ def _function_call(name, arguments=None):
             "type": "function_call",
             "name": name,
             "arguments": json.dumps(arguments or {}, ensure_ascii=False),
-            "call_id": f"call_{name}",
+            "call_id": call_id or f"call_{name}",
         },
     }
 
@@ -71,7 +73,7 @@ class CodexSessionDistillTest(unittest.TestCase):
 
             self.assertEqual(roots, [first.resolve(), second.resolve(), third.resolve()])
 
-    def test_extract_session_packet_redacts_sensitive_text_and_finds_coding_lessons(self):
+    def test_extract_session_packet_redacts_sensitive_text_and_builds_llm_distill_packet(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "rollout.jsonl"
             _write_jsonl(
@@ -90,11 +92,11 @@ class CodexSessionDistillTest(unittest.TestCase):
                         "type": "event_msg",
                         "payload": {"type": "user_message", "message": "fix bug with sk-test-secret-1234567890"},
                     },
-                    _function_call("shell_command", {"command": "rg -n \"broken\" .", "workdir": r"C:\Users\Administrator\secret_project"}),
-                    _function_output("call_shell_command", "Exit code: 0\nbroken found"),
+                    _function_call("shell_command", {"command": "rg -n \"broken\" .", "workdir": r"C:\Users\Administrator\secret_project"}, "call_search"),
+                    _function_output("call_search", "Exit code: 0\nbroken found"),
                     _function_call("apply_patch", {"patch": "*** Begin Patch\n*** Update File: app.py\n*** End Patch"}),
-                    _function_call("shell_command", {"command": "python -m unittest discover -s tests"}),
-                    _function_output("call_shell_command", "Exit code: 0\nOK"),
+                    _function_call("shell_command", {"command": "python -m unittest discover -s tests"}, "call_test"),
+                    _function_output("call_test", "Exit code: 0\nOK"),
                     {
                         "timestamp": "2026-05-09T12:00:02Z",
                         "type": "response_item",
@@ -110,10 +112,15 @@ class CodexSessionDistillTest(unittest.TestCase):
             packet = extract_session_packet(session)
             markdown = packet.to_markdown()
 
-        lesson_ids = {lesson["id"] for lesson in packet.lessons}
-        self.assertIn("repo_probe_before_edit", lesson_ids)
-        self.assertIn("verify_changes_before_done", lesson_ids)
-        self.assertIn("prefer_fast_text_search", lesson_ids)
+        seed_ids = {lesson["id"] for lesson in packet.seed_observations}
+        self.assertIn("repo_probe_before_edit", seed_ids)
+        self.assertIn("verify_changes_before_done", seed_ids)
+        self.assertIn("prefer_fast_text_search", seed_ids)
+        self.assertEqual(packet.lessons, [])
+        self.assertGreaterEqual(len(packet.timeline), 3)
+        self.assertIn("python -m unittest discover -s tests", packet.verification_commands)
+        self.assertIn("LLM Distillation Task", markdown)
+        self.assertIn("codex_lesson_update", packet.llm_distill_prompt)
         self.assertGreaterEqual(packet.quality, 0.6)
         self.assertNotIn("sk-test-secret", markdown)
         self.assertNotIn(r"C:\Users\Administrator", markdown)
@@ -147,6 +154,10 @@ class CodexSessionDistillTest(unittest.TestCase):
             only_record = next(iter(progress["sessions"].values()))
             self.assertEqual(only_record["status"], "prepared")
             self.assertEqual(only_record["learn_count"], 0)
+            instructions = deep_distill_instructions(first, state)
+            self.assertIn("LLM is the distillation core", instructions)
+            self.assertIn("codex_lesson_update", instructions)
+            self.assertIn(".md", instructions)
 
     def test_prepare_sessions_processes_files_in_stable_path_order_not_random_order(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -209,6 +220,40 @@ class CodexSessionDistillTest(unittest.TestCase):
             self.assertIn("改代码前先探测仓库事实", sop)
             self.assertIn("证据: 2", sop)
 
+    def test_learn_from_packets_does_not_promote_rule_seed_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state = DistillState(tmp_path / "state")
+            state.queue_dir.mkdir(parents=True, exist_ok=True)
+            with open(state.queue_dir / "packet.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "session_hash": "seed123",
+                        "source": "rollout.jsonl",
+                        "quality": 0.9,
+                        "focus": "workflow",
+                        "seed_observations": [
+                            {
+                                "id": "repo_probe_before_edit",
+                                "category": "workflow",
+                                "title": "Probe repository facts before editing",
+                                "guidance": "Inspect project context before patching.",
+                                "signals": ["repo_probe", "patch"],
+                            }
+                        ],
+                        "lessons": [],
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+
+            learned = learn_from_packets(state, limit=10)
+            lessons = state.lessons_path.read_text(encoding="utf-8").splitlines() if state.lessons_path.exists() else []
+
+            self.assertEqual(learned, 0)
+            self.assertEqual(lessons, [])
+            self.assertTrue((state.queue_dir / "packet.json").exists())
+
     def test_codex_lesson_update_validates_redacts_and_promotes_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = DistillState(Path(tmp) / "state")
@@ -242,6 +287,46 @@ class CodexSessionDistillTest(unittest.TestCase):
 
             self.assertEqual(bad["status"], "rejected")
             self.assertIn("sensitive", bad["reason"])
+
+    def test_candidate_promotion_requires_independent_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = DistillState(Path(tmp) / "state")
+
+            for _ in range(3):
+                codex_lesson_update(
+                    state,
+                    title="Keep branch cleanup separate from feature edits",
+                    guidance="When finishing coding work, separate cleanup or branch management from the behavior patch so review can isolate risk.",
+                    category="git",
+                    evidence=["git_status"],
+                    source_hash="same-session-hash",
+                    confidence=0.7,
+                )
+            self.assertEqual(promote_candidates(state, min_evidence=2, min_confidence=0.95), 0)
+
+            codex_lesson_update(
+                state,
+                title="Keep branch cleanup separate from feature edits",
+                guidance="When finishing coding work, separate cleanup or branch management from the behavior patch so review can isolate risk.",
+                category="git",
+                evidence=["git_status", "handoff"],
+                source_hash="different-session-hash",
+                confidence=0.7,
+            )
+            self.assertEqual(promote_candidates(state, min_evidence=2, min_confidence=0.95), 1)
+
+    def test_promote_cli_accepts_output_for_isolated_rendering(self):
+        parser = build_parser()
+
+        args = parser.parse_args([
+            "--state-dir",
+            "tmp-state",
+            "promote",
+            "--output",
+            "tmp-sop.md",
+        ])
+
+        self.assertEqual(args.output, "tmp-sop.md")
 
 
 if __name__ == "__main__":

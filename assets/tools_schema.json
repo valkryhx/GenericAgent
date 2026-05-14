@@ -68,13 +68,14 @@
   }},
   {"type": "function", "function": {
     "name": "codex_lesson_update",
-    "description": "Record one LLM-proposed reusable coding lesson from a redacted Codex packet. The tool validates, deduplicates, and stores candidates; do not use for raw logs, secrets, private paths, or project-specific facts.",
+    "description": "Record one LLM-proposed reusable coding lesson after reading a redacted Codex session packet. LLM analysis is required: do not use this for simple rule matches, raw logs, secrets, private paths, or project-specific facts. The tool validates, deduplicates, and stores candidates; independent source_hash values become promotion evidence.",
     "parameters": {"type": "object", "properties": {
       "title": {"type": "string", "description": "Short reusable lesson title"},
       "guidance": {"type": "string", "description": "Concrete reusable guidance, not project-specific"},
       "category": {"type": "string", "description": "workflow/debugging/testing/git/security/frontend/planning/communication/quality", "default": "workflow"},
-      "evidence": {"type": "array", "items": {"type": "string"}, "description": "Short evidence signals from the redacted packet"},
-      "source_hash": {"type": "string", "description": "Packet/session hash prefix if available"},
+      "evidence": {"type": "array", "items": {"type": "string"}, "description": "Short evidence signals from the redacted packet timeline, verification, failure recovery, or seed observations"},
+      "source_hash": {"type": "string", "description": "Packet/session hash prefix from the packet; used as independent promotion evidence"},
+      "state_dir": {"type": "string", "description": "Optional isolated distill state directory for tests or explicit runs; omit for the default memory/codex_distill state"},
       "confidence": {"type": "number", "description": "0.0-1.0 confidence", "default": 0.5}}}
   }},
   {"type": "function", "function": {

@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,15 @@ def _exhaust(gen):
 
 
 class CodexLessonUpdateToolTest(unittest.TestCase):
+    def test_tool_schema_exposes_state_dir_for_isolated_e2e_runs(self):
+        schema_path = REPO_ROOT / "assets" / "tools_schema.json"
+        tools = json.loads(schema_path.read_text(encoding="utf-8"))
+        lesson_tool = next(item for item in tools if item["function"]["name"] == "codex_lesson_update")
+        properties = lesson_tool["function"]["parameters"]["properties"]
+
+        self.assertIn("state_dir", properties)
+        self.assertIn("isolated", properties["state_dir"]["description"].lower())
+
     def test_handler_writes_candidate_lesson_through_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = type("Parent", (), {"task_dir": None, "verbose": False})()

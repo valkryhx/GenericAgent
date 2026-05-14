@@ -195,6 +195,19 @@ def _lesson(lesson_id: str, category: str, title: str, guidance: str, signals: I
     }
 
 
+def _build_llm_distill_prompt(session_hash: str, focus: str = "workflow") -> str:
+    source = session_hash[:16] if session_hash else ""
+    return "\n".join([
+        "Read this redacted Codex session packet as reusable coding experience, not as raw memory.",
+        "Your job is to discover 0-3 cross-project lessons that are richer than the deterministic seed observations.",
+        "For each useful lesson, call `codex_lesson_update` with a short title, concrete reusable guidance, category, evidence signals, source_hash, and confidence.",
+        "Use only evidence visible in this packet. Do not store private paths, raw logs, secrets, project-specific facts, or one-off task details.",
+        "If the packet only supports the seed observations and no deeper reusable pattern, record nothing.",
+        f"Recommended source_hash: {source}",
+        f"Current focus: {focus}",
+    ])
+
+
 @dataclass
 class SessionPacket:
     session_hash: str
@@ -205,9 +218,14 @@ class SessionPacket:
     user_goals: list[str] = field(default_factory=list)
     tool_counts: dict[str, int] = field(default_factory=dict)
     signals: list[str] = field(default_factory=list)
+    timeline: list[dict] = field(default_factory=list)
+    verification_commands: list[str] = field(default_factory=list)
+    failure_recovery: list[dict] = field(default_factory=list)
+    seed_observations: list[dict] = field(default_factory=list)
     lessons: list[dict] = field(default_factory=list)
     quality: float = 0.0
     focus: str = "workflow"
+    llm_distill_prompt: str = ""
     created_at: str = field(default_factory=_utc_now)
 
     def to_dict(self) -> dict:
@@ -220,9 +238,14 @@ class SessionPacket:
             "user_goals": self.user_goals,
             "tool_counts": self.tool_counts,
             "signals": self.signals,
+            "timeline": self.timeline,
+            "verification_commands": self.verification_commands,
+            "failure_recovery": self.failure_recovery,
+            "seed_observations": self.seed_observations,
             "lessons": self.lessons,
             "quality": self.quality,
             "focus": self.focus,
+            "llm_distill_prompt": self.llm_distill_prompt,
             "created_at": self.created_at,
         }
 
@@ -241,8 +264,53 @@ class SessionPacket:
         lines.extend(f"- {redact_text(goal, 180)}" for goal in self.user_goals[:5])
         if not self.user_goals:
             lines.append("- (none captured)")
-        lines += ["", "## Lessons"]
-        for item in self.lessons:
+
+        lines += ["", "## Timeline"]
+        if self.timeline:
+            for item in self.timeline[:40]:
+                command = item.get("command")
+                summary = item.get("summary")
+                bits = [f"- {item.get('kind', 'event')}"]
+                if item.get("tool"):
+                    bits.append(f"tool={item.get('tool')}")
+                if command:
+                    bits.append(f"command=`{redact_text(command, 180)}`")
+                if "ok" in item and item.get("ok") is not None:
+                    bits.append(f"ok={item.get('ok')}")
+                if item.get("signals"):
+                    bits.append(f"signals={','.join(item.get('signals', []))}")
+                if summary:
+                    bits.append(f"summary={redact_text(summary, 180)}")
+                lines.append(" | ".join(bits))
+        else:
+            lines.append("- (none captured)")
+
+        lines += ["", "## Verification Commands"]
+        if self.verification_commands:
+            lines.extend(f"- `{redact_text(cmd, 180)}`" for cmd in self.verification_commands[:12])
+        else:
+            lines.append("- (none captured)")
+
+        lines += ["", "## Failure Recovery"]
+        if self.failure_recovery:
+            for item in self.failure_recovery[:8]:
+                failed = item.get("failed") or {}
+                recovered = item.get("recovered_with") or {}
+                lines.append(
+                    "- failed "
+                    f"`{redact_text(failed.get('command') or failed.get('tool'), 120)}` "
+                    "then recovered with "
+                    f"`{redact_text(recovered.get('command') or recovered.get('tool'), 120)}`"
+                )
+        else:
+            lines.append("- (none captured)")
+
+        lines += [
+            "",
+            "## Seed Observations",
+            "These deterministic hints are evidence for the LLM. They are not approved lessons by themselves.",
+        ]
+        for item in self.seed_observations:
             lines += [
                 f"### {redact_text(item.get('title'), 160)}",
                 f"- ID: {item.get('id', '')}",
@@ -251,6 +319,10 @@ class SessionPacket:
                 f"- Evidence signals: {', '.join(item.get('signals', []))}",
                 "",
             ]
+        if not self.seed_observations:
+            lines.append("- (none captured)")
+
+        lines += ["", "## LLM Distillation Task", self.llm_distill_prompt or _build_llm_distill_prompt(self.session_hash, self.focus)]
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -344,6 +416,17 @@ def _load_jsonl_records(path: Path) -> list[dict]:
     return records
 
 
+def _source_prefix(source_hash: str) -> str:
+    return redact_text(source_hash, 80)[:16] if source_hash else ""
+
+
+def _candidate_evidence_count(candidate: dict) -> int:
+    sources = [s for s in candidate.get("sources", []) if s]
+    if sources:
+        return len(set(sources))
+    return int(candidate.get("evidence_count", 0))
+
+
 def codex_lesson_update(
     state: DistillState | None = None,
     *,
@@ -390,14 +473,18 @@ def codex_lesson_update(
         }
         candidates[lesson_id] = current
     current["evidence"] = sorted(set(current.get("evidence", [])) | set(evidence))
-    current["evidence_count"] = int(current.get("evidence_count", 0)) + 1
     current["confidence_max"] = max(float(current.get("confidence_max", 0.0)), confidence)
-    if source_hash and source_hash[:16] not in current.get("sources", []):
-        current.setdefault("sources", []).append(source_hash[:16])
+    source_prefix = _source_prefix(source_hash)
+    if source_prefix and source_prefix not in current.get("sources", []):
+        current.setdefault("sources", []).append(source_prefix)
+    if source_prefix:
+        current["evidence_count"] = len(set(current.get("sources", [])))
+    else:
+        current["evidence_count"] = max(1, int(current.get("evidence_count", 0)))
     current["updated_at"] = _utc_now()
 
     with open(state.candidates_path, "w", encoding="utf-8", newline="\n") as f:
-        for item in sorted(candidates.values(), key=lambda x: (-int(x.get("evidence_count", 0)), x.get("id", ""))):
+        for item in sorted(candidates.values(), key=lambda x: (-_candidate_evidence_count(x), x.get("id", ""))):
             f.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
     return {"status": "candidate_recorded", "candidate": current}
 
@@ -414,6 +501,10 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
     signals: set[str] = set()
     tool_events: list[dict] = []
     call_to_event: dict[str, dict] = {}
+    timeline: list[dict] = []
+    verification_commands: list[str] = []
+    failure_recovery: list[dict] = []
+    last_failed_event: dict | None = None
     patch_seen = False
     verification_seen = False
     verification_success = False
@@ -454,6 +545,15 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
                 "signals": sorted(_command_signal(command)),
                 "ok": None,
             }
+            timeline_event = {
+                "kind": "tool_call",
+                "tool": name,
+                "command": event["command"],
+                "signals": event["signals"],
+                "ok": None,
+            }
+            event["timeline_index"] = len(timeline)
+            timeline.append(timeline_event)
             call_id = payload.get("call_id")
             if call_id:
                 call_to_event[str(call_id)] = event
@@ -466,6 +566,8 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
                     probe_before_patch = True
             if "verification" in event["signals"]:
                 verification_seen = True
+                if event["command"] and event["command"] not in verification_commands:
+                    verification_commands.append(event["command"])
             continue
 
         output = str(payload.get("output") or "")
@@ -476,19 +578,38 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
             ok = "Exit code: 0" in output or "\nOK" in output or "passed" in output.lower()
             failed = "Exit code: 1" in output or "FAILED" in output or "Traceback" in output
             event["ok"] = ok if ok or failed else event.get("ok")
+            idx = event.get("timeline_index")
+            if isinstance(idx, int) and 0 <= idx < len(timeline):
+                timeline[idx]["ok"] = event["ok"]
+                timeline[idx]["summary"] = redact_text(output, 180)
             if failed:
                 saw_failure = True
                 signals.add("failure")
+                last_failed_event = {
+                    "tool": event.get("name"),
+                    "command": event.get("command"),
+                    "signals": event.get("signals", []),
+                }
             if ok:
                 if saw_failure:
                     failed_then_success = True
                     signals.add("recovery")
+                    if last_failed_event:
+                        failure_recovery.append({
+                            "failed": last_failed_event,
+                            "recovered_with": {
+                                "tool": event.get("name"),
+                                "command": event.get("command"),
+                                "signals": event.get("signals", []),
+                            },
+                        })
+                        last_failed_event = None
                 if "verification" in set(event.get("signals", [])):
                     verification_success = True
 
-    lessons = []
+    seed_observations = []
     if probe_before_patch or (patch_seen and any(s in signals for s in ("repo_probe", "fast_search"))):
-        lessons.append(_lesson(
+        seed_observations.append(_lesson(
             "repo_probe_before_edit",
             "workflow",
             "Probe repository facts before editing",
@@ -496,7 +617,7 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
             ["repo_probe", "patch"] + sorted(signals & {"fast_search", "git_status"}),
         ))
     if "fast_search" in signals:
-        lessons.append(_lesson(
+        seed_observations.append(_lesson(
             "prefer_fast_text_search",
             "workflow",
             "Use fast text search to orient in code",
@@ -504,7 +625,7 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
             ["fast_search"],
         ))
     if patch_seen and (verification_success or verification_seen):
-        lessons.append(_lesson(
+        seed_observations.append(_lesson(
             "verify_changes_before_done",
             "testing",
             "Verify changed behavior before claiming completion",
@@ -512,7 +633,7 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
             ["patch", "verification"] + (["verification_success"] if verification_success else []),
         ))
     if failed_then_success:
-        lessons.append(_lesson(
+        seed_observations.append(_lesson(
             "failure_recovery_with_new_information",
             "debugging",
             "Recover from failures by adding information",
@@ -531,7 +652,7 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
         quality += 0.15
     if failed_then_success:
         quality += 0.15
-    if lessons:
+    if seed_observations:
         quality += 0.10
     quality = min(1.0, quality)
 
@@ -544,9 +665,14 @@ def extract_session_packet(path: Path | str, focus: str = "workflow") -> Session
         user_goals=[g for i, g in enumerate(user_goals) if g and g not in user_goals[:i]][:6],
         tool_counts=tool_counts,
         signals=sorted(signals),
-        lessons=lessons,
+        timeline=timeline[:80],
+        verification_commands=verification_commands[:20],
+        failure_recovery=failure_recovery[:12],
+        seed_observations=seed_observations,
+        lessons=[],
         quality=quality,
         focus=focus,
+        llm_distill_prompt=_build_llm_distill_prompt(session_hash, focus),
     )
 
 
@@ -594,7 +720,7 @@ def prepare_sessions(
 
         focus = _choose_focus(record)
         packet = extract_session_packet(path, focus=focus)
-        if packet.quality < min_quality or not packet.lessons:
+        if packet.quality < min_quality or not (packet.seed_observations or packet.timeline):
             progress["sessions"][key] = {
                 "path": str(path),
                 "size": stat.st_size,
@@ -673,9 +799,13 @@ def learn_from_packets(state: DistillState | None = None, limit: int = 5) -> int
         except (OSError, json.JSONDecodeError):
             continue
 
+        packet_lessons = packet.get("lessons") or []
+        if not packet_lessons:
+            continue
+
         source_hash = packet.get("session_hash", "")
         source_key = f"sha256:{source_hash}" if source_hash else ""
-        for lesson in packet.get("lessons", []):
+        for lesson in packet_lessons:
             lesson_id = lesson.get("id")
             if not lesson_id:
                 continue
@@ -735,7 +865,8 @@ def promote_candidates(
     lessons = _load_lessons(state.lessons_path)
     promoted = 0
     for candidate in candidates:
-        if int(candidate.get("evidence_count", 0)) < min_evidence and float(candidate.get("confidence_max", 0.0)) < min_confidence:
+        evidence_count = _candidate_evidence_count(candidate)
+        if evidence_count < min_evidence and float(candidate.get("confidence_max", 0.0)) < min_confidence:
             continue
         lesson_id = candidate.get("id")
         if not lesson_id:
@@ -755,7 +886,7 @@ def promote_candidates(
             }
             lessons[lesson_id] = current
             promoted += 1
-        current["evidence_count"] = max(int(current.get("evidence_count", 0)), int(candidate.get("evidence_count", 0)))
+        current["evidence_count"] = max(int(current.get("evidence_count", 0)), evidence_count)
         current["quality_max"] = max(float(current.get("quality_max", 0.0)), float(candidate.get("confidence_max", 0.0)))
         current["signals"] = sorted(set(current.get("signals", [])) | set(candidate.get("evidence", [])))
         current["sources"] = sorted(set(current.get("sources", [])) | set(candidate.get("sources", [])))
@@ -775,11 +906,12 @@ def render_sop(state: DistillState | None = None, output_path: Path | str = DEFA
     lines = [
         "# Codex Coding SOP",
         "",
-        "来源：由 `codex_session_distill.py` 从本机 Codex JSONL 会话离线蒸馏。本文只保留跨项目编码工作法，不保存原始对话、密钥、私有路径或一次性业务事实。",
+        "来源：由 `codex_session_distill.py` 从本机 Codex JSONL 会话生成脱敏证据包，再由 LLM 读取 packet 并通过 `codex_lesson_update` 提议、校验、晋升。本文只保留跨项目编码工作法，不保存原始对话、密钥、私有路径或一次性业务事实。",
         "",
         "## 使用原则",
         "- 先按当前仓库规范执行；本 SOP 只提供编码协作习惯和避坑策略。",
-        "- 经验有证据计数，证据越多优先级越高；单次会话经验只作为弱提示。",
+        "- 经验应来自 LLM 对脱敏 packet 的分析；规则命中的 seed observation 只作为证据提示，不能单独成为正式经验。",
+        "- 经验有独立证据计数，证据越多优先级越高；单次会话经验只作为弱提示。",
         "- 若本 SOP 与项目 AGENTS/CONTRIBUTING/用户指令冲突，以上游明确指令为准。",
         "",
     ]
@@ -820,6 +952,34 @@ def status_text(state: DistillState | None = None) -> str:
     )
 
 
+def deep_distill_instructions(packets: list[SessionPacket], state: DistillState | None = None) -> str:
+    state = state or DistillState()
+    lines = [
+        "# Codex LLM Deep Distill Batch",
+        "",
+        "LLM is the distillation core. The parser only prepared redacted evidence packets and deterministic seed observations.",
+        "For each queued packet markdown below, read the packet and call `codex_lesson_update` for 0-3 reusable lessons supported by the evidence.",
+        "Do not write raw Codex logs, secrets, private paths, or project-specific facts into memory.",
+        "",
+        "## Queued Packets",
+    ]
+    if packets:
+        for packet in packets:
+            md_path = state.queue_dir / f"{packet.session_hash[:16]}-{packet.focus}.md"
+            lines.append(f"- {md_path}")
+    else:
+        lines.append("- No new packets prepared. Check `status` for queued packets from earlier runs.")
+        if state.queue_dir.exists():
+            for md_path in sorted(state.queue_dir.glob("*.md"))[:20]:
+                lines.append(f"- {md_path}")
+    lines += [
+        "",
+        "## After LLM Review",
+        "Run `python memory/codex_session_distill.py promote` to promote validated candidates and render `memory/codex_coding_sop.md`.",
+    ]
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Distill reusable coding lessons from Codex JSONL sessions.")
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR), help="Progress and lesson state directory.")
@@ -833,7 +993,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--limit", type=int, default=3)
     prepare.add_argument("--min-quality", type=float, default=0.55)
 
-    learn = sub.add_parser("learn", help="Merge queued packets into lessons.jsonl.")
+    deep = sub.add_parser("deep", help="Prepare redacted packets and print LLM review instructions.")
+    deep.add_argument("roots", nargs="*", default=[DEFAULT_ROOT_SENTINEL], help="Files or directories to scan. Defaults to auto-discovered .codex/sessions.")
+    deep.add_argument("--limit", type=int, default=3)
+    deep.add_argument("--min-quality", type=float, default=0.55)
+
+    learn = sub.add_parser("learn", help="Merge queued packets that already contain LLM-approved lessons into lessons.jsonl.")
     learn.add_argument("--limit", type=int, default=5)
 
     candidate = sub.add_parser("candidate", help="Record one LLM-proposed candidate lesson.")
@@ -847,11 +1012,12 @@ def build_parser() -> argparse.ArgumentParser:
     promote = sub.add_parser("promote", help="Promote strong candidates into formal lessons.")
     promote.add_argument("--min-evidence", type=int, default=2)
     promote.add_argument("--min-confidence", type=float, default=0.85)
+    promote.add_argument("--output", default=str(DEFAULT_SOP_PATH), help="Rendered SOP output path.")
 
     render = sub.add_parser("render", help="Render lessons.jsonl to codex_coding_sop.md.")
     render.add_argument("--output", default=str(DEFAULT_SOP_PATH))
 
-    run = sub.add_parser("run", help="Prepare, learn, and render in one safe batch.")
+    run = sub.add_parser("run", help="Legacy safe batch: prepare packets, merge any existing LLM-approved packet lessons, and render.")
     run.add_argument("roots", nargs="*", default=[DEFAULT_ROOT_SENTINEL], help="Files or directories to scan. Defaults to auto-discovered .codex/sessions.")
     run.add_argument("--limit", type=int, default=3)
     run.add_argument("--min-quality", type=float, default=0.55)
@@ -875,6 +1041,11 @@ def main(argv: list[str] | None = None) -> int:
         packets = prepare_sessions(args.roots, state=state, limit=args.limit, min_quality=args.min_quality)
         print(f"prepared={len(packets)} {status_text(state)}")
         return 0
+    if args.cmd == "deep":
+        packets = prepare_sessions(args.roots, state=state, limit=args.limit, min_quality=args.min_quality)
+        print(deep_distill_instructions(packets, state))
+        print(f"\nprepared={len(packets)} {status_text(state)}")
+        return 0
     if args.cmd == "learn":
         learned = learn_from_packets(state=state, limit=args.limit)
         print(f"learned={learned} {status_text(state)}")
@@ -893,8 +1064,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result.get("status") != "rejected" else 1
     if args.cmd == "promote":
         promoted = promote_candidates(state, min_evidence=args.min_evidence, min_confidence=args.min_confidence)
-        text = render_sop(state=state, output_path=DEFAULT_SOP_PATH)
-        print(f"promoted={promoted} rendered={DEFAULT_SOP_PATH} bytes={len(text.encode('utf-8'))} {status_text(state)}")
+        text = render_sop(state=state, output_path=args.output)
+        print(f"promoted={promoted} rendered={args.output} bytes={len(text.encode('utf-8'))} {status_text(state)}")
         return 0
     if args.cmd == "render":
         text = render_sop(state=state, output_path=args.output)
@@ -904,7 +1075,10 @@ def main(argv: list[str] | None = None) -> int:
         packets = prepare_sessions(args.roots, state=state, limit=args.limit, min_quality=args.min_quality)
         learned = learn_from_packets(state=state, limit=args.limit)
         text = render_sop(state=state, output_path=args.output)
-        print(f"prepared={len(packets)} learned={learned} rendered={args.output} bytes={len(text.encode('utf-8'))}")
+        print(
+            f"prepared={len(packets)} learned={learned} rendered={args.output} bytes={len(text.encode('utf-8'))} "
+            "note=deep_lessons_require_llm_review"
+        )
         return 0
     if args.cmd == "status":
         print(status_text(state))
