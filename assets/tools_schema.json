@@ -60,6 +60,14 @@
       "related_sop": {"type": "string", "description": "Related SOP names, tips for further re-read"}}}
   }},
   {"type": "function", "function": {
+    "name": "load_skill",
+    "description": "Load a Claude/Codex style SKILL.md by name when the user's task matches an Available Skills entry. This injects the full skill instructions and base directory before acting.",
+    "parameters": {"type": "object", "properties": {
+      "skill": {"type": "string", "description": "Skill name exactly as listed in Available Skills"},
+      "args": {"type": "string", "description": "Optional arguments or task-specific target passed into $ARGUMENTS"},
+      "search_roots": {"type": "array", "items": {"type": "string"}, "description": "Optional debug/test override for skill root directories; normally omit"}}}
+  }},
+  {"type": "function", "function": {
     "name": "ask_user",
     "description": "Interrupt task to ask user when needing decisions, extra info, or facing unresolvable blockers",
     "parameters": {"type": "object", "properties": {

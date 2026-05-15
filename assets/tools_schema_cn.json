@@ -60,6 +60,14 @@
       "related_sop": {"type": "string", "description": "相关sop名称，可以多个，必要时需要再读"}}}
   }},
   {"type": "function", "function": {
+    "name": "load_skill",
+    "description": "按名称加载 Claude/Codex 风格的 SKILL.md。当用户任务匹配 Available Skills 列表时，先调用本工具读取完整技能说明和 base directory，再继续行动。",
+    "parameters": {"type": "object", "properties": {
+      "skill": {"type": "string", "description": "Available Skills 中列出的精确技能名"},
+      "args": {"type": "string", "description": "可选参数或本次任务目标，会替换技能正文里的 $ARGUMENTS"},
+      "search_roots": {"type": "array", "items": {"type": "string"}, "description": "可选调试/测试覆盖技能根目录；正常使用时省略"}}}
+  }},
+  {"type": "function", "function": {
     "name": "ask_user",
     "description": "当需要用户决策、提供额外信息或遇到无法自动解决的阻碍时，调用此工具中断任务并提问",
     "parameters": {"type": "object", "properties": {

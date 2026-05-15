@@ -444,6 +444,30 @@ class GenericAgentHandler(BaseHandler):
         #next_prompt += '\n[SYSTEM TIPS] 此函数一般在任务开始或中间时调用，如果任务已成功完成应该是start_long_term_update用于结算长期记忆。\n'
         return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
 
+    def do_load_skill(self, args, response):
+        '''按名称加载 Claude/Codex 风格的 SKILL.md，将完整技能说明注入下一轮上下文。'''
+        skill_name = args.get("skill") or args.get("name") or ""
+        skill_args = args.get("args", "")
+        search_roots = args.get("search_roots")
+        try:
+            from skills_runtime import load_skill_content
+            result = load_skill_content(skill_name, search_roots=search_roots, args=skill_args)
+        except KeyError as e:
+            yield f"[Warn] {e}\n"
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        except Exception as e:
+            yield f"[Warn] Failed to load skill: {e}\n"
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        self.working['active_skill'] = result['name']
+        if result.get('allowed_tools'):
+            self.working['active_skill_allowed_tools'] = ', '.join(result['allowed_tools'])
+        else:
+            self.working.pop('active_skill_allowed_tools', None)
+        yield f"[Info] Loaded skill {result['name']} from {result.get('source', 'local')}: {result.get('path', '')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        next_prompt += "\n[SYSTEM TIPS] 已加载 skill。必须按上方 SKILL.md 内容执行；如技能引用相对路径，使用返回的 base_dir。"
+        return StepOutcome(result, next_prompt=next_prompt)
+
     def _retry_or_exit(self, prompt):
         self._empty_ct = getattr(self, '_empty_ct', 0) + 1
         if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
@@ -565,6 +589,10 @@ class GenericAgentHandler(BaseHandler):
         prompt += f"\nCurrent turn: {self.current_turn}\n"
         if self.working.get('key_info'): prompt += f"\n<key_info>{self.working.get('key_info')}</key_info>"
         if self.working.get('related_sop'): prompt += f"\n有不清晰的地方请再次读取{self.working.get('related_sop')}"
+        if self.working.get('active_skill'):
+            prompt += f"\n<active_skill>{self.working.get('active_skill')}</active_skill>"
+            if self.working.get('active_skill_allowed_tools'):
+                prompt += f"\n<active_skill_allowed_tools>{self.working.get('active_skill_allowed_tools')}</active_skill_allowed_tools>"
         if getattr(self.parent, 'verbose', False):
             try: print(prompt)
             except: pass
