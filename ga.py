@@ -2,11 +2,18 @@ import sys, os, re, json, time, threading, importlib
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib
-if sys.stdout is None: sys.stdout = open(os.devnull, "w")
-if sys.stderr is None: sys.stderr = open(os.devnull, "w")
+def _configure_stdio_utf8():
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        elif hasattr(stream, 'reconfigure'):
+            try: stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception: stream.reconfigure(errors='replace')
+_configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent_loop import BaseHandler, StepOutcome, json_default
+from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generator
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000):
@@ -268,6 +275,28 @@ class GenericAgentHandler(BaseHandler):
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
         self._done_hooks = []
+
+    def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        if str(tool_name).startswith('mcp__'):
+            args = args or {}
+            args['_index'] = index; args['_tool_num'] = tool_num
+            _ = yield from try_call_generator(self.tool_before_callback, tool_name, args, response)
+            ret = yield from self._dispatch_mcp_tool(tool_name, args, response)
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args, response, ret)
+            return ret
+        return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+
+    def _dispatch_mcp_tool(self, tool_name, args, response):
+        call_args = {k: v for k, v in (args or {}).items() if not str(k).startswith('_')}
+        yield f"[Action] Calling MCP tool: {tool_name}\n"
+        try:
+            from mcp_runtime import call_mcp_tool
+            result = call_mcp_tool(tool_name, call_args)
+        except Exception as e:
+            result = {"status": "error", "msg": format_error(e)}
+        yield f"[Status] MCP {result.get('status', 'unknown')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
 
     def _get_abs_path(self, path):
         if not path: return ""

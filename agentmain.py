@@ -1,9 +1,14 @@
 import os, sys, threading, queue, time, json, re, random, locale, base64, mimetypes
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
-if sys.stdout is None: sys.stdout = open(os.devnull, "w")
-elif hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
-if sys.stderr is None: sys.stderr = open(os.devnull, "w")
-elif hasattr(sys.stderr, 'reconfigure'): sys.stderr.reconfigure(errors='replace')
+def _configure_stdio_utf8():
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        elif hasattr(stream, 'reconfigure'):
+            try: stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception: stream.reconfigure(errors='replace')
+_configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from llmcore import reload_mykeys, LLMSession, ToolClient, ClaudeSession, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession, resolve_client
@@ -58,8 +63,20 @@ def _native_image_input_enabled(llmclient):
 
 def load_tool_schema(suffix=''):
     global TOOLS_SCHEMA
-    TS = open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8').read()
+    with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
+        TS = f.read()
     TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
+    try:
+        from mcp_runtime import discover_mcp_tools
+        existing = {t.get("function", {}).get("name") for t in TOOLS_SCHEMA}
+        for tool in discover_mcp_tools():
+            name = tool.get("function", {}).get("name")
+            if name and name not in existing:
+                TOOLS_SCHEMA.append(tool)
+                existing.add(name)
+    except Exception as e:
+        if os.environ.get("GA_MCP_DEBUG"):
+            print(f"[WARN] MCP tool discovery failed: {e}")
 load_tool_schema()
 
 lang_suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
