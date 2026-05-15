@@ -147,6 +147,7 @@ class ChatMessage:
     choices: list = field(default_factory=list)   # [(label, value), ...]
     on_select: Optional[Callable] = field(default=None, repr=False)
     selected_label: Optional[str] = None
+    render_mode: str = ""  # "plain" while streaming, "markdown" after completion
     # Mounted widget refs (None until mounted)
     _role_widget: Any = field(default=None, repr=False)
     _hint_widget: Any = field(default=None, repr=False)
@@ -154,6 +155,46 @@ class ChatMessage:
     # Cached rendered Text + key (content_len, done, width, fold_mode)
     _cached_body: Any = field(default=None, repr=False)
     _cache_key: tuple = field(default=(), repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.render_mode:
+            self.render_mode = "markdown" if self.done else "plain"
+
+
+class StreamUpdateGate:
+    """Coalesce stream updates so the UI thread doesn't re-render on every tiny chunk."""
+
+    def __init__(self, min_interval: float = 0.12, min_chars: int = 160) -> None:
+        self.min_interval = float(min_interval)
+        self.min_chars = int(min_chars)
+        self._last_flush_at: Optional[float] = None
+        self._last_flush_len = 0
+
+    def should_flush(self, text_len: int, *, now: Optional[float] = None, done: bool = False) -> bool:
+        if done:
+            self._mark_flushed(text_len, now)
+            return True
+        now = time.monotonic() if now is None else float(now)
+        if self._last_flush_at is None:
+            self._mark_flushed(text_len, now)
+            return True
+        if text_len - self._last_flush_len >= self.min_chars:
+            self._mark_flushed(text_len, now)
+            return True
+        if now - self._last_flush_at >= self.min_interval:
+            self._mark_flushed(text_len, now)
+            return True
+        return False
+
+    def _mark_flushed(self, text_len: int, now: Optional[float]) -> None:
+        self._last_flush_at = time.monotonic() if now is None else float(now)
+        self._last_flush_len = int(text_len)
+
+    def flush_due(self, *, now: Optional[float] = None) -> bool:
+        if self._last_flush_at is None:
+            return True
+        now = time.monotonic() if now is None else float(now)
+        return now - self._last_flush_at >= self.min_interval
 
 
 @dataclass
@@ -1339,14 +1380,27 @@ class GenericAgentTUI(App[None]):
 
     def _consume_display_queue(self, agent_id, task_id, dq):
         buf = ""
+        pending = False
+        gate = StreamUpdateGate()
         while True:
-            try: item = dq.get(timeout=0.25)
-            except queue.Empty: continue
+            try:
+                item = dq.get(timeout=0.05)
+            except queue.Empty:
+                if pending and gate.flush_due():
+                    self.call_from_thread(self._on_stream, agent_id, task_id, buf, False)
+                    gate.should_flush(len(buf), done=False)
+                    pending = False
+                continue
             if "next" in item:
                 buf += str(item.get("next") or "")
-                self.call_from_thread(self._on_stream, agent_id, task_id, buf, False)
+                if gate.should_flush(len(buf), done=False):
+                    self.call_from_thread(self._on_stream, agent_id, task_id, buf, False)
+                    pending = False
+                else:
+                    pending = True
             if "done" in item:
                 done_text = str(item.get("done") or buf)
+                gate.should_flush(len(done_text), done=True)
                 self.call_from_thread(self._on_stream, agent_id, task_id, done_text, True)
                 return
 
@@ -1358,7 +1412,7 @@ class GenericAgentTUI(App[None]):
         if done:
             s.status = "idle"
             s.current_display_queue = None
-        self._update_assistant(agent_id, text, task_id=task_id, done=done, refresh_chrome=True)
+        self._update_assistant(agent_id, text, task_id=task_id, done=done, refresh_chrome=done)
 
     def _update_assistant(self, agent_id, text, *, task_id=None, done=True, refresh_chrome=False):
         """task_id=None → 改最后一条 assistant；否则按 task_id 匹配。"""
@@ -1369,6 +1423,11 @@ class GenericAgentTUI(App[None]):
             if m.role == "assistant" and (task_id is None or m.task_id == task_id):
                 m.content = text
                 m.done = done
+                next_mode = "markdown" if done else "plain"
+                if m.render_mode != next_mode:
+                    m.render_mode = next_mode
+                    m._cached_body = None
+                    m._cache_key = ()
                 found = m
                 break
         if agent_id != self.current_id:
@@ -1455,11 +1514,13 @@ class GenericAgentTUI(App[None]):
         suffix = "" if m.done else " …"
         raw = m.content or ""
         cleaned = _ANSI_CONTROL_RE.sub("", raw)
-        if self.fold_mode:
-            cleaned = render_folded_text(cleaned)
         text = cleaned + suffix
         if not raw.strip():
             return Text(suffix or "（空）", style=C_DIM)
+        if m.render_mode == "plain":
+            return Text(text, style=C_FG)
+        if self.fold_mode:
+            text = render_folded_text(cleaned) + suffix
         try:
             from io import StringIO
             from rich.console import Console
