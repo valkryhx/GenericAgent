@@ -269,22 +269,69 @@ class SelectableStatic(Static):
         return selection.extract("\n".join(lines)), "\n"
 
 
+def _read_clipboard_text() -> str:
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            return root.clipboard_get() or ""
+        finally:
+            root.destroy()
+    except Exception:
+        return ""
+
+
 class InputArea(InputHistoryMixin, TextArea):
-    """多行输入框：Enter 发送 / Ctrl+J 等换行 / 粘贴 >2 行收为 [Pasted text #N +M lines]。"""
-    _PASTE_RE = re.compile(r'\[Pasted text #(\d+) \+\d+ lines\]')
+    """多行输入框：Enter 发送 / Ctrl+J 等换行 / 粘贴内容折叠为 [Copied text #N +M lines]。"""
+    _PASTE_RE = re.compile(r'\[(?:Pasted|Copied) text #(\d+) \+\d+ lines\]')
+    _SUBMIT_DELAY = 0.08
+    _PASTE_COMPLETION_DELAY = 0.35
 
     BINDINGS = [
         Binding("ctrl+j",      "newline", "Newline", show=False),
         Binding("alt+enter",   "newline", "Newline", show=False),
         Binding("ctrl+enter",  "newline", "Newline", show=False),
         Binding("shift+enter", "newline", "Newline", show=False),
-        # 拆掉父类 ctrl+v：父类会走 action_paste 从 app.clipboard 再插一次，
-        # 和终端 bracketed paste 触发的 _on_paste 双重插入 → 单行粘贴会重复
-        Binding("ctrl+v",      "noop",    "Noop",    show=False),
+        # 在 classic cmd 里多行粘贴可能退化成逐行 Enter。Ctrl+V 主动读剪贴板，
+        # 一次性插入完整文本；支持 bracketed paste 的终端仍走 _on_paste。
+        Binding("ctrl+v",      "paste",   "Paste",   show=False),
     ]
 
     def action_noop(self) -> None:
         pass
+
+    def _insert_via_keyboard(self, text: str) -> None:
+        result = self._replace_via_keyboard(text, *self.selection)
+        if result:
+            self.move_cursor(result.end_location)
+            self.focus()
+            try:
+                self.app._resize_input(self)
+            except Exception:
+                pass
+
+    def _insert_paste_text(self, text: str) -> None:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        newline_count = text.count("\n")
+        if newline_count > 0:
+            self._paste_counter += 1
+            sid = self._paste_counter
+            self._pastes[sid] = text
+            text = f"[Copied text #{sid} +{newline_count} lines]"
+        self._insert_via_keyboard(text)
+
+    def action_paste(self) -> None:
+        if self.read_only:
+            return
+        text = _read_clipboard_text()
+        if not text:
+            try:
+                text = getattr(self.app, "clipboard", "")
+            except Exception:
+                text = ""
+        if text:
+            self._insert_paste_text(text)
 
     class Submitted(Message):
         def __init__(self, input_area: "InputArea", value: str) -> None:
@@ -296,6 +343,9 @@ class InputArea(InputHistoryMixin, TextArea):
         super().__init__(*args, **kwargs)
         self._pastes: dict[int, str] = {}
         self._paste_counter = 0
+        self._pending_submit_timer = None
+        self._linewise_paste_active = False
+        self._linewise_paste_timer = None
         self._init_input_history()
 
     def expand_placeholders(self, text: str) -> str:
@@ -305,6 +355,19 @@ class InputArea(InputHistoryMixin, TextArea):
         return self._PASTE_RE.sub(repl, text)
 
     def reset(self) -> None:
+        if self._pending_submit_timer is not None:
+            try:
+                self._pending_submit_timer.stop()
+            except Exception:
+                pass
+            self._pending_submit_timer = None
+        if self._linewise_paste_timer is not None:
+            try:
+                self._linewise_paste_timer.stop()
+            except Exception:
+                pass
+            self._linewise_paste_timer = None
+        self._linewise_paste_active = False
         self.text = ""
         self._pastes.clear()
         self._paste_counter = 0
@@ -314,20 +377,61 @@ class InputArea(InputHistoryMixin, TextArea):
         if result:
             self.move_cursor(result.end_location)
 
+    def _queue_submit(self) -> None:
+        if self._pending_submit_timer is not None:
+            try:
+                self._pending_submit_timer.stop()
+            except Exception:
+                pass
+        self._pending_submit_timer = self.set_timer(self._SUBMIT_DELAY, self._fire_pending_submit)
+
+    def _fire_pending_submit(self) -> None:
+        self._pending_submit_timer = None
+        self.post_message(self.Submitted(self, self.text))
+
+    def _cancel_pending_submit_as_newline(self) -> None:
+        if self._pending_submit_timer is None:
+            return
+        try:
+            self._pending_submit_timer.stop()
+        except Exception:
+            pass
+        self._pending_submit_timer = None
+        self._insert_via_keyboard("\n")
+        self._linewise_paste_active = True
+        self._queue_linewise_paste_finalize()
+
+    def _queue_linewise_paste_finalize(self) -> None:
+        if self._linewise_paste_timer is not None:
+            try:
+                self._linewise_paste_timer.stop()
+            except Exception:
+                pass
+        self._linewise_paste_timer = self.set_timer(
+            self._PASTE_COMPLETION_DELAY,
+            self._finalize_linewise_paste,
+        )
+
+    def _finalize_linewise_paste(self) -> None:
+        self._linewise_paste_timer = None
+        if not self._linewise_paste_active:
+            return
+        text = self.text.replace("\r\n", "\n").replace("\r", "\n")
+        newline_count = text.count("\n")
+        if newline_count <= 0:
+            self._linewise_paste_active = False
+            return
+        self._paste_counter += 1
+        sid = self._paste_counter
+        self._pastes[sid] = text
+        self._linewise_paste_active = False
+        self.text = ""
+        self._insert_via_keyboard(f"[Copied text #{sid} +{newline_count} lines]")
+
     async def _on_paste(self, event: events.Paste) -> None:
         if self.read_only:
             return
-        text = event.text.replace("\r\n", "\n").replace("\r", "\n")
-        line_count = len(text.splitlines()) or 1
-        if line_count > 2:
-            self._paste_counter += 1
-            sid = self._paste_counter
-            self._pastes[sid] = text
-            text = f"[Pasted text #{sid} +{line_count} lines]"
-        result = self._replace_via_keyboard(text, *self.selection)
-        if result:
-            self.move_cursor(result.end_location)
-            self.focus()
+        self._insert_paste_text(event.text)
         event.stop(); event.prevent_default()
 
     async def _on_key(self, event: events.Key) -> None:
@@ -342,13 +446,22 @@ class InputArea(InputHistoryMixin, TextArea):
             fn = routes.get(event.key)
             if fn:
                 fn(); event.stop(); event.prevent_default(); return
+        if self._pending_submit_timer is not None:
+            self._cancel_pending_submit_as_newline()
+        elif self._linewise_paste_active:
+            if event.key == "enter":
+                event.stop(); event.prevent_default()
+                self._insert_via_keyboard("\n")
+                self._queue_linewise_paste_finalize()
+                return
+            self._queue_linewise_paste_finalize()
         if event.key == "up" and self.show_previous_history():
             event.stop(); event.prevent_default(); return
         if event.key == "down" and self.show_next_history():
             event.stop(); event.prevent_default(); return
         if event.key == "enter":  # 换行键已被 BINDINGS 拦走
             event.stop(); event.prevent_default()
-            self.post_message(self.Submitted(self, self.text))
+            self._queue_submit()
             return
         await super()._on_key(event)
 
@@ -402,6 +515,13 @@ def render_bottombar() -> Table:
     right.append(" 命令面板", style=C_MUTED)
     t.add_row(left, right)
     return t
+
+
+def build_user_body(content: str) -> Text:
+    body = Text()
+    body.append("> ", style=C_DIM)
+    body.append(content or "", style=C_FG)
+    return body
 
 
 # ---------- 侧栏 ----------
@@ -1558,7 +1678,7 @@ class GenericAgentTUI(App[None]):
         if m.kind == "choice":  # selected_label is not None
             body = Text(); body.append("✓ ", style=C_GREEN); body.append(m.selected_label, style=C_FG)
         elif m.role == "user":
-            body = Text.from_markup(f"[{C_DIM}]>[/] {m.content}")
+            body = build_user_body(m.content)
         elif m.role == "system":
             body = Text(m.content, style=C_MUTED)
         else:
