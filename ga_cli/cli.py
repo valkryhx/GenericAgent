@@ -3,7 +3,7 @@ ga_cli/cli.py - GenericAgent 命令行分发系统
 
 通过 python -m ga_cli <命令> 或 ga <命令> 调用
 """
-import os, sys, subprocess, argparse, textwrap
+import os, sys, subprocess, argparse, textwrap, shutil
 
 # Windows GBK 终端兼容
 if sys.platform == "win32" and sys.stdout.encoding and sys.stdout.encoding.lower() in ("gbk", "gb2312"):
@@ -20,13 +20,22 @@ def _reflect():
     return os.path.join(PROJECT_DIR, "reflect")
 
 
+def resolve_executable(command: str) -> str:
+    """Resolve bare executable names for Windows .cmd/.exe launch stability."""
+    if os.path.dirname(command) or command.startswith((".", os.sep)):
+        return command
+    return shutil.which(command) or command
+
+
 def launch_frontend(cmd_parts, args=None):
     """启动前端/工具进程"""
     full_cmd = []
-    for part in cmd_parts:
+    for i, part in enumerate(cmd_parts):
         part = part.replace("{PROJECT_DIR}", PROJECT_DIR)
         part = part.replace("{FRONTENDS}", _frontends())
         part = part.replace("{REFLECT}", _reflect())
+        if i == 0:
+            part = resolve_executable(part)
         full_cmd.append(part)
 
     # 插入额外参数
@@ -76,6 +85,15 @@ COMMANDS = {
         "help": "启动终端 TUI (tuiapp)",
         "desc": "启动终端图形界面（Textual），适合纯终端环境或 SSH",
         "cmd": ["python", "{FRONTENDS}/tuiapp.py"],
+    },
+    "ink": {
+        "help": "启动实验性 React/Ink TUI",
+        "desc": "启动独立 React/Ink 终端前端，通过 JSONL bridge 调用 Python 后端",
+        "cmd": [
+            "node",
+            "{FRONTENDS}/ink-ui/node_modules/tsx/dist/cli.mjs",
+            "{FRONTENDS}/ink-ui/src/main.tsx",
+        ],
     },
     "cli": {
         "help": "启动 CLI 对话 (agentmain)",
@@ -160,6 +178,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             示例:
+              ga                   启动实验性 React/Ink TUI
+              ga help              显示帮助
               ga gui               启动桌面 GUI
               ga web               启动 Web 增强版
               ga web --native      启动 Web 基础版(桌面壳)
@@ -180,7 +200,10 @@ def main():
 
     cmd = args.command
 
-    if not cmd or cmd == "help":
+    if not cmd:
+        cmd = "ink"
+
+    if cmd == "help":
         parser.print_help()
         print("\n--- 命令列表 ---")
         cmd_list()

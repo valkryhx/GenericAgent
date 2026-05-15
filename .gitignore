@@ -120,3 +120,7 @@ reflect/*
 **/__pycache__/
 
 .claude/
+
+# Node frontends
+frontends/ink-ui/node_modules/
+frontends/ink-ui/dist/

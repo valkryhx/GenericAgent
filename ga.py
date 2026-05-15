@@ -27,7 +27,9 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     if code_type in ["python", "py"]:
         tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
         cr_header = os.path.join(script_dir, 'assets', 'code_run_header.py')
-        if os.path.exists(cr_header): tmp_file.write(open(cr_header, encoding='utf-8').read())
+        if os.path.exists(cr_header):
+            with open(cr_header, encoding='utf-8') as header:
+                tmp_file.write(header.read())
         tmp_file.write(code)
         tmp_path = tmp_file.name
         tmp_file.close()
@@ -58,6 +60,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     try:
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             bufsize=0, cwd=cwd, startupinfo=startupinfo,
             creationflags=0x08000000 if os.name == 'nt' else 0
         )
@@ -65,7 +68,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         t = threading.Thread(target=stream_reader, args=(process, full_stdout), daemon=True)
         t.start()
 
-        while t.is_alive():
+        while process.poll() is None:
             istimeout = time.time() - start_t > timeout
             if istimeout or stop_signal:
                 process.kill()
@@ -73,7 +76,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
                 if istimeout: full_stdout.append("\n[Timeout Error] 超时强制终止")
                 else: full_stdout.append("\n[Stopped] 用户强制终止")
                 break
-            time.sleep(1)
+            time.sleep(0.1)
 
         t.join(timeout=1)
         exit_code = process.poll()
