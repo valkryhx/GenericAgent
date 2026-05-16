@@ -72,8 +72,9 @@ def default_agent_factory() -> Any:
     with backend_output_redirect():
         from agentmain import GenericAgent
 
-        agent = GenericAgent()
+    agent = GenericAgent()
     agent.inc_out = True
+    agent.verbose = True
     return agent
 
 
@@ -93,8 +94,10 @@ except Exception:  # pragma: no cover - exercised only when optional frontend he
 
 class GenericAgentBridge:
     def __init__(self, agent_factory: AgentFactory = default_agent_factory, emit: EmitFn | None = None) -> None:
-        self.agent = agent_factory()
-        self.agent.inc_out = True
+        with backend_output_redirect():
+            self.agent = agent_factory()
+            self.agent.inc_out = True
+            self.agent.verbose = True
         self.emit = emit or make_stdout_emitter(sys.stdout)
         self._task_seq = 0
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}

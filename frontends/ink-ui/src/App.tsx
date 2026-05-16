@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { Box, Text, useApp, useInput } from 'ink'
+import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
@@ -16,20 +16,28 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
+import { inputDivider, inputPrompt } from './promptChrome.js'
 
 type Props = {
   python: string
   bridgeScript: string
 }
 
-function MessageView({ message }: { message: ChatMessage }) {
-  const prefix = message.role === 'user' ? '>' : message.role === 'system' ? 'SYSTEM' : message.done ? 'GA' : 'GA ...'
+function MessageView({ message, expandedTools }: { message: ChatMessage; expandedTools: boolean }) {
+  const prefix = message.role === 'user' ? '>' : message.role === 'system' ? 'System' : message.done ? 'GenericAgent' : 'GenericAgent ...'
   const color = message.role === 'user' ? 'cyan' : message.role === 'system' ? 'gray' : message.done ? 'green' : 'yellow'
-  const body = message.role === 'assistant' ? formatAssistantText(message.text) || ' ' : message.text || ' '
+  const body = message.role === 'assistant' ? formatAssistantText(message.text, { expanded: expandedTools }) || ' ' : message.text || ' '
+  if (message.role === 'user') {
+    return (
+      <Box marginBottom={1}>
+        <Text color={color}>{inputPrompt(body)}</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={color}>{prefix}</Text>
-      <Text>{tailLines(body, message.done ? 30 : 18)}</Text>
+      <Text>{expandedTools ? body : tailLines(body, message.done ? 30 : 18)}</Text>
     </Box>
   )
 }
@@ -38,7 +46,7 @@ function formatResumeSession(session: ResumeSession): string {
   const minutes = Math.max(0, Math.round((Date.now() - session.mtime * 1000) / 60000))
   const age = minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`
   const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
-  return `${age} · ${session.rounds} turns · ${preview}`
+  return `${age} - ${session.rounds} turns - ${preview}`
 }
 
 function SelectorView({ selector }: { selector: SelectorState }) {
@@ -48,14 +56,16 @@ function SelectorView({ selector }: { selector: SelectorState }) {
   const title = selector.mode === 'resume' ? 'Resume Conversation' : 'Rewind Conversation'
   const empty = selector.mode === 'resume' && selector.loading ? 'Loading conversations...' : selector.mode === 'resume' ? 'No resumable sessions found.' : 'Nothing to rewind to yet.'
   return (
-    <Box borderStyle="single" flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={1}>
+      <Text color="gray">{inputDivider(48)}</Text>
       <Text bold>{title}</Text>
       {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map((row, index) => (
         <Text key={`${selector.mode}-${index}`} color={index === selector.selected ? 'cyan' : undefined}>
           {index === selector.selected ? '> ' : '  '}{row}
         </Text>
       ))}
-      <Text color="gray">Enter select · Up/Down move · Esc cancel</Text>
+      <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
+      <Text color="gray">{inputDivider(48)}</Text>
     </Box>
   )
 }
@@ -63,7 +73,8 @@ function SelectorView({ selector }: { selector: SelectorState }) {
 function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCommand[]; selected: number }) {
   const visible = visibleSlashSuggestions(suggestions, selected)
   return (
-    <Box borderStyle="single" flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={1}>
+      <Text color="gray">{inputDivider(48)}</Text>
       {visible.items.map((command, offset) => {
         const index = visible.startIndex + offset
         const active = index === selected
@@ -73,7 +84,8 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
           </Text>
         )
       })}
-      <Text color="gray">Tab/Enter complete · Up/Down move · Esc cancel</Text>
+      <Text color="gray">Tab/Enter complete - Up/Down move - Esc cancel</Text>
+      <Text color="gray">{inputDivider(48)}</Text>
     </Box>
   )
 }
@@ -93,10 +105,12 @@ function helpText(): string {
 
 export function App({ python, bridgeScript }: Props) {
   const { exit } = useApp()
+  const { stdout } = useStdout()
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
+  const [expandedTools, setExpandedTools] = useState(false)
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
@@ -105,6 +119,10 @@ export function App({ python, bridgeScript }: Props) {
   useEffect(() => {
     setSlashSelected(0)
   }, [input])
+
+  useEffect(() => {
+    stdout.write('\u001B[?25h')
+  }, [stdout, input, selector, slashItems.length, state.status])
 
   useEffect(() => {
     function onEvent(event: BridgeEvent) {
@@ -132,9 +150,13 @@ export function App({ python, bridgeScript }: Props) {
   }, [bridgeScript, python])
 
   useInput((rawInput, key) => {
-    if (key.ctrl && rawInput === 'c') {
+    if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
       bridgeRef.current?.send({ type: 'shutdown' })
       exit()
+      return
+    }
+    if (key.ctrl && (rawInput === 'o' || rawInput === '\u000f')) {
+      setExpandedTools(value => !value)
       return
     }
     if (selector) {
@@ -196,26 +218,26 @@ export function App({ python, bridgeScript }: Props) {
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const shownMessages = visibleMessages(state.messages)
+  const columns = Math.max(40, stdout.columns || 80)
+  const dividerWidth = Math.max(20, columns - 1)
   const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? 'Running: keep typing, Enter waits · /stop or Esc stops'
-    : 'Enter send · Ctrl+J newline · /stop or Esc stop · Ctrl+C exit'
+    ? `Running: keep typing, Enter waits - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
+    : `Enter send - Ctrl+J newline - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   return (
-    <Box flexDirection="column">
-      <Box justifyContent="space-between">
+    <Box flexDirection="column" width={columns}>
+      <Box justifyContent="space-between" width={columns}>
         <Text bold>GenericAgent Ink</Text>
         <Text color={statusColor}>{state.status}</Text>
       </Box>
-      <Box borderStyle="single" flexDirection="column" paddingX={1} minHeight={12}>
-        {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} />)}
+      <Box flexDirection="column" paddingX={1} minHeight={12} width={columns}>
+        {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} expandedTools={expandedTools} />)}
       </Box>
       {selector ? <SelectorView selector={selector} /> : null}
       {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
-      <Box borderStyle="round" paddingX={1}>
-        <Text color="cyan">❯ </Text>
-        <Text>{input}</Text>
-      </Box>
       <Text color="gray">{inputHint}</Text>
+      <Text color="gray">{inputDivider(dividerWidth)}</Text>
+      <Text color="cyan">{inputPrompt(input)}</Text>
     </Box>
   )
 }
