@@ -9,6 +9,13 @@ import { handleInput } from './inputController.js'
 import { tailLines, visibleMessages } from './messageWindow.js'
 import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
 import type { BridgeEvent, ResumeSession } from './protocol.js'
+import {
+  completeSlashCommand,
+  moveSlashSelection,
+  slashSuggestions,
+  visibleSlashSuggestions,
+  type SlashCommand,
+} from './slashCommands.js'
 
 type Props = {
   python: string
@@ -53,6 +60,24 @@ function SelectorView({ selector }: { selector: SelectorState }) {
   )
 }
 
+function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCommand[]; selected: number }) {
+  const visible = visibleSlashSuggestions(suggestions, selected)
+  return (
+    <Box borderStyle="single" flexDirection="column" paddingX={1}>
+      {visible.items.map((command, offset) => {
+        const index = visible.startIndex + offset
+        const active = index === selected
+        return (
+          <Text key={command.name} color={active ? 'cyan' : undefined}>
+            {active ? '> ' : '  '}{command.name.padEnd(12)} {command.description}
+          </Text>
+        )
+      })}
+      <Text color="gray">Tab/Enter complete · Up/Down move · Esc cancel</Text>
+    </Box>
+  )
+}
+
 function helpText(): string {
   return [
     'Commands:',
@@ -71,9 +96,15 @@ export function App({ python, bridgeScript }: Props) {
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [selector, setSelector] = useState<SelectorState | null>(null)
+  const [slashSelected, setSlashSelected] = useState(0)
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
+  const slashItems = useMemo(() => selector ? [] : slashSuggestions(input), [input, selector])
+
+  useEffect(() => {
+    setSlashSelected(0)
+  }, [input])
 
   useEffect(() => {
     function onEvent(event: BridgeEvent) {
@@ -120,6 +151,25 @@ export function App({ python, bridgeScript }: Props) {
       }
       return
     }
+    if (slashItems.length > 0) {
+      if (key.upArrow) {
+        setSlashSelected(selected => moveSlashSelection(selected, -1, slashItems))
+        return
+      }
+      if (key.downArrow) {
+        setSlashSelected(selected => moveSlashSelection(selected, 1, slashItems))
+        return
+      }
+      if ((key as { tab?: boolean }).tab || key.return) {
+        const selectedCommand = slashItems[slashSelected] ?? slashItems[0]
+        setInput(completeSlashCommand(selectedCommand))
+        return
+      }
+      if (key.escape) {
+        setInput('')
+        return
+      }
+    }
     const decision = handleInput(input, rawInput, key, state.status, pasteStore)
     setInput(decision.value)
     if (decision.command) {
@@ -159,6 +209,7 @@ export function App({ python, bridgeScript }: Props) {
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} />)}
       </Box>
       {selector ? <SelectorView selector={selector} /> : null}
+      {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
       <Box borderStyle="round" paddingX={1}>
         <Text color="cyan">❯ </Text>
