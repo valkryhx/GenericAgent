@@ -15,6 +15,17 @@ export function buildBridgeEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS
   }
 }
 
+export function writeBridgeCommand(
+  stdin: Pick<NodeJS.WritableStream, 'write'>,
+  command: BridgeCommand,
+): void {
+  try {
+    stdin.write(`${JSON.stringify(command)}\n`)
+  } catch {
+    // The bridge may already be gone during Ctrl+C or app teardown.
+  }
+}
+
 export function startBridge(
   python: string,
   bridgeScript: string,
@@ -40,10 +51,10 @@ export function startBridge(
 
   return {
     send(command: BridgeCommand) {
-      child.stdin.write(`${JSON.stringify(command)}\n`)
+      writeBridgeCommand(child.stdin, command)
     },
     stop() {
-      child.stdin.write(`${JSON.stringify({ type: 'shutdown' })}\n`)
+      writeBridgeCommand(child.stdin, { type: 'shutdown' })
       child.kill()
     },
   }

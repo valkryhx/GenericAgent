@@ -2,9 +2,13 @@ import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Box, Text, useApp, useInput } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
-import { createPasteStore, expandPastedTextRefs, foldPastedText } from './paste.js'
+import { createPasteStore } from './paste.js'
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
+import { handleInput } from './inputController.js'
+import { tailLines, visibleMessages } from './messageWindow.js'
+import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
+import type { BridgeEvent, ResumeSession } from './protocol.js'
 
 type Props = {
   python: string
@@ -12,29 +16,85 @@ type Props = {
 }
 
 function MessageView({ message }: { message: ChatMessage }) {
-  const prefix = message.role === 'user' ? '>' : message.done ? 'GA' : 'GA ...'
-  const color = message.role === 'user' ? 'cyan' : message.done ? 'green' : 'yellow'
+  const prefix = message.role === 'user' ? '>' : message.role === 'system' ? 'SYSTEM' : message.done ? 'GA' : 'GA ...'
+  const color = message.role === 'user' ? 'cyan' : message.role === 'system' ? 'gray' : message.done ? 'green' : 'yellow'
+  const body = message.role === 'assistant' ? formatAssistantText(message.text) || ' ' : message.text || ' '
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={color}>{prefix}</Text>
-      <Text>{message.role === 'assistant' ? formatAssistantText(message.text) || ' ' : message.text || ' '}</Text>
+      <Text>{tailLines(body, message.done ? 30 : 18)}</Text>
     </Box>
   )
 }
 
-function visibleMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.slice(-80)
+function formatResumeSession(session: ResumeSession): string {
+  const minutes = Math.max(0, Math.round((Date.now() - session.mtime * 1000) / 60000))
+  const age = minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`
+  const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
+  return `${age} · ${session.rounds} turns · ${preview}`
+}
+
+function SelectorView({ selector }: { selector: SelectorState }) {
+  const rows = selector.mode === 'resume'
+    ? selector.sessions.map(session => formatResumeSession(session))
+    : selector.options.map(option => option.text.replace(/\s+/g, ' ').slice(0, 90) || '(empty)')
+  const title = selector.mode === 'resume' ? 'Resume Conversation' : 'Rewind Conversation'
+  const empty = selector.mode === 'resume' && selector.loading ? 'Loading conversations...' : selector.mode === 'resume' ? 'No resumable sessions found.' : 'Nothing to rewind to yet.'
+  return (
+    <Box borderStyle="single" flexDirection="column" paddingX={1}>
+      <Text bold>{title}</Text>
+      {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map((row, index) => (
+        <Text key={`${selector.mode}-${index}`} color={index === selector.selected ? 'cyan' : undefined}>
+          {index === selector.selected ? '> ' : '  '}{row}
+        </Text>
+      ))}
+      <Text color="gray">Enter select · Up/Down move · Esc cancel</Text>
+    </Box>
+  )
+}
+
+function helpText(): string {
+  return [
+    'Commands:',
+    '/resume, /continue - pick a previous conversation',
+    '/resume N, /continue N - resume by index',
+    '/rewind, /checkpoint - restore conversation to before a user message',
+    '/clear - clear display only',
+    '/status - show current frontend status',
+    '/stop - stop current backend task',
+    '/exit, /quit - exit',
+  ].join('\n')
 }
 
 export function App({ python, bridgeScript }: Props) {
   const { exit } = useApp()
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
+  const [selector, setSelector] = useState<SelectorState | null>(null)
   const bridgeRef = useRef<BridgeClient | null>(null)
+  const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
 
   useEffect(() => {
-    bridgeRef.current = startBridge(python, bridgeScript, dispatch, code => {
+    function onEvent(event: BridgeEvent) {
+      if (event.type === 'resume_sessions') {
+        if (!resumePendingRef.current) return
+        resumePendingRef.current = false
+        setSelector({ mode: 'resume', selected: 0, sessions: event.sessions })
+        return
+      }
+      if (event.type === 'history_replace') {
+        setSelector(null)
+        resumePendingRef.current = false
+      }
+      if (event.type === 'rewind_done') {
+        setSelector(null)
+        setInput(event.text)
+      }
+      dispatch(event)
+    }
+
+    bridgeRef.current = startBridge(python, bridgeScript, onEvent, code => {
       dispatch({ type: 'error', code: 'bridge_exit', message: `bridge exited: ${code ?? 'signal'}` })
     })
     return () => bridgeRef.current?.stop()
@@ -42,33 +102,53 @@ export function App({ python, bridgeScript }: Props) {
 
   useInput((rawInput, key) => {
     if (key.ctrl && rawInput === 'c') {
-      bridgeRef.current?.stop()
+      bridgeRef.current?.send({ type: 'shutdown' })
       exit()
       return
     }
-    if (key.ctrl && rawInput === 'j') {
-      setInput(value => `${value}\n`)
-      return
-    }
-    if (key.backspace || key.delete) {
-      setInput(value => value.slice(0, -1))
-      return
-    }
-    if (key.return) {
-      const expanded = expandPastedTextRefs(input, pasteStore).trimEnd()
-      if (expanded && state.status !== 'running' && state.status !== 'stopping') {
-        bridgeRef.current?.send({ type: 'submit', text: expanded })
-        setInput('')
+    if (selector) {
+      const decision = handleSelectorInput(selector, key)
+      setSelector(decision.selector)
+      if (!decision.selector && selector.mode === 'resume') {
+        resumePendingRef.current = false
+      }
+      if (decision.command) {
+        bridgeRef.current?.send(decision.command)
+      }
+      if (decision.input !== undefined) {
+        setInput(decision.input)
       }
       return
     }
-    if (rawInput) {
-      setInput(value => value + foldPastedText(rawInput, pasteStore))
+    const decision = handleInput(input, rawInput, key, state.status, pasteStore)
+    setInput(decision.value)
+    if (decision.command) {
+      bridgeRef.current?.send(decision.command)
+    }
+    if (decision.action?.type === 'open_resume') {
+      resumePendingRef.current = true
+      setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true })
+      bridgeRef.current?.send({ type: 'list_resume_sessions' })
+    } else if (decision.action?.type === 'open_rewind') {
+      const options = rewindOptions(state.messages)
+      setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
+    } else if (decision.action?.type === 'clear') {
+      dispatch({ type: 'clear' })
+    } else if (decision.action?.type === 'help') {
+      dispatch({ type: 'system', text: helpText() })
+    } else if (decision.action?.type === 'status') {
+      dispatch({ type: 'system', text: `status=${state.status} messages=${state.messages.length}` })
+    }
+    if (decision.exit) {
+      exit()
     }
   })
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const shownMessages = visibleMessages(state.messages)
+  const inputHint = state.status === 'running' || state.status === 'stopping'
+    ? 'Running: keep typing, Enter waits · /stop or Esc stops'
+    : 'Enter send · Ctrl+J newline · /stop or Esc stop · Ctrl+C exit'
   return (
     <Box flexDirection="column">
       <Box justifyContent="space-between">
@@ -78,12 +158,13 @@ export function App({ python, bridgeScript }: Props) {
       <Box borderStyle="single" flexDirection="column" paddingX={1} minHeight={12}>
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} />)}
       </Box>
+      {selector ? <SelectorView selector={selector} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
       <Box borderStyle="round" paddingX={1}>
         <Text color="cyan">❯ </Text>
         <Text>{input}</Text>
       </Box>
-      <Text color="gray">Enter send · Ctrl+J newline · Ctrl+C exit</Text>
+      <Text color="gray">{inputHint}</Text>
     </Box>
   )
 }
