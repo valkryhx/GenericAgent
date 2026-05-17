@@ -52,3 +52,15 @@ test('formatAssistantText truncates long tool summaries with a ctrl+o hint', () 
 
   assert.match(formatAssistantText(raw), /^> code_run\(script: x{80}.*\) \(ctrl\+o to expand\)$/)
 })
+
+test('formatAssistantText removes final response marker block', () => {
+  const raw = [
+    '这是最终回答。',
+    '',
+    '`````',
+    '[Info] Final response to user.',
+    '`````',
+  ].join('\n')
+
+  assert.equal(formatAssistantText(raw), '这是最终回答。')
+})

@@ -11,12 +11,39 @@ test('handleInput submits expanded text when idle', () => {
   assert.deepEqual(decision, { value: '', command: { type: 'submit', text: 'hello' } })
 })
 
+test('handleInput submits when Enter includes a raw carriage return', () => {
+  const store = createPasteStore()
+
+  const decision = handleInput('hello', '\r', { return: true }, 'idle', store)
+
+  assert.deepEqual(decision, { value: '', command: { type: 'submit', text: 'hello' } })
+})
+
 test('handleInput keeps text when Enter is pressed while running', () => {
   const store = createPasteStore()
 
   const decision = handleInput('next prompt', '', { return: true }, 'running', store)
 
   assert.deepEqual(decision, { value: 'next prompt' })
+})
+
+test('handleInput inserts newlines with modified Enter shortcuts', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('hello', '', { meta: true, return: true }, 'idle', store), {
+    value: 'hello\n',
+  })
+  assert.deepEqual(handleInput('hello', '', { shift: true, return: true }, 'idle', store), {
+    value: 'hello\n',
+  })
+})
+
+test('handleInput inserts newline for Alt+Enter raw carriage return', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('hello', '\r', {}, 'idle', store), {
+    value: 'hello\n',
+  })
 })
 
 test('handleInput sends stop for slash stop and Escape', () => {
@@ -68,7 +95,7 @@ test('handleInput sends indexed resume commands without opening a selector', () 
 
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
-  const pasted = handleInput('', 'a\nb\nc', {}, 'idle', store)
+  const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)
 
   assert.equal(pasted.value, '[Copied text #1 +2 lines]')
   assert.deepEqual(handleInput(`${pasted.value} 请检查`, '', { return: true }, 'idle', store), {

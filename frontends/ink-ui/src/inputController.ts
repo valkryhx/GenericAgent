@@ -3,6 +3,8 @@ import { expandPastedTextRefs, foldPastedText, type PasteStore } from './paste.j
 
 export type InputKey = {
   ctrl?: boolean
+  meta?: boolean
+  shift?: boolean
   return?: boolean
   backspace?: boolean
   delete?: boolean
@@ -46,6 +48,12 @@ export function handleInput(
   }
   if (key.escape) {
     return status === 'running' || status === 'stopping' ? { value, command: { type: 'stop' } } : { value }
+  }
+  if ((key.meta || key.shift) && key.return) {
+    return { value: `${value}\n` }
+  }
+  if (!key.return && (rawInput === '\r' || rawInput === '\n')) {
+    return { value: `${value}\n` }
   }
   if (key.ctrl && rawInput === 'j') {
     return { value: `${value}\n` }

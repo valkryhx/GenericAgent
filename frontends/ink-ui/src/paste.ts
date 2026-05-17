@@ -1,13 +1,18 @@
 export type PasteStore = Map<number, string>
 
 const pasteRefPattern = /\[Copied text #(\d+) \+\d+ lines\]/g
+const ansiPattern = /\u001b\[[0-?]*[ -/]*[@-~]/g
 
 export function createPasteStore(): PasteStore {
   return new Map()
 }
 
 export function foldPastedText(text: string, store: PasteStore): string {
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const normalized = text
+    .replace(ansiPattern, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\t/g, '    ')
   const newlineCount = (normalized.match(/\n/g) ?? []).length
   if (newlineCount === 0) return normalized
   const id = store.size + 1

@@ -17,6 +17,7 @@ import {
   type SlashCommand,
 } from './slashCommands.js'
 import { inputDivider, inputPrompt } from './promptChrome.js'
+import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 
 type Props = {
   python: string
@@ -24,20 +25,27 @@ type Props = {
 }
 
 function MessageView({ message, expandedTools }: { message: ChatMessage; expandedTools: boolean }) {
-  const prefix = message.role === 'user' ? '>' : message.role === 'system' ? 'System' : message.done ? 'GenericAgent' : 'GenericAgent ...'
-  const color = message.role === 'user' ? 'cyan' : message.role === 'system' ? 'gray' : message.done ? 'green' : 'yellow'
   const body = message.role === 'assistant' ? formatAssistantText(message.text, { expanded: expandedTools }) || ' ' : message.text || ' '
   if (message.role === 'user') {
     return (
       <Box marginBottom={1}>
-        <Text color={color}>{inputPrompt(body)}</Text>
+        <Text color="black" backgroundColor="#d7d7d7">{inputPrompt(body)} </Text>
+      </Box>
+    )
+  }
+  if (message.role === 'system') {
+    return (
+      <Box marginBottom={1}>
+        <Text color="gray">{body}</Text>
       </Box>
     )
   }
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text color={color}>{prefix}</Text>
-      <Text>{expandedTools ? body : tailLines(body, message.done ? 30 : 18)}</Text>
+    <Box flexDirection="row" marginBottom={1}>
+      <Text color="black">✻ </Text>
+      <Box flexDirection="column" flexShrink={1}>
+        <Text>{expandedTools ? body : tailLines(body, message.done ? 30 : 18)}</Text>
+      </Box>
     </Box>
   )
 }
@@ -90,6 +98,23 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
   )
 }
 
+function InputView({ input }: { input: string }) {
+  return (
+    <Text color="cyan">
+      {inputPrompt(input)}
+      <Text inverse> </Text>
+    </Text>
+  )
+}
+
+function ActivityView({ seconds, label }: { seconds: number; label: string }) {
+  return (
+    <Box marginBottom={1}>
+      <Text color="yellow">{formatRunningStatus(seconds, label)}</Text>
+    </Box>
+  )
+}
+
 function helpText(): string {
   return [
     'Commands:',
@@ -111,6 +136,9 @@ export function App({ python, bridgeScript }: Props) {
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
+  const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
+  const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
+  const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
@@ -121,8 +149,27 @@ export function App({ python, bridgeScript }: Props) {
   }, [input])
 
   useEffect(() => {
-    stdout.write('\u001B[?25h')
-  }, [stdout, input, selector, slashItems.length, state.status])
+    stdout.write('\u001B[?25l')
+    return () => {
+      stdout.write('\u001B[?25h')
+    }
+  }, [stdout])
+
+  useEffect(() => {
+    if (state.status === 'running' || state.status === 'stopping') {
+      setRunningStartedAt(value => {
+        if (value !== null) return value
+        setRunningLabel(pickRunningVerb())
+        return Date.now()
+      })
+      setNow(Date.now())
+      const timer = setInterval(() => setNow(Date.now()), 1000)
+      return () => clearInterval(timer)
+    }
+    setRunningStartedAt(null)
+    setNow(Date.now())
+    return undefined
+  }, [state.status])
 
   useEffect(() => {
     function onEvent(event: BridgeEvent) {
@@ -182,7 +229,7 @@ export function App({ python, bridgeScript }: Props) {
         setSlashSelected(selected => moveSlashSelection(selected, 1, slashItems))
         return
       }
-      if ((key as { tab?: boolean }).tab || key.return) {
+      if ((key as { tab?: boolean }).tab || (key.return && !key.ctrl && !key.meta && !key.shift)) {
         const selectedCommand = slashItems[slashSelected] ?? slashItems[0]
         setInput(completeSlashCommand(selectedCommand))
         return
@@ -222,7 +269,8 @@ export function App({ python, bridgeScript }: Props) {
   const dividerWidth = Math.max(20, columns - 1)
   const inputHint = state.status === 'running' || state.status === 'stopping'
     ? `Running: keep typing, Enter waits - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Ctrl+J newline - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    : `Enter send - Alt+Enter newline - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+  const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   return (
     <Box flexDirection="column" width={columns}>
       <Box justifyContent="space-between" width={columns}>
@@ -232,12 +280,14 @@ export function App({ python, bridgeScript }: Props) {
       <Box flexDirection="column" paddingX={1} minHeight={12} width={columns}>
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} expandedTools={expandedTools} />)}
       </Box>
+      {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={runningLabel} /> : null}
       {selector ? <SelectorView selector={selector} /> : null}
       {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
       <Text color="gray">{inputHint}</Text>
       <Text color="gray">{inputDivider(dividerWidth)}</Text>
-      <Text color="cyan">{inputPrompt(input)}</Text>
+      <InputView input={input} />
+      <Text color="gray">{inputDivider(dividerWidth)}</Text>
     </Box>
   )
 }

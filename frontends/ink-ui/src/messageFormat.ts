@@ -76,6 +76,8 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
   )
   text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `> ${name}(${args})`)
   text = text.replace(/`{4,}/g, '```')
+  text = text.replace(/(?:^|\n)```\s*\n\s*\[Info\] Final response to user\.\s*\n```\s*(?=\n|$)/g, '\n')
+  text = text.replace(/(?:^|\n)\s*\[Info\] Final response to user\.\s*(?=\n|$)/g, '\n')
   text = text.replace(/\n{4,}/g, '\n\n\n')
   return text.trimEnd()
 }
