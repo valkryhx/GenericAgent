@@ -41,6 +41,7 @@ class FakeAgent:
         self.handler = object()
         self.llmclient = FakeClient()
         self.llmclients = [self.llmclient]
+        self.llm_no = 0
 
     def run(self):
         return None
@@ -55,6 +56,18 @@ class FakeAgent:
 
     def abort(self):
         self.aborted = True
+
+    def list_llms(self):
+        return [
+            (0, "NativeOAISession/gpt-native", self.llm_no == 0),
+            (1, "NativeOAISession/kimi-native", self.llm_no == 1),
+        ]
+
+    def select_llm(self, selector):
+        if str(selector).lower() in {"1", "kimi"}:
+            self.llm_no = 1
+            return {"ok": True, "index": 1, "name": "NativeOAISession/kimi-native", "model": "moonshotai/kimi-k2.6"}
+        return {"ok": False, "code": "not_found", "message": "model not found"}
 
 
 class InkBridgeTest(unittest.TestCase):
@@ -227,6 +240,47 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "system", "text": "MCP server demo reconnect: connected"}, events[-2])
         self.assertEqual({"type": "mcp_status", **payload}, events[-1])
 
+    def test_model_status_emits_available_models(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.model_status()
+
+        self.assertEqual(
+            {
+                "type": "model_status",
+                "models": [
+                    {"index": 0, "name": "NativeOAISession/gpt-native", "current": True},
+                    {"index": 1, "name": "NativeOAISession/kimi-native", "current": False},
+                ],
+            },
+            events[-1],
+        )
+
+    def test_model_switch_uses_agent_selector_then_emits_status(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.model_switch("kimi")
+
+        self.assertEqual(1, agent.llm_no)
+        self.assertEqual({"type": "system", "text": "Set model to NativeOAISession/kimi-native"}, events[-2])
+        self.assertEqual("model_status", events[-1]["type"])
+        self.assertTrue(events[-1]["models"][1]["current"])
+
+    def test_model_switch_rejects_while_busy(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        bridge.submit("busy")
+
+        bridge.model_switch("kimi")
+
+        self.assertEqual(0, agent.llm_no)
+        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
             json.dumps({"type": "mcp_status"}) + "\n"
@@ -246,6 +300,22 @@ class InkBridgeTest(unittest.TestCase):
         bridge.mcp_reconnect.assert_called_once_with("demo")
         bridge.mcp_enable.assert_called_once_with("demo")
         bridge.mcp_disable.assert_called_once_with("demo")
+
+    def test_jsonl_loop_routes_model_commands(self):
+        stdin = io.StringIO(
+            json.dumps({"type": "model_status"}) + "\n"
+            + json.dumps({"type": "model_switch", "selector": "kimi"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+
+        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            run_jsonl_loop(stdin, stdout)
+
+        bridge.model_status.assert_called_once_with()
+        bridge.model_switch.assert_called_once_with("kimi")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(

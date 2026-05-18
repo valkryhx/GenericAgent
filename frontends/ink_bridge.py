@@ -194,6 +194,32 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "mcp_disable_failed", "message": str(exc)})
         self.mcp_status()
 
+    def model_status(self) -> None:
+        try:
+            with backend_output_redirect():
+                models = [
+                    {"index": int(index), "name": str(name), "current": bool(current)}
+                    for index, name, current in self.agent.list_llms()
+                ]
+            self.emit({"type": "model_status", "models": models})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "model_status_failed", "message": str(exc)})
+
+    def model_switch(self, selector: str) -> None:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return
+        try:
+            with backend_output_redirect():
+                result = self.agent.select_llm(str(selector or ""))
+            if result.get("ok"):
+                self.emit({"type": "system", "text": f"Set model to {result.get('name')}"})
+            else:
+                self.emit({"type": "system", "text": str(result.get("message") or "model switch failed")})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
+        self.model_status()
+
     def list_resume_sessions(self) -> None:
         if continue_list is None:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
@@ -375,6 +401,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.mcp_enable(str(command.get("server") or ""))
         elif cmd_type == "mcp_disable":
             bridge.mcp_disable(str(command.get("server") or ""))
+        elif cmd_type == "model_status":
+            bridge.model_status()
+        elif cmd_type == "model_switch":
+            bridge.model_switch(str(command.get("selector") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
             try:
