@@ -18,6 +18,7 @@ import {
   panelFromMcpStatus,
   type McpPanelState,
 } from './mcpPanel.js'
+import { moveModelSelection, panelFromModelStatus, type ModelPanelState } from './modelPanel.js'
 import {
   completeSlashCommand,
   moveSlashSelection,
@@ -135,6 +136,25 @@ function McpPanelView({ panel }: { panel: McpPanelState }) {
   )
 }
 
+function ModelPanelView({ panel }: { panel: ModelPanelState }) {
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      <Text color="gray">{inputDivider(48)}</Text>
+      <Text bold>Models</Text>
+      {panel.models.length === 0 ? <Text color="gray">No models configured.</Text> : null}
+      {panel.models.map((model, index) => (
+        <Text key={model.index} color={index === panel.selected ? 'cyan' : undefined}>
+          {index === panel.selected ? '> ' : '  '}
+          <Text color={model.current ? 'green' : 'gray'}>{model.current ? '✓' : ' '}</Text>
+          {` ${model.index}: ${model.name}`}
+        </Text>
+      ))}
+      <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
+      <Text color="gray">{inputDivider(48)}</Text>
+    </Box>
+  )
+}
+
 function InputView({ input }: { input: string }) {
   return (
     <Text color="cyan">
@@ -160,6 +180,7 @@ function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/clear - clear display only',
     '/status - show current frontend status',
+    '/model, /llm - show and switch AI models',
     '/stop - stop current backend task',
     '/exit, /quit - exit',
   ].join('\n')
@@ -172,6 +193,7 @@ export function App({ python, bridgeScript }: Props) {
   const [input, setInput] = useState('')
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
+  const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
@@ -180,7 +202,7 @@ export function App({ python, bridgeScript }: Props) {
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
-  const slashItems = useMemo(() => selector || mcpPanel ? [] : slashSuggestions(input), [input, selector, mcpPanel])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel ? [] : slashSuggestions(input), [input, selector, mcpPanel, modelPanel])
 
   useEffect(() => {
     setSlashSelected(0)
@@ -213,6 +235,10 @@ export function App({ python, bridgeScript }: Props) {
     function onEvent(event: BridgeEvent) {
       if (event.type === 'mcp_status') {
         setMcpPanel(panelFromMcpStatus(event))
+        return
+      }
+      if (event.type === 'model_status') {
+        setModelPanel(panelFromModelStatus(event))
         return
       }
       if (event.type === 'resume_sessions') {
@@ -259,6 +285,28 @@ export function App({ python, bridgeScript }: Props) {
       }
       if (key.downArrow) {
         setMcpPanel(panel => panel ? moveMcpSelection(panel, 1) : panel)
+        return
+      }
+    }
+    if (modelPanel) {
+      if (key.escape) {
+        setModelPanel(null)
+        return
+      }
+      if (key.upArrow) {
+        setModelPanel(panel => panel ? { ...panel, selected: moveModelSelection(panel.selected, -1, panel.models.length) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        setModelPanel(panel => panel ? { ...panel, selected: moveModelSelection(panel.selected, 1, panel.models.length) } : panel)
+        return
+      }
+      if (key.return) {
+        const selected = modelPanel.models[modelPanel.selected]
+        if (selected) {
+          bridgeRef.current?.send({ type: 'model_switch', selector: String(selected.index) })
+        }
+        setModelPanel(null)
         return
       }
     }
@@ -310,6 +358,8 @@ export function App({ python, bridgeScript }: Props) {
     } else if (decision.action?.type === 'open_mcp') {
       setMcpPanel(loadingMcpPanel())
       bridgeRef.current?.send({ type: 'mcp_status' })
+    } else if (decision.action?.type === 'open_model') {
+      bridgeRef.current?.send({ type: 'model_status' })
     } else if (decision.action?.type === 'clear') {
       dispatch({ type: 'clear' })
     } else if (decision.action?.type === 'help') {
@@ -341,6 +391,7 @@ export function App({ python, bridgeScript }: Props) {
       </Box>
       {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={runningLabel} /> : null}
       {mcpPanel ? <McpPanelView panel={mcpPanel} /> : null}
+      {modelPanel ? <ModelPanelView panel={modelPanel} /> : null}
       {selector ? <SelectorView selector={selector} /> : null}
       {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
