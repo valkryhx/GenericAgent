@@ -78,6 +78,25 @@ def _write_chinese_stderr_server(tmp_path: Path) -> Path:
     return script_path
 
 
+def _write_counting_server(tmp_path: Path) -> Path:
+    counter_path = tmp_path / "starts.txt"
+    script_path = tmp_path / "counting_mcp_server.py"
+    script_path.write_text(
+        "from pathlib import Path\n"
+        "from fastmcp import FastMCP\n"
+        f"counter = Path({str(counter_path)!r})\n"
+        "counter.write_text(str(int(counter.read_text() or '0') + 1) if counter.exists() else '1')\n"
+        "mcp = FastMCP('counting')\n"
+        "@mcp.tool(description='Echo text.')\n"
+        "def echo(text: str) -> str:\n"
+        "    return 'echo:' + text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path
+
+
 def _write_mcp_config(tmp_path: Path, server_script: Path) -> Path:
     config_path = tmp_path / "mcp.json"
     config_path.write_text(
@@ -252,6 +271,22 @@ class McpRuntimeTest(unittest.TestCase):
 
         self.assertEqual(outcome.data["status"], "success")
         self.assertIn("echo:dispatch", json.dumps(outcome.data, ensure_ascii=False))
+
+    def test_manager_reuses_stdio_server_across_calls(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_counting_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "counting", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            first = call_mcp_tool("mcp__counting__echo", {"text": "one"}, timeout=20)
+            second = call_mcp_tool("mcp__counting__echo", {"text": "two"}, timeout=20)
+            starts = int((tmp_path / "starts.txt").read_text(encoding="utf-8"))
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(starts, 1)
 
     def test_stdio_server_stderr_is_utf8_log_file_not_console_output(self):
         with _tempdir() as tmp:

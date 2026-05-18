@@ -50,6 +50,7 @@ class McpServerState:
     tool_refs: dict[str, McpToolRef] = field(default_factory=dict)
     client: Any = None
     entered: Any = None
+    stderr_log: Any = None
 
 
 _MANAGER_LOCK = threading.Lock()
@@ -109,6 +110,13 @@ class McpManager:
         self.config_path = config_path
         self.lock = threading.RLock()
         self.states: dict[str, McpServerState] = {}
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(
+            target=self.loop.run_forever,
+            daemon=True,
+            name="ga-mcp-loop",
+        )
+        self.loop_thread.start()
         self.reload_config()
 
     def reload_config(self) -> None:
@@ -126,7 +134,7 @@ class McpManager:
                 )
 
     def status(self, timeout: Optional[float] = None) -> dict[str, Any]:
-        del timeout
+        self.ensure_all_connected(timeout=timeout)
         with self.lock:
             servers = [self._server_summary(state) for state in self.states.values()]
             tools = [dict(tool) for state in self.states.values() for tool in state.tools]
@@ -140,12 +148,182 @@ class McpManager:
 
     def close(self) -> None:
         with self.lock:
+            states = list(self.states.values())
+        for state in states:
+            self._close_state(state)
+        if self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.loop_thread.is_alive():
+            self.loop_thread.join(timeout=2)
+
+    def discover(self, include_unavailable: bool = False, timeout: Optional[float] = None) -> McpDiscovery:
+        self.ensure_all_connected(timeout=timeout)
+        discovery = McpDiscovery()
+        with self.lock:
             for state in self.states.values():
-                self._close_state(state)
+                if state.status == "disabled":
+                    if include_unavailable:
+                        discovery.errors[state.name] = "disabled"
+                    continue
+                if state.error:
+                    discovery.errors[state.name] = state.error
+                    if not include_unavailable:
+                        continue
+                discovery.tools.extend(dict(tool) for tool in state.tools)
+                discovery.tool_refs.update(state.tool_refs)
+        return discovery
+
+    def ensure_all_connected(self, timeout: Optional[float] = None) -> None:
+        names = []
+        with self.lock:
+            for name, state in self.states.items():
+                if state.status != "disabled" and state.client is None:
+                    names.append(name)
+        for name in names:
+            self.ensure_connected(name, timeout=timeout)
+
+    def ensure_connected(self, server_name: str, timeout: Optional[float] = None) -> McpServerState:
+        timeout = _default_timeout(timeout)
+        with self.lock:
+            state = self.states[server_name]
+            if state.status == "disabled":
+                return state
+            if state.status == "connected" and state.client is not None:
+                return state
+            state.status = "pending"
+            state.error = ""
+        self._run(self._connect_and_fetch_tools(state, timeout))
+        return state
+
+    def call_tool(
+        self,
+        full_name: str,
+        arguments: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        call_timeout = _default_timeout(timeout, env_name="GA_MCP_CALL_TIMEOUT", fallback=60)
+        self.ensure_all_connected(timeout=call_timeout)
+        discovery = self.discover(include_unavailable=True, timeout=call_timeout)
+        tool_ref = discovery.tool_refs.get(full_name)
+        if tool_ref is None:
+            known = ", ".join(sorted(discovery.tool_refs)[:30])
+            return {
+                "status": "error",
+                "msg": f"Unknown MCP tool: {full_name}" + (f". Known: {known}" if known else ""),
+                "discovery_errors": discovery.errors,
+            }
+        with self.lock:
+            state = self.states[tool_ref.server_name]
+        clean_args = {k: v for k, v in (arguments or {}).items() if not str(k).startswith("_")}
+        return self._run(self._call_tool_async(state, tool_ref.tool_name, clean_args, timeout=call_timeout))
+
+    def _run(self, coro):
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result()
+
+    async def _connect_and_fetch_tools(self, state: McpServerState, timeout: float) -> None:
+        try:
+            await self._close_state_async(state)
+            await self._open_state_client(state, timeout)
+            tools = await asyncio.wait_for(state.client.list_tools(), timeout=timeout)
+            schemas: list[dict[str, Any]] = []
+            refs: dict[str, McpToolRef] = {}
+            seen: set[str] = set()
+            for tool in tools:
+                original_name = str(getattr(tool, "name", ""))
+                if not original_name:
+                    continue
+                full_name = build_mcp_tool_name(state.name, original_name)
+                if full_name in seen:
+                    state.error = f"Duplicate normalized MCP tool name skipped: {full_name}"
+                    continue
+                seen.add(full_name)
+                schema = _tool_to_function_schema(state.name, tool, full_name)
+                schemas.append(schema)
+                refs[full_name] = McpToolRef(
+                    full_name=full_name,
+                    server_name=state.name,
+                    tool_name=original_name,
+                    server_config=dict(state.config),
+                    schema=schema,
+                )
+            with self.lock:
+                state.tools = schemas
+                state.tool_refs = refs
+                state.status = "connected"
+                state.error = ""
+        except Exception as e:
+            await self._close_state_async(state)
+            with self.lock:
+                state.status = "failed"
+                state.error = _redact_sensitive(f"{type(e).__name__}: {e}")
+                state.tools = []
+                state.tool_refs = {}
+
+    async def _open_state_client(self, state: McpServerState, timeout: float) -> None:
+        from fastmcp import Client
+        from fastmcp.client.transports import MCPConfigTransport, StdioTransport
+
+        transport = MCPConfigTransport(_single_server_config(state.name, state.config))
+        stderr_log = None
+        if isinstance(getattr(transport, "transport", None), StdioTransport):
+            transport.transport.keep_alive = True
+            _MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            log_name = f"{normalize_mcp_name(state.name)}.stderr.log"
+            stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
+            transport.transport.log_file = stderr_log
+        entered = Client(transport, name=f"ga-mcp-{state.name}", timeout=timeout, init_timeout=timeout)
+        client = await entered.__aenter__()
+        with self.lock:
+            state.entered = entered
+            state.client = client
+            state.stderr_log = stderr_log
+
+    async def _call_tool_async(
+        self,
+        state: McpServerState,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.wait_for(
+                state.client.call_tool(tool_name, arguments, timeout=timeout, raise_on_error=False),
+                timeout=timeout,
+            )
+            return _serialize_call_result(result)
+        except Exception as e:
+            with self.lock:
+                state.status = "failed"
+                state.error = _redact_sensitive(f"{type(e).__name__}: {e}")
+            return {"status": "error", "msg": state.error}
 
     def _close_state(self, state: McpServerState) -> None:
+        if state.entered is not None:
+            try:
+                self._run(self._close_state_async(state))
+                return
+            except Exception:
+                pass
+        if state.stderr_log is not None:
+            try:
+                state.stderr_log.close()
+            except Exception:
+                pass
         state.client = None
         state.entered = None
+        state.stderr_log = None
+
+    async def _close_state_async(self, state: McpServerState) -> None:
+        entered = state.entered
+        stderr_log = state.stderr_log
+        state.client = None
+        state.entered = None
+        state.stderr_log = None
+        if entered is not None:
+            await entered.__aexit__(None, None, None)
+        if stderr_log is not None:
+            stderr_log.close()
 
     def _server_summary(self, state: McpServerState) -> dict[str, Any]:
         transport = state.config.get("type") or state.config.get("transport")
@@ -221,20 +399,10 @@ def discover_mcp(
     include_unavailable: bool = False,
     timeout: Optional[float] = None,
 ) -> McpDiscovery:
-    timeout = _default_timeout(timeout)
-    cfg = load_mcp_config(config_path)
-    if not cfg.servers:
-        return McpDiscovery()
-
-    signature = _config_signature(cfg, include_unavailable, timeout)
-    ttl = float(os.environ.get("GA_MCP_CACHE_TTL", "30"))
-    cached = _DISCOVERY_CACHE.get(signature)
-    if cached is not None and time.time() - cached.discovered_at <= ttl:
-        return cached
-
-    discovery = _run_async(_discover_mcp_async(cfg, include_unavailable=include_unavailable, timeout=timeout))
-    _DISCOVERY_CACHE[signature] = discovery
-    return discovery
+    return get_mcp_manager(config_path).discover(
+        include_unavailable=include_unavailable,
+        timeout=timeout,
+    )
 
 
 def call_mcp_tool(
@@ -243,18 +411,11 @@ def call_mcp_tool(
     config_path: Optional[os.PathLike | str] = None,
     timeout: Optional[float] = None,
 ) -> dict[str, Any]:
-    call_timeout = _default_timeout(timeout, env_name="GA_MCP_CALL_TIMEOUT", fallback=60)
-    discovery = discover_mcp(config_path=config_path)
-    tool_ref = discovery.tool_refs.get(full_name)
-    if tool_ref is None:
-        known = ", ".join(sorted(discovery.tool_refs)[:30])
-        return {
-            "status": "error",
-            "msg": f"Unknown MCP tool: {full_name}" + (f". Known: {known}" if known else ""),
-            "discovery_errors": discovery.errors,
-        }
-    clean_args = {k: v for k, v in (arguments or {}).items() if not str(k).startswith("_")}
-    return _run_async(_call_mcp_tool_async(tool_ref, clean_args, timeout=call_timeout))
+    return get_mcp_manager(config_path).call_tool(
+        full_name,
+        arguments=arguments,
+        timeout=timeout,
+    )
 
 
 def _default_timeout(value: Optional[float], env_name: str = "GA_MCP_DISCOVERY_TIMEOUT", fallback: float = 8) -> float:
