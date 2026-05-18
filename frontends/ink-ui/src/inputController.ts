@@ -16,7 +16,7 @@ export type InputStatus = 'connecting' | 'idle' | 'running' | 'stopping'
 export type InputDecision = {
   value: string
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'clear' | 'help' | 'status' }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'clear' | 'help' | 'status' }
   exit?: boolean
 }
 
@@ -35,6 +35,13 @@ function parseSlashSubmit(text: string): Pick<InputDecision, 'command' | 'action
     if (mcpAction[1] === 'reconnect') return { command: { type: 'mcp_reconnect', server } }
     if (mcpAction[1] === 'enable') return { command: { type: 'mcp_enable', server } }
     return { command: { type: 'mcp_disable', server } }
+  }
+  if (/^\/(?:model|llm)$/.test(trimmed)) return { action: { type: 'open_model' } }
+  const modelSwitch = /^\/(?:model|llm)\s+(.+)$/.exec(trimmed)
+  if (modelSwitch) {
+    const selector = modelSwitch[1].trim()
+    if (selector === '?' || selector.toLowerCase() === 'help') return { command: { type: 'model_status' } }
+    return { command: { type: 'model_switch', selector } }
   }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/clear') return { action: { type: 'clear' } }

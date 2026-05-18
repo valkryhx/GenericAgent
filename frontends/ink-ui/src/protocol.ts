@@ -9,6 +9,8 @@ export type BridgeCommand =
   | { type: 'mcp_reconnect'; server: string }
   | { type: 'mcp_enable'; server: string }
   | { type: 'mcp_disable'; server: string }
+  | { type: 'model_status' }
+  | { type: 'model_switch'; selector: string }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -42,6 +44,12 @@ export type McpToolStatus = {
   }
 }
 
+export type ModelStatus = {
+  index: number
+  name: string
+  current: boolean
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -54,6 +62,7 @@ export type BridgeEvent =
   | { type: 'history_replace'; messages: HistoryMessage[] }
   | { type: 'rewind_done'; taskId: number; text: string }
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
+  | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'error'; code: string; message: string; taskId?: number }
 
 export type ChatMessage = {

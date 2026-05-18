@@ -7,6 +7,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/help', description: 'Show available commands' },
   { name: '/status', description: 'Show frontend and bridge status' },
   { name: '/mcp', description: 'Show and manage MCP servers' },
+  { name: '/model', description: 'Show and switch AI models' },
+  { name: '/llm', description: 'Alias for /model' },
   { name: '/clear', description: 'Clear the visible transcript' },
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/resume', description: 'Pick a previous conversation' },

@@ -114,6 +114,27 @@ test('handleInput parses mcp slash commands', () => {
   })
 })
 
+test('handleInput parses model slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/model', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_model' },
+  })
+  assert.deepEqual(handleInput('/model kimi', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'model_switch', selector: 'kimi' },
+  })
+  assert.deepEqual(handleInput('/llm 1', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'model_switch', selector: '1' },
+  })
+  assert.deepEqual(handleInput('/model ?', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'model_status' },
+  })
+})
+
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
   const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)

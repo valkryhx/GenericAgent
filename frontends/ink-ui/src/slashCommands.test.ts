@@ -26,6 +26,11 @@ test('slashSuggestions includes mcp command', () => {
   assert.ok(slashSuggestions('/m').some(command => command.name === '/mcp'))
 })
 
+test('slashSuggestions includes model commands', () => {
+  assert.ok(slashSuggestions('/m').some(command => command.name === '/model'))
+  assert.ok(slashSuggestions('/l').some(command => command.name === '/llm'))
+})
+
 test('moveSlashSelection clamps selection inside suggestion bounds', () => {
   const suggestions = slashSuggestions('/')
 
