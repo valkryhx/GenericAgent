@@ -1,5 +1,5 @@
 import type { BridgeCommand } from './protocol.js'
-import { expandPastedTextRefs, foldPastedText, type PasteStore } from './paste.js'
+import { compactPasteRefs, appendFoldedText, expandPastedTextRefs, flushPendingPaste, type PasteStore } from './paste.js'
 
 export type InputKey = {
   ctrl?: boolean
@@ -70,7 +70,8 @@ export function handleInput(
     return { value: value.slice(0, -1) }
   }
   if (key.return) {
-    const expanded = expandPastedTextRefs(value, pasteStore).trimEnd()
+    const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
+    const expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
     if (!expanded) return { value }
     const slash = parseSlashSubmit(expanded)
     if (slash) return { value: '', ...slash }
@@ -78,7 +79,7 @@ export function handleInput(
     return { value: '', command: { type: 'submit', text: expanded } }
   }
   if (rawInput) {
-    return { value: value + foldPastedText(rawInput, pasteStore) }
+    return { value: appendFoldedText(value, rawInput, pasteStore) }
   }
   return { value }
 }

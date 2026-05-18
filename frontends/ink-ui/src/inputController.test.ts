@@ -125,6 +125,83 @@ test('handleInput folds multiline pasted text and expands on submit', () => {
   })
 })
 
+test('handleInput folds split bracketed paste into a single copied placeholder', () => {
+  const store = createPasteStore()
+
+  const first = handleInput('', '\u001b[200~a\n', {}, 'idle', store)
+  const second = handleInput(first.value, 'b\n', {}, 'idle', store)
+  const third = handleInput(second.value, 'c\n', {}, 'idle', store)
+  const done = handleInput(third.value, 'd\u001b[201~', {}, 'idle', store)
+
+  assert.equal(done.value, '[Copied text #1 +3 lines]')
+  assert.deepEqual(handleInput(`${done.value} summarize`, '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'submit', text: 'a\nb\nc\nd summarize' },
+  })
+})
+
+test('handleInput merges adjacent multiline paste chunks into one placeholder', () => {
+  const store = createPasteStore()
+
+  const first = handleInput('', 'a\nb\n', {}, 'idle', store)
+  const second = handleInput(first.value, 'c\nd', {}, 'idle', store)
+
+  assert.equal(second.value, '[Copied text #1 +3 lines]')
+  assert.deepEqual(handleInput(`${second.value} summarize`, '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'submit', text: 'a\nb\nc\nd summarize' },
+  })
+})
+
+test('handleInput flushes unfinished bracketed paste on submit', () => {
+  const store = createPasteStore()
+
+  const pasted = handleInput('', '\u001b[200~a\nb', {}, 'idle', store)
+  const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store)
+
+  assert.deepEqual(submitted, {
+    value: '',
+    command: { type: 'submit', text: 'a\nb' },
+  })
+})
+
+test('handleInput compacts existing adjacent paste placeholders on submit', () => {
+  const store = createPasteStore()
+  store.set(3, 'a\nb\n')
+  store.set(4, 'c\nd')
+
+  const submitted = handleInput(
+    '[Copied text #3 +2 lines][Copied text #4 +1 lines]',
+    '',
+    { return: true },
+    'idle',
+    store,
+  )
+
+  assert.deepEqual(submitted, {
+    value: '',
+    command: { type: 'submit', text: 'a\nb\nc\nd' },
+  })
+})
+
+test('handleInput keeps split paste with single-line middle chunk as one placeholder', () => {
+  const store = createPasteStore()
+
+  const first = handleInput('', 'server:\nurl:\n', {}, 'idle', store)
+  const second = handleInput(first.value, 'https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-dev-', {}, 'idle', store)
+  const third = handleInput(second.value, 'secret\nmore\nconfig', {}, 'idle', store)
+
+  assert.equal(third.value, '[Copied text #1 +4 lines]')
+  assert.ok(!third.value.includes('tavilyApiKey'))
+  assert.deepEqual(handleInput(third.value, '', { return: true }, 'idle', store), {
+    value: '',
+    command: {
+      type: 'submit',
+      text: 'server:\nurl:\nhttps://mcp.tavily.com/mcp/?tavilyApiKey=tvly-dev-secret\nmore\nconfig',
+    },
+  })
+})
+
 test('handleInput turns Ctrl+C into shutdown and exit', () => {
   const store = createPasteStore()
 
