@@ -155,6 +155,8 @@ class McpManager:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.loop_thread.is_alive():
             self.loop_thread.join(timeout=2)
+        if not self.loop.is_closed():
+            self.loop.close()
 
     def discover(self, include_unavailable: bool = False, timeout: Optional[float] = None) -> McpDiscovery:
         self.ensure_all_connected(timeout=timeout)
@@ -216,6 +218,38 @@ class McpManager:
             state = self.states[tool_ref.server_name]
         clean_args = {k: v for k, v in (arguments or {}).items() if not str(k).startswith("_")}
         return self._run(self._call_tool_async(state, tool_ref.tool_name, clean_args, timeout=call_timeout))
+
+    def reconnect(self, server_name: str, timeout: Optional[float] = None) -> dict[str, Any]:
+        with self.lock:
+            if server_name not in self.states:
+                raise KeyError(f"Unknown MCP server: {server_name}")
+            state = self.states[server_name]
+            self._close_state(state)
+            if state.status != "disabled":
+                state.status = "pending"
+            state.error = ""
+            state.tools = []
+            state.tool_refs = {}
+        self.ensure_connected(server_name, timeout=timeout)
+        with self.lock:
+            return {"server": self._server_summary(self.states[server_name])}
+
+    def enable(self, server_name: str, timeout: Optional[float] = None) -> dict[str, Any]:
+        set_mcp_server_enabled(server_name, True, self.config_path)
+        return self.reconnect(server_name, timeout=timeout)
+
+    def disable(self, server_name: str) -> dict[str, Any]:
+        set_mcp_server_enabled(server_name, False, self.config_path)
+        with self.lock:
+            if server_name not in self.states:
+                raise KeyError(f"Unknown MCP server: {server_name}")
+            state = self.states[server_name]
+            self._close_state(state)
+            state.status = "disabled"
+            state.error = ""
+            state.tools = []
+            state.tool_refs = {}
+            return {"server": self._server_summary(state)}
 
     def _run(self, coro):
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -343,7 +377,10 @@ def get_mcp_manager(config_path: Optional[os.PathLike | str] = None) -> McpManag
     global _MANAGER
     path = Path(config_path) if config_path is not None else default_mcp_config_path()
     with _MANAGER_LOCK:
-        if _MANAGER is None or _MANAGER.config_path != path:
+        if _MANAGER is not None and _MANAGER.config_path != path:
+            _MANAGER.close()
+            _MANAGER = None
+        if _MANAGER is None:
             _MANAGER = McpManager(path)
         return _MANAGER
 
@@ -383,6 +420,29 @@ def set_mcp_server_enabled(
     path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
     clear_mcp_cache()
     get_mcp_manager(path).reload_config()
+
+
+def reconnect_mcp_server(
+    server_name: str,
+    config_path: Optional[os.PathLike | str] = None,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    return get_mcp_manager(config_path).reconnect(server_name, timeout=timeout)
+
+
+def enable_mcp_server(
+    server_name: str,
+    config_path: Optional[os.PathLike | str] = None,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    return get_mcp_manager(config_path).enable(server_name, timeout=timeout)
+
+
+def disable_mcp_server(
+    server_name: str,
+    config_path: Optional[os.PathLike | str] = None,
+) -> dict[str, Any]:
+    return get_mcp_manager(config_path).disable(server_name)
 
 
 def discover_mcp_tools(

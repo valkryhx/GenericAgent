@@ -20,10 +20,13 @@ from mcp_runtime import (  # noqa: E402
     call_mcp_tool,
     clear_mcp_cache,
     discover_mcp_tools,
+    disable_mcp_server,
+    enable_mcp_server,
     get_mcp_manager,
     load_mcp_config,
     mcp_status,
     normalize_mcp_name,
+    reconnect_mcp_server,
     reset_mcp_manager,
     set_mcp_server_enabled,
     _MCP_LOG_DIR,
@@ -219,6 +222,21 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertIs(disabled_data["mcpServers"]["demo"]["disabled"], True)
         self.assertNotIn("disabled", enabled_data["mcpServers"]["demo"])
 
+    def test_get_mcp_manager_closes_previous_config_manager(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            first_config = _write_named_mcp_config(tmp_path, "one", _write_demo_server(tmp_path))
+            second_dir = tmp_path / "second"
+            second_dir.mkdir()
+            second_config = _write_named_mcp_config(second_dir, "two", _write_demo_server(second_dir))
+
+            first_manager = get_mcp_manager(first_config)
+            first_thread = first_manager.loop_thread
+            get_mcp_manager(second_config)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertTrue(first_manager.loop.is_closed())
+
     def test_redacts_sensitive_values_from_mcp_errors(self):
         msg = _redact_sensitive("https://example.test/mcp?tavilyApiKey=abc123&x=1 token: xyz")
 
@@ -287,6 +305,46 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "success")
         self.assertEqual(starts, 1)
+
+    def test_reconnect_restarts_stdio_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_counting_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "counting", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            call_mcp_tool("mcp__counting__echo", {"text": "one"}, timeout=20)
+            reconnect = reconnect_mcp_server("counting", timeout=20)
+            call_mcp_tool("mcp__counting__echo", {"text": "two"}, timeout=20)
+            starts = int((tmp_path / "starts.txt").read_text(encoding="utf-8"))
+
+        self.assertEqual(reconnect["server"]["status"], "connected")
+        self.assertEqual(starts, 2)
+
+    def test_disable_and_enable_mcp_server_update_status_and_tools(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_counting_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "counting", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            call_mcp_tool("mcp__counting__echo", {"text": "one"}, timeout=20)
+            disabled = disable_mcp_server("counting")
+            disabled_data = json.loads(config_path.read_text(encoding="utf-8"))
+            unavailable = call_mcp_tool("mcp__counting__echo", {"text": "blocked"}, timeout=20)
+            enabled = enable_mcp_server("counting", timeout=20)
+            enabled_data = json.loads(config_path.read_text(encoding="utf-8"))
+            restored = call_mcp_tool("mcp__counting__echo", {"text": "two"}, timeout=20)
+
+        self.assertEqual(disabled["server"]["status"], "disabled")
+        self.assertEqual(disabled["server"]["tool_count"], 0)
+        self.assertIs(disabled_data["mcpServers"]["counting"]["disabled"], True)
+        self.assertEqual(unavailable["status"], "error")
+        self.assertEqual(enabled["server"]["status"], "connected")
+        self.assertNotIn("disabled", enabled_data["mcpServers"]["counting"])
+        self.assertEqual(restored["status"], "success")
 
     def test_stdio_server_stderr_is_utf8_log_file_not_console_output(self):
         with _tempdir() as tmp:
