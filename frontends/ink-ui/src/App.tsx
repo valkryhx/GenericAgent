@@ -6,7 +6,7 @@ import { createPasteStore } from './paste.js'
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { handleInput } from './inputController.js'
-import { tailLines, visibleMessages } from './messageWindow.js'
+import { assistantDisplayText, visibleMessages } from './messageWindow.js'
 import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
 import type { BridgeEvent, ResumeSession } from './protocol.js'
 import {
@@ -53,7 +53,7 @@ function MessageView({ message, expandedTools }: { message: ChatMessage; expande
     <Box flexDirection="row" marginBottom={1}>
       <Text color="black">✻ </Text>
       <Box flexDirection="column" flexShrink={1}>
-        <Text>{expandedTools ? body : tailLines(body, message.done ? 30 : 18)}</Text>
+        <Text>{assistantDisplayText(body, { expanded: expandedTools, done: message.done })}</Text>
       </Box>
     </Box>
   )
