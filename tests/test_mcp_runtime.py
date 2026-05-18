@@ -20,8 +20,12 @@ from mcp_runtime import (  # noqa: E402
     call_mcp_tool,
     clear_mcp_cache,
     discover_mcp_tools,
+    get_mcp_manager,
     load_mcp_config,
+    mcp_status,
     normalize_mcp_name,
+    reset_mcp_manager,
+    set_mcp_server_enabled,
     _MCP_LOG_DIR,
     _redact_sensitive,
 )
@@ -117,6 +121,7 @@ def _write_named_mcp_config(tmp_path: Path, server_name: str, server_script: Pat
 class McpRuntimeTest(unittest.TestCase):
     def tearDown(self):
         clear_mcp_cache()
+        reset_mcp_manager()
         os.environ.pop("GA_MCP_CONFIG", None)
 
     def test_build_mcp_tool_name_matches_claudecode_normalization(self):
@@ -151,6 +156,49 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(set(config.servers), {"fetch", "exa"})
         self.assertEqual(config.servers["fetch"]["type"], "stdio")
         self.assertEqual(config.servers["exa"]["type"], "sse")
+
+    def test_mcp_status_reports_configured_disabled_server_without_connecting(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_demo_server(tmp_path)
+            config_path = tmp_path / "mcp.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "demo": {
+                                "type": "stdio",
+                                "command": sys.executable,
+                                "args": [str(server_script)],
+                                "disabled": True,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+
+            status = mcp_status(timeout=20)
+
+        self.assertEqual(status["servers"][0]["name"], "demo")
+        self.assertEqual(status["servers"][0]["status"], "disabled")
+        self.assertEqual(status["servers"][0]["tool_count"], 0)
+
+    def test_set_mcp_server_enabled_persists_disabled_flag(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_demo_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "demo", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+
+            set_mcp_server_enabled("demo", False)
+            disabled_data = json.loads(config_path.read_text(encoding="utf-8"))
+            set_mcp_server_enabled("demo", True)
+            enabled_data = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertIs(disabled_data["mcpServers"]["demo"]["disabled"], True)
+        self.assertNotIn("disabled", enabled_data["mcpServers"]["demo"])
 
     def test_redacts_sensitive_values_from_mcp_errors(self):
         msg = _redact_sensitive("https://example.test/mcp?tavilyApiKey=abc123&x=1 token: xyz")

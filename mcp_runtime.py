@@ -40,6 +40,22 @@ class McpDiscovery:
     discovered_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class McpServerState:
+    name: str
+    config: dict[str, Any]
+    status: str = "pending"
+    error: str = ""
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_refs: dict[str, McpToolRef] = field(default_factory=dict)
+    client: Any = None
+    entered: Any = None
+
+
+_MANAGER_LOCK = threading.Lock()
+_MANAGER: Optional["McpManager"] = None
+
+
 def normalize_mcp_name(name: str) -> str:
     return _MCP_NAME_RE.sub("_", str(name))
 
@@ -70,6 +86,125 @@ def load_mcp_config(config_path: Optional[os.PathLike | str] = None) -> McpConfi
         if isinstance(config, dict) and not config.get("disabled")
     }
     return McpConfig(path=path, servers=servers)
+
+
+def load_mcp_config_with_disabled(config_path: Optional[os.PathLike | str] = None) -> McpConfig:
+    path = Path(config_path) if config_path is not None else default_mcp_config_path()
+    if not path.is_file():
+        return McpConfig(path=path, servers={})
+    data = json.loads(path.read_text(encoding="utf-8"))
+    raw_servers = data.get("mcpServers", data if isinstance(data, dict) else {})
+    if not isinstance(raw_servers, dict):
+        raise ValueError("mcp.json must contain an object field named mcpServers")
+    servers = {
+        str(name): dict(config)
+        for name, config in raw_servers.items()
+        if isinstance(config, dict)
+    }
+    return McpConfig(path=path, servers=servers)
+
+
+class McpManager:
+    def __init__(self, config_path: Path):
+        self.config_path = config_path
+        self.lock = threading.RLock()
+        self.states: dict[str, McpServerState] = {}
+        self.reload_config()
+
+    def reload_config(self) -> None:
+        cfg = load_mcp_config_with_disabled(self.config_path)
+        with self.lock:
+            for state in self.states.values():
+                self._close_state(state)
+            self.states = {}
+            for name, server_config in cfg.servers.items():
+                status = "disabled" if server_config.get("disabled") else "pending"
+                self.states[name] = McpServerState(
+                    name=name,
+                    config=dict(server_config),
+                    status=status,
+                )
+
+    def status(self, timeout: Optional[float] = None) -> dict[str, Any]:
+        del timeout
+        with self.lock:
+            servers = [self._server_summary(state) for state in self.states.values()]
+            tools = [dict(tool) for state in self.states.values() for tool in state.tools]
+            errors = {state.name: state.error for state in self.states.values() if state.error}
+        return {
+            "config_path": str(self.config_path),
+            "servers": servers,
+            "tools": tools,
+            "errors": errors,
+        }
+
+    def close(self) -> None:
+        with self.lock:
+            for state in self.states.values():
+                self._close_state(state)
+
+    def _close_state(self, state: McpServerState) -> None:
+        state.client = None
+        state.entered = None
+
+    def _server_summary(self, state: McpServerState) -> dict[str, Any]:
+        transport = state.config.get("type") or state.config.get("transport")
+        if not transport:
+            transport = "stdio" if state.config.get("command") else "unknown"
+        return {
+            "name": state.name,
+            "status": state.status,
+            "transport": str(transport),
+            "disabled": state.status == "disabled",
+            "error": state.error,
+            "tool_count": len(state.tools),
+        }
+
+
+def get_mcp_manager(config_path: Optional[os.PathLike | str] = None) -> McpManager:
+    global _MANAGER
+    path = Path(config_path) if config_path is not None else default_mcp_config_path()
+    with _MANAGER_LOCK:
+        if _MANAGER is None or _MANAGER.config_path != path:
+            _MANAGER = McpManager(path)
+        return _MANAGER
+
+
+def reset_mcp_manager() -> None:
+    global _MANAGER
+    with _MANAGER_LOCK:
+        manager = _MANAGER
+        _MANAGER = None
+    if manager is not None:
+        manager.close()
+
+
+def mcp_status(
+    config_path: Optional[os.PathLike | str] = None,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    return get_mcp_manager(config_path).status(timeout=timeout)
+
+
+def set_mcp_server_enabled(
+    server_name: str,
+    enabled: bool,
+    config_path: Optional[os.PathLike | str] = None,
+) -> None:
+    path = Path(config_path) if config_path is not None else default_mcp_config_path()
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    raw_servers = data.get("mcpServers", data if isinstance(data, dict) else {})
+    if not isinstance(raw_servers, dict) or not isinstance(raw_servers.get(server_name), dict):
+        raise KeyError(f"Unknown MCP server: {server_name}")
+    if enabled:
+        raw_servers[server_name].pop("disabled", None)
+    else:
+        raw_servers[server_name]["disabled"] = True
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+    clear_mcp_cache()
+    get_mcp_manager(path).reload_config()
 
 
 def discover_mcp_tools(
