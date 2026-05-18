@@ -43,3 +43,7 @@ export function visibleSlashSuggestions(
 export function completeSlashCommand(command: SlashCommand): string {
   return `${command.name} `
 }
+
+export function shouldCompleteSlashCommand(input: string, command: SlashCommand): boolean {
+  return input.trim() !== command.name
+}

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   completeSlashCommand,
+  shouldCompleteSlashCommand,
   moveSlashSelection,
   slashSuggestions,
   visibleSlashSuggestions,
@@ -55,4 +56,11 @@ test('completeSlashCommand inserts selected command with a trailing space', () =
   const [resume] = slashSuggestions('/res')
 
   assert.equal(completeSlashCommand(resume), '/resume ')
+})
+
+test('shouldCompleteSlashCommand does not complete exact commands on Enter', () => {
+  const [model] = slashSuggestions('/model')
+
+  assert.equal(shouldCompleteSlashCommand('/model', model), false)
+  assert.equal(shouldCompleteSlashCommand('/mod', model), true)
 })

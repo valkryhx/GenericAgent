@@ -14,3 +14,7 @@ export function moveModelSelection(selected: number, delta: number, total: numbe
   if (total <= 0) return 0
   return Math.max(0, Math.min(total - 1, selected + delta))
 }
+
+export function shouldApplyModelStatus(requested: boolean, panelOpen: boolean): boolean {
+  return requested || panelOpen
+}

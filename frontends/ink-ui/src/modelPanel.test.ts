@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { moveModelSelection, panelFromModelStatus } from './modelPanel.js'
+import { moveModelSelection, panelFromModelStatus, shouldApplyModelStatus } from './modelPanel.js'
 
 test('panelFromModelStatus selects current model', () => {
   const panel = panelFromModelStatus({
@@ -19,4 +19,10 @@ test('moveModelSelection clamps to bounds', () => {
   assert.equal(moveModelSelection(0, -1, 2), 0)
   assert.equal(moveModelSelection(0, 1, 2), 1)
   assert.equal(moveModelSelection(1, 1, 2), 1)
+})
+
+test('shouldApplyModelStatus only opens panel when requested or already open', () => {
+  assert.equal(shouldApplyModelStatus(false, false), false)
+  assert.equal(shouldApplyModelStatus(true, false), true)
+  assert.equal(shouldApplyModelStatus(false, true), true)
 })

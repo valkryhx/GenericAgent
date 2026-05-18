@@ -18,10 +18,11 @@ import {
   panelFromMcpStatus,
   type McpPanelState,
 } from './mcpPanel.js'
-import { moveModelSelection, panelFromModelStatus, type ModelPanelState } from './modelPanel.js'
+import { moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
 import {
   completeSlashCommand,
   moveSlashSelection,
+  shouldCompleteSlashCommand,
   slashSuggestions,
   visibleSlashSuggestions,
   type SlashCommand,
@@ -201,12 +202,18 @@ export function App({ python, bridgeScript }: Props) {
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
+  const modelPanelPendingRef = useRef(false)
+  const modelPanelOpenRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel ? [] : slashSuggestions(input), [input, selector, mcpPanel, modelPanel])
 
   useEffect(() => {
     setSlashSelected(0)
   }, [input])
+
+  useEffect(() => {
+    modelPanelOpenRef.current = modelPanel !== null
+  }, [modelPanel])
 
   useEffect(() => {
     stdout.write('\u001B[?25l')
@@ -238,6 +245,8 @@ export function App({ python, bridgeScript }: Props) {
         return
       }
       if (event.type === 'model_status') {
+        if (!shouldApplyModelStatus(modelPanelPendingRef.current, modelPanelOpenRef.current)) return
+        modelPanelPendingRef.current = false
         setModelPanel(panelFromModelStatus(event))
         return
       }
@@ -335,8 +344,10 @@ export function App({ python, bridgeScript }: Props) {
       }
       if ((key as { tab?: boolean }).tab || (key.return && !key.ctrl && !key.meta && !key.shift)) {
         const selectedCommand = slashItems[slashSelected] ?? slashItems[0]
-        setInput(completeSlashCommand(selectedCommand))
-        return
+        if ((key as { tab?: boolean }).tab || shouldCompleteSlashCommand(input, selectedCommand)) {
+          setInput(completeSlashCommand(selectedCommand))
+          return
+        }
       }
       if (key.escape) {
         setInput('')
@@ -359,6 +370,7 @@ export function App({ python, bridgeScript }: Props) {
       setMcpPanel(loadingMcpPanel())
       bridgeRef.current?.send({ type: 'mcp_status' })
     } else if (decision.action?.type === 'open_model') {
+      modelPanelPendingRef.current = true
       bridgeRef.current?.send({ type: 'model_status' })
     } else if (decision.action?.type === 'clear') {
       dispatch({ type: 'clear' })
