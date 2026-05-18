@@ -145,8 +145,37 @@ class GenericAgent:
     
     def next_llm(self, n=-1):
         self.load_llm_sessions()
-        self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
+        index = ((self.llm_no + 1) if n < 0 else int(n)) % len(self.llmclients)
+        result = self._switch_llm_index(index)
+        if not result.get("ok"):
+            raise Exception(result.get("message") or "model switch failed")
+
+    def select_llm(self, selector):
+        self.load_llm_sessions()
+        selector = str(selector or "").strip()
+        if not selector:
+            return {"ok": False, "code": "empty", "message": "model selector is empty"}
+        if selector.isdigit():
+            return self._switch_llm_index(int(selector))
+        lowered = selector.lower()
+        matches = [
+            i for i, client in enumerate(self.llmclients)
+            if lowered in self.get_llm_name(client).lower()
+            or lowered in getattr(client.backend, "model", "").lower()
+            or lowered in getattr(client.backend, "name", "").lower()
+        ]
+        if len(matches) == 1:
+            return self._switch_llm_index(matches[0])
+        if not matches:
+            return {"ok": False, "code": "not_found", "message": f"model not found: {selector}"}
+        return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
+
+    def _switch_llm_index(self, index):
+        self.load_llm_sessions()
+        if not (0 <= index < len(self.llmclients)):
+            return {"ok": False, "code": "out_of_range", "message": f"model index out of range: {index}"}
         lastc = self.llmclient
+        self.llm_no = index
         self.llmclient = self.llmclients[self.llm_no]
         try: self.llmclient.backend.history = lastc.backend.history
         except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
@@ -154,6 +183,7 @@ class GenericAgent:
         name = self.get_llm_name(model=True)
         if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
         else: load_tool_schema()
+        return {"ok": True, "index": self.llm_no, "name": self.get_llm_name(), "model": self.get_llm_name(model=True)}
     def list_llms(self): 
         self.load_llm_sessions()
         return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(self.llmclients)]
