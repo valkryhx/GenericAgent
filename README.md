@@ -132,6 +132,42 @@ ga ink
 
 Running `ga` without a subcommand also starts this Ink frontend by default.
 
+#### Runtime Model Switching
+
+The Ink frontend can switch configured LLM sessions without editing comments in
+`mykey.py` or restarting GA:
+
+```text
+/model          # open the model picker
+/model 1        # switch by index
+/model kimi     # switch by unique name/model fragment
+/llm            # alias for /model
+```
+
+For multiple OpenAI-compatible profiles, keep existing single configs such as
+`native_oai_config` if other frontends still use them, and optionally add:
+
+```python
+llm_profile_configs = [
+    {
+        "key": "native_gpt55_config",
+        "session": "NativeOAISession",
+        "name": "gpt-native",
+        "model": "gpt-5.5",
+        "apikey": "YOUR_API_KEY",
+        "apibase": "https://YOUR_PROVIDER/v1",
+    },
+    {
+        "key": "native_kimi_config",
+        "session": "NativeOAISession",
+        "name": "kimi-native",
+        "model": "moonshotai/kimi-k2.6",
+        "apikey": "YOUR_API_KEY",
+        "apibase": "https://YOUR_PROVIDER/v1",
+    },
+]
+```
+
 ### Other Desktop Frontends
 
 ```bash
@@ -406,6 +442,41 @@ ga ink
 ```
 
 不带子命令直接运行 `ga` 也会默认启动这个 Ink 前端。
+
+#### 运行时切换模型
+
+Ink 前端可以在不修改 `mykey.py` 注释、不重启 GA 的情况下切换已经配置好的 LLM 会话：
+
+```text
+/model          # 打开模型选择器
+/model 1        # 按索引切换
+/model kimi     # 按唯一的名称或模型片段切换
+/llm            # /model 的别名
+```
+
+如果需要配置多个 OpenAI 兼容 profile，可以保留现有的 `native_oai_config`
+供其他前端继续使用，同时可选增加：
+
+```python
+llm_profile_configs = [
+    {
+        "key": "native_gpt55_config",
+        "session": "NativeOAISession",
+        "name": "gpt-native",
+        "model": "gpt-5.5",
+        "apikey": "YOUR_API_KEY",
+        "apibase": "https://YOUR_PROVIDER/v1",
+    },
+    {
+        "key": "native_kimi_config",
+        "session": "NativeOAISession",
+        "name": "kimi-native",
+        "model": "moonshotai/kimi-k2.6",
+        "apikey": "YOUR_API_KEY",
+        "apibase": "https://YOUR_PROVIDER/v1",
+    },
+]
+```
 
 ### 其他桌面前端
 
