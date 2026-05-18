@@ -10,6 +10,15 @@ import { tailLines, visibleMessages } from './messageWindow.js'
 import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
 import type { BridgeEvent, ResumeSession } from './protocol.js'
 import {
+  loadingMcpPanel,
+  mcpStatusColor,
+  mcpStatusIcon,
+  mcpToolsForServer,
+  moveMcpSelection,
+  panelFromMcpStatus,
+  type McpPanelState,
+} from './mcpPanel.js'
+import {
   completeSlashCommand,
   moveSlashSelection,
   slashSuggestions,
@@ -98,6 +107,34 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
   )
 }
 
+function McpPanelView({ panel }: { panel: McpPanelState }) {
+  const selected = panel.servers[panel.selected]
+  const selectedTools = selected ? mcpToolsForServer(panel, selected.name) : []
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      <Text color="gray">{inputDivider(48)}</Text>
+      <Text bold>MCP Servers</Text>
+      {panel.configPath ? <Text color="gray">Config: {panel.configPath}</Text> : null}
+      {panel.loading ? <Text color="gray">Loading MCP status...</Text> : null}
+      {!panel.loading && panel.servers.length === 0 ? <Text color="gray">No MCP servers configured.</Text> : null}
+      {panel.servers.map((server, index) => (
+        <Text key={server.name} color={index === panel.selected ? 'cyan' : undefined}>
+          {index === panel.selected ? '> ' : '  '}
+          <Text color={mcpStatusColor(server.status)}>{mcpStatusIcon(server.status)}</Text>
+          {` ${server.name} - ${server.status} - ${server.transport} - ${server.tool_count} tools`}
+        </Text>
+      ))}
+      {selected ? <Text color="gray">Actions: /mcp reconnect {selected.name} - /mcp {selected.disabled ? 'enable' : 'disable'} {selected.name}</Text> : null}
+      {selected && panel.errors[selected.name] ? <Text color="red">{panel.errors[selected.name]}</Text> : null}
+      {selectedTools.slice(0, 20).map(tool => (
+        <Text key={tool.function.name} color="gray">  - {tool.function.name}</Text>
+      ))}
+      <Text color="gray">Up/Down move - Esc close</Text>
+      <Text color="gray">{inputDivider(48)}</Text>
+    </Box>
+  )
+}
+
 function InputView({ input }: { input: string }) {
   return (
     <Text color="cyan">
@@ -134,6 +171,7 @@ export function App({ python, bridgeScript }: Props) {
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [selector, setSelector] = useState<SelectorState | null>(null)
+  const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
@@ -142,7 +180,7 @@ export function App({ python, bridgeScript }: Props) {
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
-  const slashItems = useMemo(() => selector ? [] : slashSuggestions(input), [input, selector])
+  const slashItems = useMemo(() => selector || mcpPanel ? [] : slashSuggestions(input), [input, selector, mcpPanel])
 
   useEffect(() => {
     setSlashSelected(0)
@@ -173,6 +211,10 @@ export function App({ python, bridgeScript }: Props) {
 
   useEffect(() => {
     function onEvent(event: BridgeEvent) {
+      if (event.type === 'mcp_status') {
+        setMcpPanel(panelFromMcpStatus(event))
+        return
+      }
       if (event.type === 'resume_sessions') {
         if (!resumePendingRef.current) return
         resumePendingRef.current = false
@@ -205,6 +247,20 @@ export function App({ python, bridgeScript }: Props) {
     if (key.ctrl && (rawInput === 'o' || rawInput === '\u000f')) {
       setExpandedTools(value => !value)
       return
+    }
+    if (mcpPanel) {
+      if (key.escape) {
+        setMcpPanel(null)
+        return
+      }
+      if (key.upArrow) {
+        setMcpPanel(panel => panel ? moveMcpSelection(panel, -1) : panel)
+        return
+      }
+      if (key.downArrow) {
+        setMcpPanel(panel => panel ? moveMcpSelection(panel, 1) : panel)
+        return
+      }
     }
     if (selector) {
       const decision = handleSelectorInput(selector, key)
@@ -251,6 +307,9 @@ export function App({ python, bridgeScript }: Props) {
     } else if (decision.action?.type === 'open_rewind') {
       const options = rewindOptions(state.messages)
       setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
+    } else if (decision.action?.type === 'open_mcp') {
+      setMcpPanel(loadingMcpPanel())
+      bridgeRef.current?.send({ type: 'mcp_status' })
     } else if (decision.action?.type === 'clear') {
       dispatch({ type: 'clear' })
     } else if (decision.action?.type === 'help') {
@@ -281,6 +340,7 @@ export function App({ python, bridgeScript }: Props) {
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} expandedTools={expandedTools} />)}
       </Box>
       {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={runningLabel} /> : null}
+      {mcpPanel ? <McpPanelView panel={mcpPanel} /> : null}
       {selector ? <SelectorView selector={selector} /> : null}
       {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
       {state.error ? <Text color="red">{state.error}</Text> : null}
