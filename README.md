@@ -114,6 +114,24 @@ A lightweight, keyboard-driven interface built on [Textual](https://github.com/T
 python frontends/tuiapp.py
 ```
 
+### Ink Terminal UI
+
+The experimental React/Ink terminal frontend uses Node.js dependencies under
+`frontends/ink-ui`. After cloning the repository on a new machine, install those
+dependencies once:
+
+```cmd
+install_ink_ui.cmd
+```
+
+Then start the Ink frontend from the repository root:
+
+```bash
+ga ink
+```
+
+Running `ga` without a subcommand also starts this Ink frontend by default.
+
 ### Other Desktop Frontends
 
 ```bash
@@ -372,6 +390,22 @@ python launch.pyw
 ```bash
 python frontends/tuiapp.py
 ```
+
+### Ink 终端 UI
+
+实验性的 React/Ink 终端前端使用 `frontends/ink-ui` 下的 Node.js 依赖。新机器克隆仓库后，先在仓库根目录运行一次：
+
+```cmd
+install_ink_ui.cmd
+```
+
+然后从仓库根目录启动 Ink 前端：
+
+```bash
+ga ink
+```
+
+不带子命令直接运行 `ga` 也会默认启动这个 Ink 前端。
 
 ### 其他桌面前端
 
