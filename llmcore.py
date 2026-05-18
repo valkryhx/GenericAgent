@@ -3,15 +3,31 @@ from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 
+def expand_llm_profile_configs(mykeys):
+    expanded = dict(mykeys or {})
+    profiles = expanded.get('llm_profile_configs')
+    if not isinstance(profiles, list):
+        return expanded
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        key = str(profile.get('key') or '').strip()
+        if not key or 'config' not in key or key in expanded:
+            continue
+        cfg = dict(profile)
+        cfg.pop('key', None)
+        expanded[key] = cfg
+    return expanded
+
 def _load_mykeys():
     global _mykey_path
     try:
         import mykey; importlib.reload(mykey); _mykey_path = mykey.__file__
-        return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
+        return expand_llm_profile_configs({k: v for k, v in vars(mykey).items() if not k.startswith('_')})
     except ImportError: pass
     _mykey_path = p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mykey.json')
     if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
-    with open(p, encoding='utf-8') as f: return json.load(f)
+    with open(p, encoding='utf-8') as f: return expand_llm_profile_configs(json.load(f))
 
 _mykey_path = _mykey_mtime = None
 def reload_mykeys():
