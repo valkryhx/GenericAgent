@@ -93,6 +93,27 @@ test('handleInput sends indexed resume commands without opening a selector', () 
   })
 })
 
+test('handleInput parses mcp slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/mcp', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_mcp' },
+  })
+  assert.deepEqual(handleInput('/mcp reconnect demo server', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'mcp_reconnect', server: 'demo server' },
+  })
+  assert.deepEqual(handleInput('/mcp enable demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'mcp_enable', server: 'demo' },
+  })
+  assert.deepEqual(handleInput('/mcp disable demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'mcp_disable', server: 'demo' },
+  })
+})
+
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
   const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)

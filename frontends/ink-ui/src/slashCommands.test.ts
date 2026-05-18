@@ -22,6 +22,10 @@ test('slashSuggestions filters by command prefix only for single-line slash inpu
   assert.deepEqual(slashSuggestions('/re\nmore'), [])
 })
 
+test('slashSuggestions includes mcp command', () => {
+  assert.ok(slashSuggestions('/m').some(command => command.name === '/mcp'))
+})
+
 test('moveSlashSelection clamps selection inside suggestion bounds', () => {
   const suggestions = slashSuggestions('/')
 
