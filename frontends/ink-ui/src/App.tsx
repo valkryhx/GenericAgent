@@ -6,6 +6,7 @@ import { createPasteStore } from './paste.js'
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { handleInput } from './inputController.js'
+import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import { assistantDisplayText, visibleMessages } from './messageWindow.js'
 import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
 import type { BridgeEvent, ResumeSession } from './protocol.js'
@@ -192,6 +193,7 @@ export function App({ python, bridgeScript }: Props) {
   const { stdout } = useStdout()
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
+  const [inputHistory, setInputHistory] = useState(() => createInputHistory())
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
@@ -354,10 +356,26 @@ export function App({ python, bridgeScript }: Props) {
         return
       }
     }
+    if (key.upArrow) {
+      const result = previousInput(inputHistory, input)
+      setInputHistory(result.history)
+      setInput(result.value)
+      return
+    }
+    if (key.downArrow) {
+      const result = nextInput(inputHistory, input)
+      setInputHistory(result.history)
+      setInput(result.value)
+      return
+    }
     const decision = handleInput(input, rawInput, key, state.status, pasteStore)
     setInput(decision.value)
     if (decision.command) {
-      bridgeRef.current?.send(decision.command)
+      const command = decision.command
+      if (command.type === 'submit') {
+        setInputHistory(history => recordInput(history, command.text))
+      }
+      bridgeRef.current?.send(command)
     }
     if (decision.action?.type === 'open_resume') {
       resumePendingRef.current = true
