@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import subprocess
 import queue
@@ -14,7 +15,7 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 
-from ink_bridge import GenericAgentBridge, encode_event  # noqa: E402
+from ink_bridge import GenericAgentBridge, encode_event, make_stdout_emitter, run_jsonl_loop  # noqa: E402
 
 
 class FakeBackend:
@@ -199,6 +200,52 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(first_history, agent.llmclient.backend.history)
         self.assertIsNone(agent.handler)
         self.assertEqual({"type": "rewind_done", "taskId": 2, "text": "second"}, events[-1])
+
+    def test_emit_mcp_status(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        payload = {"config_path": "mcp.json", "servers": [], "tools": [], "errors": {}}
+
+        with patch("mcp_runtime.mcp_status", return_value=payload):
+            bridge.mcp_status()
+
+        self.assertEqual({"type": "mcp_status", **payload}, events[-1])
+
+    def test_emit_mcp_action_result_then_status(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        payload = {"config_path": "mcp.json", "servers": [], "tools": [], "errors": {}}
+
+        with (
+            patch("mcp_runtime.reconnect_mcp_server", return_value={"server": {"name": "demo", "status": "connected"}}),
+            patch("mcp_runtime.mcp_status", return_value=payload),
+        ):
+            bridge.mcp_reconnect("demo")
+
+        self.assertEqual({"type": "system", "text": "MCP server demo reconnect: connected"}, events[-2])
+        self.assertEqual({"type": "mcp_status", **payload}, events[-1])
+
+    def test_jsonl_loop_routes_mcp_commands(self):
+        stdin = io.StringIO(
+            json.dumps({"type": "mcp_status"}) + "\n"
+            + json.dumps({"type": "mcp_reconnect", "server": "demo"}) + "\n"
+            + json.dumps({"type": "mcp_enable", "server": "demo"}) + "\n"
+            + json.dumps({"type": "mcp_disable", "server": "demo"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+
+        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            run_jsonl_loop(stdin, stdout)
+
+        bridge.mcp_status.assert_called_once_with()
+        bridge.mcp_reconnect.assert_called_once_with("demo")
+        bridge.mcp_enable.assert_called_once_with("demo")
+        bridge.mcp_disable.assert_called_once_with("demo")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(

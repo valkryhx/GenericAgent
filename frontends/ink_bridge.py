@@ -148,6 +148,52 @@ class GenericAgentBridge:
         else:
             self.emit({"type": "status", "status": "idle"})
 
+    def mcp_status(self) -> None:
+        try:
+            with backend_output_redirect():
+                from mcp_runtime import mcp_status
+
+                payload = mcp_status()
+            self.emit({"type": "mcp_status", **payload})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "mcp_status_failed", "message": str(exc)})
+
+    def mcp_reconnect(self, server_name: str) -> None:
+        try:
+            with backend_output_redirect():
+                from mcp_runtime import reconnect_mcp_server
+
+                result = reconnect_mcp_server(str(server_name or ""))
+            status = result.get("server", {}).get("status", "unknown")
+            self.emit({"type": "system", "text": f"MCP server {server_name} reconnect: {status}"})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "mcp_reconnect_failed", "message": str(exc)})
+        self.mcp_status()
+
+    def mcp_enable(self, server_name: str) -> None:
+        try:
+            with backend_output_redirect():
+                from mcp_runtime import enable_mcp_server
+
+                result = enable_mcp_server(str(server_name or ""))
+            status = result.get("server", {}).get("status", "unknown")
+            self.emit({"type": "system", "text": f"MCP server {server_name} enabled: {status}"})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "mcp_enable_failed", "message": str(exc)})
+        self.mcp_status()
+
+    def mcp_disable(self, server_name: str) -> None:
+        try:
+            with backend_output_redirect():
+                from mcp_runtime import disable_mcp_server
+
+                result = disable_mcp_server(str(server_name or ""))
+            status = result.get("server", {}).get("status", "unknown")
+            self.emit({"type": "system", "text": f"MCP server {server_name} disabled: {status}"})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "mcp_disable_failed", "message": str(exc)})
+        self.mcp_status()
+
     def list_resume_sessions(self) -> None:
         if continue_list is None:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
@@ -321,8 +367,23 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.resume_session_by_index(int(command.get("index") or 0))
         elif cmd_type == "rewind":
             bridge.rewind(int(command.get("taskId") or 0))
+        elif cmd_type == "mcp_status":
+            bridge.mcp_status()
+        elif cmd_type == "mcp_reconnect":
+            bridge.mcp_reconnect(str(command.get("server") or ""))
+        elif cmd_type == "mcp_enable":
+            bridge.mcp_enable(str(command.get("server") or ""))
+        elif cmd_type == "mcp_disable":
+            bridge.mcp_disable(str(command.get("server") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
+            try:
+                with backend_output_redirect():
+                    from mcp_runtime import reset_mcp_manager
+
+                    reset_mcp_manager()
+            except Exception:
+                pass
             return 0
         else:
             bridge.emit({"type": "error", "code": "unknown_command", "message": str(cmd_type)})
