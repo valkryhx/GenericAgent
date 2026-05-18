@@ -231,6 +231,7 @@ COMMANDS = [
     ("/clear",    "",                 "清空显示（不动 LLM 历史）"),
     ("/stop",     "",                 "中止当前任务"),
     ("/llm",      "[n]",              "查看 / 切换模型"),
+    ("/model",    "[n|name]",         "查看 / 切换模型"),
     ("/btw",      "<question>",       "side question — 不打断主 agent"),
     ("/continue", "[n]",              "列出 / 恢复历史会话"),
     ("/export",   "clip|<file>|all",  "导出最后回复"),
@@ -1201,7 +1202,7 @@ class GenericAgentTUI(App[None]):
             "help": self._cmd_help, "status": self._cmd_status, "sessions": self._cmd_status,
             "new": self._cmd_new, "switch": self._cmd_switch, "close": self._cmd_close,
             "branch": self._cmd_branch, "rewind": self._cmd_rewind, "clear": self._cmd_clear,
-            "stop": self._cmd_stop, "llm": self._cmd_llm, "export": self._cmd_export,
+            "stop": self._cmd_stop, "llm": self._cmd_llm, "model": self._cmd_llm, "export": self._cmd_export,
             "restore": self._cmd_restore,
             "btw": lambda a, r: self._cmd_btw(a, r),
             "continue": lambda a, r: self._cmd_continue(a, r),
@@ -1325,8 +1326,16 @@ class GenericAgentTUI(App[None]):
         sess = self.current
         if args:
             try:
-                sess.agent.next_llm(int(args[0]))
-                self._system(f"Switched model to #{int(args[0])}.")
+                selector = " ".join(args).strip()
+                if hasattr(sess.agent, "select_llm"):
+                    result = sess.agent.select_llm(selector)
+                    if not result.get("ok"):
+                        self._system(f"Switch failed: {result.get('message') or selector}")
+                        return
+                    self._system(f"Switched model to {result.get('name') or selector}.")
+                else:
+                    sess.agent.next_llm(int(args[0]))
+                    self._system(f"Switched model to #{int(args[0])}.")
             except Exception as e:
                 self._system(f"Switch failed: {e}")
             return
@@ -1355,7 +1364,12 @@ class GenericAgentTUI(App[None]):
 
     def _do_switch_llm(self, idx: int) -> str:
         try:
-            self.current.agent.next_llm(int(idx))
+            if hasattr(self.current.agent, "select_llm"):
+                result = self.current.agent.select_llm(str(idx))
+                if not result.get("ok"):
+                    return f"❌ 切换失败: {result.get('message') or idx}"
+            else:
+                self.current.agent.next_llm(int(idx))
             name = self.current.agent.get_llm_name()
             return f"已切换到 [{idx}] {name}"
         except Exception as e:

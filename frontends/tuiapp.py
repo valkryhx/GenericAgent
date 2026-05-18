@@ -334,6 +334,7 @@ class GenericAgentTUI(App[None]):
             "sessions": self._cmd_sessions,
             "stop": self._cmd_stop,
             "llm": self._cmd_llm,
+            "model": self._cmd_llm,
             "branch": self._cmd_branch,
             "rewind": self._cmd_rewind,
             "clear": self._cmd_clear,
@@ -429,7 +430,9 @@ class GenericAgentTUI(App[None]):
             "/clear - clear chat display (keeps LLM history)\n"
             "/close - close current session (cannot close last)\n"
             "/llm - list models for current session\n"
-            "/llm <n> - switch model for current session\n"
+            "/llm <n|name> - switch model for current session\n"
+            "/model - list models for current session\n"
+            "/model <n|name> - switch model for current session\n"
             "/quit - exit TUI\n\n"
             "Unknown slash commands (for example /session.x=... or /resume) are sent to GenericAgent."
         )
@@ -572,8 +575,16 @@ class GenericAgentTUI(App[None]):
         session = self.current
         if args:
             try:
-                session.agent.next_llm(int(args[0]))
-                self._system(f"Switched model to #{int(args[0])}.")
+                selector = " ".join(args).strip()
+                if hasattr(session.agent, "select_llm"):
+                    result = session.agent.select_llm(selector)
+                    if not result.get("ok"):
+                        self._system(f"Model switch failed: {result.get('message') or selector}")
+                        return
+                    self._system(f"Switched model to {result.get('name') or selector}.")
+                else:
+                    session.agent.next_llm(int(args[0]))
+                    self._system(f"Switched model to #{int(args[0])}.")
             except Exception as exc:
                 self._system(f"Model switch failed: {exc}")
                 return
