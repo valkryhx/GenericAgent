@@ -61,11 +61,13 @@ def _native_image_input_enabled(llmclient):
     return isinstance(backend, NativeOAISession) and bool(getattr(backend, 'native_image_input', False))
 
 
-def load_tool_schema(suffix=''):
+def load_tool_schema(suffix='', include_mcp_tools=True):
     global TOOLS_SCHEMA
     with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
         TS = f.read()
     TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
+    if not include_mcp_tools:
+        return
     try:
         from mcp_runtime import discover_mcp_tools
         existing = {t.get("function", {}).get("name") for t in TOOLS_SCHEMA}
@@ -77,7 +79,7 @@ def load_tool_schema(suffix=''):
     except Exception as e:
         if os.environ.get("GA_MCP_DEBUG"):
             print(f"[WARN] MCP tool discovery failed: {e}")
-load_tool_schema()
+load_tool_schema(include_mcp_tools=False)
 
 lang_suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
 mem_dir = os.path.join(script_dir, 'memory')
@@ -181,8 +183,8 @@ class GenericAgent:
         except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
         self.llmclient.last_tools = ''
         name = self.get_llm_name(model=True)
-        if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
-        else: load_tool_schema()
+        if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn', include_mcp_tools=False)
+        else: load_tool_schema(include_mcp_tools=False)
         return {"ok": True, "index": self.llm_no, "name": self.get_llm_name(), "model": self.get_llm_name(model=True)}
     def list_llms(self): 
         self.load_llm_sessions()
@@ -242,6 +244,8 @@ class GenericAgent:
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
             initial_content = _build_user_content_with_images(raw_query, images) if _native_image_input_enabled(self.llmclient) else None
+            name = self.get_llm_name(model=True)
+            load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
                                 handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)

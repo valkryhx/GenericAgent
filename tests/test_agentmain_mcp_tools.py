@@ -11,6 +11,20 @@ if str(REPO_ROOT) not in sys.path:
 
 
 class AgentMainMcpToolsTest(unittest.TestCase):
+    def test_load_tool_schema_can_skip_mcp_discovery(self):
+        os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
+        import agentmain
+
+        try:
+            with patch("mcp_runtime.discover_mcp_tools") as discover:
+                agentmain.load_tool_schema(include_mcp_tools=False)
+                discover.assert_not_called()
+                names = {tool["function"]["name"] for tool in agentmain.TOOLS_SCHEMA}
+        finally:
+            os.environ.pop("GA_MCP_CONFIG", None)
+
+        self.assertFalse(any(name.startswith("mcp__") for name in names))
+
     def test_load_tool_schema_appends_discovered_mcp_tools(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
         import agentmain
