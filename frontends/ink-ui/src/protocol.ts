@@ -11,6 +11,8 @@ export type BridgeCommand =
   | { type: 'mcp_disable'; server: string }
   | { type: 'model_status' }
   | { type: 'model_switch'; selector: string }
+  | { type: 'skill_status' }
+  | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -50,6 +52,13 @@ export type ModelStatus = {
   current: boolean
 }
 
+export type SkillStatus = {
+  name: string
+  description: string
+  source: string
+  path: string
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -63,6 +72,7 @@ export type BridgeEvent =
   | { type: 'rewind_done'; taskId: number; text: string }
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
   | { type: 'model_status'; models: ModelStatus[] }
+  | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'error'; code: string; message: string; taskId?: number }
 
 export type ChatMessage = {

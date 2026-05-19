@@ -1,6 +1,10 @@
+import type { SkillStatus } from './protocol.js'
+
 export type SlashCommand = {
   name: string
   description: string
+  kind?: 'builtin' | 'skill'
+  source?: string
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -19,9 +23,21 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/quit', description: 'Exit GenericAgent Ink' },
 ]
 
-export function slashSuggestions(input: string): SlashCommand[] {
+function skillSlashCommands(skills: readonly SkillStatus[]): SlashCommand[] {
+  return skills.map(skill => ({
+    name: `/${skill.name}`,
+    description: skill.description || 'Skill',
+    kind: 'skill',
+    source: skill.source,
+  }))
+}
+
+export function slashSuggestions(input: string, skills: readonly SkillStatus[] = []): SlashCommand[] {
   if (!input.startsWith('/') || input.includes('\n')) return []
-  return SLASH_COMMANDS.filter(command => command.name.startsWith(input))
+  return [
+    ...SLASH_COMMANDS.map(command => ({ ...command, kind: 'builtin' as const })),
+    ...skillSlashCommands(skills),
+  ].filter(command => command.name.startsWith(input))
 }
 
 export function moveSlashSelection(selected: number, delta: number, suggestions: readonly SlashCommand[]): number {
@@ -42,6 +58,13 @@ export function visibleSlashSuggestions(
 
 export function completeSlashCommand(command: SlashCommand): string {
   return `${command.name} `
+}
+
+export function formatSlashDescription(description: string, maxLength = 72): string {
+  const normalized = description.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  if (maxLength <= 3) return '.'.repeat(Math.max(0, maxLength))
+  return `${normalized.slice(0, maxLength - 3).trimEnd()}...`
 }
 
 export function shouldCompleteSlashCommand(input: string, command: SlashCommand): boolean {

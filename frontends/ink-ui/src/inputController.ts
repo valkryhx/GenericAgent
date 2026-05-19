@@ -20,7 +20,10 @@ export type InputDecision = {
   exit?: boolean
 }
 
-function parseSlashSubmit(text: string): Pick<InputDecision, 'command' | 'action' | 'exit'> | null {
+function parseSlashSubmit(
+  text: string,
+  skillNames: ReadonlySet<string> = new Set(),
+): Pick<InputDecision, 'command' | 'action' | 'exit'> | null {
   const trimmed = text.trim()
   const indexedResume = /^\/(?:resume|continue)\s+(\d+)$/.exec(trimmed)
   if (indexedResume) {
@@ -48,6 +51,11 @@ function parseSlashSubmit(text: string): Pick<InputDecision, 'command' | 'action
   if (trimmed === '/help') return { action: { type: 'help' } }
   if (trimmed === '/status') return { action: { type: 'status' } }
   if (trimmed === '/quit' || trimmed === '/exit') return { command: { type: 'shutdown' }, exit: true }
+  const skillMatch = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (skillMatch) {
+    const skill = skillMatch[1]
+    if (skillNames.has(skill)) return { command: { type: 'skill_invoke', skill, args: skillMatch[2] ?? '' } }
+  }
   return null
 }
 
@@ -57,6 +65,7 @@ export function handleInput(
   key: InputKey,
   status: InputStatus,
   pasteStore: PasteStore,
+  skillNames: ReadonlySet<string> = new Set(),
 ): InputDecision {
   if (key.ctrl && rawInput === 'c') {
     return { value, command: { type: 'shutdown' }, exit: true }
@@ -80,7 +89,7 @@ export function handleInput(
     const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
     const expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
     if (!expanded) return { value }
-    const slash = parseSlashSubmit(expanded)
+    const slash = parseSlashSubmit(expanded, skillNames)
     if (slash) return { value: '', ...slash }
     if (status === 'running' || status === 'stopping' || status === 'connecting') return { value }
     return { value: '', command: { type: 'submit', text: expanded } }

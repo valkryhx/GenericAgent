@@ -135,6 +135,15 @@ test('handleInput parses model slash commands', () => {
   })
 })
 
+test('handleInput parses known skill slash commands without using args as the skill name', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/imagegen 生成 一张图', '', { return: true }, 'idle', store, new Set(['imagegen'])), {
+    value: '',
+    command: { type: 'skill_invoke', skill: 'imagegen', args: '生成 一张图' },
+  })
+})
+
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
   const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)

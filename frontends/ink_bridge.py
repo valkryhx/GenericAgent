@@ -109,7 +109,7 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent.run()
 
-    def submit(self, text: str) -> int:
+    def submit(self, text: str, display_text: str | None = None) -> int:
         text = str(text or "")
         if not text.strip():
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
@@ -119,9 +119,10 @@ class GenericAgentBridge:
             return -1
         self._task_seq += 1
         task_id = self._task_seq
+        visible_text = text if display_text is None else str(display_text)
         self._rewind_snapshots[task_id] = self._snapshot_agent_state()
-        self._rewind_snapshots[task_id]["text"] = text
-        self.emit({"type": "user", "taskId": task_id, "text": text})
+        self._rewind_snapshots[task_id]["text"] = visible_text
+        self.emit({"type": "user", "taskId": task_id, "text": visible_text})
         self.emit({"type": "status", "status": "running", "taskId": task_id})
         try:
             display_queue = self.agent.put_task(text, source="user")
@@ -219,6 +220,62 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
         self.model_status()
+
+    def skill_status(self, search_roots: list[str] | None = None) -> None:
+        try:
+            with backend_output_redirect():
+                from skills_runtime import discover_skills
+
+                skills = discover_skills(search_roots=search_roots)
+            self.emit(
+                {
+                    "type": "skill_status",
+                    "skills": [
+                        {
+                            "name": str(skill.name),
+                            "description": str(skill.description or ""),
+                            "source": str(skill.source or ""),
+                            "path": str(skill.path),
+                        }
+                        for skill in skills
+                    ],
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "skill_status_failed", "message": str(exc)})
+
+    def skill_invoke(self, skill_name: str, args: str = "", search_roots: list[str] | None = None) -> int:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return -1
+        try:
+            with backend_output_redirect():
+                from skills_runtime import load_skill_content
+
+                loaded = load_skill_content(str(skill_name or ""), search_roots=search_roots, args=str(args or ""))
+        except KeyError as exc:
+            self.emit({"type": "error", "code": "skill_not_found", "message": str(exc)})
+            return -1
+        except Exception as exc:
+            self.emit({"type": "error", "code": "skill_invoke_failed", "message": str(exc)})
+            return -1
+
+        request = str(args or "").strip()
+        fallback_request = f"Use the {loaded.get('name')} skill."
+        prompt = (
+            f'[SYSTEM] The user invoked skill "{loaded.get("name")}" via slash command.\n'
+            "You must follow the loaded SKILL.md instructions.\n\n"
+            "<skill>\n"
+            f"{loaded.get('content', '')}\n"
+            "</skill>\n\n"
+            "<arguments>\n"
+            f"{request}\n"
+            "</arguments>\n\n"
+            "User request:\n"
+            f"{request or fallback_request}"
+        )
+        visible = f"/{loaded.get('name')} {request}".rstrip()
+        return self.submit(prompt, display_text=visible)
 
     def list_resume_sessions(self) -> None:
         if continue_list is None:
@@ -405,6 +462,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.model_status()
         elif cmd_type == "model_switch":
             bridge.model_switch(str(command.get("selector") or ""))
+        elif cmd_type == "skill_status":
+            bridge.skill_status()
+        elif cmd_type == "skill_invoke":
+            bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
             try:

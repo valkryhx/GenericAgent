@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
-import type { ChatMessage } from './protocol.js'
+import type { ChatMessage, SkillStatus } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { handleInput } from './inputController.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
@@ -22,6 +22,7 @@ import {
 import { moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
 import {
   completeSlashCommand,
+  formatSlashDescription,
   moveSlashSelection,
   shouldCompleteSlashCommand,
   slashSuggestions,
@@ -30,6 +31,8 @@ import {
 } from './slashCommands.js'
 import { inputDivider, inputPrompt } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
+import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
+import { statusPanelText, type FooterPanel } from './footerPanel.js'
 
 type Props = {
   python: string
@@ -77,7 +80,6 @@ function SelectorView({ selector }: { selector: SelectorState }) {
   const empty = selector.mode === 'resume' && selector.loading ? 'Loading conversations...' : selector.mode === 'resume' ? 'No resumable sessions found.' : 'Nothing to rewind to yet.'
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Text color="gray">{inputDivider(48)}</Text>
       <Text bold>{title}</Text>
       {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map((row, index) => (
         <Text key={`${selector.mode}-${index}`} color={index === selector.selected ? 'cyan' : undefined}>
@@ -85,7 +87,6 @@ function SelectorView({ selector }: { selector: SelectorState }) {
         </Text>
       ))}
       <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
-      <Text color="gray">{inputDivider(48)}</Text>
     </Box>
   )
 }
@@ -94,18 +95,17 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
   const visible = visibleSlashSuggestions(suggestions, selected)
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Text color="gray">{inputDivider(48)}</Text>
       {visible.items.map((command, offset) => {
         const index = visible.startIndex + offset
         const active = index === selected
+        const description = formatSlashDescription(command.description, command.kind === 'skill' ? 58 : 72)
         return (
           <Text key={command.name} color={active ? 'cyan' : undefined}>
-            {active ? '> ' : '  '}{command.name.padEnd(12)} {command.description}
+            {active ? '> ' : '  '}{command.name.padEnd(12)} {command.kind === 'skill' ? `[skill${command.source ? `: ${command.source}` : ''}] ` : ''}{description}
           </Text>
         )
       })}
       <Text color="gray">Tab/Enter complete - Up/Down move - Esc cancel</Text>
-      <Text color="gray">{inputDivider(48)}</Text>
     </Box>
   )
 }
@@ -115,7 +115,6 @@ function McpPanelView({ panel }: { panel: McpPanelState }) {
   const selectedTools = selected ? mcpToolsForServer(panel, selected.name) : []
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Text color="gray">{inputDivider(48)}</Text>
       <Text bold>MCP Servers</Text>
       {panel.configPath ? <Text color="gray">Config: {panel.configPath}</Text> : null}
       {panel.loading ? <Text color="gray">Loading MCP status...</Text> : null}
@@ -133,7 +132,6 @@ function McpPanelView({ panel }: { panel: McpPanelState }) {
         <Text key={tool.function.name} color="gray">  - {tool.function.name}</Text>
       ))}
       <Text color="gray">Up/Down move - Esc close</Text>
-      <Text color="gray">{inputDivider(48)}</Text>
     </Box>
   )
 }
@@ -141,7 +139,6 @@ function McpPanelView({ panel }: { panel: McpPanelState }) {
 function ModelPanelView({ panel }: { panel: ModelPanelState }) {
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Text color="gray">{inputDivider(48)}</Text>
       <Text bold>Models</Text>
       {panel.models.length === 0 ? <Text color="gray">No models configured.</Text> : null}
       {panel.models.map((model, index) => (
@@ -152,7 +149,17 @@ function ModelPanelView({ panel }: { panel: ModelPanelState }) {
         </Text>
       ))}
       <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
-      <Text color="gray">{inputDivider(48)}</Text>
+    </Box>
+  )
+}
+
+function FooterPanelView({ panel }: { panel: FooterPanel }) {
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {panel.text.split('\n').map((line, index) => (
+        <Text key={index} color={index === 0 && panel.type === 'help' ? undefined : 'gray'}>{line}</Text>
+      ))}
+      <Text color="gray">Esc close</Text>
     </Box>
   )
 }
@@ -194,9 +201,11 @@ export function App({ python, bridgeScript }: Props) {
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [inputHistory, setInputHistory] = useState(() => createInputHistory())
+  const [skills, setSkills] = useState<SkillStatus[]>([])
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
+  const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
@@ -207,7 +216,8 @@ export function App({ python, bridgeScript }: Props) {
   const modelPanelPendingRef = useRef(false)
   const modelPanelOpenRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel ? [] : slashSuggestions(input), [input, selector, mcpPanel, modelPanel])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
+  const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   useEffect(() => {
     setSlashSelected(0)
@@ -242,6 +252,13 @@ export function App({ python, bridgeScript }: Props) {
 
   useEffect(() => {
     function onEvent(event: BridgeEvent) {
+      if (event.type === 'ready') {
+        bridgeRef.current?.send({ type: 'skill_status' })
+      }
+      if (event.type === 'skill_status') {
+        setSkills(event.skills)
+        return
+      }
       if (event.type === 'mcp_status') {
         setMcpPanel(panelFromMcpStatus(event))
         return
@@ -260,6 +277,7 @@ export function App({ python, bridgeScript }: Props) {
       }
       if (event.type === 'history_replace') {
         setSelector(null)
+        setFooterPanel(null)
         resumePendingRef.current = false
       }
       if (event.type === 'rewind_done') {
@@ -284,6 +302,15 @@ export function App({ python, bridgeScript }: Props) {
     if (key.ctrl && (rawInput === 'o' || rawInput === '\u000f')) {
       setExpandedTools(value => !value)
       return
+    }
+    if (footerPanel) {
+      if (key.escape) {
+        setFooterPanel(null)
+        return
+      }
+      if (rawInput || key.return || key.backspace || key.delete || key.upArrow || key.downArrow) {
+        setFooterPanel(null)
+      }
     }
     if (mcpPanel) {
       if (key.escape) {
@@ -368,34 +395,42 @@ export function App({ python, bridgeScript }: Props) {
       setInput(result.value)
       return
     }
-    const decision = handleInput(input, rawInput, key, state.status, pasteStore)
+    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames)
     setInput(decision.value)
     if (decision.command) {
+      setFooterPanel(null)
       const command = decision.command
       if (command.type === 'submit') {
         setInputHistory(history => recordInput(history, command.text))
+      } else if (command.type === 'skill_invoke') {
+        setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
       }
       bridgeRef.current?.send(command)
     }
     if (decision.action?.type === 'open_resume') {
+      setFooterPanel(null)
       resumePendingRef.current = true
       setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true })
       bridgeRef.current?.send({ type: 'list_resume_sessions' })
     } else if (decision.action?.type === 'open_rewind') {
+      setFooterPanel(null)
       const options = rewindOptions(state.messages)
       setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
     } else if (decision.action?.type === 'open_mcp') {
+      setFooterPanel(null)
       setMcpPanel(loadingMcpPanel())
       bridgeRef.current?.send({ type: 'mcp_status' })
     } else if (decision.action?.type === 'open_model') {
+      setFooterPanel(null)
       modelPanelPendingRef.current = true
       bridgeRef.current?.send({ type: 'model_status' })
     } else if (decision.action?.type === 'clear') {
+      setFooterPanel(null)
       dispatch({ type: 'clear' })
     } else if (decision.action?.type === 'help') {
-      dispatch({ type: 'system', text: helpText() })
+      setFooterPanel({ type: 'help', text: helpText() })
     } else if (decision.action?.type === 'status') {
-      dispatch({ type: 'system', text: `status=${state.status} messages=${state.messages.length}` })
+      setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
     }
     if (decision.exit) {
       exit()
@@ -410,6 +445,26 @@ export function App({ python, bridgeScript }: Props) {
     ? `Running: keep typing, Enter waits - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
     : `Enter send - Alt+Enter newline - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
+  const activePanel = mcpPanel || modelPanel || selector || footerPanel
+  const inputSections = inputChromeSections({
+    hasError: Boolean(state.error),
+    hasPanel: Boolean(activePanel),
+    hasSlashSuggestions: slashItems.length > 0,
+  })
+  const renderInputSection = (section: InputChromeSection) => {
+    if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
+    if (section === 'hint') return <Text key={section} color="gray">{inputHint}</Text>
+    if (section === 'topDivider' || section === 'bottomDivider') return <Text key={section} color="gray">{inputDivider(dividerWidth)}</Text>
+    if (section === 'input') return <InputView key={section} input={input} />
+    if (section === 'panel') {
+      if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
+      if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
+      if (selector) return <SelectorView key={section} selector={selector} />
+      if (footerPanel) return <FooterPanelView key={section} panel={footerPanel} />
+      return null
+    }
+    return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null
+  }
   return (
     <Box flexDirection="column" width={columns}>
       <Box justifyContent="space-between" width={columns}>
@@ -420,15 +475,7 @@ export function App({ python, bridgeScript }: Props) {
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} expandedTools={expandedTools} />)}
       </Box>
       {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={runningLabel} /> : null}
-      {mcpPanel ? <McpPanelView panel={mcpPanel} /> : null}
-      {modelPanel ? <ModelPanelView panel={modelPanel} /> : null}
-      {selector ? <SelectorView selector={selector} /> : null}
-      {!selector && slashItems.length > 0 ? <SlashSuggestionsView suggestions={slashItems} selected={slashSelected} /> : null}
-      {state.error ? <Text color="red">{state.error}</Text> : null}
-      <Text color="gray">{inputHint}</Text>
-      <Text color="gray">{inputDivider(dividerWidth)}</Text>
-      <InputView input={input} />
-      <Text color="gray">{inputDivider(dividerWidth)}</Text>
+      {inputSections.map(renderInputSection)}
     </Box>
   )
 }

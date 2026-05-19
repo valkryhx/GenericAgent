@@ -4,6 +4,7 @@ import json
 import subprocess
 import queue
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -281,6 +282,68 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(0, agent.llm_no)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
+    def test_skill_status_emits_discovered_skill_metadata(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skills" / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: demo\n"
+                "description: Demo skill\n"
+                "---\n"
+                "# Demo\n",
+                encoding="utf-8",
+            )
+
+            bridge.skill_status(search_roots=[str(Path(tmp) / "skills")])
+
+        self.assertEqual("skill_status", events[-1]["type"])
+        self.assertEqual(
+            [
+                {
+                    "name": "demo",
+                    "description": "Demo skill",
+                    "source": "local",
+                    "path": str(skill_dir / "SKILL.md"),
+                }
+            ],
+            events[-1]["skills"],
+        )
+
+    def test_skill_invoke_loads_skill_name_and_submits_args_as_request(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skills" / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: demo\n"
+                "description: Demo skill\n"
+                "---\n"
+                "Use $ARGUMENTS from ${GA_SKILL_DIR}.",
+                encoding="utf-8",
+            )
+
+            bridge.skill_invoke("demo", "中文 args with spaces", search_roots=[str(Path(tmp) / "skills")])
+
+        self.assertEqual(1, len(agent.prompts))
+        prompt, source = agent.prompts[0]
+        self.assertEqual("user", source)
+        self.assertIn('The user invoked skill "demo"', prompt)
+        self.assertIn("Use 中文 args with spaces from", prompt)
+        self.assertIn("<arguments>\n中文 args with spaces\n</arguments>", prompt)
+        self.assertEqual("user", events[0]["type"])
+        self.assertEqual("/demo 中文 args with spaces", events[0]["text"])
+        self.assertNotIn("<skill>", events[0]["text"])
+        self.assertEqual("status", events[1]["type"])
+
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
             json.dumps({"type": "mcp_status"}) + "\n"
@@ -316,6 +379,22 @@ class InkBridgeTest(unittest.TestCase):
 
         bridge.model_status.assert_called_once_with()
         bridge.model_switch.assert_called_once_with("kimi")
+
+    def test_jsonl_loop_routes_skill_commands(self):
+        stdin = io.StringIO(
+            json.dumps({"type": "skill_status"}) + "\n"
+            + json.dumps({"type": "skill_invoke", "skill": "demo", "args": "hello world"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+
+        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            run_jsonl_loop(stdin, stdout)
+
+        bridge.skill_status.assert_called_once_with()
+        bridge.skill_invoke.assert_called_once_with("demo", "hello world")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(

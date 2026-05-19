@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   completeSlashCommand,
+  formatSlashDescription,
   shouldCompleteSlashCommand,
   moveSlashSelection,
   slashSuggestions,
@@ -32,6 +33,18 @@ test('slashSuggestions includes model commands', () => {
   assert.ok(slashSuggestions('/l').some(command => command.name === '/llm'))
 })
 
+test('slashSuggestions includes matching skills after built-in commands', () => {
+  const suggestions = slashSuggestions('/', [
+    { name: 'imagegen', description: 'Generate images', source: 'codex', path: 'C:/skills/imagegen/SKILL.md' },
+    { name: 'review', description: 'Review code', source: 'claude', path: 'C:/skills/review/SKILL.md' },
+  ])
+
+  assert.ok(suggestions.some(command => command.name === '/imagegen' && command.kind === 'skill'))
+  assert.equal(slashSuggestions('/im', [
+    { name: 'imagegen', description: 'Generate images', source: 'codex', path: 'C:/skills/imagegen/SKILL.md' },
+  ])[0].name, '/imagegen')
+})
+
 test('moveSlashSelection clamps selection inside suggestion bounds', () => {
   const suggestions = slashSuggestions('/')
 
@@ -56,6 +69,15 @@ test('completeSlashCommand inserts selected command with a trailing space', () =
   const [resume] = slashSuggestions('/res')
 
   assert.equal(completeSlashCommand(resume), '/resume ')
+})
+
+test('formatSlashDescription truncates long skill descriptions with ellipsis', () => {
+  const text = 'This is a very long skill description that should not stretch the slash suggestion panel forever.'
+  const formatted = formatSlashDescription(text, 42)
+
+  assert.equal(formatted, 'This is a very long skill description t...')
+  assert.equal(formatted.length, 42)
+  assert.equal(formatSlashDescription('short text', 42), 'short text')
 })
 
 test('shouldCompleteSlashCommand does not complete exact commands on Enter', () => {
