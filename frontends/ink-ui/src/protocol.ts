@@ -72,6 +72,7 @@ export type BridgeEvent =
   | { type: 'rewind_done'; taskId: number; text: string }
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
   | { type: 'model_status'; models: ModelStatus[] }
+  | { type: 'model_switch_result'; ok: boolean; message: string }
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'error'; code: string; message: string; taskId?: number }
 

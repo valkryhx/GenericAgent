@@ -214,9 +214,9 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 result = self.agent.select_llm(str(selector or ""))
             if result.get("ok"):
-                self.emit({"type": "system", "text": f"Set model to {result.get('name')}"})
+                self.emit({"type": "model_switch_result", "ok": True, "message": f"Set model to {result.get('name')}"})
             else:
-                self.emit({"type": "system", "text": str(result.get("message") or "model switch failed")})
+                self.emit({"type": "model_switch_result", "ok": False, "message": str(result.get("message") or "model switch failed")})
         except Exception as exc:
             self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
         self.model_status()

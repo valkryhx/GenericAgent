@@ -267,7 +267,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge.model_switch("kimi")
 
         self.assertEqual(1, agent.llm_no)
-        self.assertEqual({"type": "system", "text": "Set model to NativeOAISession/kimi-native"}, events[-2])
+        self.assertEqual({"type": "model_switch_result", "ok": True, "message": "Set model to NativeOAISession/kimi-native"}, events[-2])
         self.assertEqual("model_status", events[-1]["type"])
         self.assertTrue(events[-1]["models"][1]["current"])
 

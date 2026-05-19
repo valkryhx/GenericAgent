@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import {
   completeSlashCommand,
   formatSlashDescription,
+  formatSlashSuggestionLine,
   shouldCompleteSlashCommand,
+  slashSelectionAction,
   moveSlashSelection,
   slashSuggestions,
   visibleSlashSuggestions,
@@ -80,9 +82,32 @@ test('formatSlashDescription truncates long skill descriptions with ellipsis', (
   assert.equal(formatSlashDescription('short text', 42), 'short text')
 })
 
+test('formatSlashSuggestionLine truncates long skill rows to the brainstorming limit', () => {
+  const line = formatSlashSuggestionLine({
+    name: '/brainstorming',
+    description: 'You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior.',
+    kind: 'skill',
+    source: 'claude',
+  })
+
+  assert.equal(line, '/brainstorming [skill: claude] You MUST use this before any creative work - creating f...')
+  assert.equal(line.length, 89)
+})
+
 test('shouldCompleteSlashCommand does not complete exact commands on Enter', () => {
   const [model] = slashSuggestions('/model')
 
   assert.equal(shouldCompleteSlashCommand('/model', model), false)
   assert.equal(shouldCompleteSlashCommand('/mod', model), true)
+})
+
+test('slashSelectionAction executes built-in commands on Enter and completes skills', () => {
+  const [help] = slashSuggestions('/')
+  const [imagegen] = slashSuggestions('/im', [
+    { name: 'imagegen', description: 'Generate images', source: 'codex', path: 'C:/skills/imagegen/SKILL.md' },
+  ])
+
+  assert.deepEqual(slashSelectionAction('/', help, 'enter'), { type: 'execute', value: '/help' })
+  assert.deepEqual(slashSelectionAction('/he', help, 'tab'), { type: 'complete', value: '/help ' })
+  assert.deepEqual(slashSelectionAction('/im', imagegen, 'enter'), { type: 'complete', value: '/imagegen ' })
 })

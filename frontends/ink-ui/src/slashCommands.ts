@@ -60,11 +60,29 @@ export function completeSlashCommand(command: SlashCommand): string {
   return `${command.name} `
 }
 
+export function slashSelectionAction(
+  input: string,
+  command: SlashCommand,
+  trigger: 'enter' | 'tab',
+): { type: 'complete' | 'execute'; value: string } {
+  if (trigger === 'enter' && command.kind !== 'skill') {
+    return { type: 'execute', value: command.name }
+  }
+  return { type: 'complete', value: completeSlashCommand(command) }
+}
+
 export function formatSlashDescription(description: string, maxLength = 72): string {
   const normalized = description.replace(/\s+/g, ' ').trim()
   if (normalized.length <= maxLength) return normalized
   if (maxLength <= 3) return '.'.repeat(Math.max(0, maxLength))
   return `${normalized.slice(0, maxLength - 3).trimEnd()}...`
+}
+
+export function formatSlashSuggestionLine(command: SlashCommand, maxLength = 89): string {
+  const prefix = command.kind === 'skill'
+    ? `${command.name} [skill${command.source ? `: ${command.source}` : ''}] `
+    : `${command.name.padEnd(12)} `
+  return `${prefix}${formatSlashDescription(command.description, Math.max(0, maxLength - prefix.length))}`
 }
 
 export function shouldCompleteSlashCommand(input: string, command: SlashCommand): boolean {

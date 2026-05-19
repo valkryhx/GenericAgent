@@ -21,10 +21,10 @@ import {
 } from './mcpPanel.js'
 import { moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
 import {
-  completeSlashCommand,
-  formatSlashDescription,
+  formatSlashSuggestionLine,
   moveSlashSelection,
   shouldCompleteSlashCommand,
+  slashSelectionAction,
   slashSuggestions,
   visibleSlashSuggestions,
   type SlashCommand,
@@ -32,7 +32,7 @@ import {
 import { inputDivider, inputPrompt } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { statusPanelText, type FooterPanel } from './footerPanel.js'
+import { modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 
 type Props = {
   python: string
@@ -98,10 +98,9 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
       {visible.items.map((command, offset) => {
         const index = visible.startIndex + offset
         const active = index === selected
-        const description = formatSlashDescription(command.description, command.kind === 'skill' ? 58 : 72)
         return (
           <Text key={command.name} color={active ? 'cyan' : undefined}>
-            {active ? '> ' : '  '}{command.name.padEnd(12)} {command.kind === 'skill' ? `[skill${command.source ? `: ${command.source}` : ''}] ` : ''}{description}
+            {active ? '> ' : '  '}{formatSlashSuggestionLine(command)}
           </Text>
         )
       })}
@@ -219,6 +218,48 @@ export function App({ python, bridgeScript }: Props) {
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
+  const applyInputDecision = (decision: ReturnType<typeof handleInput>) => {
+    setInput(decision.value)
+    if (decision.command) {
+      setFooterPanel(null)
+      const command = decision.command
+      if (command.type === 'submit') {
+        setInputHistory(history => recordInput(history, command.text))
+      } else if (command.type === 'skill_invoke') {
+        setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
+      }
+      bridgeRef.current?.send(command)
+    }
+    if (decision.action?.type === 'open_resume') {
+      setFooterPanel(null)
+      resumePendingRef.current = true
+      setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true })
+      bridgeRef.current?.send({ type: 'list_resume_sessions' })
+    } else if (decision.action?.type === 'open_rewind') {
+      setFooterPanel(null)
+      const options = rewindOptions(state.messages)
+      setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
+    } else if (decision.action?.type === 'open_mcp') {
+      setFooterPanel(null)
+      setMcpPanel(loadingMcpPanel())
+      bridgeRef.current?.send({ type: 'mcp_status' })
+    } else if (decision.action?.type === 'open_model') {
+      setFooterPanel(null)
+      modelPanelPendingRef.current = true
+      bridgeRef.current?.send({ type: 'model_status' })
+    } else if (decision.action?.type === 'clear') {
+      setFooterPanel(null)
+      dispatch({ type: 'clear' })
+    } else if (decision.action?.type === 'help') {
+      setFooterPanel({ type: 'help', text: helpText() })
+    } else if (decision.action?.type === 'status') {
+      setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
+    }
+    if (decision.exit) {
+      exit()
+    }
+  }
+
   useEffect(() => {
     setSlashSelected(0)
   }, [input])
@@ -267,6 +308,10 @@ export function App({ python, bridgeScript }: Props) {
         if (!shouldApplyModelStatus(modelPanelPendingRef.current, modelPanelOpenRef.current)) return
         modelPanelPendingRef.current = false
         setModelPanel(panelFromModelStatus(event))
+        return
+      }
+      if (event.type === 'model_switch_result') {
+        setFooterPanel({ type: 'model', text: modelSwitchPanelText(event.message) })
         return
       }
       if (event.type === 'resume_sessions') {
@@ -328,6 +373,7 @@ export function App({ python, bridgeScript }: Props) {
     }
     if (modelPanel) {
       if (key.escape) {
+        modelPanelOpenRef.current = false
         setModelPanel(null)
         return
       }
@@ -344,6 +390,8 @@ export function App({ python, bridgeScript }: Props) {
         if (selected) {
           bridgeRef.current?.send({ type: 'model_switch', selector: String(selected.index) })
         }
+        modelPanelOpenRef.current = false
+        modelPanelPendingRef.current = false
         setModelPanel(null)
         return
       }
@@ -373,8 +421,15 @@ export function App({ python, bridgeScript }: Props) {
       }
       if ((key as { tab?: boolean }).tab || (key.return && !key.ctrl && !key.meta && !key.shift)) {
         const selectedCommand = slashItems[slashSelected] ?? slashItems[0]
-        if ((key as { tab?: boolean }).tab || shouldCompleteSlashCommand(input, selectedCommand)) {
-          setInput(completeSlashCommand(selectedCommand))
+        const trigger = (key as { tab?: boolean }).tab ? 'tab' : 'enter'
+        const action = slashSelectionAction(input, selectedCommand, trigger)
+        if (action.type === 'complete') {
+          if (trigger === 'tab' || shouldCompleteSlashCommand(input, selectedCommand)) {
+            setInput(action.value)
+            return
+          }
+        } else {
+          applyInputDecision(handleInput(action.value, '', { return: true }, state.status, pasteStore, skillNames))
           return
         }
       }
@@ -396,45 +451,7 @@ export function App({ python, bridgeScript }: Props) {
       return
     }
     const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames)
-    setInput(decision.value)
-    if (decision.command) {
-      setFooterPanel(null)
-      const command = decision.command
-      if (command.type === 'submit') {
-        setInputHistory(history => recordInput(history, command.text))
-      } else if (command.type === 'skill_invoke') {
-        setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
-      }
-      bridgeRef.current?.send(command)
-    }
-    if (decision.action?.type === 'open_resume') {
-      setFooterPanel(null)
-      resumePendingRef.current = true
-      setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true })
-      bridgeRef.current?.send({ type: 'list_resume_sessions' })
-    } else if (decision.action?.type === 'open_rewind') {
-      setFooterPanel(null)
-      const options = rewindOptions(state.messages)
-      setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
-    } else if (decision.action?.type === 'open_mcp') {
-      setFooterPanel(null)
-      setMcpPanel(loadingMcpPanel())
-      bridgeRef.current?.send({ type: 'mcp_status' })
-    } else if (decision.action?.type === 'open_model') {
-      setFooterPanel(null)
-      modelPanelPendingRef.current = true
-      bridgeRef.current?.send({ type: 'model_status' })
-    } else if (decision.action?.type === 'clear') {
-      setFooterPanel(null)
-      dispatch({ type: 'clear' })
-    } else if (decision.action?.type === 'help') {
-      setFooterPanel({ type: 'help', text: helpText() })
-    } else if (decision.action?.type === 'status') {
-      setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
-    }
-    if (decision.exit) {
-      exit()
-    }
+    applyInputDecision(decision)
   })
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
