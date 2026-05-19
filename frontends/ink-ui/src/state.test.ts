@@ -29,6 +29,18 @@ test('applyBridgeEvent appends system messages and clears display only', () => {
   assert.deepEqual(state.messages, [])
 })
 
+test('applyBridgeEvent appends local command transcript messages without task ids', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'local_command_input', text: '/help' })
+  state = applyBridgeEvent(state, { type: 'local_command_output', text: 'Help dialog dismissed' })
+
+  assert.deepEqual(state.messages, [
+    { id: 'lc-in-0', role: 'system', text: '/help', done: true, localCommand: 'input' },
+    { id: 'lc-out-1', role: 'system', text: 'Help dialog dismissed', done: true, localCommand: 'output' },
+  ])
+  assert.equal(state.messages.some(message => message.taskId !== undefined), false)
+})
+
 test('applyBridgeEvent replaces history after resume', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, {

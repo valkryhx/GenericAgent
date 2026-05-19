@@ -32,7 +32,13 @@ import {
 import { inputDivider, inputPrompt } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
+import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
+import {
+  clearLocalCommandOutput,
+  commandTextForLocalDecision,
+  dismissedLocalCommandOutput,
+  localCommandResultOutput,
+} from './localCommandTranscript.js'
 
 type Props = {
   python: string
@@ -41,6 +47,20 @@ type Props = {
 
 function MessageView({ message, expandedTools }: { message: ChatMessage; expandedTools: boolean }) {
   const body = message.role === 'assistant' ? formatAssistantText(message.text, { expanded: expandedTools }) || ' ' : message.text || ' '
+  if (message.localCommand === 'input') {
+    return (
+      <Box marginBottom={0}>
+        <Text>{body}</Text>
+      </Box>
+    )
+  }
+  if (message.localCommand === 'output') {
+    return (
+      <Box marginBottom={1} paddingLeft={2}>
+        <Text color="gray">{body}</Text>
+      </Box>
+    )
+  }
   if (message.role === 'user') {
     return (
       <Box marginBottom={1}>
@@ -212,14 +232,45 @@ export function App({ python, bridgeScript }: Props) {
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
   const resumePendingRef = useRef(false)
+  const mcpPanelOpenRef = useRef(false)
   const modelPanelPendingRef = useRef(false)
   const modelPanelOpenRef = useRef(false)
+  const pendingLocalCommandRef = useRef<string | null>(null)
   const pasteStore = useMemo(() => createPasteStore(), [])
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
+  const appendLocalCommandInput = (commandText: string) => {
+    dispatch({ type: 'local_command_input', text: commandText })
+    pendingLocalCommandRef.current = commandText
+  }
+
+  const appendLocalCommandOutput = (text: string) => {
+    dispatch({ type: 'local_command_output', text })
+    pendingLocalCommandRef.current = null
+  }
+
+  const dismissPendingLocalCommand = () => {
+    const commandText = pendingLocalCommandRef.current
+    if (!commandText) return
+    appendLocalCommandOutput(dismissedLocalCommandOutput(commandText))
+  }
+
   const applyInputDecision = (decision: ReturnType<typeof handleInput>) => {
     setInput(decision.value)
+    const localCommandText = commandTextForLocalDecision(decision)
+    if (decision.action?.type === 'clear') {
+      setFooterPanel(null)
+      pendingLocalCommandRef.current = null
+      dispatch({ type: 'clear' })
+      dispatch({ type: 'local_command_input', text: localCommandText ?? '/clear' })
+      dispatch({ type: 'local_command_output', text: clearLocalCommandOutput() })
+      if (decision.exit) exit()
+      return
+    }
+    if (localCommandText) {
+      appendLocalCommandInput(localCommandText)
+    }
     if (decision.command) {
       setFooterPanel(null)
       const command = decision.command
@@ -227,6 +278,9 @@ export function App({ python, bridgeScript }: Props) {
         setInputHistory(history => recordInput(history, command.text))
       } else if (command.type === 'skill_invoke') {
         setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
+      }
+      if (command.type === 'stop' && localCommandText) {
+        appendLocalCommandOutput('Stop requested')
       }
       bridgeRef.current?.send(command)
     }
@@ -241,19 +295,17 @@ export function App({ python, bridgeScript }: Props) {
       setSelector({ mode: 'rewind', selected: Math.max(0, options.length - 1), options })
     } else if (decision.action?.type === 'open_mcp') {
       setFooterPanel(null)
+      mcpPanelOpenRef.current = true
       setMcpPanel(loadingMcpPanel())
       bridgeRef.current?.send({ type: 'mcp_status' })
     } else if (decision.action?.type === 'open_model') {
       setFooterPanel(null)
       modelPanelPendingRef.current = true
       bridgeRef.current?.send({ type: 'model_status' })
-    } else if (decision.action?.type === 'clear') {
-      setFooterPanel(null)
-      dispatch({ type: 'clear' })
     } else if (decision.action?.type === 'help') {
       setFooterPanel({ type: 'help', text: helpText() })
     } else if (decision.action?.type === 'status') {
-      setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
+      appendLocalCommandOutput(localCommandResultOutput('/status', state.status, state.messages.length))
     }
     if (decision.exit) {
       exit()
@@ -263,6 +315,10 @@ export function App({ python, bridgeScript }: Props) {
   useEffect(() => {
     setSlashSelected(0)
   }, [input])
+
+  useEffect(() => {
+    mcpPanelOpenRef.current = mcpPanel !== null
+  }, [mcpPanel])
 
   useEffect(() => {
     modelPanelOpenRef.current = modelPanel !== null
@@ -301,16 +357,26 @@ export function App({ python, bridgeScript }: Props) {
         return
       }
       if (event.type === 'mcp_status') {
+        if (!mcpPanelOpenRef.current) return
         setMcpPanel(panelFromMcpStatus(event))
         return
       }
       if (event.type === 'model_status') {
+        if (pendingLocalCommandRef.current === '/model ?') {
+          const rows = event.models.map(model => `${model.current ? '* ' : '  '}${model.index}. ${model.name}`)
+          appendLocalCommandOutput(rows.length > 0 ? rows.join('\n') : 'No models configured')
+          return
+        }
         if (!shouldApplyModelStatus(modelPanelPendingRef.current, modelPanelOpenRef.current)) return
         modelPanelPendingRef.current = false
         setModelPanel(panelFromModelStatus(event))
         return
       }
       if (event.type === 'model_switch_result') {
+        if (pendingLocalCommandRef.current) {
+          appendLocalCommandOutput(event.message)
+          return
+        }
         setFooterPanel({ type: 'model', text: modelSwitchPanelText(event.message) })
         return
       }
@@ -321,13 +387,30 @@ export function App({ python, bridgeScript }: Props) {
         return
       }
       if (event.type === 'history_replace') {
+        const commandText = pendingLocalCommandRef.current
         setSelector(null)
         setFooterPanel(null)
         resumePendingRef.current = false
+        dispatch(event)
+        if (commandText) {
+          dispatch({ type: 'local_command_input', text: commandText })
+        }
+        return
       }
       if (event.type === 'rewind_done') {
+        const commandText = pendingLocalCommandRef.current
         setSelector(null)
         setInput(event.text)
+        dispatch(event)
+        if (commandText) {
+          dispatch({ type: 'local_command_input', text: commandText })
+          appendLocalCommandOutput('Rewound to selected message')
+        }
+        return
+      }
+      if (event.type === 'system' && pendingLocalCommandRef.current) {
+        appendLocalCommandOutput(event.text)
+        return
       }
       dispatch(event)
     }
@@ -351,15 +434,19 @@ export function App({ python, bridgeScript }: Props) {
     if (footerPanel) {
       if (key.escape) {
         setFooterPanel(null)
+        dismissPendingLocalCommand()
         return
       }
       if (rawInput || key.return || key.backspace || key.delete || key.upArrow || key.downArrow) {
         setFooterPanel(null)
+        dismissPendingLocalCommand()
       }
     }
     if (mcpPanel) {
       if (key.escape) {
+        mcpPanelOpenRef.current = false
         setMcpPanel(null)
+        dismissPendingLocalCommand()
         return
       }
       if (key.upArrow) {
@@ -375,6 +462,7 @@ export function App({ python, bridgeScript }: Props) {
       if (key.escape) {
         modelPanelOpenRef.current = false
         setModelPanel(null)
+        dismissPendingLocalCommand()
         return
       }
       if (key.upArrow) {
@@ -401,6 +489,9 @@ export function App({ python, bridgeScript }: Props) {
       setSelector(decision.selector)
       if (!decision.selector && selector.mode === 'resume') {
         resumePendingRef.current = false
+      }
+      if (!decision.selector && !decision.command && decision.input === undefined) {
+        dismissPendingLocalCommand()
       }
       if (decision.command) {
         bridgeRef.current?.send(decision.command)

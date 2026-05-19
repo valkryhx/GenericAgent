@@ -66,6 +66,8 @@ export type BridgeEvent =
   | { type: 'assistant_delta'; taskId: number; text: string }
   | { type: 'assistant_done'; taskId: number; text: string }
   | { type: 'system'; text: string }
+  | { type: 'local_command_input'; text: string }
+  | { type: 'local_command_output'; text: string }
   | { type: 'clear' }
   | { type: 'resume_sessions'; sessions: ResumeSession[] }
   | { type: 'history_replace'; messages: HistoryMessage[] }
@@ -82,4 +84,5 @@ export type ChatMessage = {
   text: string
   done: boolean
   taskId?: number
+  localCommand?: 'input' | 'output'
 }

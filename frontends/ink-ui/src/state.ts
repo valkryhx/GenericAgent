@@ -32,6 +32,18 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       error: null,
     }
   }
+  if (event.type === 'local_command_input' || event.type === 'local_command_output') {
+    const kind = event.type === 'local_command_input' ? 'input' : 'output'
+    const prefix = kind === 'input' ? 'lc-in' : 'lc-out'
+    return {
+      ...state,
+      messages: [
+        ...state.messages,
+        { id: `${prefix}-${state.messages.length}`, role: 'system', text: event.text, done: true, localCommand: kind },
+      ],
+      error: null,
+    }
+  }
   if (event.type === 'clear') {
     return { ...state, messages: [], error: null }
   }
