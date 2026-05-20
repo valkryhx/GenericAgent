@@ -183,11 +183,11 @@ function FooterPanelView({ panel }: { panel: FooterPanel }) {
   )
 }
 
-function InputView({ input }: { input: string }) {
+function InputView({ input, showCursor }: { input: string; showCursor: boolean }) {
   return (
     <Text color="cyan">
       {inputPrompt(input)}
-      <Text inverse> </Text>
+      {showCursor && <Text inverse> </Text>}
     </Text>
   )
 }
@@ -349,6 +349,17 @@ export function App({ python, bridgeScript }: Props) {
   }, [state.status])
 
   useEffect(() => {
+    let pendingDeltas: { [taskId: string]: string } = {}
+    let throttleTimer: NodeJS.Timeout | null = null
+
+    function flushDeltas() {
+      if (Object.keys(pendingDeltas).length === 0) return
+      for (const [taskId, text] of Object.entries(pendingDeltas)) {
+        dispatch({ type: 'assistant_delta', taskId: Number(taskId), text })
+      }
+      pendingDeltas = {}
+    }
+
     function onEvent(event: BridgeEvent) {
       if (event.type === 'ready') {
         bridgeRef.current?.send({ type: 'skill_status' })
@@ -392,6 +403,7 @@ export function App({ python, bridgeScript }: Props) {
         setSelector(null)
         setFooterPanel(null)
         resumePendingRef.current = false
+        flushDeltas()
         dispatch(event)
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })
@@ -402,6 +414,7 @@ export function App({ python, bridgeScript }: Props) {
         const commandText = pendingLocalCommandRef.current
         setSelector(null)
         setInput(event.text)
+        flushDeltas()
         dispatch(event)
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })
@@ -413,13 +426,34 @@ export function App({ python, bridgeScript }: Props) {
         appendLocalCommandOutput(event.text)
         return
       }
+      if (event.type === 'assistant_delta') {
+        const taskIdStr = String(event.taskId)
+        pendingDeltas[taskIdStr] = (pendingDeltas[taskIdStr] || '') + event.text
+        if (!throttleTimer) {
+          throttleTimer = setTimeout(() => {
+            throttleTimer = null
+            flushDeltas()
+          }, 80)
+        }
+        return
+      }
+      if (event.type === 'assistant_done') {
+        const taskIdStr = String(event.taskId)
+        const cachedDelta = pendingDeltas[taskIdStr] || ''
+        delete pendingDeltas[taskIdStr]
+        dispatch({ type: 'assistant_done', taskId: event.taskId, text: cachedDelta + event.text })
+        return
+      }
       dispatch(event)
     }
 
     bridgeRef.current = startBridge(python, bridgeScript, onEvent, code => {
       dispatch({ type: 'error', code: 'bridge_exit', message: `bridge exited: ${code ?? 'signal'}` })
     })
-    return () => bridgeRef.current?.stop()
+    return () => {
+      bridgeRef.current?.stop()
+      if (throttleTimer) clearTimeout(throttleTimer)
+    }
   }, [bridgeScript, python])
 
   useInput((rawInput, key) => {
@@ -564,7 +598,7 @@ export function App({ python, bridgeScript }: Props) {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
     if (section === 'hint') return <Text key={section} color="gray">{inputHint}</Text>
     if (section === 'topDivider' || section === 'bottomDivider') return <Text key={section} color="gray">{inputDivider(dividerWidth)}</Text>
-    if (section === 'input') return <InputView key={section} input={input} />
+    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
