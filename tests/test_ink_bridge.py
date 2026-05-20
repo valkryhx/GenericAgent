@@ -282,6 +282,90 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(0, agent.llm_no)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
+    def test_compact_replaces_backend_history_and_clears_rewind_checkpoints(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "old context"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+        ]
+        bridge._rewind_snapshots[1] = {"backend_history": [{"role": "user", "content": "old"}]}
+
+        with patch("ink_bridge.compact_agent_context") as compact:
+            compact.return_value.ok = True
+            compact.return_value.summary = "summary text"
+            compact.return_value.original_messages = 2
+            compact.return_value.compacted_messages = 2
+            compact.return_value.message = "Compacted 2 messages into summary context."
+            bridge.compact("keep file names")
+
+        compact.assert_called_once()
+        self.assertEqual({}, bridge._rewind_snapshots)
+        self.assertEqual({"type": "status", "status": "running"}, events[-6])
+        self.assertEqual({"type": "activity", "label": "Compacting conversation"}, events[-5])
+        self.assertEqual(
+            {"type": "local_command_output", "text": "Compacted 2 messages into summary context."},
+            events[-4],
+        )
+        self.assertEqual(
+            {
+                "type": "history_replace",
+                "messages": [
+                    {"role": "system", "text": "Compacted 2 messages into summary context."},
+                ],
+            },
+            events[-3],
+        )
+        self.assertEqual({"type": "activity", "label": None}, events[-2])
+        self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
+    def test_compact_rejects_while_busy(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        bridge.submit("busy")
+
+        bridge.compact("")
+
+        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+
+    def test_manual_compact_failure_is_reported_as_local_command_output(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with patch("ink_bridge.compact_agent_context") as compact:
+            compact.return_value.ok = False
+            compact.return_value.message = "No conversation history to compact."
+            bridge.compact("")
+
+        self.assertEqual({"type": "status", "status": "running"}, events[-5])
+        self.assertEqual({"type": "activity", "label": "Compacting conversation"}, events[-4])
+        self.assertEqual(
+            {"type": "local_command_output", "text": "Compact failed: No conversation history to compact."},
+            events[-3],
+        )
+        self.assertEqual({"type": "activity", "label": None}, events[-2])
+        self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
+    def test_submit_stops_when_required_auto_compact_fails(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with (
+            patch("ink_bridge.should_auto_compact_agent", return_value=True),
+            patch("ink_bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = False
+            compact.return_value.message = "summary failed"
+            result = bridge.submit("large prompt")
+
+        self.assertEqual(-1, result)
+        self.assertEqual([], agent.prompts)
+        self.assertEqual({"type": "error", "code": "auto_compact_failed", "message": "summary failed"}, events[-1])
+
     def test_skill_status_emits_discovered_skill_metadata(self):
         agent = FakeAgent()
         events = []
@@ -395,6 +479,20 @@ class InkBridgeTest(unittest.TestCase):
 
         bridge.skill_status.assert_called_once_with()
         bridge.skill_invoke.assert_called_once_with("demo", "hello world")
+
+    def test_jsonl_loop_routes_compact_command(self):
+        stdin = io.StringIO(
+            json.dumps({"type": "compact", "instructions": "keep decisions"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+
+        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            run_jsonl_loop(stdin, stdout)
+
+        bridge.compact.assert_called_once_with("keep decisions")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(

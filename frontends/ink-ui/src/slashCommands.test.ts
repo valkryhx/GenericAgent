@@ -30,6 +30,10 @@ test('slashSuggestions includes mcp command', () => {
   assert.ok(slashSuggestions('/m').some(command => command.name === '/mcp'))
 })
 
+test('slashSuggestions includes compact command', () => {
+  assert.ok(slashSuggestions('/c').some(command => command.name === '/compact'))
+})
+
 test('slashSuggestions includes model commands', () => {
   assert.ok(slashSuggestions('/m').some(command => command.name === '/model'))
   assert.ok(slashSuggestions('/l').some(command => command.name === '/llm'))

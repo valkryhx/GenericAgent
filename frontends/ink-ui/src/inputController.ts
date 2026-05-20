@@ -46,6 +46,8 @@ function parseSlashSubmit(
     if (selector === '?' || selector.toLowerCase() === 'help') return { command: { type: 'model_status' } }
     return { command: { type: 'model_switch', selector } }
   }
+  const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (compact) return { command: { type: 'compact', instructions: compact[1]?.trim() ?? '' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/clear') return { action: { type: 'clear' } }
   if (trimmed === '/help') return { action: { type: 'help' } }

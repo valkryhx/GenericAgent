@@ -79,6 +79,14 @@ def default_agent_factory() -> Any:
 
 
 try:
+    from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent
+except Exception:  # pragma: no cover - compact core import failures are reported at call sites
+    compact_agent_context = None
+    replace_log_with_compact_history = None
+    should_auto_compact_agent = None
+
+
+try:
     from continue_cmd import (
         extract_ui_messages as continue_extract,
         list_sessions as continue_list,
@@ -116,6 +124,8 @@ class GenericAgentBridge:
             return -1
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return -1
+        if not self._auto_compact_if_needed(text):
             return -1
         self._task_seq += 1
         task_id = self._task_seq
@@ -276,6 +286,61 @@ class GenericAgentBridge:
         )
         visible = f"/{loaded.get('name')} {request}".rstrip()
         return self.submit(prompt, display_text=visible)
+
+    def compact(self, instructions: str = "") -> None:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return
+        if compact_agent_context is None:
+            self.emit({"type": "error", "code": "compact_unavailable", "message": "/compact is unavailable"})
+            return
+        self.emit({"type": "status", "status": "running"})
+        self.emit({"type": "activity", "label": "Compacting conversation"})
+        try:
+            with backend_output_redirect():
+                result = compact_agent_context(self.agent, instructions=str(instructions or ""))
+            if not result.ok:
+                self.emit({"type": "local_command_output", "text": f"Compact failed: {result.message}"})
+                return
+            self._replace_compact_log()
+            self._rewind_snapshots.clear()
+            text = result.message
+            self.emit({"type": "local_command_output", "text": text})
+            self.emit({"type": "history_replace", "messages": [
+                {"role": "system", "text": text},
+            ]})
+        finally:
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
+
+    def _auto_compact_if_needed(self, pending_text: str) -> bool:
+        if compact_agent_context is None or should_auto_compact_agent is None:
+            return True
+        try:
+            if not should_auto_compact_agent(self.agent, pending_text=pending_text):
+                return True
+            with backend_output_redirect():
+                result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
+            if result.ok:
+                self._replace_compact_log()
+                self._rewind_snapshots.clear()
+                self.emit({"type": "local_command_output", "text": "Auto " + result.message})
+                return True
+            else:
+                self.emit({"type": "error", "code": "auto_compact_failed", "message": result.message})
+                return False
+        except Exception as exc:
+            self.emit({"type": "error", "code": "auto_compact_failed", "message": str(exc)})
+            return False
+
+    def _replace_compact_log(self) -> None:
+        if replace_log_with_compact_history is None:
+            return
+        try:
+            log_path = getattr(self.agent, "log_path", None)
+            replace_log_with_compact_history(log_path, copy.deepcopy(self._backend_history()))
+        except Exception as exc:
+            self.emit({"type": "error", "code": "compact_log_failed", "message": str(exc)})
 
     def list_resume_sessions(self) -> None:
         if continue_list is None:
@@ -466,6 +531,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.skill_status()
         elif cmd_type == "skill_invoke":
             bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
+        elif cmd_type == "compact":
+            bridge.compact(str(command.get("instructions") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
             try:

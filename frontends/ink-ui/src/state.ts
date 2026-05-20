@@ -2,22 +2,27 @@ import type { BridgeEvent, ChatMessage } from './protocol.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
+  activityLabel: string | null
   messages: ChatMessage[]
   error: string | null
 }
 
 export const initialState: AppState = {
   status: 'connecting',
+  activityLabel: null,
   messages: [],
   error: null,
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
   if (event.type === 'ready') {
-    return { ...state, status: 'idle', error: null }
+    return { ...state, status: 'idle', activityLabel: null, error: null }
   }
   if (event.type === 'status') {
-    return { ...state, status: event.status, error: null }
+    return { ...state, status: event.status, activityLabel: event.status === 'idle' ? null : state.activityLabel, error: null }
+  }
+  if (event.type === 'activity') {
+    return { ...state, activityLabel: event.label, error: null }
   }
   if (event.type === 'error') {
     return { ...state, error: event.message }

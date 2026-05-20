@@ -41,6 +41,20 @@ test('applyBridgeEvent appends local command transcript messages without task id
   assert.equal(state.messages.some(message => message.taskId !== undefined), false)
 })
 
+test('applyBridgeEvent tracks compact activity while running and clears it when idle', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  state = applyBridgeEvent(state, { type: 'activity', label: 'Compacting conversation' })
+
+  assert.equal(state.status, 'running')
+  assert.equal(state.activityLabel, 'Compacting conversation')
+
+  state = applyBridgeEvent(state, { type: 'status', status: 'idle' })
+
+  assert.equal(state.status, 'idle')
+  assert.equal(state.activityLabel, null)
+})
+
 test('applyBridgeEvent replaces history after resume', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, {
@@ -54,6 +68,24 @@ test('applyBridgeEvent replaces history after resume', () => {
   assert.deepEqual(state.messages, [
     { id: 'h-0', role: 'user', text: 'old question', done: true },
     { id: 'h-1', role: 'assistant', text: 'old answer', done: true },
+  ])
+})
+
+test('applyBridgeEvent compact replacement keeps only compact result rows', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'local_command_input', text: '/compact' })
+  state = applyBridgeEvent(state, { type: 'local_command_output', text: 'Compacted 8 messages into summary context.' })
+  state = applyBridgeEvent(state, {
+    type: 'history_replace',
+    messages: [
+      { role: 'system', text: 'Compacted 8 messages into summary context.' },
+    ],
+  })
+  state = applyBridgeEvent(state, { type: 'local_command_input', text: '/compact' })
+
+  assert.deepEqual(state.messages.map(message => message.text), [
+    'Compacted 8 messages into summary context.',
+    '/compact',
   ])
 })
 

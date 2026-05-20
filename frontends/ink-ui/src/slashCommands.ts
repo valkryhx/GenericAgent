@@ -13,6 +13,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/mcp', description: 'Show and manage MCP servers' },
   { name: '/model', description: 'Show and switch AI models' },
   { name: '/llm', description: 'Alias for /model' },
+  { name: '/compact', description: 'Summarize and replace long conversation context' },
   { name: '/clear', description: 'Clear the visible transcript' },
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/resume', description: 'Pick a previous conversation' },

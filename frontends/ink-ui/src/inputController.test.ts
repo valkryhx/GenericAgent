@@ -135,6 +135,18 @@ test('handleInput parses model slash commands', () => {
   })
 })
 
+test('handleInput parses compact slash commands', () => {
+  const store = createPasteStore()
+  assert.deepEqual(handleInput('/compact', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'compact', instructions: '' },
+  })
+  assert.deepEqual(handleInput('/compact keep decisions', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'compact', instructions: 'keep decisions' },
+  })
+})
+
 test('handleInput parses known skill slash commands without using args as the skill name', () => {
   const store = createPasteStore()
 

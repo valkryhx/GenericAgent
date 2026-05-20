@@ -13,6 +13,7 @@ export type BridgeCommand =
   | { type: 'model_switch'; selector: string }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
+  | { type: 'compact'; instructions: string }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -62,6 +63,7 @@ export type SkillStatus = {
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
+  | { type: 'activity'; label: string | null }
   | { type: 'user'; taskId: number; text: string }
   | { type: 'assistant_delta'; taskId: number; text: string }
   | { type: 'assistant_done'; taskId: number; text: string }

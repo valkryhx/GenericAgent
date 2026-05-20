@@ -17,6 +17,7 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'mcp_disable') return `/mcp disable ${command.server}`
   if (command.type === 'model_status') return '/model ?'
   if (command.type === 'model_switch') return `/model ${command.selector}`
+  if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
   if (command.type === 'resume_session_index') return `/resume ${command.index}`
   if (command.type === 'rewind') return `/rewind ${command.taskId}`
   if (command.type === 'stop') return '/stop'

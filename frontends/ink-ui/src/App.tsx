@@ -206,6 +206,7 @@ function helpText(): string {
     '/resume, /continue - pick a previous conversation',
     '/resume N, /continue N - resume by index',
     '/rewind, /checkpoint - restore conversation to before a user message',
+    '/compact [instructions] - summarize and replace long conversation context',
     '/clear - clear display only',
     '/status - show current frontend status',
     '/model, /llm - show and switch AI models',
@@ -582,7 +583,7 @@ export function App({ python, bridgeScript }: Props) {
       <Box flexDirection="column" paddingX={1} minHeight={12} width={columns}>
         {shownMessages.length === 0 ? <Text color="gray">Ready.</Text> : shownMessages.map(message => <MessageView key={message.id} message={message} expandedTools={expandedTools} />)}
       </Box>
-      {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={runningLabel} /> : null}
+      {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : null}
       {inputSections.map(renderInputSection)}
     </Box>
   )
