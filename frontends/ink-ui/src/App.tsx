@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { Box, Text, useApp, useInput, useStdin, useStdout } from 'ink'
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { Box, Static, Text, useApp, useInput, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
@@ -7,14 +7,12 @@ import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
-  clampTranscriptScrollOffset,
   transcriptLines,
   type TranscriptLine,
-  visibleTranscriptLines,
   wrapTranscriptLines,
 } from './messageWindow.js'
 import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
-import type { BridgeEvent, ResumeSession } from './protocol.js'
+import type { BridgeEvent, ChatMessage, ResumeSession } from './protocol.js'
 import {
   loadingMcpPanel,
   mcpStatusColor,
@@ -45,8 +43,6 @@ import {
   localCommandResultOutput,
 } from './localCommandTranscript.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
-import { scrollTranscriptBy, transcriptScrollStep } from './transcriptScroll.js'
-import { mouseTrackingOff, mouseTrackingOn, parseMouseEvent } from './mouseWheel.js'
 
 type Props = {
   python: string
@@ -159,16 +155,11 @@ function FooterPanelView({ panel }: { panel: FooterPanel }) {
   )
 }
 
-function MessageViewport({ height, columns, lines }: {
-  height: number
-  columns: number
-  lines: TranscriptLine[]
-}) {
+function StaticMessage({ message, columns, expandedTools }: { message: ChatMessage; columns: number; expandedTools: boolean }) {
+  const lines = wrapTranscriptLines(transcriptLines([message], { expandedTools }), Math.max(1, columns - 2))
   return (
-    <Box flexDirection="column" paddingX={1} height={height} width={columns} overflow="hidden">
-      {lines.length === 0 ? <Text color="gray">Ready.</Text> : lines.map(line => (
-        <TranscriptLineView key={line.id} line={line} />
-      ))}
+    <Box flexDirection="column" paddingX={1} width={columns}>
+      {lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
     </Box>
   )
 }
@@ -228,7 +219,6 @@ function helpText(): string {
 
 export function App({ python, bridgeScript }: Props) {
   const { exit } = useApp()
-  const { stdin } = useStdin()
   const { stdout } = useStdout()
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
@@ -240,7 +230,6 @@ export function App({ python, bridgeScript }: Props) {
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
-  const [messageScrollOffset, setMessageScrollOffset] = useState(0)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [now, setNow] = useState(() => Date.now())
@@ -275,7 +264,6 @@ export function App({ python, bridgeScript }: Props) {
     const localCommandText = commandTextForLocalDecision(decision)
     if (decision.action?.type === 'clear') {
       setFooterPanel(null)
-      setMessageScrollOffset(0)
       pendingLocalCommandRef.current = null
       dispatch({ type: 'clear' })
       dispatch({ type: 'local_command_input', text: localCommandText ?? '/clear' })
@@ -291,10 +279,8 @@ export function App({ python, bridgeScript }: Props) {
       const command = decision.command
       if (command.type === 'submit') {
         setInputHistory(history => recordInput(history, command.text))
-        setMessageScrollOffset(0)
       } else if (command.type === 'skill_invoke') {
         setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
-        setMessageScrollOffset(0)
       }
       if (command.type === 'stop' && localCommandText) {
         appendLocalCommandOutput('Stop requested')
@@ -345,13 +331,6 @@ export function App({ python, bridgeScript }: Props) {
     stdout.write('\u001B[?25l')
     return () => {
       stdout.write('\u001B[?25h')
-    }
-  }, [stdout])
-
-  useEffect(() => {
-    stdout.write(mouseTrackingOn())
-    return () => {
-      stdout.write(mouseTrackingOff())
     }
   }, [stdout])
 
@@ -480,9 +459,6 @@ export function App({ python, bridgeScript }: Props) {
   }, [bridgeScript, python])
 
   useInput((rawInput, key) => {
-    if (parseMouseEvent(rawInput)) {
-      return
-    }
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
       bridgeRef.current?.send({ type: 'shutdown' })
       exit()
@@ -618,55 +594,15 @@ export function App({ python, bridgeScript }: Props) {
     hasSlashSuggestions: slashItems.length > 0,
     panelRows: slashItems.length > 0 ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1 : undefined,
   })
-  const transcriptTextColumns = Math.max(1, metrics.columns - 2)
-  const allTranscriptLines = useMemo(() => {
-    return wrapTranscriptLines(transcriptLines(state.messages, { expandedTools }), transcriptTextColumns)
-  }, [state.messages, expandedTools, transcriptTextColumns])
-  const visibleTranscript = visibleTranscriptLines(allTranscriptLines, {
-    maxRows: metrics.messageRows,
-    scrollOffset: messageScrollOffset,
-  })
-  const shownTranscriptLines = visibleTranscript.lines
-  const totalTranscriptRows = visibleTranscript.totalRows
-  const clampedMessageScrollOffset = visibleTranscript.scrollOffset
-
-  useEffect(() => {
-    setMessageScrollOffset(offset => clampTranscriptScrollOffset(offset, totalTranscriptRows, metrics.messageRows))
-  }, [totalTranscriptRows, metrics.messageRows])
-
-  const handleTranscriptMouse = useCallback((raw: string) => {
-    const mouse = parseMouseEvent(raw)
-    if (!mouse || mouse.kind !== 'wheel') return
-    const canScrollTranscript = !footerPanel && !mcpPanel && !modelPanel && !selector && slashItems.length === 0
-    if (!canScrollTranscript) return
-
-    const delta = mouse.direction === 'up' ? transcriptScrollStep(metrics.messageRows) : -transcriptScrollStep(metrics.messageRows)
-    setMessageScrollOffset(offset => clampTranscriptScrollOffset(scrollTranscriptBy(offset, delta), totalTranscriptRows, metrics.messageRows))
-  }, [
-    footerPanel,
-    mcpPanel,
-    metrics.columns,
-    metrics.headerRows,
-    metrics.messageRows,
-    modelPanel,
-    selector,
-    slashItems.length,
-    totalTranscriptRows,
-  ])
-
-  useEffect(() => {
-    const handleData = (data: Buffer | string) => {
-      handleTranscriptMouse(Buffer.isBuffer(data) ? data.toString('utf8') : data)
-    }
-    stdin.on('data', handleData)
-    return () => {
-      stdin.off('data', handleData)
-    }
-  }, [stdin, handleTranscriptMouse])
+  const staticMessages = state.messages.filter(message => message.done)
+  const liveLines = useMemo(() => {
+    const liveMessages = state.messages.filter(message => !message.done)
+    return wrapTranscriptLines(transcriptLines(liveMessages, { expandedTools }), Math.max(1, metrics.columns - 2))
+  }, [state.messages, expandedTools, metrics.columns])
 
   const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? `Running: keep typing, Enter waits - Mouse wheel scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Alt+Enter newline - Mouse wheel scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    ? `Running: keep typing, Enter waits - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
+    : `Enter send - Alt+Enter newline - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const inputSections = inputChromeSections({
     hasError: Boolean(state.error),
@@ -687,20 +623,24 @@ export function App({ python, bridgeScript }: Props) {
     return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null
   }
   return (
-    <Box flexDirection="column" width={metrics.columns} height={metrics.rows} overflow="hidden">
+    <>
+      <Static items={staticMessages}>
+        {message => <StaticMessage key={message.id} message={message} columns={metrics.columns} expandedTools={expandedTools} />}
+      </Static>
+      <Box flexDirection="column" width={metrics.columns}>
       <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
         <Text bold wrap="truncate-end">GenericAgent Ink</Text>
         <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
       </Box>
-      <MessageViewport
-        height={metrics.messageRows}
-        columns={metrics.columns}
-        lines={shownTranscriptLines}
-      />
-      <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-        {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : null}
-        {inputSections.map(renderInputSection)}
-      </BottomChrome>
-    </Box>
+        <Box flexDirection="column" paddingX={1} width={metrics.columns}>
+          {staticMessages.length === 0 && liveLines.length === 0 ? <Text color="gray">Ready.</Text> : null}
+          {liveLines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+        </Box>
+        <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
+          {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : null}
+          {inputSections.map(renderInputSection)}
+        </BottomChrome>
+      </Box>
+    </>
   )
 }
