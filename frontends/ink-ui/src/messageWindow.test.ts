@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { assistantDisplayText, tailLines, visibleMessages } from './messageWindow.js'
+import {
+  assistantDisplayText,
+  clampTranscriptScrollOffset,
+  tailLines,
+  transcriptLines,
+  visibleMessages,
+  visibleMessagesForViewport,
+  visibleTranscriptLines,
+  wrapTranscriptLines,
+} from './messageWindow.js'
 import type { ChatMessage } from './protocol.js'
 
 test('visibleMessages keeps only the latest messages', () => {
@@ -31,4 +40,115 @@ test('assistantDisplayText keeps collapsed output compact', () => {
   const text = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join('\n')
 
   assert.equal(assistantDisplayText(text, { expanded: false, done: false }).split('\n').length, 19)
+})
+
+test('visibleMessagesForViewport keeps the latest messages within a row budget', () => {
+  const messages: ChatMessage[] = Array.from({ length: 6 }, (_, index) => ({
+    id: String(index + 1),
+    role: 'user',
+    text: `message ${index + 1}`,
+    done: true,
+  }))
+
+  assert.deepEqual(visibleMessagesForViewport(messages, { maxRows: 3, expandedTools: false }).map(message => message.id), ['4', '5', '6'])
+})
+
+test('visibleMessagesForViewport always keeps the active streaming assistant tail', () => {
+  const messages: ChatMessage[] = [
+    { id: '1', role: 'user', text: 'older', done: true },
+    { id: '2', role: 'assistant', text: Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n'), done: false },
+  ]
+
+  const visible = visibleMessagesForViewport(messages, { maxRows: 4, expandedTools: false })
+  assert.equal(visible.at(-1)?.id, '2')
+  assert.equal(visible.length, 1)
+})
+
+test('visibleMessagesForViewport can scroll upward from the sticky bottom', () => {
+  const messages: ChatMessage[] = Array.from({ length: 6 }, (_, index) => ({
+    id: String(index + 1),
+    role: 'user',
+    text: `message ${index + 1}`,
+    done: true,
+  }))
+
+  assert.deepEqual(visibleMessagesForViewport(messages, { maxRows: 3, expandedTools: false, scrollOffset: 2 }).map(message => message.id), ['2', '3', '4'])
+})
+
+test('visibleMessagesForViewport clamps large scroll offsets to the oldest window', () => {
+  const messages: ChatMessage[] = Array.from({ length: 6 }, (_, index) => ({
+    id: String(index + 1),
+    role: 'user',
+    text: `message ${index + 1}`,
+    done: true,
+  }))
+
+  assert.deepEqual(visibleMessagesForViewport(messages, { maxRows: 3, expandedTools: false, scrollOffset: 99 }).map(message => message.id), ['1', '2', '3'])
+})
+
+test('transcriptLines keeps full assistant output without vertical omission markers', () => {
+  const messages: ChatMessage[] = [
+    {
+      id: 'a-1',
+      role: 'assistant',
+      text: Array.from({ length: 45 }, (_, index) => `line ${index + 1}`).join('\n'),
+      done: true,
+    },
+  ]
+
+  const lines = transcriptLines(messages, { expandedTools: false })
+  const text = lines.map(line => line.text).join('\n')
+
+  assert.equal(text.includes('omitted'), false)
+  assert.ok(text.includes('line 1'))
+  assert.ok(text.includes('line 45'))
+})
+
+test('visibleTranscriptLines scrolls by rendered lines from the sticky bottom', () => {
+  const lines = Array.from({ length: 10 }, (_, index) => ({
+    id: `line-${index + 1}`,
+    text: `line ${index + 1}`,
+  }))
+
+  assert.deepEqual(visibleTranscriptLines(lines, { maxRows: 4, scrollOffset: 0 }).lines.map(line => line.text), [
+    'line 7',
+    'line 8',
+    'line 9',
+    'line 10',
+  ])
+  assert.deepEqual(visibleTranscriptLines(lines, { maxRows: 4, scrollOffset: 3 }).lines.map(line => line.text), [
+    'line 4',
+    'line 5',
+    'line 6',
+    'line 7',
+  ])
+  assert.deepEqual(visibleTranscriptLines(lines, { maxRows: 4, scrollOffset: 99 }).lines.map(line => line.text), [
+    'line 1',
+    'line 2',
+    'line 3',
+    'line 4',
+  ])
+})
+
+test('clampTranscriptScrollOffset keeps scrollbar state inside rendered line bounds', () => {
+  assert.equal(clampTranscriptScrollOffset(0, 10, 4), 0)
+  assert.equal(clampTranscriptScrollOffset(3, 10, 4), 3)
+  assert.equal(clampTranscriptScrollOffset(99, 10, 4), 6)
+  assert.equal(clampTranscriptScrollOffset(-5, 10, 4), 0)
+})
+
+test('wrapTranscriptLines wraps long physical lines without adding ellipsis', () => {
+  const lines = [
+    {
+      id: 'long-0',
+      text: 'https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-dev-abcdefghijklmnopqrstuvwxyz',
+    },
+  ]
+
+  const wrapped = wrapTranscriptLines(lines, 20)
+
+  assert.ok(wrapped.length > 1)
+  assert.equal(wrapped.some(line => line.text.includes('...')), false)
+  assert.equal(wrapped.map(line => line.text).join(''), lines[0]!.text)
+  assert.ok(wrapped.every(line => line.text.length <= 20))
 })

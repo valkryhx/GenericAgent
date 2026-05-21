@@ -124,3 +124,11 @@ reflect/*
 # Node frontends
 frontends/ink-ui/node_modules/
 frontends/ink-ui/dist/
+dev_ideas/
+1/1.md
+调研/
+tests/test_llmcore_url.py
+docs/superpowers/plans/2026-05-14-codex-llm-distill-refactor.md
+docs/superpowers/plans/2026-05-18-mcp-persistent-manager.md
+屏幕截图 2026-05-13 122835.png
+屏幕截图 2026-05-20 154551.png

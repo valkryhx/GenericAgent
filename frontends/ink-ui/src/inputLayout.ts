@@ -1,4 +1,4 @@
-export type InputChromeSection = 'error' | 'hint' | 'topDivider' | 'input' | 'panel' | 'slashSuggestions' | 'bottomDivider'
+export type InputChromeSection = 'error' | 'hint' | 'input' | 'panel' | 'slashSuggestions'
 
 export function inputChromeSections({
   hasError,
@@ -12,9 +12,7 @@ export function inputChromeSections({
   return [
     ...(hasError ? ['error' as const] : []),
     'hint',
-    'topDivider',
     'input',
-    'bottomDivider',
     ...(hasPanel ? ['panel' as const] : hasSlashSuggestions ? ['slashSuggestions' as const] : []),
   ]
 }
