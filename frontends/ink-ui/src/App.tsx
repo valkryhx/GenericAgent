@@ -51,6 +51,7 @@ import {
 } from './localCommandTranscript.js'
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
+import { cleanupTerminalForExit } from './terminalCleanup.js'
 
 type Props = {
   python: string
@@ -267,6 +268,11 @@ export function App({ python, bridgeScript }: Props) {
     pendingLocalCommandRef.current = null
   }
 
+  const exitCleanly = () => {
+    cleanupTerminalForExit(stdout)
+    exit()
+  }
+
   const dismissPendingLocalCommand = () => {
     const commandText = pendingLocalCommandRef.current
     if (!commandText) return
@@ -282,7 +288,7 @@ export function App({ python, bridgeScript }: Props) {
       dispatch({ type: 'clear' })
       dispatch({ type: 'local_command_input', text: localCommandText ?? '/clear' })
       dispatch({ type: 'local_command_output', text: clearLocalCommandOutput() })
-      if (decision.exit) exit()
+      if (decision.exit) exitCleanly()
       return
     }
     if (localCommandText) {
@@ -325,7 +331,7 @@ export function App({ python, bridgeScript }: Props) {
       appendLocalCommandOutput(localCommandResultOutput('/status', state.status, state.messages.length))
     }
     if (decision.exit) {
-      exit()
+      exitCleanly()
     }
   }
 
@@ -480,7 +486,7 @@ export function App({ python, bridgeScript }: Props) {
   useInput((rawInput, key) => {
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
       bridgeRef.current?.send({ type: 'shutdown' })
-      exit()
+      exitCleanly()
       return
     }
     if (key.ctrl && (rawInput === 'o' || rawInput === '\u000f')) {
