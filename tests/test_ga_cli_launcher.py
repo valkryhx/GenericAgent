@@ -1,4 +1,5 @@
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
 from ga_cli import cli
@@ -28,6 +29,24 @@ class GaCliLauncherTest(unittest.TestCase):
                 cli.launch_frontend(["npm", "--version"])
 
         self.assertEqual("npm.cmd", popen_calls[0][0])
+
+    def test_launch_frontend_banner_uses_plain_text_without_emoji(self):
+        class Proc:
+            def wait(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+        output = StringIO()
+
+        with patch("ga_cli.cli.subprocess.Popen", return_value=Proc()):
+            with patch("sys.stdout", output):
+                cli.launch_frontend(["python", "--version"])
+
+        banner = output.getvalue()
+        self.assertIn("Launching ", banner)
+        self.assertNotIn("\U0001f680", banner)
 
     def test_main_without_command_launches_default_ink_frontend(self):
         launched = []

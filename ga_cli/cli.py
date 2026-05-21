@@ -42,7 +42,7 @@ def launch_frontend(cmd_parts, args=None):
     if args:
         full_cmd.extend(args)
 
-    print(f"🚀 {' '.join(full_cmd)}")
+    print(f"Launching {' '.join(full_cmd)}")
     sys.stdout.flush()
     os.chdir(PROJECT_DIR)
     proc = subprocess.Popen(full_cmd)
@@ -148,22 +148,22 @@ def cmd_status():
     running = [p for p in psutil.process_iter(['pid', 'name', 'cmdline'])
                if p.info['cmdline'] and any('agentmain' in c for c in p.info['cmdline'])]
     if running:
-        print(f"🟢 运行中: {len(running)} 个进程")
+        print(f"[OK] 运行中: {len(running)} 个进程")
         for p in running:
             print(f"   PID {p.info['pid']} — {' '.join(p.info['cmdline'][:3])}")
     else:
-        print("⚫ GenericAgent 进程未运行")
+        print("[IDLE] GenericAgent 进程未运行")
 
 
 def cmd_update():
     """git pull + pip install"""
     os.chdir(PROJECT_DIR)
-    print("🔄 git pull...")
+    print("[UPDATE] git pull...")
     r = subprocess.run(["git", "pull"], capture_output=True, text=True)
     print(r.stdout)
     if r.returncode != 0:
         print(r.stderr)
-    print("📦 pip install...")
+    print("[UPDATE] pip install...")
     r2 = subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."],
                         capture_output=True, text=True)
     print(r2.stdout[-500:] if r2.stdout else "")
@@ -222,7 +222,7 @@ def main():
         return
 
     if cmd not in COMMANDS:
-        print(f"❌ 未知命令: {cmd}")
+        print(f"[ERROR] 未知命令: {cmd}")
         print(f"   使用 'ga list' 查看可用命令")
         sys.exit(1)
 
@@ -230,7 +230,7 @@ def main():
 
     # 内置命令走内部逻辑
     if info.get("internal"):
-        print(f"❌ 命令 {cmd} 没有配置启动命令")
+        print(f"[ERROR] 命令 {cmd} 没有配置启动命令")
         sys.exit(1)
 
     extra = list(args.args) + unknown
