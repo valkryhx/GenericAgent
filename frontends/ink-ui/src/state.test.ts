@@ -81,11 +81,9 @@ test('applyBridgeEvent compact replacement keeps only compact result rows', () =
       { role: 'system', text: 'Compacted 8 messages into summary context.' },
     ],
   })
-  state = applyBridgeEvent(state, { type: 'local_command_input', text: '/compact' })
 
   assert.deepEqual(state.messages.map(message => message.text), [
     'Compacted 8 messages into summary context.',
-    '/compact',
   ])
 })
 

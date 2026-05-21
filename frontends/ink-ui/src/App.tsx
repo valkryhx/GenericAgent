@@ -49,6 +49,7 @@ import {
   dismissedLocalCommandOutput,
   localCommandResultOutput,
 } from './localCommandTranscript.js'
+import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
 
 type Props = {
@@ -423,6 +424,11 @@ export function App({ python, bridgeScript }: Props) {
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })
         }
+        return
+      }
+      if (event.type === 'local_command_output') {
+        pendingLocalCommandRef.current = pendingLocalCommandAfterBridgeEvent(pendingLocalCommandRef.current, event)
+        dispatch(event)
         return
       }
       if (event.type === 'rewind_done') {
