@@ -27,13 +27,10 @@ test('handleInput keeps text when Enter is pressed while running', () => {
   assert.deepEqual(decision, { value: 'next prompt' })
 })
 
-test('handleInput inserts newlines with modified Enter shortcuts', () => {
+test('handleInput inserts newlines with Claude-style Alt+Enter shortcut', () => {
   const store = createPasteStore()
 
   assert.deepEqual(handleInput('hello', '', { meta: true, return: true }, 'idle', store), {
-    value: 'hello\n',
-  })
-  assert.deepEqual(handleInput('hello', '', { shift: true, return: true }, 'idle', store), {
     value: 'hello\n',
   })
 })
@@ -42,6 +39,14 @@ test('handleInput inserts newline for Alt+Enter raw carriage return', () => {
   const store = createPasteStore()
 
   assert.deepEqual(handleInput('hello', '\r', {}, 'idle', store), {
+    value: 'hello\n',
+  })
+})
+
+test('handleInput inserts newline for Claude-style backslash Enter', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('hello\\', '', { return: true }, 'idle', store), {
     value: 'hello\n',
   })
 })

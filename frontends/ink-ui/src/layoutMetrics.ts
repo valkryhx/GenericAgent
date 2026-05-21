@@ -6,6 +6,7 @@ export type LayoutMetricInput = {
   hasPanel: boolean
   hasSlashSuggestions: boolean
   panelRows?: number
+  inputRows?: number
 }
 
 export type LayoutMetrics = {
@@ -28,7 +29,8 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const rows = terminalRows(input.rows)
   const columns = terminalColumns(input.columns)
   const headerRows = 1
-  const baseBottomRows = 4
+  const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
+  const baseBottomRows = 3 + inputRows
   const activityRows = input.hasActivity ? 1 : 0
   const errorRows = input.hasError ? 1 : 0
   const requestedPanelRows = input.hasPanel || input.hasSlashSuggestions

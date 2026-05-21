@@ -88,6 +88,9 @@ export function handleInput(
     return { value: value.slice(0, -1) }
   }
   if (key.return) {
+    if (value.endsWith('\\')) {
+      return { value: `${value.slice(0, -1)}\n` }
+    }
     const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
     const expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
     if (!expanded) return { value }

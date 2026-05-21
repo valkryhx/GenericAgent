@@ -25,6 +25,21 @@ test('computeLayoutMetrics reserves fixed bottom rows for hint and framed input'
   })
 })
 
+test('computeLayoutMetrics reserves extra bottom rows for multiline input', () => {
+  const metrics = computeLayoutMetrics({
+    rows: 24,
+    columns: 80,
+    hasActivity: false,
+    hasError: false,
+    hasPanel: false,
+    hasSlashSuggestions: false,
+    inputRows: 3,
+  })
+
+  assert.equal(metrics.bottomRows, 6)
+  assert.equal(metrics.messageRows, 17)
+})
+
 test('computeLayoutMetrics accounts for running activity and capped panels', () => {
   const metrics = computeLayoutMetrics({
     rows: 20,

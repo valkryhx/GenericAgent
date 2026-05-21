@@ -39,7 +39,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { inputFrameBorderStyle, inputPrompt } from './promptChrome.js'
+import { inputFrameBorderStyle, inputPromptLines, inputVisibleRowCount } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -186,10 +186,11 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, showCursor }: { input: string; showCursor: boolean }) {
+function InputView({ input, showCursor, visibleRows }: { input: string; showCursor: boolean; visibleRows: number }) {
+  const lines = inputPromptLines(input, visibleRows)
   return (
     <Box
-      flexDirection="row"
+      flexDirection="column"
       alignItems="flex-start"
       borderStyle={inputFrameBorderStyle}
       borderColor="gray"
@@ -198,13 +199,16 @@ function InputView({ input, showCursor }: { input: string; showCursor: boolean }
       borderTop
       borderBottom
       width="100%"
+      height={visibleRows + 2}
       paddingLeft={1}
       overflow="hidden"
     >
-      <Text color="cyan" wrap="truncate-end">
-        {inputPrompt(input)}
-        {showCursor && <Text inverse> </Text>}
-      </Text>
+      {lines.map((line, index) => (
+        <Text key={index} color="cyan" wrap="truncate-end">
+          {line}
+          {showCursor && index === lines.length - 1 ? <Text inverse> </Text> : null}
+        </Text>
+      ))}
     </Box>
   )
 }
@@ -610,6 +614,7 @@ export function App({ python, bridgeScript }: Props) {
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
   const activePanel = mcpPanel || modelPanel || selector || footerPanel
+  const inputRows = inputVisibleRowCount(input)
   const metrics = computeLayoutMetrics({
     rows: stdout.rows,
     columns,
@@ -617,6 +622,7 @@ export function App({ python, bridgeScript }: Props) {
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
+    inputRows,
     panelRows: modelPanel
       ? modelPanelRows(modelPanel)
       : selector
@@ -633,7 +639,7 @@ export function App({ python, bridgeScript }: Props) {
 
   const inputHint = state.status === 'running' || state.status === 'stopping'
     ? `Running: keep typing, Enter waits - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Alt+Enter newline - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    : `Enter send - Alt+Enter newline - \\ then Enter newline - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const inputSections = inputChromeSections({
     hasError: Boolean(state.error),
@@ -643,7 +649,7 @@ export function App({ python, bridgeScript }: Props) {
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
     if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} />
+    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
