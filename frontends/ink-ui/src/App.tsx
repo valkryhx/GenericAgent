@@ -39,7 +39,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { inputPrompt } from './promptChrome.js'
+import { inputFrameBorderStyle, inputPrompt } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -184,17 +184,18 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, showCursor, columns }: { input: string; showCursor: boolean; columns: number }) {
+function InputView({ input, showCursor }: { input: string; showCursor: boolean }) {
   return (
     <Box
       flexDirection="row"
       alignItems="flex-start"
-      borderStyle="round"
+      borderStyle={inputFrameBorderStyle}
       borderColor="gray"
       borderLeft={false}
       borderRight={false}
+      borderTop
       borderBottom
-      width={columns}
+      width="100%"
       paddingLeft={1}
       overflow="hidden"
     >
@@ -630,7 +631,7 @@ export function App({ python, bridgeScript }: Props) {
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
     if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.columns} />
+    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
