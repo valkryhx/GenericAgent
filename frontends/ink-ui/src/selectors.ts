@@ -17,6 +17,11 @@ export type SelectorDecision = {
   input?: string
 }
 
+export type VisibleSelectorRow = {
+  index: number
+  selected: boolean
+}
+
 export type SelectorKey = {
   upArrow?: boolean
   downArrow?: boolean
@@ -37,6 +42,27 @@ export function moveSelection(selector: SelectorState, delta: number): SelectorS
   if (size <= 0) return selector
   const selected = Math.max(0, Math.min(size - 1, selector.selected + delta))
   return { ...selector, selected } as SelectorState
+}
+
+export function selectorSize(selector: SelectorState): number {
+  return selector.mode === 'resume' ? selector.sessions.length : selector.options.length
+}
+
+export function visibleSelectorRows(selector: SelectorState, maxRows: number): VisibleSelectorRow[] {
+  const size = selectorSize(selector)
+  if (size <= 0) return []
+  const limit = Math.max(1, Math.min(size, Math.floor(maxRows)))
+  const selected = Math.max(0, Math.min(size - 1, selector.selected))
+  let start = selected - Math.floor(limit / 2)
+  start = Math.max(0, Math.min(size - limit, start))
+  return Array.from({ length: limit }, (_, offset) => {
+    const index = start + offset
+    return { index, selected: index === selected }
+  })
+}
+
+export function newestResumeSessions(sessions: ResumeSession[]): ResumeSession[] {
+  return [...sessions].sort((left, right) => right.mtime - left.mtime)
 }
 
 export function handleSelectorInput(selector: SelectorState, key: SelectorKey): SelectorDecision {

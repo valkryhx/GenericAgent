@@ -11,7 +11,14 @@ import {
   type TranscriptLine,
   wrapTranscriptLines,
 } from './messageWindow.js'
-import { handleSelectorInput, rewindOptions, type SelectorState } from './selectors.js'
+import {
+  handleSelectorInput,
+  newestResumeSessions,
+  rewindOptions,
+  selectorSize,
+  visibleSelectorRows,
+  type SelectorState,
+} from './selectors.js'
 import type { BridgeEvent, ChatMessage, ResumeSession } from './protocol.js'
 import {
   loadingMcpPanel,
@@ -22,7 +29,7 @@ import {
   panelFromMcpStatus,
   type McpPanelState,
 } from './mcpPanel.js'
-import { moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
+import { modelPanelRows, moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
 import {
   formatSlashSuggestionLine,
   moveSlashSelection,
@@ -60,24 +67,29 @@ function TranscriptLineView({ line }: { line: TranscriptLine }) {
 function formatResumeSession(session: ResumeSession): string {
   const minutes = Math.max(0, Math.round((Date.now() - session.mtime * 1000) / 60000))
   const age = minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`
+  const when = new Date(session.mtime * 1000)
+  const stamp = `${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')} ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
   const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
-  return `${age} - ${session.rounds} turns - ${preview}`
+  return `${stamp} - ${age} - ${session.rounds} turns - ${preview}`
 }
 
 function SelectorView({ selector }: { selector: SelectorState }) {
-  const rows = selector.mode === 'resume'
-    ? selector.sessions.map(session => formatResumeSession(session))
-    : selector.options.map(option => option.text.replace(/\s+/g, ' ').slice(0, 90) || '(empty)')
+  const rows = visibleSelectorRows(selector, 8)
   const title = selector.mode === 'resume' ? 'Resume Conversation' : 'Rewind Conversation'
   const empty = selector.mode === 'resume' && selector.loading ? 'Loading conversations...' : selector.mode === 'resume' ? 'No resumable sessions found.' : 'Nothing to rewind to yet.'
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text bold>{title}</Text>
-      {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map((row, index) => (
-        <Text key={`${selector.mode}-${index}`} color={index === selector.selected ? 'cyan' : undefined}>
-          {index === selector.selected ? '> ' : '  '}{row}
+      {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map(row => {
+        const text = selector.mode === 'resume'
+          ? formatResumeSession(selector.sessions[row.index]!)
+          : selector.options[row.index]!.text.replace(/\s+/g, ' ').slice(0, 90) || '(empty)'
+        return (
+        <Text key={`${selector.mode}-${row.index}`} color={row.selected ? 'cyan' : undefined} inverse={row.selected}>
+          {row.selected ? '> ' : '  '}{text}
         </Text>
-      ))}
+        )
+      })}
       <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
     </Box>
   )
@@ -129,7 +141,7 @@ function McpPanelView({ panel }: { panel: McpPanelState }) {
 
 function ModelPanelView({ panel }: { panel: ModelPanelState }) {
   return (
-    <Box flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
       <Text bold>Models</Text>
       {panel.models.length === 0 ? <Text color="gray">No models configured.</Text> : null}
       {panel.models.map((model, index) => (
@@ -397,7 +409,7 @@ export function App({ python, bridgeScript }: Props) {
       if (event.type === 'resume_sessions') {
         if (!resumePendingRef.current) return
         resumePendingRef.current = false
-        setSelector({ mode: 'resume', selected: 0, sessions: event.sessions })
+        setSelector({ mode: 'resume', selected: 0, sessions: newestResumeSessions(event.sessions) })
         return
       }
       if (event.type === 'history_replace') {
@@ -592,7 +604,13 @@ export function App({ python, bridgeScript }: Props) {
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
-    panelRows: slashItems.length > 0 ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1 : undefined,
+    panelRows: modelPanel
+      ? modelPanelRows(modelPanel)
+      : selector
+        ? Math.min(selectorSize(selector), 8) + 2
+      : slashItems.length > 0
+        ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
+        : undefined,
   })
   const staticMessages = state.messages.filter(message => message.done)
   const liveLines = useMemo(() => {

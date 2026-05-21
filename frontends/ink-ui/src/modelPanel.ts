@@ -15,6 +15,10 @@ export function moveModelSelection(selected: number, delta: number, total: numbe
   return Math.max(0, Math.min(total - 1, selected + delta))
 }
 
+export function modelPanelRows(panel: ModelPanelState): number {
+  return panel.models.length + 2
+}
+
 export function shouldApplyModelStatus(requested: boolean, panelOpen: boolean): boolean {
   return requested || panelOpen
 }

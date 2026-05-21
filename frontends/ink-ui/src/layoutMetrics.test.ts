@@ -36,8 +36,23 @@ test('computeLayoutMetrics accounts for running activity and capped panels', () 
     panelRows: 20,
   })
 
-  assert.equal(metrics.bottomRows, 14)
-  assert.equal(metrics.messageRows, 5)
+  assert.equal(metrics.bottomRows, 18)
+  assert.equal(metrics.messageRows, 1)
+})
+
+test('computeLayoutMetrics allows tall panels when the terminal has room', () => {
+  const metrics = computeLayoutMetrics({
+    rows: 24,
+    columns: 120,
+    hasActivity: false,
+    hasError: false,
+    hasPanel: true,
+    hasSlashSuggestions: false,
+    panelRows: 11,
+  })
+
+  assert.equal(metrics.bottomRows, 15)
+  assert.equal(metrics.messageRows, 8)
 })
 
 test('computeLayoutMetrics never returns negative message rows on tiny terminals', () => {
