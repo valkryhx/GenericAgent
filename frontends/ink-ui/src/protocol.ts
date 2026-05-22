@@ -60,10 +60,17 @@ export type SkillStatus = {
   path: string
 }
 
+export type TokenUsage = {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
   | { type: 'activity'; label: string | null }
+  | ({ type: 'token_usage'; taskId?: number } & TokenUsage)
   | { type: 'user'; taskId: number; text: string }
   | { type: 'assistant_delta'; taskId: number; text: string }
   | { type: 'assistant_done'; taskId: number; text: string }

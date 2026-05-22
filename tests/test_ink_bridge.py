@@ -22,6 +22,7 @@ from ink_bridge import GenericAgentBridge, encode_event, make_stdout_emitter, ru
 class FakeBackend:
     def __init__(self):
         self.history = []
+        self.last_usage_tokens = None
 
 
 class FakeClient:
@@ -108,6 +109,25 @@ class InkBridgeTest(unittest.TestCase):
                 {"type": "assistant_done", "taskId": 1, "text": "hello"},
                 {"type": "status", "status": "idle", "taskId": 1},
             ],
+            events,
+        )
+
+    def test_submit_emits_token_usage_when_backend_usage_changes(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.submit("hello")
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 11,
+            "output_tokens": 17,
+            "total_tokens": 28,
+        }
+        agent.queues[0].put({"done": "hello"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertIn(
+            {"type": "token_usage", "taskId": 1, "inputTokens": 11, "outputTokens": 17, "totalTokens": 28},
             events,
         )
 

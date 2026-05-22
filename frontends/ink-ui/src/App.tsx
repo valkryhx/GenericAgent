@@ -20,7 +20,7 @@ import {
   visibleSelectorRows,
   type SelectorState,
 } from './selectors.js'
-import type { BridgeEvent, ResumeSession } from './protocol.js'
+import type { BridgeEvent, ResumeSession, TokenUsage } from './protocol.js'
 import {
   loadingMcpPanel,
   mcpStatusColor,
@@ -41,7 +41,7 @@ import {
   type SlashCommand,
 } from './slashCommands.js'
 import { fixedInputLine, inputFrameBorderStyle, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
-import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
+import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
 import {
@@ -242,10 +242,10 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { 
   )
 }
 
-function ActivityView({ seconds, label }: { seconds: number; label: string }) {
+function ActivityView({ seconds, label, tokenUsage }: { seconds: number; label: string; tokenUsage: TokenUsage | null }) {
   return (
     <Box>
-      <Text color="yellow">{formatRunningStatus(seconds, label)}</Text>
+      <Text color="yellow">{formatRunningStatus(seconds, label, tokenUsage)}</Text>
     </Box>
   )
 }
@@ -290,6 +290,7 @@ export function App({ python, bridgeScript }: Props) {
   const [expandedTools, setExpandedTools] = useState(false)
   const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
+  const [lastActivitySeconds, setLastActivitySeconds] = useState(0)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
@@ -408,6 +409,7 @@ export function App({ python, bridgeScript }: Props) {
     if (state.status === 'running' || state.status === 'stopping') {
       setRunningStartedAt(value => {
         if (value !== null) return value
+        setLastActivitySeconds(0)
         setRunningLabel(pickRunningVerb())
         return Date.now()
       })
@@ -415,10 +417,13 @@ export function App({ python, bridgeScript }: Props) {
       const timer = setInterval(() => setNow(Date.now()), 1000)
       return () => clearInterval(timer)
     }
+    if (runningStartedAt !== null) {
+      setLastActivitySeconds(Math.max(0, Math.floor((Date.now() - runningStartedAt) / 1000)))
+    }
     setRunningStartedAt(null)
     setNow(Date.now())
     return undefined
-  }, [state.status])
+  }, [runningStartedAt, state.status])
 
   useEffect(() => {
     let pendingDeltas: { [taskId: string]: string } = {}
@@ -701,10 +706,11 @@ export function App({ python, bridgeScript }: Props) {
   const columns = Math.max(1, stdout.columns || 80)
   const activePanel = mcpPanel || modelPanel || selector || footerPanel
   const inputRows = inputVisibleRowCount(input)
+  const hasActivity = shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const metrics = computeLayoutMetrics({
     rows: stdout.rows,
     columns,
-    hasActivity: (state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null,
+    hasActivity,
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
@@ -742,6 +748,7 @@ export function App({ python, bridgeScript }: Props) {
     ? `Running: keep typing, Enter waits - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
     : `Enter send - Alt+Enter newline - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
+  const activitySeconds = runningStartedAt === null ? lastActivitySeconds : runningSeconds
   const inputSections = inputChromeSections({
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
@@ -775,7 +782,7 @@ export function App({ python, bridgeScript }: Props) {
         scrollOffset={visibleTranscript.scrollOffset}
       />
       <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-        {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : <ActivityPlaceholder />}
+        {hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} /> : <ActivityPlaceholder />}
         {inputSections.map(renderInputSection)}
       </BottomChrome>
     </Box>

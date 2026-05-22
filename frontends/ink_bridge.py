@@ -445,6 +445,20 @@ class GenericAgentBridge:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
         return getattr(backend, "history", [])
 
+    def _backend_token_usage(self) -> dict[str, int] | None:
+        backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
+        usage = getattr(backend, "last_usage_tokens", None)
+        if not isinstance(usage, dict):
+            return None
+        try:
+            return {
+                "inputTokens": int(usage.get("input_tokens") or 0),
+                "outputTokens": int(usage.get("output_tokens") or 0),
+                "totalTokens": int(usage.get("total_tokens") or 0),
+            }
+        except Exception:
+            return None
+
     def _resume_ui_messages_with_checkpoints(self, path: str) -> list[dict[str, Any]]:
         backend_history = copy.deepcopy(self._backend_history())
         messages: list[dict[str, Any]] = []
@@ -480,12 +494,22 @@ class GenericAgentBridge:
         return self._consume_thread is not None and self._consume_thread.is_alive()
 
     def _consume_display_queue(self, task_id: int, display_queue: queue.Queue) -> None:
+        last_usage = None
+        def emit_usage_if_changed() -> None:
+            nonlocal last_usage
+            usage = self._backend_token_usage()
+            if usage is None or usage == last_usage:
+                return
+            last_usage = usage
+            self.emit({"type": "token_usage", "taskId": task_id, **usage})
         try:
             while True:
                 item = display_queue.get()
+                emit_usage_if_changed()
                 if "next" in item:
                     self.emit({"type": "assistant_delta", "taskId": task_id, "text": str(item.get("next") or "")})
                 if "done" in item:
+                    emit_usage_if_changed()
                     self.emit({"type": "assistant_done", "taskId": task_id, "text": str(item.get("done") or "")})
                     self.emit({"type": "status", "status": "idle", "taskId": task_id})
                     return

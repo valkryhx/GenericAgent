@@ -124,15 +124,15 @@ def auto_make_url(base, path):
     if b.endswith(p): return b
     return f"{b}/{p}" if re.search(r'/v\d+(/|$)', b) else f"{b}/v1/{p}"
 
-def _parse_claude_json(data):
+def _parse_claude_json(data, sess=None):
     content_blocks = data.get("content", [])
-    _record_usage(data.get("usage", {}), "messages")
+    _record_usage(data.get("usage", {}), "messages", sess)
     for b in content_blocks:
         if b.get("type") == "text": yield b.get("text", "")
         elif b.get("type") == "thinking": yield ""
     return content_blocks
 
-def _parse_claude_sse(resp_lines):
+def _parse_claude_sse(resp_lines, sess=None):
     """Parse Anthropic SSE stream. Yields text chunks, returns list[content_block]."""
     content_blocks = []; current_block = None; tool_json_buf = ""
     stop_reason = None; got_message_stop = False; warn = None
@@ -149,7 +149,7 @@ def _parse_claude_sse(resp_lines):
         evt_type = evt.get("type", "")
         if evt_type == "message_start":
             usage = evt.get("message", {}).get("usage", {})
-            _record_usage(usage, "messages")
+            _record_usage(usage, "messages", sess)
         elif evt_type == "content_block_start":
             block = evt.get("content_block", {})
             if block.get("type") == "text": current_block = {"type": "text", "text": ""}
@@ -180,6 +180,7 @@ def _parse_claude_sse(resp_lines):
             delta = evt.get("delta", {})
             stop_reason = delta.get("stop_reason", stop_reason)
             out_usage = evt.get("usage", {})
+            _record_usage(out_usage, "messages", sess)
             out_tokens = out_usage.get("output_tokens", 0)
             if out_tokens: print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
         elif evt_type == "message_stop": got_message_stop = True
@@ -215,7 +216,7 @@ def _try_parse_tool_args(raw):
         return parsed
     return [{"_raw": raw}]
 
-def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
+def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
     """Parse OpenAI SSE stream (chat_completions or responses API).
     Yields text chunks, returns list[content_block].
     content_block: {type:'text', text:str} | {type:'tool_use', id:str, name:str, input:dict}
@@ -257,7 +258,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 break
             elif etype == "response.completed":
                 usage = evt.get("response", {}).get("usage", {})
-                _record_usage(usage, api_mode)
+                _record_usage(usage, api_mode, sess)
                 break
         blocks = []
         if content_text: blocks.append({"type": "text", "text": content_text})
@@ -296,7 +297,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 if tc.get("function", {}).get("arguments"): tc_buf[idx]["args"] += tc["function"]["arguments"]
                 if tc.get("id") and not tc_buf[idx]["id"]: tc_buf[idx]["id"] = tc["id"]
             usage = evt.get("usage")
-            if usage: _record_usage(usage, api_mode)
+            if usage: _record_usage(usage, api_mode, sess)
         blocks = []
         if reasoning_text: blocks.append({"type": "thinking", "thinking": reasoning_text})
         if content_text: blocks.append({"type": "text", "text": content_text})
@@ -309,8 +310,43 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 blocks.append({"type": "tool_use", "id": bid, "name": tc["name"], "input": inp})
         return blocks
 
-def _record_usage(usage, api_mode):
+def _int_usage(value):
+    try: return max(0, int(value or 0))
+    except Exception: return 0
+
+def normalize_usage_tokens(usage, api_mode):
+    if not usage: return None
+    if api_mode == 'responses':
+        inp = _int_usage(usage.get("input_tokens"))
+        out = _int_usage(usage.get("output_tokens"))
+        total = _int_usage(usage.get("total_tokens")) or inp + out
+    elif api_mode == 'chat_completions':
+        inp = _int_usage(usage.get("prompt_tokens"))
+        out = _int_usage(usage.get("completion_tokens"))
+        total = _int_usage(usage.get("total_tokens")) or inp + out
+    elif api_mode == 'messages':
+        inp = _int_usage(usage.get("input_tokens"))
+        out = _int_usage(usage.get("output_tokens"))
+        total = inp + out + _int_usage(usage.get("cache_creation_input_tokens")) + _int_usage(usage.get("cache_read_input_tokens"))
+    else:
+        return None
+    if inp == 0 and out == 0 and total == 0: return None
+    return {"input_tokens": inp, "output_tokens": out, "total_tokens": total}
+
+def _record_usage(usage, api_mode, sess=None):
     if not usage: return
+    normalized = normalize_usage_tokens(usage, api_mode)
+    if normalized and sess is not None:
+        try:
+            if api_mode == 'messages':
+                old = getattr(sess, "last_usage_tokens", None) or {}
+                inp = normalized["input_tokens"] or _int_usage(old.get("input_tokens"))
+                out = normalized["output_tokens"] or _int_usage(old.get("output_tokens"))
+                total = normalized["total_tokens"]
+                if total < inp + out: total = inp + out
+                normalized = {"input_tokens": inp, "output_tokens": out, "total_tokens": total}
+            sess.last_usage_tokens = normalized
+        except Exception: pass
     if api_mode == 'responses':
         cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
         inp = usage.get("input_tokens", 0)
@@ -323,10 +359,10 @@ def _record_usage(usage, api_mode):
         ci, cr, inp = usage.get("cache_creation_input_tokens", 0), usage.get("cache_read_input_tokens", 0), usage.get("input_tokens", 0)
         print(f"[Cache] input={inp} creation={ci} read={cr}")
     
-def _parse_openai_json(data, api_mode="chat_completions"):
+def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     blocks = []
     if api_mode == "responses":
-        _record_usage(data.get("usage") or {}, api_mode)
+        _record_usage(data.get("usage") or {}, api_mode, sess)
         for item in (data.get("output") or []):
             if item.get("type") == "message":
                 for p in (item.get("content") or []):
@@ -338,7 +374,7 @@ def _parse_openai_json(data, api_mode="chat_completions"):
                 blocks.append({"type": "tool_use", "id": item.get("call_id", item.get("id", "")),
                                "name": item.get("name", ""), "input": args})
     else:
-        _record_usage(data.get("usage") or {}, api_mode)
+        _record_usage(data.get("usage") or {}, api_mode, sess)
         msg = (data.get("choices") or [{}])[0].get("message", {})
         reasoning = msg.get("reasoning_content", "")
         if reasoning:
@@ -480,7 +516,7 @@ def _openai_stream(sess, messages):
     tools = getattr(sess, 'tools', None)
     if tools: payload["tools"] = _prepare_oai_tools(tools, api_mode)
     if sess.service_tier: payload["service_tier"] = sess.service_tier
-    parse_fn = (lambda r: _parse_openai_sse(r.iter_lines(), api_mode)) if sess.stream else (lambda r: _parse_openai_json(r.json(), api_mode))
+    parse_fn = (lambda r: _parse_openai_sse(r.iter_lines(), api_mode, sess)) if sess.stream else (lambda r: _parse_openai_json(r.json(), api_mode, sess))
     return (yield from _stream_with_retry(sess, url, headers, payload, parse_fn))
         
 def _prepare_oai_tools(tools, api_mode="chat_completions"):
@@ -609,6 +645,7 @@ class BaseSession:
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens')
+        self.last_usage_tokens = None
         self._init_cancel_state()
     def _init_cancel_state(self):
         self._cancel_event = threading.Event()
@@ -693,7 +730,7 @@ class ClaudeSession(BaseSession):
         self._apply_claude_thinking(payload)
         if self.system: payload["system"] = [{"type": "text", "text": self.system, "cache_control": {"type": "persistent"}}]
         url = auto_make_url(self.api_base, "messages")
-        parse_fn = (lambda r: _parse_claude_sse(r.iter_lines())) if self.stream else (lambda r: _parse_claude_json(r.json()))
+        parse_fn = (lambda r: _parse_claude_sse(r.iter_lines(), self)) if self.stream else (lambda r: _parse_claude_json(r.json(), self))
         return (yield from _stream_with_retry(self, url, headers, payload, parse_fn))
     def make_messages(self, raw_list):
         msgs = _drop_unsigned_thinking([{"role": m['role'], "content": list(m['content'])} for m in raw_list])
@@ -764,7 +801,7 @@ class NativeClaudeSession(BaseSession):
             messages[idx] = {**messages[idx], "content": list(messages[idx]["content"])}
             messages[idx]["content"][-1] = dict(messages[idx]["content"][-1], cache_control={"type": "ephemeral"})
         url = auto_make_url(self.api_base, "messages") + '?beta=true'
-        parse_fn = (lambda r: _parse_claude_sse(r.iter_lines())) if self.stream else (lambda r: _parse_claude_json(r.json()))
+        parse_fn = (lambda r: _parse_claude_sse(r.iter_lines(), self)) if self.stream else (lambda r: _parse_claude_json(r.json(), self))
         return (yield from _stream_with_retry(self, url, headers, payload, parse_fn))
 
     def ask(self, msg):

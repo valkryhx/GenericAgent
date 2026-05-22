@@ -1,8 +1,9 @@
-import type { BridgeEvent, ChatMessage } from './protocol.js'
+import type { BridgeEvent, ChatMessage, TokenUsage } from './protocol.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
   activityLabel: string | null
+  tokenUsage: TokenUsage | null
   messages: ChatMessage[]
   error: string | null
 }
@@ -10,19 +11,23 @@ export type AppState = {
 export const initialState: AppState = {
   status: 'connecting',
   activityLabel: null,
+  tokenUsage: null,
   messages: [],
   error: null,
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
   if (event.type === 'ready') {
-    return { ...state, status: 'idle', activityLabel: null, error: null }
+    return { ...state, status: 'idle', activityLabel: null, tokenUsage: null, error: null }
   }
   if (event.type === 'status') {
-    return { ...state, status: event.status, activityLabel: event.status === 'idle' ? null : state.activityLabel, error: null }
+    return { ...state, status: event.status, activityLabel: event.status === 'idle' ? null : state.activityLabel, tokenUsage: event.status === 'running' ? null : state.tokenUsage, error: null }
   }
   if (event.type === 'activity') {
     return { ...state, activityLabel: event.label, error: null }
+  }
+  if (event.type === 'token_usage') {
+    return { ...state, tokenUsage: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.totalTokens }, error: null }
   }
   if (event.type === 'error') {
     return { ...state, error: event.message }
