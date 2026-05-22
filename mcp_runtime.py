@@ -306,8 +306,13 @@ class McpManager:
             log_name = f"{normalize_mcp_name(state.name)}.stderr.log"
             stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
             transport.transport.log_file = stderr_log
-        entered = Client(transport, name=f"ga-mcp-{state.name}", timeout=timeout, init_timeout=timeout)
-        client = await entered.__aenter__()
+        try:
+            entered = _make_fastmcp_client(Client, transport, state.name, timeout)
+            client = await entered.__aenter__()
+        except Exception:
+            if stderr_log is not None:
+                stderr_log.close()
+            raise
         with self.lock:
             state.entered = entered
             state.client = client
@@ -487,6 +492,15 @@ def _default_timeout(value: Optional[float], env_name: str = "GA_MCP_DISCOVERY_T
         return fallback
 
 
+def _make_fastmcp_client(Client, transport, server_name: str, timeout: float):
+    try:
+        return Client(transport, name=f"ga-mcp-{server_name}", timeout=timeout, init_timeout=timeout)
+    except TypeError as e:
+        if "unexpected keyword argument 'name'" not in str(e):
+            raise
+        return Client(transport, timeout=timeout, init_timeout=timeout)
+
+
 def _config_signature(cfg: McpConfig, include_unavailable: bool, timeout: float) -> tuple:
     file_sig = None
     if cfg.path:
@@ -576,7 +590,7 @@ async def _mcp_client(single_config: dict[str, Any], server_name: str, timeout: 
         stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
         transport.transport.log_file = stderr_log
     try:
-        async with Client(transport, name=f"ga-mcp-{server_name}", timeout=timeout, init_timeout=timeout) as client:
+        async with _make_fastmcp_client(Client, transport, server_name, timeout) as client:
             yield client
     finally:
         if stderr_log is not None:
