@@ -105,6 +105,29 @@ test('transcriptLines keeps full assistant output without vertical omission mark
   assert.ok(text.includes('line 45'))
 })
 
+
+test('transcriptLines renders assistant markdown as styled parts', () => {
+  const lines = transcriptLines([
+    { id: 'a1', role: 'assistant', text: 'Use **bold** and `code`.', done: true },
+  ], { expandedTools: false })
+
+  assert.equal(lines[0]!.text, '✻ Use bold and code.')
+  assert.equal(lines[0]!.parts?.some(part => part.text === 'bold' && part.bold), true)
+  assert.equal(lines[0]!.parts?.some(part => part.text === 'code' && part.color === 'cyan'), true)
+})
+
+test('wrapTranscriptLines preserves styled parts across wrapped rows', () => {
+  const lines = transcriptLines([
+    { id: 'a1', role: 'assistant', text: '**abcdef**', done: true },
+  ], { expandedTools: false })
+
+  const wrapped = wrapTranscriptLines(lines, 5)
+
+  assert.equal(wrapped.map(line => line.text).join('|'), '✻ abc|def| ')
+  assert.equal(wrapped[0]!.parts?.some(part => part.bold), true)
+  assert.equal(wrapped[1]!.parts?.some(part => part.bold), true)
+})
+
 test('visibleTranscriptLines scrolls by rendered lines from the sticky bottom', () => {
   const lines = Array.from({ length: 10 }, (_, index) => ({
     id: `line-${index + 1}`,

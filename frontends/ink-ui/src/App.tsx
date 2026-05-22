@@ -72,13 +72,31 @@ type Props = {
 }
 
 function TranscriptLineView({ line }: { line: TranscriptLine }) {
+  if (line.parts?.length) {
+    return (
+      <Text color={line.color} backgroundColor={line.backgroundColor}>
+        {line.parts.map((part, index) => (
+          <Text
+            key={index}
+            color={part.color ?? line.color}
+            backgroundColor={part.backgroundColor ?? line.backgroundColor}
+            bold={part.bold}
+            italic={part.italic}
+            underline={part.underline}
+            dimColor={part.dimColor}
+          >
+            {part.text}
+          </Text>
+        ))}
+      </Text>
+    )
+  }
   return (
     <Text color={line.color} backgroundColor={line.backgroundColor}>
       {line.text}
     </Text>
   )
 }
-
 function formatResumeSession(session: ResumeSession): string {
   const minutes = Math.max(0, Math.round((Date.now() - session.mtime * 1000) / 60000))
   const age = minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`
@@ -87,7 +105,6 @@ function formatResumeSession(session: ResumeSession): string {
   const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
   return `${stamp} - ${age} - ${session.rounds} turns - ${preview}`
 }
-
 function SelectorView({ selector }: { selector: SelectorState }) {
   const rows = visibleSelectorRows(selector, 8)
   const title = selector.mode === 'resume' ? 'Resume Conversation' : 'Rewind Conversation'

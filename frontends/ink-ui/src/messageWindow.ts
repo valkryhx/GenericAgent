@@ -1,10 +1,16 @@
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
+import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import stringWidth from 'string-width'
+
+export type TranscriptPart = MarkdownPart & {
+  backgroundColor?: string
+}
 
 export type TranscriptLine = {
   id: string
   text: string
+  parts?: TranscriptPart[]
   color?: string
   backgroundColor?: string
 }
@@ -93,14 +99,7 @@ export function wrapTranscriptLines(lines: TranscriptLine[], columns: number): T
   const wrapped: TranscriptLine[] = []
 
   for (const line of lines) {
-    const chunks = wrapText(line.text, width)
-    chunks.forEach((chunk, index) => {
-      wrapped.push({
-        ...line,
-        id: index === 0 ? line.id : `${line.id}-wrap-${index}`,
-        text: chunk,
-      })
-    })
+    wrapped.push(...wrapStyledLine(line, width))
   }
 
   return wrapped
@@ -161,10 +160,13 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
   }
 
   const body = formatAssistantText(message.text, { expanded: expandedTools }) || ' '
-  splitDisplayLines(body).forEach((line, index) => {
+  const markdownLines = renderMarkdownLines(body)
+  markdownLines.forEach((line, index) => {
+    const prefix = index === 0 ? '✻ ' : '  '
     rows.push({
       id: `${message.id}-${index}`,
-      text: index === 0 ? `✻ ${line}` : `  ${line}`,
+      text: `${prefix}${line.text}`,
+      parts: [{ text: prefix }, ...line.parts],
     })
   })
   rows.push(blankLine(`${message.id}-blank`))
@@ -192,24 +194,52 @@ function splitDisplayLines(text: string): string[] {
   return lines.length === 0 ? [' '] : lines.map(line => line || ' ')
 }
 
-function wrapText(text: string, width: number): string[] {
-  if (stringWidth(text) <= width) return [text]
-  const chunks: string[] = []
-  let chunk = ''
-  let chunkWidth = 0
+function lineParts(line: TranscriptLine): TranscriptPart[] {
+  return line.parts ?? [{ text: line.text, color: line.color, backgroundColor: line.backgroundColor }]
+}
 
-  for (const char of text) {
-    const charWidth = Math.max(1, stringWidth(char))
-    if (chunk && chunkWidth + charWidth > width) {
-      chunks.push(chunk)
-      chunk = ''
-      chunkWidth = 0
-    }
-    chunk += char
-    chunkWidth += charWidth
+function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
+  if (stringWidth(line.text) <= width) return [line]
+  const wrapped: TranscriptLine[] = []
+  let currentText = ''
+  let currentWidth = 0
+  let currentParts: TranscriptPart[] = []
+
+  const flush = () => {
+    wrapped.push({
+      ...line,
+      id: wrapped.length === 0 ? line.id : `${line.id}-wrap-${wrapped.length}`,
+      text: currentText || ' ',
+      parts: currentParts.length > 0 ? currentParts : [{ text: ' ' }],
+    })
+    currentText = ''
+    currentWidth = 0
+    currentParts = []
   }
-  if (chunk) chunks.push(chunk)
-  return chunks.length === 0 ? [' '] : chunks
+
+  for (const part of lineParts(line)) {
+    for (const char of part.text) {
+      const charWidth = Math.max(1, stringWidth(char))
+      if (currentText && currentWidth + charWidth > width) flush()
+      currentText += char
+      currentWidth += charWidth
+      const last = currentParts[currentParts.length - 1]
+      const sameStyle = last
+        && last.color === part.color
+        && last.backgroundColor === part.backgroundColor
+        && last.bold === part.bold
+        && last.italic === part.italic
+        && last.underline === part.underline
+        && last.dimColor === part.dimColor
+      if (sameStyle) {
+        last.text += char
+      } else {
+        currentParts.push({ ...part, text: char })
+      }
+    }
+  }
+  if (currentText || currentParts.length === 0) flush()
+  return wrapped
 }
 
 function blankLine(id: string): TranscriptLine {

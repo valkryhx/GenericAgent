@@ -44,7 +44,7 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
       pushLine(lines, inlineParts(token.tokens ?? [], style))
       return
     case 'code':
-      token.text.split('\n').forEach(line => {
+      token.text.split('\n').forEach((line: string) => {
         pushLine(lines, [{ text: `  ${line || ' '}`, color: 'gray' }])
       })
       return
@@ -60,7 +60,7 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
       }
       return
     case 'list':
-      token.items.forEach((item, index) => {
+      token.items.forEach((item: { tokens?: Token[] }, index: number) => {
         const marker = token.ordered ? `${token.start + index}. ` : '- '
         const parts = inlineParts(flatListItemTokens(item.tokens ?? []), style)
         pushLine(lines, [{ text: marker }, ...parts])
