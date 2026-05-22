@@ -8,7 +8,7 @@ test('terminalRows uses real narrow heights without forcing a tall minimum', () 
   assert.equal(terminalRows(undefined), 24)
 })
 
-test('computeLayoutMetrics reserves fixed bottom rows for hint and framed input', () => {
+test('computeLayoutMetrics reserves fixed bottom rows for activity, hint and framed input', () => {
   assert.deepEqual(computeLayoutMetrics({
     rows: 24,
     columns: 80,
@@ -20,9 +20,31 @@ test('computeLayoutMetrics reserves fixed bottom rows for hint and framed input'
     rows: 24,
     columns: 80,
     headerRows: 1,
-    bottomRows: 4,
-    messageRows: 19,
+    bottomRows: 5,
+    messageRows: 18,
   })
+})
+
+test('computeLayoutMetrics does not change bottom height when activity toggles', () => {
+  const idle = computeLayoutMetrics({
+    rows: 24,
+    columns: 80,
+    hasActivity: false,
+    hasError: false,
+    hasPanel: false,
+    hasSlashSuggestions: false,
+  })
+  const running = computeLayoutMetrics({
+    rows: 24,
+    columns: 80,
+    hasActivity: true,
+    hasError: false,
+    hasPanel: false,
+    hasSlashSuggestions: false,
+  })
+
+  assert.equal(idle.bottomRows, running.bottomRows)
+  assert.equal(idle.messageRows, running.messageRows)
 })
 
 test('computeLayoutMetrics reserves extra bottom rows for multiline input', () => {
@@ -36,8 +58,8 @@ test('computeLayoutMetrics reserves extra bottom rows for multiline input', () =
     inputRows: 3,
   })
 
-  assert.equal(metrics.bottomRows, 6)
-  assert.equal(metrics.messageRows, 17)
+  assert.equal(metrics.bottomRows, 7)
+  assert.equal(metrics.messageRows, 16)
 })
 
 test('computeLayoutMetrics accounts for running activity and capped panels', () => {
@@ -66,8 +88,8 @@ test('computeLayoutMetrics allows tall panels when the terminal has room', () =>
     panelRows: 11,
   })
 
-  assert.equal(metrics.bottomRows, 15)
-  assert.equal(metrics.messageRows, 8)
+  assert.equal(metrics.bottomRows, 16)
+  assert.equal(metrics.messageRows, 7)
 })
 
 test('computeLayoutMetrics never returns negative message rows on tiny terminals', () => {

@@ -123,6 +123,10 @@ export function visibleTranscriptLines(
   }
 }
 
+export function liveTranscriptViewportLines(lines: TranscriptLine[], maxRows: number): TranscriptLine[] {
+  return visibleTranscriptLines(lines, { maxRows, scrollOffset: 0 }).lines
+}
+
 export function clampTranscriptScrollOffset(offset: number, totalRows: number, maxRows: number): number {
   const maxScrollOffset = Math.max(0, Math.floor(totalRows) - Math.max(1, Math.floor(maxRows)))
   return Math.min(maxScrollOffset, Math.max(0, Math.floor(offset)))

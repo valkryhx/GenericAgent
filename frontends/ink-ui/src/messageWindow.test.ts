@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   assistantDisplayText,
   clampTranscriptScrollOffset,
+  liveTranscriptViewportLines,
   tailLines,
   transcriptLines,
   visibleMessages,
@@ -128,6 +129,31 @@ test('visibleTranscriptLines scrolls by rendered lines from the sticky bottom', 
     'line 3',
     'line 4',
   ])
+})
+
+test('liveTranscriptViewportLines caps streaming transcript rows to the viewport height', () => {
+  const lines = [
+    { id: '1', text: 'one' },
+    { id: '2', text: 'two' },
+    { id: '3', text: 'three' },
+    { id: '4', text: 'four' },
+  ]
+
+  assert.deepEqual(liveTranscriptViewportLines(lines, 2).map(line => line.text), ['three', 'four'])
+})
+
+test('liveTranscriptViewportLines keeps completed and streaming transcript in one fixed window', () => {
+  const messages: ChatMessage[] = [
+    { id: 'u-1', role: 'user', text: 'first prompt', done: true },
+    { id: 'a-1', role: 'assistant', text: 'first answer', done: true },
+    { id: 'u-2', role: 'user', text: 'second prompt', done: true },
+    { id: 'a-2', role: 'assistant', text: 'streaming answer', done: false },
+  ]
+
+  const lines = transcriptLines(messages, { expandedTools: false })
+  const viewport = liveTranscriptViewportLines(lines, 4).map(line => line.text)
+
+  assert.deepEqual(viewport, ['> second prompt', ' ', '✻ streaming answer', ' '])
 })
 
 test('clampTranscriptScrollOffset keeps scrollbar state inside rendered line bounds', () => {

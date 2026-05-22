@@ -7,6 +7,7 @@ import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
+  liveTranscriptViewportLines,
   transcriptLines,
   type TranscriptLine,
   wrapTranscriptLines,
@@ -39,7 +40,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { inputFrameBorderStyle, inputPromptLines, inputVisibleRowCount } from './promptChrome.js'
+import { inputFrameBorderStyle, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -51,7 +52,9 @@ import {
 } from './localCommandTranscript.js'
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
-import { cleanupTerminalForExit } from './terminalCleanup.js'
+import { cleanupTerminalForExit, enterMainScreenTerminalSequence } from './terminalCleanup.js'
+import { planMessageViewport } from './messageViewportPlan.js'
+import { splitStaticAndActiveMessages } from './messagePartition.js'
 
 type Props = {
   python: string
@@ -178,6 +181,27 @@ function StaticMessage({ message, columns, expandedTools }: { message: ChatMessa
   )
 }
 
+function MessageViewport({ height, columns, lines, ready }: {
+  height: number
+  columns: number
+  lines: TranscriptLine[]
+  ready: boolean
+}) {
+  return (
+    <Box flexDirection="column" paddingX={1} height={height} width={columns} overflow="hidden">
+      {ready ? <Text color="gray">Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+    </Box>
+  )
+}
+
+function ReadyViewport({ columns }: { columns: number }) {
+  return (
+    <Box flexDirection="column" paddingX={1} width={columns}>
+      <Text color="gray">Ready.</Text>
+    </Box>
+  )
+}
+
 function BottomChrome({ children, columns, height }: { children: React.ReactNode; columns: number; height: number }) {
   return (
     <Box flexDirection="column" flexShrink={0} width={columns} height={height} overflow="hidden">
@@ -205,8 +229,7 @@ function InputView({ input, showCursor, visibleRows }: { input: string; showCurs
     >
       {lines.map((line, index) => (
         <Text key={index} color="cyan" wrap="truncate-end">
-          {line}
-          {showCursor && index === lines.length - 1 ? <Text inverse> </Text> : null}
+          {renderInputLine(line, showCursor && index === lines.length - 1)}
         </Text>
       ))}
     </Box>
@@ -217,6 +240,14 @@ function ActivityView({ seconds, label }: { seconds: number; label: string }) {
   return (
     <Box>
       <Text color="yellow">{formatRunningStatus(seconds, label)}</Text>
+    </Box>
+  )
+}
+
+function ActivityPlaceholder() {
+  return (
+    <Box height={1}>
+      <Text> </Text>
     </Box>
   )
 }
@@ -352,9 +383,9 @@ export function App({ python, bridgeScript }: Props) {
   }, [modelPanel])
 
   useEffect(() => {
-    stdout.write('\u001B[?25l')
+    stdout.write(enterMainScreenTerminalSequence)
     return () => {
-      stdout.write('\u001B[?25h')
+      cleanupTerminalForExit(stdout)
     }
   }, [stdout])
 
@@ -631,15 +662,20 @@ export function App({ python, bridgeScript }: Props) {
         ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
         : undefined,
   })
-  const staticMessages = state.messages.filter(message => message.done)
-  const liveLines = useMemo(() => {
-    const liveMessages = state.messages.filter(message => !message.done)
-    return wrapTranscriptLines(transcriptLines(liveMessages, { expandedTools }), Math.max(1, metrics.columns - 2))
-  }, [state.messages, expandedTools, metrics.columns])
+  const { staticMessages, activeMessages } = useMemo(() => splitStaticAndActiveMessages(state.messages), [state.messages])
+  const activeLines = useMemo(() => {
+    const lines = wrapTranscriptLines(transcriptLines(activeMessages, { expandedTools }), Math.max(1, metrics.columns - 2))
+    return liveTranscriptViewportLines(lines, metrics.messageRows)
+  }, [activeMessages, expandedTools, metrics.columns, metrics.messageRows])
+  const messageViewportPlan = planMessageViewport({
+    hasStaticMessages: staticMessages.length > 0,
+    liveLineCount: activeLines.length,
+    messageRows: metrics.messageRows,
+  })
 
   const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? `Running: keep typing, Enter waits - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Alt+Enter newline - \\ then Enter newline - Native terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    ? `Running: keep typing, Enter waits - Terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
+    : `Enter send - Alt+Enter newline - Terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const inputSections = inputChromeSections({
     hasError: Boolean(state.error),
@@ -665,16 +701,21 @@ export function App({ python, bridgeScript }: Props) {
         {message => <StaticMessage key={message.id} message={message} columns={metrics.columns} expandedTools={expandedTools} />}
       </Static>
       <Box flexDirection="column" width={metrics.columns}>
-      <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
-        <Text bold wrap="truncate-end">GenericAgent Ink</Text>
-        <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
-      </Box>
-        <Box flexDirection="column" paddingX={1} width={metrics.columns}>
-          {staticMessages.length === 0 && liveLines.length === 0 ? <Text color="gray">Ready.</Text> : null}
-          {liveLines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+        <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
+          <Text bold wrap="truncate-end">GenericAgent Ink</Text>
+          <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
         </Box>
+        {messageViewportPlan.kind === 'ready' ? <ReadyViewport columns={metrics.columns} /> : null}
+        {messageViewportPlan.kind === 'live' ? (
+          <MessageViewport
+            height={messageViewportPlan.height}
+            columns={metrics.columns}
+            lines={activeLines}
+            ready={false}
+          />
+        ) : null}
         <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-          {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : null}
+          {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>
       </Box>

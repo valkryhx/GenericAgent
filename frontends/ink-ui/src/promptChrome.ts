@@ -22,6 +22,10 @@ export function inputPromptLines(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS
   return rows.slice(start).map((line, index) => `${start + index === 0 ? '> ' : '  '}${line}`)
 }
 
+export function renderInputLine(line: string, _showCursor: boolean): string {
+  return line
+}
+
 export function inputVisibleRowCount(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS): number {
   return Math.min(input.split('\n').length, Math.max(1, Math.floor(maxRows)))
 }

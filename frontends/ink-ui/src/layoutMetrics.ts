@@ -31,7 +31,7 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const headerRows = 1
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
   const baseBottomRows = 3 + inputRows
-  const activityRows = input.hasActivity ? 1 : 0
+  const activityRows = 1
   const errorRows = input.hasError ? 1 : 0
   const requestedPanelRows = input.hasPanel || input.hasSlashSuggestions
     ? Math.max(0, input.panelRows ?? (input.hasSlashSuggestions ? 6 : 8))

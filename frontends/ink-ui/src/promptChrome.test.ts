@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { inputFrameBorderStyle, inputPrompt, inputPromptLines, inputVisibleRowCount } from './promptChrome.js'
+import { inputFrameBorderStyle, inputPrompt, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 
 test('inputPrompt uses a Claude-style greater-than marker', () => {
   assert.equal(inputPrompt('hello'), '> hello')
@@ -10,6 +10,11 @@ test('inputPrompt uses a Claude-style greater-than marker', () => {
 test('inputPromptLines keeps multiline input and trailing blank cursor rows visible', () => {
   assert.deepEqual(inputPromptLines('hello\n'), ['> hello', '  '])
   assert.deepEqual(inputPromptLines('hello\nworld'), ['> hello', '  world'])
+})
+
+test('renderInputLine does not append a fake cursor cell that shifts IME positioning', () => {
+  assert.equal(renderInputLine('> hello', true), '> hello')
+  assert.equal(renderInputLine('> hello', false), '> hello')
 })
 
 test('inputVisibleRowCount grows for multiline input with a cap', () => {
