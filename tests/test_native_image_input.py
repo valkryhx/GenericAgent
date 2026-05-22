@@ -50,6 +50,17 @@ class NativeImageInputTest(unittest.TestCase):
         self.assertEqual(content[1]["source"]["media_type"], "image/png")
         self.assertEqual(base64.b64decode(content[1]["source"]["data"]), b"\x89PNG\r\n\x1a\nfake")
 
+    def test_agentmain_builds_native_image_blocks_from_unquoted_path_with_spaces(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "screen shot 2026-05-21 165002.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\nfake spaced")
+
+            content = _build_user_content_with_images(f"{path} 内容是？")
+
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1]["type"], "image")
+        self.assertEqual(base64.b64decode(content[1]["source"]["data"]), b"\x89PNG\r\n\x1a\nfake spaced")
+
     def test_agentmain_leaves_plain_text_on_original_path(self):
         self.assertIsNone(_build_user_content_with_images("你好"))
 

@@ -22,12 +22,20 @@ _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
 
 def _extract_image_paths(text):
     paths = []
-    for raw in re.findall(r'"([^"]+\.(?:png|jpe?g|webp|gif|bmp))"|\'([^\']+\.(?:png|jpe?g|webp|gif|bmp))\'|(\S+\.(?:png|jpe?g|webp|gif|bmp))', text or '', re.I):
-        p = next((x for x in raw if x), '')
-        if not p: continue
+    def add_path(p):
         path = p if os.path.isabs(p) else os.path.join(script_dir, p)
         if os.path.isfile(path) and path not in paths:
             paths.append(path)
+
+    for raw in re.findall(r'"([^"]+\.(?:png|jpe?g|webp|gif|bmp))"|\'([^\']+\.(?:png|jpe?g|webp|gif|bmp))\'', text or '', re.I):
+        p = next((x for x in raw if x), '')
+        if p: add_path(p)
+
+    for m in re.finditer(r'(?:[A-Za-z]:[\\/]|/)[^\r\n"\']+?\.(?:png|jpe?g|webp|gif|bmp)', text or '', re.I):
+        add_path(m.group(0).strip())
+
+    for m in re.finditer(r'\S+\.(?:png|jpe?g|webp|gif|bmp)', text or '', re.I):
+        add_path(m.group(0).strip())
     return paths
 
 
