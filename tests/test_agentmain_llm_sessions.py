@@ -13,6 +13,20 @@ from agentmain import GenericAgent  # noqa: E402
 
 
 class AgentMainLLMSessionsTest(unittest.TestCase):
+    def test_abort_cancels_active_llm_request(self):
+        backend = type("Backend", (), {"history": [], "cancelled": False})()
+        backend.cancel_current_request = lambda: setattr(backend, "cancelled", True)
+        agent = GenericAgent.__new__(GenericAgent)
+        agent.is_running = True
+        agent.stop_sig = False
+        agent.handler = None
+        agent.llmclient = type("Client", (), {"backend": backend})()
+
+        agent.abort()
+
+        self.assertTrue(agent.stop_sig)
+        self.assertTrue(backend.cancelled)
+
     def test_failed_mixin_config_is_not_left_as_default_client(self):
         backend = type("Backend", (), {"history": [], "name": "native", "model": "gpt-test"})()
         client = type("Client", (), {"backend": backend, "last_tools": ""})()

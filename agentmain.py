@@ -207,6 +207,11 @@ class GenericAgent:
         if not self.is_running: return
         print('Abort current task...')
         self.stop_sig = True
+        for target in (getattr(self, 'llmclient', None), getattr(getattr(self, 'llmclient', None), 'backend', None)):
+            cancel = getattr(target, 'cancel_current_request', None)
+            if cancel:
+                try: cancel()
+                except Exception as e: print(f"[WARN] cancel_current_request failed: {e}")
         if self.handler is not None: self.handler.code_stop_signal.append(1)
             
     def put_task(self, query, source="user", images=None):
@@ -238,6 +243,10 @@ class GenericAgent:
             if raw_query is None:
                 self.task_queue.task_done(); continue
             self.is_running = True
+            reset_cancel = getattr(self.llmclient, 'reset_cancel', None)
+            if reset_cancel:
+                try: reset_cancel()
+                except Exception as e: print(f"[WARN] reset_cancel failed: {e}")
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             

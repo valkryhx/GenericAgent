@@ -1,4 +1,4 @@
-import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid
+import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
@@ -367,39 +367,93 @@ def _stamp_oai_cache_markers(messages, model):
             messages[idx] = {**messages[idx], 'content': c}
 
 def _stream_with_retry(sess, url, headers, payload, parse_fn):
+    cancel_event = getattr(sess, "_cancel_event", None)
     _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
-    def _delay(resp, attempt):
-        try: ra = float((resp.headers or {}).get("retry-after"))
+    def _delay(headers, attempt):
+        try: ra = float((headers or {}).get("retry-after"))
         except: ra = None
         return max(0.5, ra if ra is not None else min(30.0, 1.5 * (2 ** attempt)))
-    for attempt in range(sess.max_retries + 1):
-        streamed = False
+    def _cancelled():
+        return bool(cancel_event and cancel_event.is_set())
+    def _cancel_wait(delay):
+        if cancel_event is not None: return cancel_event.wait(delay)
+        time.sleep(delay); return False
+    def _close_active():
+        close = getattr(sess, "_close_active_response", None)
+        if close: close()
+    def _request_once(outq):
+        streamed = False; active = None
         try:
-            with requests.post(url, headers=headers, json=payload, stream=sess.stream, 
+            with requests.post(url, headers=headers, json=payload, stream=sess.stream,
                                timeout=(sess.connect_timeout, sess.read_timeout), proxies=sess.proxies, verify=sess.verify) as r:
+                active = r
+                set_active = getattr(sess, "_set_active_response", None)
+                if set_active: set_active(r)
+                if _cancelled():
+                    outq.put(("cancelled",)); return
                 if r.status_code >= 400:
                     if r.status_code in _RETRYABLE and attempt < sess.max_retries:
-                        d = _delay(r, attempt)
-                        print(f"[LLM Retry] HTTP {r.status_code}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
-                        time.sleep(d); continue
+                        outq.put(("retry_http", r.status_code, dict(r.headers or {}))); return
                     try: body = r.text.strip()[:500]
                     except: body = ""
                     err = f"!!!Error: HTTP {r.status_code}" + (f": {body}" if body else "")
-                    yield err; return [{"type": "text", "text": err}]
+                    outq.put(("chunk", err)); outq.put(("done", [{"type": "text", "text": err}])); return
                 gen = parse_fn(r)
                 try:
-                    while True: streamed = True; yield next(gen)
-                except StopIteration as e: return e.value or []
+                    while True:
+                        chunk = next(gen)
+                        if _cancelled():
+                            outq.put(("cancelled",)); return
+                        streamed = True; outq.put(("chunk", chunk))
+                except StopIteration as e:
+                    outq.put(("done", e.value or [])); return
         except (requests.Timeout, requests.ConnectionError) as e:
-            err = f"!!!Error: {type(e).__name__}"
-            if attempt < sess.max_retries:
-                d = _delay(None, attempt)
-                print(f"[LLM Retry] {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
-                yield err; time.sleep(d); continue
-            yield err; return [{"type": "text", "text": err}]
+            outq.put(("retry_error", e, streamed))
         except Exception as e:
-            err = f"\n\n[!!! 流异常中断 {type(e).__name__}: {e} !!!]" if streamed else f"!!!Error: {type(e).__name__}: {e}"
-            yield err; return [{"type": "text", "text": err}]
+            if _cancelled(): outq.put(("cancelled",)); return
+            outq.put(("error", e, streamed))
+        finally:
+            clear_active = getattr(sess, "_clear_active_response", None)
+            if clear_active and active is not None: clear_active(active)
+    for attempt in range(sess.max_retries + 1):
+        if _cancelled(): return []
+        outq = queue.Queue()
+        worker = threading.Thread(target=_request_once, args=(outq,), daemon=True, name=f"ga-llm-request-{attempt}")
+        worker.start()
+        while True:
+            if _cancelled():
+                _close_active(); return []
+            try: item = outq.get(timeout=0.1)
+            except queue.Empty: continue
+            kind = item[0]
+            if kind == "chunk":
+                if _cancelled():
+                    _close_active(); return []
+                yield item[1]
+            elif kind == "done":
+                return item[1]
+            elif kind == "cancelled":
+                return []
+            elif kind == "retry_http":
+                _, status, retry_headers = item
+                d = _delay(retry_headers, attempt)
+                print(f"[LLM Retry] HTTP {status}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
+                if _cancel_wait(d): _close_active(); return []
+                break
+            elif kind == "retry_error":
+                _, exc, _streamed = item
+                err = f"!!!Error: {type(exc).__name__}"
+                if attempt < sess.max_retries:
+                    d = _delay(None, attempt)
+                    print(f"[LLM Retry] {type(exc).__name__}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
+                    yield err
+                    if _cancel_wait(d): _close_active(); return []
+                    break
+                yield err; return [{"type": "text", "text": err}]
+            elif kind == "error":
+                _, exc, streamed = item
+                err = f"\n\n[!!! 流异常中断 {type(exc).__name__}: {exc} !!!]" if streamed else f"!!!Error: {type(exc).__name__}: {exc}"
+                yield err; return [{"type": "text", "text": err}]
 
 def _openai_stream(sess, messages):
     model, api_mode = sess.model, sess.api_mode
@@ -555,6 +609,31 @@ class BaseSession:
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens')
+        self._init_cancel_state()
+    def _init_cancel_state(self):
+        self._cancel_event = threading.Event()
+        self._active_response = None
+        self._request_lock = threading.Lock()
+    def reset_cancel(self):
+        self._cancel_event = threading.Event()
+    def is_cancelled(self):
+        return self._cancel_event.is_set()
+    def _set_active_response(self, response):
+        with self._request_lock:
+            self._active_response = response
+    def _clear_active_response(self, response):
+        with self._request_lock:
+            if self._active_response is response:
+                self._active_response = None
+    def _close_active_response(self):
+        with self._request_lock:
+            response = self._active_response
+        if response is not None:
+            try: response.close()
+            except Exception: pass
+    def cancel_current_request(self):
+        self._cancel_event.set()
+        self._close_active_response()
     def _apply_claude_thinking(self, payload):
         if self.thinking_type:
             thinking = {"type": self.thinking_type}
@@ -761,6 +840,10 @@ class ToolClient:
         self.name = self.backend.name
         self.total_cd_tokens = 0
         self.log_path = None
+    def reset_cancel(self):
+        if hasattr(self.backend, 'reset_cancel'): self.backend.reset_cancel()
+    def cancel_current_request(self):
+        if hasattr(self.backend, 'cancel_current_request'): self.backend.cancel_current_request()
 
     def chat(self, messages, tools=None):
         tools = json.loads(json.dumps(tools, ensure_ascii=False)) if tools else tools
@@ -927,6 +1010,8 @@ class MixinSession:
         assert len(groups) == 1, f"MixinSession: sessions must be in same group (Native or non-Native), got {[type(s).__name__ for s in self._sessions]}"
         self.name = '|'.join(s.name for s in self._sessions)
         import copy; self._sessions = [copy.copy(s) for s in self._sessions]
+        for s in self._sessions:
+            if hasattr(s, '_init_cancel_state'): s._init_cancel_state()
         for s in self._sessions: s.max_retries = 0
         self._orig_raw_asks = [s.raw_ask for s in self._sessions]
         self._sessions[0].raw_ask = self._raw_ask
@@ -942,6 +1027,14 @@ class MixinSession:
         else: object.__setattr__(self, name, value)
     @property
     def primary(self): return self._sessions[0]
+    def reset_cancel(self):
+        for s in self._sessions:
+            if hasattr(s, 'reset_cancel'): s.reset_cancel()
+    def is_cancelled(self):
+        return any(getattr(s, 'is_cancelled', lambda: False)() for s in self._sessions)
+    def cancel_current_request(self):
+        for s in self._sessions:
+            if hasattr(s, 'cancel_current_request'): s.cancel_current_request()
     def _pick(self):
         if self._cur_idx and time.time() - self._switched_at > self._spring_sec: self._cur_idx = 0
         return self._cur_idx
@@ -997,6 +1090,10 @@ class NativeToolClient:
         self._pending_tool_ids = []
         self.last_tools = ''
         self.log_path = None
+    def reset_cancel(self):
+        if hasattr(self.backend, 'reset_cancel'): self.backend.reset_cancel()
+    def cancel_current_request(self):
+        if hasattr(self.backend, 'cancel_current_request'): self.backend.cancel_current_request()
     def _uses_native_tools(self):
         return bool(getattr(self.backend, 'native_tools', True))
     def _text_tool_instruction(self, tools):
