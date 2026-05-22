@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { Box, Static, Text, useApp, useInput, useStdout } from 'ink'
+import { Box, Static, Text, useApp, useStdin, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
@@ -40,7 +40,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { inputFrameBorderStyle, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import { inputFrameBorderStyle, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -55,6 +55,8 @@ import { computeLayoutMetrics } from './layoutMetrics.js'
 import { cleanupTerminalForExit, enterMainScreenTerminalSequence } from './terminalCleanup.js'
 import { planMessageViewport } from './messageViewportPlan.js'
 import { splitStaticAndActiveMessages } from './messagePartition.js'
+import type { InputKey } from './inputController.js'
+import { parseTerminalInput } from './terminalInput.js'
 
 type Props = {
   python: string
@@ -210,8 +212,8 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, showCursor, visibleRows }: { input: string; showCursor: boolean; visibleRows: number }) {
-  const lines = inputPromptLines(input, visibleRows)
+function InputView({ input, cursorOffset, showCursor, visibleRows }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number }) {
+  const lines = inputPromptLineItems(input, visibleRows, cursorOffset)
   return (
     <Box
       flexDirection="column"
@@ -229,7 +231,9 @@ function InputView({ input, showCursor, visibleRows }: { input: string; showCurs
     >
       {lines.map((line, index) => (
         <Text key={index} color="cyan" wrap="truncate-end">
-          {renderInputLine(line, showCursor && index === lines.length - 1)}
+          {renderInputLine(line.text, showCursor && line.cursorColumn !== undefined, line.cursorColumn).map((part, partIndex) => (
+            <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
+          ))}
         </Text>
       ))}
     </Box>
@@ -270,8 +274,10 @@ function helpText(): string {
 export function App({ python, bridgeScript }: Props) {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  const { setRawMode, internal_eventEmitter } = useStdin()
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
+  const [cursorOffset, setCursorOffset] = useState(0)
   const [inputHistory, setInputHistory] = useState(() => createInputHistory())
   const [skills, setSkills] = useState<SkillStatus[]>([])
   const [selector, setSelector] = useState<SelectorState | null>(null)
@@ -284,6 +290,7 @@ export function App({ python, bridgeScript }: Props) {
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
+  const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
   const resumePendingRef = useRef(false)
   const mcpPanelOpenRef = useRef(false)
   const modelPanelPendingRef = useRef(false)
@@ -316,6 +323,7 @@ export function App({ python, bridgeScript }: Props) {
 
   const applyInputDecision = (decision: ReturnType<typeof handleInput>) => {
     setInput(decision.value)
+    setCursorOffset(decision.cursorOffset ?? decision.value.length)
     const localCommandText = commandTextForLocalDecision(decision)
     if (decision.action?.type === 'clear') {
       setFooterPanel(null)
@@ -518,7 +526,7 @@ export function App({ python, bridgeScript }: Props) {
     }
   }, [bridgeScript, python])
 
-  useInput((rawInput, key) => {
+  const handleTerminalInput = (rawInput: string, key: InputKey) => {
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
       bridgeRef.current?.send({ type: 'shutdown' })
       exitCleanly()
@@ -595,6 +603,7 @@ export function App({ python, bridgeScript }: Props) {
       }
       if (decision.input !== undefined) {
         setInput(decision.input)
+        setCursorOffset(decision.input.length)
       }
       return
     }
@@ -614,6 +623,7 @@ export function App({ python, bridgeScript }: Props) {
         if (action.type === 'complete') {
           if (trigger === 'tab' || shouldCompleteSlashCommand(input, selectedCommand)) {
             setInput(action.value)
+            setCursorOffset(action.value.length)
             return
           }
         } else {
@@ -623,6 +633,7 @@ export function App({ python, bridgeScript }: Props) {
       }
       if (key.escape) {
         setInput('')
+        setCursorOffset(0)
         return
       }
     }
@@ -630,17 +641,33 @@ export function App({ python, bridgeScript }: Props) {
       const result = previousInput(inputHistory, input)
       setInputHistory(result.history)
       setInput(result.value)
+      setCursorOffset(result.value.length)
       return
     }
     if (key.downArrow) {
       const result = nextInput(inputHistory, input)
       setInputHistory(result.history)
       setInput(result.value)
+      setCursorOffset(result.value.length)
       return
     }
-    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames)
+    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames, cursorOffset)
     applyInputDecision(decision)
-  })
+  }
+  terminalInputHandlerRef.current = handleTerminalInput
+
+  useEffect(() => {
+    setRawMode(true)
+    const handleData = (data: Buffer | string) => {
+      const parsed = parseTerminalInput(String(data))
+      terminalInputHandlerRef.current?.(parsed.rawInput, parsed.key)
+    }
+    internal_eventEmitter.on('input', handleData)
+    return () => {
+      internal_eventEmitter.removeListener('input', handleData)
+      setRawMode(false)
+    }
+  }, [internal_eventEmitter, setRawMode])
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
@@ -685,7 +712,7 @@ export function App({ python, bridgeScript }: Props) {
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
     if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} />
+    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />

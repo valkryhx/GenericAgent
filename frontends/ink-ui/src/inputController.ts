@@ -6,18 +6,59 @@ export type InputKey = {
   meta?: boolean
   shift?: boolean
   return?: boolean
+  tab?: boolean
   backspace?: boolean
   delete?: boolean
   escape?: boolean
+  upArrow?: boolean
+  downArrow?: boolean
+  leftArrow?: boolean
+  rightArrow?: boolean
+  pageUp?: boolean
+  pageDown?: boolean
+  sequence?: string
 }
 
 export type InputStatus = 'connecting' | 'idle' | 'running' | 'stopping'
 
 export type InputDecision = {
   value: string
+  cursorOffset?: number
   command?: BridgeCommand
   action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'clear' | 'help' | 'status' }
   exit?: boolean
+}
+
+function clampCursorOffset(value: string, cursorOffset: number): number {
+  return Math.max(0, Math.min(value.length, Math.floor(cursorOffset)))
+}
+
+function makeDecision(
+  value: string,
+  cursorOffset: number,
+  includeCursorOffset: boolean,
+  extra: Omit<InputDecision, 'value' | 'cursorOffset'> = {},
+): InputDecision {
+  const decision: InputDecision = { value, ...extra }
+  if (includeCursorOffset) decision.cursorOffset = clampCursorOffset(value, cursorOffset)
+  return decision
+}
+
+function insertFoldedTextAtCursor(value: string, cursorOffset: number, text: string, pasteStore: PasteStore) {
+  const before = value.slice(0, cursorOffset)
+  const after = value.slice(cursorOffset)
+  const insertedPrefix = appendFoldedText(before, text, pasteStore)
+  return {
+    value: insertedPrefix + after,
+    cursorOffset: insertedPrefix.length,
+  }
+}
+
+function insertLiteralTextAtCursor(value: string, cursorOffset: number, text: string) {
+  return {
+    value: value.slice(0, cursorOffset) + text + value.slice(cursorOffset),
+    cursorOffset: cursorOffset + text.length,
+  }
 }
 
 function parseSlashSubmit(
@@ -68,39 +109,70 @@ export function handleInput(
   status: InputStatus,
   pasteStore: PasteStore,
   skillNames: ReadonlySet<string> = new Set(),
+  cursorOffset?: number,
 ): InputDecision {
+  const includeCursorOffset = cursorOffset !== undefined
+  const offset = clampCursorOffset(value, cursorOffset ?? value.length)
+  const decision = (
+    nextValue: string,
+    nextCursorOffset = nextValue.length,
+    extra: Omit<InputDecision, 'value' | 'cursorOffset'> = {},
+  ) => makeDecision(nextValue, nextCursorOffset, includeCursorOffset, extra)
+
   if (key.ctrl && rawInput === 'c') {
-    return { value, command: { type: 'shutdown' }, exit: true }
+    return decision(value, offset, { command: { type: 'shutdown' }, exit: true })
   }
   if (key.escape) {
-    return status === 'running' || status === 'stopping' ? { value, command: { type: 'stop' } } : { value }
+    return status === 'running' || status === 'stopping'
+      ? decision(value, offset, { command: { type: 'stop' } })
+      : decision(value, offset)
+  }
+  if (key.leftArrow) {
+    return decision(value, offset - 1)
+  }
+  if (key.rightArrow) {
+    return decision(value, offset + 1)
   }
   if ((key.meta || key.shift) && key.return) {
-    return { value: `${value}\n` }
+    const inserted = insertLiteralTextAtCursor(value, offset, '\n')
+    return decision(inserted.value, inserted.cursorOffset)
   }
   if (!key.return && (rawInput === '\r' || rawInput === '\n')) {
-    return { value: `${value}\n` }
+    const inserted = insertLiteralTextAtCursor(value, offset, '\n')
+    return decision(inserted.value, inserted.cursorOffset)
   }
   if (key.ctrl && rawInput === 'j') {
-    return { value: `${value}\n` }
+    const inserted = insertLiteralTextAtCursor(value, offset, '\n')
+    return decision(inserted.value, inserted.cursorOffset)
   }
-  if (key.backspace || key.delete) {
-    return { value: value.slice(0, -1) }
+  if (key.backspace) {
+    if (offset <= 0) return decision(value, offset)
+    return decision(value.slice(0, offset - 1) + value.slice(offset), offset - 1)
+  }
+  if (key.delete && (key.sequence === '\x7f' || key.sequence === '\b')) {
+    if (offset <= 0) return decision(value, offset)
+    return decision(value.slice(0, offset - 1) + value.slice(offset), offset - 1)
+  }
+  if (key.delete) {
+    if (offset >= value.length) return decision(value, offset)
+    return decision(value.slice(0, offset) + value.slice(offset + 1), offset)
   }
   if (key.return) {
-    if (value.endsWith('\\')) {
-      return { value: `${value.slice(0, -1)}\n` }
+    if (value.endsWith('\\') && (!includeCursorOffset || offset === value.length)) {
+      const nextValue = `${value.slice(0, -1)}\n`
+      return decision(nextValue, nextValue.length)
     }
     const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
     const expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
-    if (!expanded) return { value }
+    if (!expanded) return decision(value, offset)
     const slash = parseSlashSubmit(expanded, skillNames)
-    if (slash) return { value: '', ...slash }
-    if (status === 'running' || status === 'stopping' || status === 'connecting') return { value }
-    return { value: '', command: { type: 'submit', text: expanded } }
+    if (slash) return decision('', 0, slash)
+    if (status === 'running' || status === 'stopping' || status === 'connecting') return decision(value, offset)
+    return decision('', 0, { command: { type: 'submit', text: expanded } })
   }
   if (rawInput) {
-    return { value: appendFoldedText(value, rawInput, pasteStore) }
+    const inserted = insertFoldedTextAtCursor(value, offset, rawInput, pasteStore)
+    return decision(inserted.value, inserted.cursorOffset)
   }
-  return { value }
+  return decision(value, offset)
 }

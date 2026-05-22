@@ -51,6 +51,44 @@ test('handleInput inserts newline for Claude-style backslash Enter', () => {
   })
 })
 
+test('handleInput moves cursor and edits at cursor offset', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('helo', '', { leftArrow: true }, 'idle', store, new Set(), 4), {
+    value: 'helo',
+    cursorOffset: 3,
+  })
+  assert.deepEqual(handleInput('helo', 'l', {}, 'idle', store, new Set(), 2), {
+    value: 'hello',
+    cursorOffset: 3,
+  })
+  assert.deepEqual(handleInput('hello', '', { backspace: true }, 'idle', store, new Set(), 3), {
+    value: 'helo',
+    cursorOffset: 2,
+  })
+  assert.deepEqual(handleInput('hello', '', { delete: true }, 'idle', store, new Set(), 2), {
+    value: 'helo',
+    cursorOffset: 2,
+  })
+})
+
+test('handleInput treats terminal backspace bytes as backward delete', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('hello', '', { delete: true, sequence: '\x7f' }, 'idle', store, new Set(), 5), {
+    value: 'hell',
+    cursorOffset: 4,
+  })
+  assert.deepEqual(handleInput('hello', '', { delete: true, sequence: '\x7f' }, 'idle', store, new Set(), 3), {
+    value: 'helo',
+    cursorOffset: 2,
+  })
+  assert.deepEqual(handleInput('hello', '', { delete: true, sequence: '\x1b[3~' }, 'idle', store, new Set(), 3), {
+    value: 'helo',
+    cursorOffset: 3,
+  })
+})
+
 test('handleInput sends stop for slash stop and Escape', () => {
   const store = createPasteStore()
 
