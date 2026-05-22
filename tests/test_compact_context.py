@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent  # noqa: E402
+from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget  # noqa: E402
 
 
 class FakeBackend:
@@ -145,6 +146,19 @@ class CompactContextTest(unittest.TestCase):
 
         agent.llmclient.backend.context_win = 20
         self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 200))
+
+    def test_auto_compact_default_budget_matches_400k_token_models(self):
+        agent = FakeAgent()
+        delattr(agent.llmclient.backend, "context_win")
+
+        self.assertEqual(400_000, DEFAULT_CONTEXT_WIN)
+        self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 890_000))
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 910_000))
+
+    def test_compact_source_budget_scales_for_large_default_context(self):
+        backend = type("Backend", (), {})()
+
+        self.assertEqual(800_000, _source_char_budget(backend))
 
     def test_replace_log_with_compact_history_archives_old_log_and_writes_restorable_pair(self):
         with tempfile.TemporaryDirectory() as tmp:

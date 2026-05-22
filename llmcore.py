@@ -2,6 +2,7 @@ import os, json, re, time, requests, sys, threading, urllib3, base64, importlib,
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
+DEFAULT_CONTEXT_WIN = 400_000
 
 def expand_llm_profile_configs(mykeys):
     expanded = dict(mykeys or {})
@@ -530,7 +531,7 @@ class BaseSession:
         self.api_key = cfg['apikey']
         self.api_base = cfg['apibase'].rstrip('/')
         self.model = cfg.get('model', '')
-        self.context_win = cfg.get('context_win', 28000)
+        self.context_win = cfg.get('context_win', DEFAULT_CONTEXT_WIN)
         self.history = []
         self.lock = threading.Lock()
         self.system = ""

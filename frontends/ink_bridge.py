@@ -324,7 +324,11 @@ class GenericAgentBridge:
             if result.ok:
                 self._replace_compact_log()
                 self._rewind_snapshots.clear()
-                self.emit({"type": "local_command_output", "text": "Auto " + result.message})
+                text = "Auto " + result.message
+                self.emit({"type": "local_command_output", "text": text})
+                self.emit({"type": "history_replace", "messages": [
+                    {"role": "system", "text": text},
+                ]})
                 return True
             else:
                 self.emit({"type": "error", "code": "auto_compact_failed", "message": result.message})

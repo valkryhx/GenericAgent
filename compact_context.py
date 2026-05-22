@@ -11,6 +11,9 @@ from typing import Any, Callable
 
 SummarizeFn = Callable[[str, str], str]
 
+DEFAULT_CONTEXT_WIN = 400_000
+MAX_COMPACT_SOURCE_CHARS = 800_000
+
 
 @dataclass
 class CompactResult:
@@ -28,7 +31,7 @@ def estimate_history_chars(history: list[dict[str, Any]], pending_text: str = ""
 def should_auto_compact_agent(agent: Any, pending_text: str = "", threshold: float = 0.75) -> bool:
     backend = _backend(agent)
     history = getattr(backend, "history", []) if backend is not None else []
-    context_win = int(getattr(backend, "context_win", 28000) or 28000) if backend is not None else 28000
+    context_win = int(getattr(backend, "context_win", DEFAULT_CONTEXT_WIN) or DEFAULT_CONTEXT_WIN) if backend is not None else DEFAULT_CONTEXT_WIN
     return estimate_history_chars(history, pending_text) > context_win * 3 * threshold
 
 
@@ -82,8 +85,8 @@ def _backend(agent: Any) -> Any:
 
 
 def _source_char_budget(backend: Any) -> int:
-    context_win = int(getattr(backend, "context_win", 28000) or 28000)
-    return max(4000, min(context_win * 2, 120000))
+    context_win = int(getattr(backend, "context_win", DEFAULT_CONTEXT_WIN) or DEFAULT_CONTEXT_WIN)
+    return max(4000, min(context_win * 2, MAX_COMPACT_SOURCE_CHARS))
 
 
 def _history_to_text(history: list[dict[str, Any]], budget: int) -> str:

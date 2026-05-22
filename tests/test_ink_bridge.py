@@ -366,6 +366,35 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([], agent.prompts)
         self.assertEqual({"type": "error", "code": "auto_compact_failed", "message": "summary failed"}, events[-1])
 
+    def test_submit_auto_compact_replaces_visible_history_before_new_user_message(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with (
+            patch("ink_bridge.should_auto_compact_agent", return_value=True),
+            patch("ink_bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted 8 messages into summary context."
+            result = bridge.submit("follow up")
+
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertEqual(1, result)
+        history_replace_index = next(index for index, event in enumerate(events) if event["type"] == "history_replace")
+        user_index = next(index for index, event in enumerate(events) if event["type"] == "user")
+        self.assertLess(history_replace_index, user_index)
+        self.assertEqual(
+            {
+                "type": "history_replace",
+                "messages": [
+                    {"role": "system", "text": "Auto Compacted 8 messages into summary context."},
+                ],
+            },
+            events[history_replace_index],
+        )
+
     def test_skill_status_emits_discovered_skill_metadata(self):
         agent = FakeAgent()
         events = []
