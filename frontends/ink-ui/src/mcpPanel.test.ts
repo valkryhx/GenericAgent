@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import {
   mcpStatusColor,
   mcpStatusIcon,
+  mcpPanelRows,
   mcpToolsForServer,
+  visibleMcpServerRows,
   moveMcpSelection,
   panelFromMcpStatus,
 } from './mcpPanel.js'
@@ -48,4 +50,40 @@ test('mcpToolsForServer filters tools by MCP description prefix', () => {
 
   assert.deepEqual(mcpToolsForServer(panel, 'demo').map(tool => tool.function.name), ['mcp__demo__echo'])
   assert.deepEqual(mcpToolsForServer(panel, 'missing'), [])
+})
+
+test('visibleMcpServerRows keeps selected server visible in a capped panel', () => {
+  const panel = panelFromMcpStatus({
+    ...statusEvent,
+    servers: ['fetch', 'tavily', 'sequential-thinking', 'memory', 'exa'].map((name, index) => ({
+      name,
+      status: index === 1 ? 'connected' : 'failed',
+      transport: index === 1 ? 'http' : 'stdio',
+      disabled: false,
+      error: index === 1 ? '' : 'boom',
+      tool_count: index === 1 ? 5 : 0,
+    })),
+  })
+
+  const rows = visibleMcpServerRows({ ...panel, selected: 2 }, 3)
+
+  assert.deepEqual(rows.map(row => panel.servers[row.index]?.name), ['tavily', 'sequential-thinking', 'memory'])
+  assert.equal(rows.some(row => row.selected && panel.servers[row.index]?.name === 'sequential-thinking'), true)
+})
+
+test('mcpPanelRows requests enough height for five servers and selected details', () => {
+  const panel = panelFromMcpStatus({
+    ...statusEvent,
+    servers: ['fetch', 'tavily', 'sequential-thinking', 'memory', 'exa'].map((name, index) => ({
+      name,
+      status: index === 2 ? 'failed' : 'connected',
+      transport: index === 1 ? 'http' : 'stdio',
+      disabled: false,
+      error: index === 2 ? 'boom' : '',
+      tool_count: index === 1 ? 5 : 0,
+    })),
+    errors: { 'sequential-thinking': 'boom' },
+  })
+
+  assert.equal(mcpPanelRows({ ...panel, selected: 2 }), 10)
 })

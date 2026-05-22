@@ -9,6 +9,11 @@ export type McpPanelState = {
   errors: Record<string, string>
 }
 
+export type VisibleMcpServerRow = {
+  index: number
+  selected: boolean
+}
+
 export function loadingMcpPanel(): McpPanelState {
   return { loading: true, selected: 0, configPath: '', servers: [], tools: [], errors: {} }
 }
@@ -28,6 +33,30 @@ export function moveMcpSelection(panel: McpPanelState, delta: number): McpPanelS
   if (panel.servers.length === 0) return panel
   const selected = Math.max(0, Math.min(panel.servers.length - 1, panel.selected + delta))
   return { ...panel, selected }
+}
+
+export function visibleMcpServerRows(panel: McpPanelState, maxRows: number): VisibleMcpServerRow[] {
+  const size = panel.servers.length
+  if (size <= 0) return []
+  const limit = Math.max(1, Math.min(size, Math.floor(maxRows)))
+  const selected = Math.max(0, Math.min(size - 1, panel.selected))
+  let start = selected - Math.floor(limit / 2)
+  start = Math.max(0, Math.min(size - limit, start))
+  return Array.from({ length: limit }, (_, offset) => {
+    const index = start + offset
+    return { index, selected: index === selected }
+  })
+}
+
+export function mcpPanelRows(panel: McpPanelState): number {
+  const selected = panel.servers[panel.selected]
+  const serverRows = Math.min(panel.servers.length, 5)
+  const statusRows = (panel.configPath ? 1 : 0)
+    + (panel.loading ? 1 : 0)
+    + (!panel.loading && panel.servers.length === 0 ? 1 : 0)
+  const selectedRows = selected ? 1 + (panel.errors[selected.name] ? 1 : 0) : 0
+  const toolRows = selected ? Math.min(mcpToolsForServer(panel, selected.name).length, 2) : 0
+  return 1 + statusRows + serverRows + selectedRows + toolRows + 1
 }
 
 export function mcpToolsForServer(panel: McpPanelState, serverName: string): McpToolStatus[] {

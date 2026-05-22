@@ -23,11 +23,13 @@ import {
 import type { BridgeEvent, ResumeSession, TokenUsage } from './protocol.js'
 import {
   loadingMcpPanel,
+  mcpPanelRows,
   mcpStatusColor,
   mcpStatusIcon,
   mcpToolsForServer,
   moveMcpSelection,
   panelFromMcpStatus,
+  visibleMcpServerRows,
   type McpPanelState,
 } from './mcpPanel.js'
 import { modelPanelRows, moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
@@ -129,22 +131,26 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
 function McpPanelView({ panel }: { panel: McpPanelState }) {
   const selected = panel.servers[panel.selected]
   const selectedTools = selected ? mcpToolsForServer(panel, selected.name) : []
+  const serverRows = visibleMcpServerRows(panel, 5)
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text bold>MCP Servers</Text>
       {panel.configPath ? <Text color="gray">Config: {panel.configPath}</Text> : null}
       {panel.loading ? <Text color="gray">Loading MCP status...</Text> : null}
       {!panel.loading && panel.servers.length === 0 ? <Text color="gray">No MCP servers configured.</Text> : null}
-      {panel.servers.map((server, index) => (
-        <Text key={server.name} color={index === panel.selected ? 'cyan' : undefined}>
-          {index === panel.selected ? '> ' : '  '}
-          <Text color={mcpStatusColor(server.status)}>{mcpStatusIcon(server.status)}</Text>
-          {` ${server.name} - ${server.status} - ${server.transport} - ${server.tool_count} tools`}
-        </Text>
-      ))}
+      {serverRows.map(row => {
+        const server = panel.servers[row.index]!
+        return (
+          <Text key={server.name} color={row.selected ? 'cyan' : undefined}>
+            {row.selected ? '> ' : '  '}
+            <Text color={mcpStatusColor(server.status)}>{mcpStatusIcon(server.status)}</Text>
+            {` ${server.name} - ${server.status} - ${server.transport} - ${server.tool_count} tools`}
+          </Text>
+        )
+      })}
       {selected ? <Text color="gray">Actions: /mcp reconnect {selected.name} - /mcp {selected.disabled ? 'enable' : 'disable'} {selected.name}</Text> : null}
       {selected && panel.errors[selected.name] ? <Text color="red">{panel.errors[selected.name]}</Text> : null}
-      {selectedTools.slice(0, 20).map(tool => (
+      {selectedTools.slice(0, 2).map(tool => (
         <Text key={tool.function.name} color="gray">  - {tool.function.name}</Text>
       ))}
       <Text color="gray">Up/Down move - Esc close</Text>
@@ -717,6 +723,8 @@ export function App({ python, bridgeScript }: Props) {
     inputRows,
     panelRows: modelPanel
       ? modelPanelRows(modelPanel)
+      : mcpPanel
+        ? mcpPanelRows(mcpPanel)
       : selector
         ? Math.min(selectorSize(selector), 8) + 2
       : slashItems.length > 0
