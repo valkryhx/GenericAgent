@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { inputFrameBorderStyle, inputPrompt, inputPromptLineItems, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import { fixedInputLine, inputFrameBorderStyle, inputPrompt, inputPromptLineItems, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 
 test('inputPrompt uses a Claude-style greater-than marker', () => {
   assert.equal(inputPrompt('hello'), '> hello')
@@ -45,6 +45,29 @@ test('renderInputLine can render cursor in the middle without changing text widt
     { text: 'llo' },
   ])
   assert.equal(rendered.map(part => part.text).join(''), '> hello')
+})
+
+test('fixedInputLine keeps rendered input rows at a stable width', () => {
+  assert.equal(fixedInputLine('> hi', 8), '> hi    ')
+  assert.equal(fixedInputLine('> hello world', 8), '> hello ')
+  assert.equal(fixedInputLine('> 你好', 8), '> 你好  ')
+})
+
+test('inputPromptLineItems uses terminal display width for wide characters', () => {
+  assert.deepEqual(inputPromptLineItems('你好', 1, 1), [
+    { text: '> 你好', cursorColumn: 4 },
+  ])
+})
+
+test('renderInputLine keeps wide-character cursor rendering width stable', () => {
+  const rendered = renderInputLine('> 你好  ', true, 5)
+
+  assert.deepEqual(rendered, [
+    { text: '> 你' },
+    { text: '好', inverse: true },
+    { text: '  ' },
+  ])
+  assert.equal(rendered.map(part => part.text).join(''), '> 你好  ')
 })
 
 test('inputPromptLineItems keeps the cursor row visible in multiline input', () => {

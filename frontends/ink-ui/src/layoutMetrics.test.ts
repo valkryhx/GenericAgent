@@ -8,7 +8,7 @@ test('terminalRows uses real narrow heights without forcing a tall minimum', () 
   assert.equal(terminalRows(undefined), 24)
 })
 
-test('computeLayoutMetrics reserves fixed bottom rows for activity, hint and framed input', () => {
+test('computeLayoutMetrics reserves one terminal row so Ink does not full-clear on each render', () => {
   assert.deepEqual(computeLayoutMetrics({
     rows: 24,
     columns: 80,
@@ -17,11 +17,11 @@ test('computeLayoutMetrics reserves fixed bottom rows for activity, hint and fra
     hasPanel: false,
     hasSlashSuggestions: false,
   }), {
-    rows: 24,
+    rows: 23,
     columns: 80,
     headerRows: 1,
     bottomRows: 5,
-    messageRows: 18,
+    messageRows: 17,
   })
 })
 
@@ -59,7 +59,7 @@ test('computeLayoutMetrics reserves extra bottom rows for multiline input', () =
   })
 
   assert.equal(metrics.bottomRows, 7)
-  assert.equal(metrics.messageRows, 16)
+  assert.equal(metrics.messageRows, 15)
 })
 
 test('computeLayoutMetrics accounts for running activity and capped panels', () => {
@@ -73,7 +73,7 @@ test('computeLayoutMetrics accounts for running activity and capped panels', () 
     panelRows: 20,
   })
 
-  assert.equal(metrics.bottomRows, 18)
+  assert.equal(metrics.bottomRows, 17)
   assert.equal(metrics.messageRows, 1)
 })
 
@@ -89,7 +89,7 @@ test('computeLayoutMetrics allows tall panels when the terminal has room', () =>
   })
 
   assert.equal(metrics.bottomRows, 16)
-  assert.equal(metrics.messageRows, 7)
+  assert.equal(metrics.messageRows, 6)
 })
 
 test('computeLayoutMetrics never returns negative message rows on tiny terminals', () => {
@@ -104,6 +104,6 @@ test('computeLayoutMetrics never returns negative message rows on tiny terminals
   })
 
   assert.equal(metrics.messageRows, 1)
-  assert.equal(metrics.rows, 4)
+  assert.equal(metrics.rows, 3)
   assert.equal(metrics.columns, 20)
 })

@@ -8,11 +8,12 @@ test('exitTerminalCleanupSequence restores terminal state without visible symbol
   assert.doesNotMatch(exitTerminalCleanupSequence, /[\p{Extended_Pictographic}]/u)
 })
 
-test('main screen terminal sequences preserve native terminal scrollback', () => {
+test('fullscreen terminal sequences use alternate screen with mouse wheel tracking', () => {
   assert.doesNotMatch(enterMainScreenTerminalSequence, /\u001B\[\?25l/)
   assert.ok(exitTerminalCleanupSequence.includes('\u001B[?25h'))
-  assert.doesNotMatch(enterMainScreenTerminalSequence, /\u001B\[\?1049h/)
-  assert.doesNotMatch(enterMainScreenTerminalSequence, /\u001B\[\?1006h/)
-  assert.doesNotMatch(exitTerminalCleanupSequence, /\u001B\[\?1049l/)
-  assert.doesNotMatch(exitTerminalCleanupSequence, /\u001B\[\?1006l/)
+  assert.ok(enterMainScreenTerminalSequence.includes('\u001B[?1049h'))
+  assert.ok(enterMainScreenTerminalSequence.includes('\u001B[2J\u001B[H'))
+  assert.ok(enterMainScreenTerminalSequence.includes('\u001B[?1006h'))
+  assert.ok(exitTerminalCleanupSequence.includes('\u001B[?1049l'))
+  assert.ok(exitTerminalCleanupSequence.includes('\u001B[?1006l'))
 })

@@ -1,5 +1,6 @@
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
+import stringWidth from 'string-width'
 
 export type TranscriptLine = {
   id: string
@@ -192,11 +193,22 @@ function splitDisplayLines(text: string): string[] {
 }
 
 function wrapText(text: string, width: number): string[] {
-  if (text.length <= width) return [text]
+  if (stringWidth(text) <= width) return [text]
   const chunks: string[] = []
-  for (let index = 0; index < text.length; index += width) {
-    chunks.push(text.slice(index, index + width))
+  let chunk = ''
+  let chunkWidth = 0
+
+  for (const char of text) {
+    const charWidth = Math.max(1, stringWidth(char))
+    if (chunk && chunkWidth + charWidth > width) {
+      chunks.push(chunk)
+      chunk = ''
+      chunkWidth = 0
+    }
+    chunk += char
+    chunkWidth += charWidth
   }
+  if (chunk) chunks.push(chunk)
   return chunks.length === 0 ? [' '] : chunks
 }
 

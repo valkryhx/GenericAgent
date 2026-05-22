@@ -1,3 +1,5 @@
+import stringWidth from 'string-width'
+
 export const inputFrameBorderStyle = {
   topLeft: '',
   top: '─',
@@ -36,6 +38,18 @@ function clampCursorOffset(input: string, cursorOffset: number): number {
   return Math.max(0, Math.min(input.length, Math.floor(cursorOffset)))
 }
 
+function graphemes(text: string): string[] {
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    return Array.from(segmenter.segment(text), part => part.segment)
+  }
+  return Array.from(text)
+}
+
+function textBeforeOffset(text: string, offset: number): string {
+  return text.slice(0, Math.max(0, Math.min(text.length, offset)))
+}
+
 export function inputPromptLineItems(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS, cursorOffset = input.length): InputLineItem[] {
   const rows = input.split('\n')
   const visibleRows = Math.max(1, Math.floor(maxRows))
@@ -60,7 +74,7 @@ export function inputPromptLineItems(input: string, maxRows = DEFAULT_MAX_INPUT_
     const logicalRow = start + index
     const prefix = logicalRow === 0 ? '> ' : '  '
     const item: InputLineItem = { text: `${prefix}${line}` }
-    if (logicalRow === cursorRow) item.cursorColumn = prefix.length + cursorColumnInRow
+    if (logicalRow === cursorRow) item.cursorColumn = stringWidth(prefix) + stringWidth(textBeforeOffset(line, cursorColumnInRow))
     return item
   })
 }
@@ -68,15 +82,50 @@ export function inputPromptLineItems(input: string, maxRows = DEFAULT_MAX_INPUT_
 export function renderInputLine(line: string, showCursor: boolean, cursorColumn = line.length): InputLinePart[] {
   if (!showCursor) return [{ text: line }]
   if (!line) return [{ text: ' ', inverse: true }]
-  const safeCursorColumn = Math.max(0, Math.min(line.length - 1, Math.floor(cursorColumn) - 1))
-  const head = line.slice(0, safeCursorColumn)
-  const cursor = line.slice(safeCursorColumn, safeCursorColumn + 1)
-  const tail = line.slice(safeCursorColumn + 1)
+  const targetColumn = Math.max(1, Math.floor(cursorColumn))
+  let head = ''
+  let cursor = ''
+  let tail = ''
+  let width = 0
+  let cursorFound = false
+  for (const segment of graphemes(line)) {
+    if (cursorFound) {
+      tail += segment
+      continue
+    }
+    const nextWidth = width + Math.max(0, stringWidth(segment))
+    if (nextWidth >= targetColumn) {
+      cursor = segment
+      cursorFound = true
+    } else {
+      head += segment
+      width = nextWidth
+    }
+  }
+  if (!cursor) {
+    const parts = graphemes(line)
+    cursor = parts.pop() ?? ' '
+    head = parts.join('')
+    tail = ''
+  }
   return [
     ...(head ? [{ text: head }] : []),
     { text: cursor, inverse: true },
     ...(tail ? [{ text: tail }] : []),
   ]
+}
+
+export function fixedInputLine(line: string, columns: number): string {
+  const targetWidth = Math.max(1, Math.floor(columns))
+  let rendered = ''
+  let width = 0
+  for (const segment of graphemes(line)) {
+    const segmentWidth = Math.max(0, stringWidth(segment))
+    if (width + segmentWidth > targetWidth) break
+    rendered += segment
+    width += segmentWidth
+  }
+  return rendered + ' '.repeat(Math.max(0, targetWidth - width))
 }
 
 export function inputVisibleRowCount(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS): number {

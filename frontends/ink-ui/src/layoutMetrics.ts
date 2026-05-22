@@ -26,7 +26,7 @@ export function terminalColumns(columns?: number, fallback = 80): number {
 }
 
 export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
-  const rows = terminalRows(input.rows)
+  const rows = Math.max(1, terminalRows(input.rows) - 1)
   const columns = terminalColumns(input.columns)
   const headerRows = 1
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
@@ -39,7 +39,8 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const availablePanelRows = Math.max(0, rows - headerRows - baseBottomRows - activityRows - errorRows - 1)
   const maxPanelRows = Math.max(0, Math.min(12, availablePanelRows))
   const panelRows = Math.min(requestedPanelRows, maxPanelRows)
-  const bottomRows = baseBottomRows + activityRows + errorRows + panelRows
+  const requestedBottomRows = baseBottomRows + activityRows + errorRows + panelRows
+  const bottomRows = Math.min(requestedBottomRows, Math.max(1, rows - headerRows - 1))
   const messageRows = Math.max(1, rows - headerRows - bottomRows)
 
   return { rows, columns, headerRows, bottomRows, messageRows }

@@ -178,3 +178,9 @@ test('wrapTranscriptLines wraps long physical lines without adding ellipsis', ()
   assert.equal(wrapped.map(line => line.text).join(''), lines[0]!.text)
   assert.ok(wrapped.every(line => line.text.length <= 20))
 })
+
+test('wrapTranscriptLines wraps wide characters by terminal display width', () => {
+  const wrapped = wrapTranscriptLines([{ id: 'wide-0', text: '中文测试' }], 4)
+
+  assert.deepEqual(wrapped.map(line => line.text), ['中文', '测试'])
+})

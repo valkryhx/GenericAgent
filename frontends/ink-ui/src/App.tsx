@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { Box, Static, Text, useApp, useStdin, useStdout } from 'ink'
+import { Box, Text, useApp, useStdin, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
@@ -7,9 +7,9 @@ import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
-  liveTranscriptViewportLines,
   transcriptLines,
   type TranscriptLine,
+  visibleTranscriptLines,
   wrapTranscriptLines,
 } from './messageWindow.js'
 import {
@@ -20,7 +20,7 @@ import {
   visibleSelectorRows,
   type SelectorState,
 } from './selectors.js'
-import type { BridgeEvent, ChatMessage, ResumeSession } from './protocol.js'
+import type { BridgeEvent, ResumeSession } from './protocol.js'
 import {
   loadingMcpPanel,
   mcpStatusColor,
@@ -40,7 +40,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { inputFrameBorderStyle, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import { fixedInputLine, inputFrameBorderStyle, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -53,10 +53,16 @@ import {
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
 import { cleanupTerminalForExit, enterMainScreenTerminalSequence } from './terminalCleanup.js'
-import { planMessageViewport } from './messageViewportPlan.js'
-import { splitStaticAndActiveMessages } from './messagePartition.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
+import { parseMouseEvent, parseMouseWheel } from './mouseWheel.js'
+import {
+  preserveTranscriptScrollOnContentChange,
+  scrollTranscriptBy,
+  transcriptScrollStep,
+  transcriptWheelStep,
+} from './transcriptScroll.js'
+import { transcriptScrollbar } from './transcriptScrollbar.js'
 
 type Props = {
   python: string
@@ -174,32 +180,27 @@ function FooterPanelView({ panel }: { panel: FooterPanel }) {
   )
 }
 
-function StaticMessage({ message, columns, expandedTools }: { message: ChatMessage; columns: number; expandedTools: boolean }) {
-  const lines = wrapTranscriptLines(transcriptLines([message], { expandedTools }), Math.max(1, columns - 2))
-  return (
-    <Box flexDirection="column" paddingX={1} width={columns}>
-      {lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
-    </Box>
-  )
-}
-
-function MessageViewport({ height, columns, lines, ready }: {
+function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffset }: {
   height: number
   columns: number
   lines: TranscriptLine[]
   ready: boolean
+  totalRows: number
+  scrollOffset: number
 }) {
+  const scrollbar = transcriptScrollbar({ totalRows, viewportRows: height, scrollOffset })
   return (
-    <Box flexDirection="column" paddingX={1} height={height} width={columns} overflow="hidden">
-      {ready ? <Text color="gray">Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
-    </Box>
-  )
-}
-
-function ReadyViewport({ columns }: { columns: number }) {
-  return (
-    <Box flexDirection="column" paddingX={1} width={columns}>
-      <Text color="gray">Ready.</Text>
+    <Box flexDirection="row" height={height} width={columns} overflow="hidden">
+      <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={Math.max(1, columns - 1)} overflow="hidden">
+        {ready ? <Text color="gray">Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+      </Box>
+      <Box flexDirection="column" width={1} height={height} overflow="hidden">
+        {Array.from({ length: height }, (_, index) => (
+          <Text key={index} color={scrollbar.visible ? 'gray' : undefined}>
+            {scrollbar.visible ? (index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize ? '█' : '│') : ' '}
+          </Text>
+        ))}
+      </Box>
     </Box>
   )
 }
@@ -212,8 +213,9 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, cursorOffset, showCursor, visibleRows }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number }) {
+function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number; columns: number }) {
   const lines = inputPromptLineItems(input, visibleRows, cursorOffset)
+  const contentColumns = Math.max(1, columns - 2)
   return (
     <Box
       flexDirection="column"
@@ -231,7 +233,7 @@ function InputView({ input, cursorOffset, showCursor, visibleRows }: { input: st
     >
       {lines.map((line, index) => (
         <Text key={index} color="cyan" wrap="truncate-end">
-          {renderInputLine(line.text, showCursor && line.cursorColumn !== undefined, line.cursorColumn).map((part, partIndex) => (
+          {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
             <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
           ))}
         </Text>
@@ -286,11 +288,13 @@ export function App({ python, bridgeScript }: Props) {
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
+  const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
   const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
+  const transcriptRowsRef = useRef({ totalRows: 0, viewportRows: 1 })
   const resumePendingRef = useRef(false)
   const mcpPanelOpenRef = useRef(false)
   const modelPanelPendingRef = useRef(false)
@@ -327,6 +331,7 @@ export function App({ python, bridgeScript }: Props) {
     const localCommandText = commandTextForLocalDecision(decision)
     if (decision.action?.type === 'clear') {
       setFooterPanel(null)
+      setTranscriptScrollOffset(0)
       pendingLocalCommandRef.current = null
       dispatch({ type: 'clear' })
       dispatch({ type: 'local_command_input', text: localCommandText ?? '/clear' })
@@ -342,8 +347,10 @@ export function App({ python, bridgeScript }: Props) {
       const command = decision.command
       if (command.type === 'submit') {
         setInputHistory(history => recordInput(history, command.text))
+        setTranscriptScrollOffset(0)
       } else if (command.type === 'skill_invoke') {
         setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
+        setTranscriptScrollOffset(0)
       }
       if (command.type === 'stop' && localCommandText) {
         appendLocalCommandOutput('Stop requested')
@@ -527,6 +534,27 @@ export function App({ python, bridgeScript }: Props) {
   }, [bridgeScript, python])
 
   const handleTerminalInput = (rawInput: string, key: InputKey) => {
+    const mouseInput = key.sequence ?? rawInput
+    const wheel = parseMouseWheel(mouseInput)
+    if (wheel) {
+      const { totalRows, viewportRows } = transcriptRowsRef.current
+      const delta = transcriptWheelStep()
+      setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, wheel === 'up' ? delta : -delta, totalRows, viewportRows))
+      return
+    }
+    if (parseMouseEvent(mouseInput)) {
+      return
+    }
+    if (key.pageUp) {
+      const { totalRows, viewportRows } = transcriptRowsRef.current
+      setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, transcriptScrollStep(viewportRows), totalRows, viewportRows))
+      return
+    }
+    if (key.pageDown) {
+      const { totalRows, viewportRows } = transcriptRowsRef.current
+      setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, -transcriptScrollStep(viewportRows), totalRows, viewportRows))
+      return
+    }
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
       bridgeRef.current?.send({ type: 'shutdown' })
       exitCleanly()
@@ -689,20 +717,30 @@ export function App({ python, bridgeScript }: Props) {
         ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
         : undefined,
   })
-  const { staticMessages, activeMessages } = useMemo(() => splitStaticAndActiveMessages(state.messages), [state.messages])
-  const activeLines = useMemo(() => {
-    const lines = wrapTranscriptLines(transcriptLines(activeMessages, { expandedTools }), Math.max(1, metrics.columns - 2))
-    return liveTranscriptViewportLines(lines, metrics.messageRows)
-  }, [activeMessages, expandedTools, metrics.columns, metrics.messageRows])
-  const messageViewportPlan = planMessageViewport({
-    hasStaticMessages: staticMessages.length > 0,
-    liveLineCount: activeLines.length,
-    messageRows: metrics.messageRows,
-  })
+  const transcriptRows = useMemo(() => (
+    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools }), Math.max(1, metrics.columns - 3))
+  ), [state.messages, expandedTools, metrics.columns])
+  const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
+  const effectiveTranscriptScrollOffset = preserveTranscriptScrollOnContentChange(
+    transcriptScrollOffset,
+    previousTranscriptTotalRows,
+    transcriptRows.length,
+    metrics.messageRows,
+  )
+  const visibleTranscript = useMemo(() => (
+    visibleTranscriptLines(transcriptRows, { maxRows: metrics.messageRows, scrollOffset: effectiveTranscriptScrollOffset })
+  ), [transcriptRows, metrics.messageRows, effectiveTranscriptScrollOffset])
+  transcriptRowsRef.current = { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
+
+  useEffect(() => {
+    if (transcriptScrollOffset !== visibleTranscript.scrollOffset) {
+      setTranscriptScrollOffset(visibleTranscript.scrollOffset)
+    }
+  }, [transcriptScrollOffset, visibleTranscript.scrollOffset])
 
   const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? `Running: keep typing, Enter waits - Terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Alt+Enter newline - Terminal scrollback - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    ? `Running: keep typing, Enter waits - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
+    : `Enter send - Alt+Enter newline - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const inputSections = inputChromeSections({
     hasError: Boolean(state.error),
@@ -712,7 +750,7 @@ export function App({ python, bridgeScript }: Props) {
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
     if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} />
+    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} columns={metrics.columns} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
@@ -723,29 +761,23 @@ export function App({ python, bridgeScript }: Props) {
     return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null
   }
   return (
-    <>
-      <Static items={staticMessages}>
-        {message => <StaticMessage key={message.id} message={message} columns={metrics.columns} expandedTools={expandedTools} />}
-      </Static>
-      <Box flexDirection="column" width={metrics.columns}>
-        <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
-          <Text bold wrap="truncate-end">GenericAgent Ink</Text>
-          <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
-        </Box>
-        {messageViewportPlan.kind === 'ready' ? <ReadyViewport columns={metrics.columns} /> : null}
-        {messageViewportPlan.kind === 'live' ? (
-          <MessageViewport
-            height={messageViewportPlan.height}
-            columns={metrics.columns}
-            lines={activeLines}
-            ready={false}
-          />
-        ) : null}
-        <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-          {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : <ActivityPlaceholder />}
-          {inputSections.map(renderInputSection)}
-        </BottomChrome>
+    <Box flexDirection="column" width={metrics.columns}>
+      <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
+        <Text bold wrap="truncate-end">GenericAgent Ink</Text>
+        <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
       </Box>
-    </>
+      <MessageViewport
+        height={metrics.messageRows}
+        columns={metrics.columns}
+        lines={visibleTranscript.lines}
+        ready={visibleTranscript.totalRows === 0}
+        totalRows={visibleTranscript.totalRows}
+        scrollOffset={visibleTranscript.scrollOffset}
+      />
+      <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
+        {(state.status === 'running' || state.status === 'stopping') && runningStartedAt !== null ? <ActivityView seconds={runningSeconds} label={state.activityLabel ?? runningLabel} /> : <ActivityPlaceholder />}
+        {inputSections.map(renderInputSection)}
+      </BottomChrome>
+    </Box>
   )
 }
