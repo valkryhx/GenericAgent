@@ -15,6 +15,7 @@ from llmcore import reload_mykeys, LLMSession, ToolClient, ClaudeSession, MixinS
 from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
+import session_transcript
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
@@ -124,6 +125,13 @@ class GenericAgent:
         self.peer_hint = True
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
         self.load_llm_sessions()
+        self.session_id = None
+        self.session_path = None
+        self.session_turn_id = 0
+        try:
+            session_transcript.ensure_agent_session(self)
+        except Exception as e:
+            print(f"[WARN] Failed to initialize session transcript: {e}")
 
     def load_llm_sessions(self):
         mykeys, changed = reload_mykeys()
@@ -260,6 +268,7 @@ class GenericAgent:
                 if ps > 0: handler.working['key_info'] += f'\n[SYSTEM] 此为 {ps} 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n'
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
+            transcript_history_before = session_transcript.current_backend_history(self)
             initial_content = _build_user_content_with_images(raw_query, images) if _native_image_input_enabled(self.llmclient) else None
             name = self.get_llm_name(model=True)
             load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
@@ -280,9 +289,30 @@ class GenericAgent:
                 if '</file_content>' in full_resp: full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)                
                 display_queue.put({'done': full_resp, 'source': source})
                 self.history = handler.history_info
+                try:
+                    session_transcript.record_agent_turn(
+                        self,
+                        user_text=raw_query,
+                        assistant_text=full_resp,
+                        source=source,
+                        backend_history_before=transcript_history_before,
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to record session transcript: {e}")
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
-                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source})
+                failed_resp = full_resp + f'\n```\n{format_error(e)}\n```'
+                display_queue.put({'done': failed_resp, 'source': source})
+                try:
+                    session_transcript.record_agent_turn(
+                        self,
+                        user_text=raw_query,
+                        assistant_text=failed_resp,
+                        source=source,
+                        backend_history_before=transcript_history_before,
+                    )
+                except Exception as rec_e:
+                    print(f"[WARN] Failed to record session transcript: {rec_e}")
             finally:
                 if self.stop_sig: print('User aborted the task.')
                 self.is_running = self.stop_sig = False

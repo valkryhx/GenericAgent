@@ -124,6 +124,32 @@ class SessionTranscriptTest(unittest.TestCase):
             self.assertEqual("session_test", agent.session_id)
             self.assertEqual(str(path), agent.session_path)
 
+    def test_record_agent_turn_uses_agent_session_and_increments_turn_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            agent = FakeAgent()
+            agent.session_id = "session_test"
+            agent.session_path = str(path)
+            agent.session_turn_id = 0
+            before = []
+            after = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+            agent.llmclient.backend.history = after
+
+            session_transcript.record_agent_turn(
+                agent,
+                user_text="hello",
+                assistant_text="hi",
+                source="user",
+                backend_history_before=before,
+            )
+
+            loaded = session_transcript.load_session(path)
+            self.assertEqual(1, agent.session_turn_id)
+            self.assertEqual(1, loaded.rounds)
+            self.assertEqual(after, loaded.backend_history)
+            self.assertEqual("hello", loaded.ui_messages[0]["content"])
+            self.assertEqual("hi", loaded.ui_messages[1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

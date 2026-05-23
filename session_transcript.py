@@ -202,3 +202,35 @@ def restore_agent_session(agent, path):
         message=f"已恢复 {loaded.rounds} 轮结构化会话（{Path(path).name}）",
         session=loaded,
     )
+
+
+def ensure_agent_session(agent, *, root=None, frontend=None):
+    if getattr(agent, "session_path", None) and getattr(agent, "session_id", None):
+        return agent.session_path
+    sid = new_session_id()
+    path = create_session(root=root, cwd=os.getcwd(), session_id=sid, frontend=frontend)
+    agent.session_id = sid
+    agent.session_path = path
+    agent.session_turn_id = 0
+    return path
+
+
+def current_backend_history(agent):
+    backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+    return copy.deepcopy(getattr(backend, "history", []) or [])
+
+
+def record_agent_turn(agent, *, user_text, assistant_text, source, backend_history_before):
+    path = ensure_agent_session(agent)
+    turn_id = int(getattr(agent, "session_turn_id", 0) or 0) + 1
+    agent.session_turn_id = turn_id
+    record_turn(
+        path,
+        session_id=getattr(agent, "session_id"),
+        turn_id=turn_id,
+        source=source,
+        user_text=user_text,
+        assistant_text=assistant_text,
+        backend_history_before=backend_history_before,
+        backend_history_after=current_backend_history(agent),
+    )
