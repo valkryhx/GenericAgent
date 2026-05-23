@@ -70,6 +70,7 @@ import { transcriptScrollbar } from './transcriptScrollbar.js'
 type Props = {
   python: string
   bridgeScript: string
+  startBridgeClient?: typeof startBridge
 }
 
 function TranscriptLineView({ line }: { line: TranscriptLine }) {
@@ -297,7 +298,7 @@ function helpText(): string {
   ].join('\n')
 }
 
-export function App({ python, bridgeScript }: Props) {
+export function App({ python, bridgeScript, startBridgeClient = startBridge }: Props) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { setRawMode, internal_eventEmitter } = useStdin()
@@ -325,6 +326,7 @@ export function App({ python, bridgeScript }: Props) {
   const modelPanelPendingRef = useRef(false)
   const modelPanelOpenRef = useRef(false)
   const pendingLocalCommandRef = useRef<string | null>(null)
+  const pendingHistoryReplacementScrollRef = useRef(false)
   const pasteStore = useMemo(() => createPasteStore(), [])
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
@@ -505,7 +507,7 @@ export function App({ python, bridgeScript }: Props) {
         setFooterPanel(null)
         resumePendingRef.current = false
         flushDeltas()
-        setTranscriptScrollOffset(scrollOffsetForHistoryReplacement())
+        pendingHistoryReplacementScrollRef.current = true
         dispatch(event)
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })
@@ -554,14 +556,14 @@ export function App({ python, bridgeScript }: Props) {
       dispatch(event)
     }
 
-    bridgeRef.current = startBridge(python, bridgeScript, onEvent, code => {
+    bridgeRef.current = startBridgeClient(python, bridgeScript, onEvent, code => {
       dispatch({ type: 'error', code: 'bridge_exit', message: `bridge exited: ${code ?? 'signal'}` })
     })
     return () => {
       bridgeRef.current?.stop()
       if (throttleTimer) clearTimeout(throttleTimer)
     }
-  }, [bridgeScript, python])
+  }, [bridgeScript, python, startBridgeClient])
 
   const handleTerminalInput = (rawInput: string, key: InputKey) => {
     const mouseInput = key.sequence ?? rawInput
@@ -764,6 +766,12 @@ export function App({ python, bridgeScript }: Props) {
     visibleTranscriptLines(transcriptRows, { maxRows: metrics.messageRows, scrollOffset: effectiveTranscriptScrollOffset })
   ), [transcriptRows, metrics.messageRows, effectiveTranscriptScrollOffset])
   transcriptRowsRef.current = { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
+
+  useEffect(() => {
+    if (!pendingHistoryReplacementScrollRef.current) return
+    pendingHistoryReplacementScrollRef.current = false
+    setTranscriptScrollOffset(scrollOffsetForHistoryReplacement(visibleTranscript.totalRows, metrics.messageRows))
+  }, [metrics.messageRows, transcriptRows, visibleTranscript.totalRows])
 
   useEffect(() => {
     if (transcriptScrollOffset !== visibleTranscript.scrollOffset) {

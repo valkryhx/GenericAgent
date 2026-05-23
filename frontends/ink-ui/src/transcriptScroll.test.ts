@@ -31,7 +31,8 @@ test('preserveTranscriptScrollOnContentChange remains sticky at the bottom', () 
 })
 
 test('scrollOffsetForHistoryReplacement starts restored history at the oldest rows', () => {
-  assert.equal(scrollOffsetForHistoryReplacement(), Number.MAX_SAFE_INTEGER)
+  assert.equal(scrollOffsetForHistoryReplacement(40, 10), 30)
+  assert.equal(scrollOffsetForHistoryReplacement(8, 10), 0)
 })
 
 test('transcript scroll helpers use stable page and wheel increments', () => {
