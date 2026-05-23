@@ -1,0 +1,129 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import session_transcript
+
+
+class FakeBackend:
+    def __init__(self):
+        self.history = []
+
+
+class FakeClient:
+    def __init__(self):
+        self.backend = FakeBackend()
+        self.last_tools = "cached tools"
+
+
+class FakeAgent:
+    def __init__(self):
+        self.history = ["old ui history"]
+        self.handler = object()
+        self.llmclient = FakeClient()
+        self.llmclients = [self.llmclient]
+        self.aborted = False
+
+    def abort(self):
+        self.aborted = True
+
+
+class SessionTranscriptTest(unittest.TestCase):
+    def test_create_session_writes_session_start_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo")
+
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, len(lines))
+            event = json.loads(lines[0])
+            self.assertEqual(1, event["version"])
+            self.assertEqual("session_start", event["type"])
+            self.assertTrue(event["session_id"].startswith("session_"))
+            self.assertEqual("C:/repo", event["cwd"])
+
+    def test_record_turn_and_load_session_round_trips_ui_and_backend_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            before = []
+            after = [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            ]
+
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="hello",
+                assistant_text="hi",
+                backend_history_before=before,
+                backend_history_after=after,
+            )
+
+            loaded = session_transcript.load_session(path)
+            self.assertEqual("session_test", loaded.session_id)
+            self.assertEqual(1, loaded.rounds)
+            self.assertEqual("hello", loaded.preview)
+            self.assertEqual(
+                [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                loaded.ui_messages,
+            )
+            self.assertEqual(after, loaded.backend_history)
+            self.assertEqual(before, loaded.turns[0].backend_history_before)
+
+    def test_list_sessions_returns_newest_first_and_skips_malformed_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_a")
+            second = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_b")
+            Path(tmp, "broken.jsonl").write_text("{not json", encoding="utf-8")
+            session_transcript.record_turn(
+                second,
+                session_id="session_b",
+                turn_id=1,
+                source="user",
+                user_text="newer",
+                assistant_text="answer",
+                backend_history_before=[],
+                backend_history_after=[{"role": "user", "content": "newer"}],
+            )
+
+            sessions = session_transcript.list_sessions(root=tmp)
+
+            self.assertEqual(["session_b", "session_a"], [s.session_id for s in sessions])
+            self.assertEqual(str(second), sessions[0].path)
+            self.assertEqual(str(first), sessions[1].path)
+
+    def test_restore_session_replaces_backend_history_and_clears_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            history = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="hello",
+                assistant_text="hi",
+                backend_history_before=[],
+                backend_history_after=history,
+            )
+            agent = FakeAgent()
+
+            result = session_transcript.restore_agent_session(agent, path)
+
+            self.assertTrue(result.ok)
+            self.assertTrue(agent.aborted)
+            self.assertEqual(history, agent.llmclient.backend.history)
+            self.assertEqual("", agent.llmclient.last_tools)
+            self.assertIsNone(agent.handler)
+            self.assertEqual("session_test", agent.session_id)
+            self.assertEqual(str(path), agent.session_path)
+
+
+if __name__ == "__main__":
+    unittest.main()
