@@ -110,6 +110,50 @@ def record_compact(path, *, session_id, message, backend_history_after):
     })
 
 
+def record_rewind(path, *, session_id, keep_turns, backend_history_after):
+    append_event(path, {
+        "version": 1,
+        "type": "rewind",
+        "session_id": session_id,
+        "created_at": _now_iso(),
+        "keep_turns": max(0, int(keep_turns or 0)),
+        "backend_history_after": copy.deepcopy(backend_history_after or []),
+    })
+
+
+def _history_equal(left, right):
+    return (left or []) == (right or [])
+
+
+def _find_turn_count_for_backend_history(turns, backend_history):
+    if not backend_history:
+        return 0
+    for idx in range(len(turns) - 1, -1, -1):
+        if _history_equal(turns[idx].backend_history_after, backend_history):
+            return idx + 1
+    return None
+
+
+def _append_loaded_turn(turns, ui_messages, turn):
+    turns.append(turn)
+    if turn.user_text.strip():
+        ui_messages.append({"role": "user", "content": turn.user_text})
+    if turn.assistant_text.strip():
+        ui_messages.append({"role": "assistant", "content": turn.assistant_text})
+
+
+def _truncate_loaded_turns(turns, ui_messages, keep_turns):
+    keep = max(0, min(int(keep_turns or 0), len(turns)))
+    del turns[keep:]
+    keep_messages = 0
+    for turn in turns:
+        if turn.user_text.strip():
+            keep_messages += 1
+        if turn.assistant_text.strip():
+            keep_messages += 1
+    del ui_messages[keep_messages:]
+
+
 def load_session(path):
     p = Path(path)
     warnings = []
@@ -139,13 +183,18 @@ def load_session(path):
                 backend_history_before=copy.deepcopy(event.get("backend_history_before") or []),
                 backend_history_after=copy.deepcopy(event.get("backend_history_after") or []),
             )
-            turns.append(turn)
-            if turn.user_text.strip():
-                ui_messages.append({"role": "user", "content": turn.user_text})
-            if turn.assistant_text.strip():
-                ui_messages.append({"role": "assistant", "content": turn.assistant_text})
+            keep_turns = None
+            if backend_history:
+                keep_turns = _find_turn_count_for_backend_history(turns, turn.backend_history_before)
+            if keep_turns is not None and keep_turns < len(turns):
+                _truncate_loaded_turns(turns, ui_messages, keep_turns)
+            _append_loaded_turn(turns, ui_messages, turn)
             backend_history = copy.deepcopy(turn.backend_history_after)
         elif event.get("type") == "compact":
+            backend_history = copy.deepcopy(event.get("backend_history_after") or [])
+        elif event.get("type") == "rewind":
+            keep_turns = int(event.get("keep_turns") or 0)
+            _truncate_loaded_turns(turns, ui_messages, keep_turns)
             backend_history = copy.deepcopy(event.get("backend_history_after") or [])
     preview = next((t.user_text.strip() for t in turns if t.user_text.strip()), "")
     stat = p.stat()

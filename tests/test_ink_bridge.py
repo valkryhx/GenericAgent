@@ -401,6 +401,76 @@ class InkBridgeTest(unittest.TestCase):
         self.assertIsNone(agent.handler)
         self.assertEqual({"type": "rewind_done", "taskId": 2, "text": "second"}, events[-1])
 
+    def test_rewind_records_transcript_branch_boundary_and_resets_next_turn_id(self):
+        import session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            first_after = [
+                {"role": "user", "content": "1+1= ?"},
+                {"role": "assistant", "content": "2"},
+            ]
+            second_after = first_after + [
+                {"role": "user", "content": "1-2= ?"},
+                {"role": "assistant", "content": "-1"},
+            ]
+            agent = FakeAgent()
+            agent.session_id = "session_test"
+            agent.session_path = str(transcript)
+            agent.session_turn_id = 2
+            agent.llmclient.backend.history = copy.deepcopy(second_after)
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            bridge._task_seq = 2
+            bridge._rewind_snapshots = {
+                1: {"text": "1+1= ?", "history": [], "backend_history": [], "last_tools": ""},
+                2: {"text": "1-2= ?", "history": [], "backend_history": first_after, "last_tools": ""},
+            }
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="1+1= ?",
+                assistant_text="2",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="1-2= ?",
+                assistant_text="-1",
+                backend_history_before=first_after,
+                backend_history_after=second_after,
+            )
+
+            bridge.rewind(1)
+            agent.llmclient.backend.history = [
+                {"role": "user", "content": "1+10= ?"},
+                {"role": "assistant", "content": "11"},
+            ]
+            session_transcript.record_agent_turn(
+                agent,
+                user_text="1+10= ?",
+                assistant_text="11",
+                source="user",
+                backend_history_before=[],
+            )
+
+            loaded = session_transcript.load_session(transcript)
+            raw_types = [
+                json.loads(line)["type"]
+                for line in Path(transcript).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual({"type": "rewind_done", "taskId": 1, "text": "1+1= ?"}, events[-1])
+            self.assertEqual(1, agent.session_turn_id)
+            self.assertEqual(["session_start", "turn", "turn", "rewind", "turn"], raw_types)
+            self.assertEqual(["1+10= ?"], [turn.user_text for turn in loaded.turns])
+
     def test_emit_mcp_status(self):
         agent = FakeAgent()
         events = []

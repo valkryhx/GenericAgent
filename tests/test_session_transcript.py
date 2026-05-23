@@ -190,6 +190,150 @@ class SessionTranscriptTest(unittest.TestCase):
             self.assertEqual([1, 2, 3], [turn.turn_id for turn in loaded.turns])
             self.assertEqual(["one", "two", "three"], [turn.user_text for turn in loaded.turns])
 
+    def test_load_session_discards_legacy_dead_branch_when_next_turn_starts_from_earlier_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            first_after = [
+                {"role": "user", "content": "1+1= ?"},
+                {"role": "assistant", "content": "2"},
+            ]
+            second_after = first_after + [
+                {"role": "user", "content": "1-2= ?"},
+                {"role": "assistant", "content": "-1"},
+            ]
+            rewritten_after = [
+                {"role": "user", "content": "1+10= ?"},
+                {"role": "assistant", "content": "11"},
+            ]
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="1+1= ?",
+                assistant_text="2",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="1-2= ?",
+                assistant_text="-1",
+                backend_history_before=first_after,
+                backend_history_after=second_after,
+            )
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=3,
+                source="user",
+                user_text="1+10= ?",
+                assistant_text="11",
+                backend_history_before=[],
+                backend_history_after=rewritten_after,
+            )
+
+            loaded = session_transcript.load_session(path)
+
+            self.assertEqual(1, loaded.rounds)
+            self.assertEqual(["1+10= ?"], [turn.user_text for turn in loaded.turns])
+            self.assertEqual(rewritten_after, loaded.backend_history)
+            self.assertEqual("1+10= ?", loaded.preview)
+
+    def test_load_session_does_not_treat_empty_backend_snapshots_as_implicit_rewind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="first",
+                assistant_text="a1",
+                backend_history_before=[],
+                backend_history_after=[],
+            )
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="second",
+                assistant_text="a2",
+                backend_history_before=[],
+                backend_history_after=[],
+            )
+
+            loaded = session_transcript.load_session(path)
+
+            self.assertEqual(["first", "second"], [turn.user_text for turn in loaded.turns])
+
+    def test_record_rewind_keeps_raw_turns_but_loads_only_current_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            first_after = [
+                {"role": "user", "content": "1+1= ?"},
+                {"role": "assistant", "content": "2"},
+            ]
+            second_after = first_after + [
+                {"role": "user", "content": "1-2= ?"},
+                {"role": "assistant", "content": "-1"},
+            ]
+            rewritten_after = [
+                {"role": "user", "content": "1+10= ?"},
+                {"role": "assistant", "content": "11"},
+            ]
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="1+1= ?",
+                assistant_text="2",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="1-2= ?",
+                assistant_text="-1",
+                backend_history_before=first_after,
+                backend_history_after=second_after,
+            )
+            session_transcript.record_rewind(
+                path,
+                session_id="session_test",
+                keep_turns=0,
+                backend_history_after=[],
+            )
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="1+10= ?",
+                assistant_text="11",
+                backend_history_before=[],
+                backend_history_after=rewritten_after,
+            )
+
+            loaded = session_transcript.load_session(path)
+            events = [
+                json.loads(line)
+                for line in Path(path).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+            self.assertEqual(["turn", "turn", "rewind", "turn"], [event["type"] for event in events[1:]])
+            self.assertEqual(["1+10= ?"], [turn.user_text for turn in loaded.turns])
+            self.assertEqual(rewritten_after, loaded.backend_history)
+
     def test_record_agent_turn_uses_agent_session_and_increments_turn_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")

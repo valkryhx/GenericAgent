@@ -434,8 +434,10 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "rewind_missing", "message": f"no checkpoint for task {task_id}"})
             return
         self._restore_agent_state(snapshot)
+        self._record_rewind_transcript(snapshot)
         for stale_id in [key for key in self._rewind_snapshots if key > task_id]:
             del self._rewind_snapshots[stale_id]
+        self._task_seq = task_id - 1
         self.emit({"type": "rewind_done", "taskId": task_id, "text": str(snapshot.get("text") or "")})
 
     def _snapshot_agent_state(self) -> dict[str, Any]:
@@ -444,6 +446,7 @@ class GenericAgentBridge:
             "history": copy.deepcopy(getattr(self.agent, "history", [])),
             "backend_history": copy.deepcopy(self._backend_history()),
             "last_tools": copy.deepcopy(getattr(getattr(self.agent, "llmclient", None), "last_tools", "")),
+            "session_turn_id": int(getattr(self.agent, "session_turn_id", 0) or 0),
         }
 
     def _restore_agent_state(self, snapshot: dict[str, Any]) -> None:
@@ -461,6 +464,22 @@ class GenericAgentBridge:
             client.last_tools = copy.deepcopy(snapshot.get("last_tools") or "")
         if hasattr(self.agent, "handler"):
             self.agent.handler = None
+        if hasattr(self.agent, "session_turn_id"):
+            self.agent.session_turn_id = int(snapshot.get("session_turn_id", 0) or 0)
+
+    def _record_rewind_transcript(self, snapshot: dict[str, Any]) -> None:
+        if session_transcript is None or not getattr(self.agent, "session_path", None):
+            return
+        keep_turns = int(snapshot.get("session_turn_id", 0) or 0)
+        try:
+            session_transcript.record_rewind(
+                self.agent.session_path,
+                session_id=getattr(self.agent, "session_id", ""),
+                keep_turns=keep_turns,
+                backend_history_after=copy.deepcopy(snapshot.get("backend_history") or []),
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "rewind_transcript_failed", "message": str(exc)})
 
     def _backend_history(self) -> Any:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
@@ -506,6 +525,7 @@ class GenericAgentBridge:
                         "history": [],
                         "backend_history": copy.deepcopy(turn.backend_history_before),
                         "last_tools": "",
+                        "session_turn_id": task_id - 1,
                     }
                     if turn.assistant_text:
                         messages.append({"role": "assistant", "text": turn.assistant_text, "taskId": task_id})
@@ -530,6 +550,7 @@ class GenericAgentBridge:
                     "history": [],
                     "backend_history": copy.deepcopy(backend_history[: max(0, (user_count - 1) * 2)]),
                     "last_tools": "",
+                    "session_turn_id": current_task_id - 1,
                 }
             elif role == "assistant" and current_task_id is not None:
                 msg["taskId"] = current_task_id

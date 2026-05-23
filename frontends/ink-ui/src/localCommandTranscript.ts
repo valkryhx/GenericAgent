@@ -7,7 +7,6 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (action === 'clear') return '/clear'
   if (action === 'open_mcp') return '/mcp'
   if (action === 'open_model') return '/model'
-  if (action === 'open_rewind') return '/rewind'
 
   const command = decision.command
   if (!command) return null
@@ -17,7 +16,6 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'model_status') return '/model ?'
   if (command.type === 'model_switch') return `/model ${command.selector}`
   if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
-  if (command.type === 'rewind') return `/rewind ${command.taskId}`
   if (command.type === 'stop') return '/stop'
   return null
 }
