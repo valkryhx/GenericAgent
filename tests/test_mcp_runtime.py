@@ -81,6 +81,22 @@ def _write_chinese_stderr_server(tmp_path: Path) -> Path:
     return script_path
 
 
+def _write_long_description_server(tmp_path: Path) -> Path:
+    script_path = tmp_path / "long_description_mcp_server.py"
+    long_description = "A" * 3000
+    script_path.write_text(
+        "from fastmcp import FastMCP\n"
+        "mcp = FastMCP('longdesc')\n"
+        f"@mcp.tool(description={long_description!r})\n"
+        "def echo(text: str) -> str:\n"
+        "    return text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path
+
+
 def _write_counting_server(tmp_path: Path) -> Path:
     counter_path = tmp_path / "starts.txt"
     script_path = tmp_path / "counting_mcp_server.py"
@@ -100,6 +116,18 @@ def _write_counting_server(tmp_path: Path) -> Path:
     return script_path
 
 
+def _write_failing_marker_server(tmp_path: Path) -> tuple[Path, Path]:
+    marker_path = tmp_path / "bad_server_started.txt"
+    script_path = tmp_path / "failing_mcp_server.py"
+    script_path.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker_path)!r}).write_text('started', encoding='utf-8')\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    return script_path, marker_path
+
+
 def _write_mcp_config(tmp_path: Path, server_script: Path) -> Path:
     config_path = tmp_path / "mcp.json"
     config_path.write_text(
@@ -111,6 +139,27 @@ def _write_mcp_config(tmp_path: Path, server_script: Path) -> Path:
                         "command": sys.executable,
                         "args": [str(server_script)],
                     }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_multi_mcp_config(tmp_path: Path, servers: dict[str, Path]) -> Path:
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    server_name: {
+                        "type": "stdio",
+                        "command": sys.executable,
+                        "args": [str(server_script)],
+                    }
+                    for server_name, server_script in servers.items()
                 }
             },
             ensure_ascii=False,
@@ -305,6 +354,68 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(first["status"], "success")
         self.assertEqual(second["status"], "success")
         self.assertEqual(starts, 1)
+
+    def test_call_tool_only_connects_target_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            bad_script, bad_marker = _write_failing_marker_server(tmp_path)
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {
+                    "demo": _write_demo_server(tmp_path),
+                    "bad": bad_script,
+                },
+            )
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            result = call_mcp_tool("mcp__demo__echo", {"text": "target"}, timeout=20)
+            manager = get_mcp_manager()
+            with manager.lock:
+                statuses = {name: state.status for name, state in manager.states.items()}
+
+            self.assertEqual(result["status"], "success")
+            self.assertIn("echo:target", json.dumps(result, ensure_ascii=False))
+            self.assertFalse(bad_marker.exists())
+            self.assertEqual(statuses, {"demo": "connected", "bad": "pending"})
+
+    def test_unknown_mcp_server_does_not_connect_any_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            bad_script, bad_marker = _write_failing_marker_server(tmp_path)
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {
+                    "demo": _write_demo_server(tmp_path),
+                    "bad": bad_script,
+                },
+            )
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            result = call_mcp_tool("mcp__dmeo__echo", {"text": "target"}, timeout=20)
+            manager = get_mcp_manager()
+            with manager.lock:
+                statuses = {name: state.status for name, state in manager.states.items()}
+
+            self.assertEqual(result["status"], "error")
+            self.assertIn("Unknown MCP server", result["msg"])
+            self.assertIn("demo", result["msg"])
+            self.assertFalse(bad_marker.exists())
+            self.assertEqual(statuses, {"demo": "pending", "bad": "pending"})
+
+    def test_mcp_tool_description_is_truncated_for_schema_stability(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            config_path = _write_named_mcp_config(tmp_path, "longdesc", _write_long_description_server(tmp_path))
+
+            tools = discover_mcp_tools(config_path=config_path, timeout=20)
+
+        echo_schema = next(tool for tool in tools if tool["function"]["name"] == "mcp__longdesc__echo")["function"]
+        self.assertIn("[MCP: longdesc/echo]", echo_schema["description"])
+        self.assertIn("[truncated]", echo_schema["description"])
+        self.assertLessEqual(len(echo_schema["description"]), 2100)
+        self.assertNotIn("A" * 2500, echo_schema["description"])
 
     def test_reconnect_restarts_stdio_server(self):
         with _tempdir() as tmp:

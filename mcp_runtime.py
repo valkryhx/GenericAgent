@@ -4,7 +4,7 @@ import os
 import re
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +15,7 @@ MCP_TOOL_PREFIX = "mcp__"
 _MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 _DISCOVERY_CACHE: dict[tuple, "McpDiscovery"] = {}
 _MCP_LOG_DIR = Path(script_dir) / "temp" / "mcp_logs"
+_MAX_MCP_DESCRIPTION_LENGTH = 2048
 
 
 @dataclass(frozen=True)
@@ -204,20 +205,55 @@ class McpManager:
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         call_timeout = _default_timeout(timeout, env_name="GA_MCP_CALL_TIMEOUT", fallback=60)
-        self.ensure_all_connected(timeout=call_timeout)
-        discovery = self.discover(include_unavailable=True, timeout=call_timeout)
-        tool_ref = discovery.tool_refs.get(full_name)
-        if tool_ref is None:
-            known = ", ".join(sorted(discovery.tool_refs)[:30])
+        server_name = self._server_name_for_tool(full_name)
+        if server_name is None:
+            known = ", ".join(sorted(self.states)[:30])
             return {
                 "status": "error",
-                "msg": f"Unknown MCP tool: {full_name}" + (f". Known: {known}" if known else ""),
-                "discovery_errors": discovery.errors,
+                "msg": f"Unknown MCP server for tool: {full_name}" + (f". Known servers: {known}" if known else ""),
+                "discovery_errors": {},
             }
         with self.lock:
-            state = self.states[tool_ref.server_name]
+            state = self.states[server_name]
+            if state.status == "disabled":
+                return {
+                    "status": "error",
+                    "msg": f"MCP server is disabled: {server_name}",
+                    "discovery_errors": {server_name: "disabled"},
+                }
+        self.ensure_connected(server_name, timeout=call_timeout)
+        with self.lock:
+            state = self.states[server_name]
+            tool_ref = state.tool_refs.get(full_name)
+            server_error = state.error
+            known_refs = sorted(state.tool_refs)[:30]
+        if tool_ref is None:
+            known = ", ".join(known_refs)
+            if server_error:
+                msg = f"MCP server {server_name} unavailable: {server_error}"
+            else:
+                msg = f"Unknown MCP tool: {full_name}" + (f". Known for {server_name}: {known}" if known else "")
+            return {
+                "status": "error",
+                "msg": msg,
+                "discovery_errors": {server_name: server_error} if server_error else {},
+            }
         clean_args = {k: v for k, v in (arguments or {}).items() if not str(k).startswith("_")}
         return self._run(self._call_tool_async(state, tool_ref.tool_name, clean_args, timeout=call_timeout))
+
+    def _server_name_for_tool(self, full_name: str) -> Optional[str]:
+        text = str(full_name or "")
+        if not text.startswith(MCP_TOOL_PREFIX):
+            return None
+        with self.lock:
+            matches = [
+                name
+                for name in self.states
+                if text.startswith(f"{MCP_TOOL_PREFIX}{normalize_mcp_name(name)}__")
+            ]
+        if not matches:
+            return None
+        return max(matches, key=lambda name: len(f"{MCP_TOOL_PREFIX}{normalize_mcp_name(name)}__"))
 
     def reconnect(self, server_name: str, timeout: Optional[float] = None) -> dict[str, Any]:
         with self.lock:
@@ -307,8 +343,9 @@ class McpManager:
             stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
             transport.transport.log_file = stderr_log
         try:
-            entered = _make_fastmcp_client(Client, transport, state.name, timeout)
-            client = await entered.__aenter__()
+            with _stdio_errlog_patch(transport, stderr_log):
+                entered = _make_fastmcp_client(Client, transport, state.name, timeout)
+                client = await entered.__aenter__()
         except Exception:
             if stderr_log is not None:
                 stderr_log.close()
@@ -590,11 +627,51 @@ async def _mcp_client(single_config: dict[str, Any], server_name: str, timeout: 
         stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
         transport.transport.log_file = stderr_log
     try:
-        async with _make_fastmcp_client(Client, transport, server_name, timeout) as client:
-            yield client
+        with _stdio_errlog_patch(transport, stderr_log):
+            async with _make_fastmcp_client(Client, transport, server_name, timeout) as client:
+                yield client
     finally:
         if stderr_log is not None:
             stderr_log.close()
+
+
+@contextmanager
+def _stdio_errlog_patch(transport: Any, stderr_log: Any):
+    if stderr_log is None:
+        yield
+        return
+    stdio_transport = getattr(transport, "transport", None)
+    try:
+        from fastmcp.client.transports import StdioTransport
+    except Exception:
+        StdioTransport = None
+    if StdioTransport is None or not isinstance(stdio_transport, StdioTransport):
+        yield
+        return
+
+    original_connect_session = stdio_transport.connect_session
+
+    @asynccontextmanager
+    async def connect_session_with_errlog(**session_kwargs):
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        from mcp import ClientSession
+
+        server_params = StdioServerParameters(
+            command=stdio_transport.command,
+            args=stdio_transport.args,
+            env=stdio_transport.env,
+            cwd=stdio_transport.cwd,
+        )
+        async with stdio_client(server_params, errlog=stderr_log) as transport_pair:
+            read_stream, write_stream = transport_pair
+            async with ClientSession(read_stream, write_stream, **session_kwargs) as session:
+                yield session
+
+    stdio_transport.connect_session = connect_session_with_errlog
+    try:
+        yield
+    finally:
+        stdio_transport.connect_session = original_connect_session
 
 
 def _normalize_server_config(server_config: dict[str, Any]) -> dict[str, Any]:
@@ -618,6 +695,8 @@ def _normalize_server_config(server_config: dict[str, Any]) -> dict[str, Any]:
 def _tool_to_function_schema(server_name: str, tool: Any, full_name: str) -> dict[str, Any]:
     tool_name = str(getattr(tool, "name", ""))
     description = str(getattr(tool, "description", "") or "").strip()
+    if len(description) > _MAX_MCP_DESCRIPTION_LENGTH:
+        description = description[:_MAX_MCP_DESCRIPTION_LENGTH] + "... [truncated]"
     description = f"[MCP: {server_name}/{tool_name}] {description}".strip()
     parameters = getattr(tool, "inputSchema", None) or {"type": "object", "properties": {}}
     if not isinstance(parameters, dict):
