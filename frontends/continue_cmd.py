@@ -72,6 +72,19 @@ def _last_summary(pairs):
 def _preview_text(pairs):
     return _last_summary(pairs) or _first_user(pairs)
 
+
+def _session_fingerprint(first_user, rounds):
+    first = re.sub(r'\s+', ' ', str(first_user or '')).strip()
+    return (first, int(rounds or 0))
+
+
+def _ui_session_fingerprint(path):
+    messages = extract_ui_messages(path)
+    users = [str(m.get('content') or '').strip() for m in messages if m.get('role') == 'user']
+    if not users:
+        return None
+    return _session_fingerprint(users[0], len(users))
+
 def _recent_context(my_pid, n=5):
     """扫描最近 n 个 model_response 文件（排除自身），提取 lastQ / lastA。"""
     out = []
@@ -107,9 +120,11 @@ def _parse_native_history(pairs):
 def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     """Transcript sessions first, newest-first within each source."""
     transcripts = []
+    transcript_keys = set()
     if session_transcript is not None:
         for s in session_transcript.list_sessions(root=_SESSION_ROOT, exclude_session_id=exclude_session_id):
             transcripts.append((s.path, s.mtime, s.preview, s.rounds))
+            transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
     out = []
     files = glob.glob(_LOG_GLOB)
     if exclude_pid is not None:
@@ -125,6 +140,8 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
         except Exception: continue
         pairs = _pairs(content)
         if not pairs: continue
+        if _ui_session_fingerprint(f) in transcript_keys:
+            continue
         out.append((f, os.path.getmtime(f), _preview_text(pairs), len(pairs)))
     transcripts.sort(key=lambda x: x[1], reverse=True)
     out.sort(key=lambda x: x[1], reverse=True)

@@ -162,7 +162,7 @@ def load_session(path):
     )
 
 
-def list_sessions(root=None, exclude_session_id=None):
+def list_sessions(root=None, exclude_session_id=None, include_empty=False):
     out = []
     base = _root(root)
     if not base.exists():
@@ -173,6 +173,8 @@ def list_sessions(root=None, exclude_session_id=None):
         except Exception:
             continue
         if exclude_session_id and loaded.session_id == exclude_session_id:
+            continue
+        if not include_empty and loaded.rounds <= 0:
             continue
         out.append(loaded)
     out.sort(key=lambda item: item.mtime, reverse=True)

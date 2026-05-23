@@ -92,11 +92,32 @@ class SessionTranscriptTest(unittest.TestCase):
                 backend_history_after=[{"role": "user", "content": "newer"}],
             )
 
-            sessions = session_transcript.list_sessions(root=tmp)
+            sessions = session_transcript.list_sessions(root=tmp, include_empty=True)
 
             self.assertEqual(["session_b", "session_a"], [s.session_id for s in sessions])
             self.assertEqual(str(second), sessions[0].path)
             self.assertEqual(str(first), sessions[1].path)
+
+    def test_list_sessions_skips_empty_session_start_files_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_empty")
+            full = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_full")
+            session_transcript.record_turn(
+                full,
+                session_id="session_full",
+                turn_id=1,
+                source="user",
+                user_text="hello",
+                assistant_text="hi",
+                backend_history_before=[],
+                backend_history_after=[{"role": "user", "content": "hello"}],
+            )
+
+            sessions = session_transcript.list_sessions(root=tmp)
+
+            self.assertEqual(["session_full"], [s.session_id for s in sessions])
+            self.assertEqual(str(full), sessions[0].path)
+            self.assertNotIn(str(empty), [s.path for s in sessions])
 
     def test_restore_session_replaces_backend_history_and_clears_runtime_state(self):
         with tempfile.TemporaryDirectory() as tmp:

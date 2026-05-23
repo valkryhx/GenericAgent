@@ -48,6 +48,46 @@ def write_native_log(path, user_text="hello", assistant_text="hi"):
     )
 
 
+def write_native_log_with_tool_continuation(path):
+    first_prompt = {
+        "role": "user",
+        "content": [{"type": "text", "text": "one"}],
+    }
+    first_response = [{"type": "text", "text": "a1"}]
+    tool_prompt = {
+        "role": "user",
+        "content": [{"type": "text", "text": "two"}],
+    }
+    tool_response = [
+        {"type": "text", "text": "searching"},
+        {"type": "tool_use", "id": "tool-1", "name": "web_search", "input": {"q": "two"}},
+    ]
+    continuation_prompt = {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "tool-1", "content": "result"},
+            {"type": "text", "text": "### [WORKING MEMORY]\n<history></history>"},
+        ],
+    }
+    continuation_response = [{"type": "text", "text": "a2"}]
+    Path(path).write_text(
+        "=== Prompt === 2026-05-23 13:00:00\n"
+        + json.dumps(first_prompt, ensure_ascii=False, indent=2)
+        + "\n\n=== Response === 2026-05-23 13:00:01\n"
+        + repr(first_response)
+        + "\n\n=== Prompt === 2026-05-23 13:00:02\n"
+        + json.dumps(tool_prompt, ensure_ascii=False, indent=2)
+        + "\n\n=== Response === 2026-05-23 13:00:03\n"
+        + repr(tool_response)
+        + "\n\n=== Prompt === 2026-05-23 13:00:04\n"
+        + json.dumps(continuation_prompt, ensure_ascii=False, indent=2)
+        + "\n\n=== Response === 2026-05-23 13:00:05\n"
+        + repr(continuation_response)
+        + "\n\n",
+        encoding="utf-8",
+    )
+
+
 class ContinueCmdResumeTest(unittest.TestCase):
     def test_list_sessions_excludes_actual_agent_log_path_not_only_pid_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -150,6 +190,49 @@ class ContinueCmdResumeTest(unittest.TestCase):
             self.assertEqual(str(transcript), sessions[0][0])
             self.assertEqual("from transcript", sessions[0][2])
             self.assertEqual(str(legacy), sessions[1][0])
+
+    def test_list_sessions_does_not_show_legacy_log_when_transcript_covers_same_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_root = root / "sessions"
+            log_dir = root / "model_responses"
+            log_dir.mkdir()
+            transcript = session_transcript.create_session(
+                root=transcript_root,
+                cwd="C:/repo",
+                session_id="session_test",
+            )
+            first_after = [{"role": "user", "content": "one"}, {"role": "assistant", "content": "a1"}]
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="one",
+                assistant_text="a1",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="two",
+                assistant_text="a2",
+                backend_history_before=first_after,
+                backend_history_after=first_after + [{"role": "user", "content": "two"}],
+            )
+            covered_legacy = log_dir / "model_responses_111111.txt"
+            write_native_log_with_tool_continuation(covered_legacy)
+
+            with (
+                patch.object(continue_cmd, "_LOG_GLOB", str(log_dir / "model_responses_*.txt")),
+                patch.object(continue_cmd, "_SESSION_ROOT", str(transcript_root)),
+            ):
+                sessions = continue_cmd.list_sessions()
+
+            self.assertEqual([str(transcript)], [item[0] for item in sessions])
 
     def test_restore_dispatches_transcript_path_to_session_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:
