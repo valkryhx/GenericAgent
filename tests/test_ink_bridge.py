@@ -422,6 +422,30 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "activity", "label": None}, events[-2])
         self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
+    def test_compact_records_transcript_compact_event(self):
+        import session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            agent = FakeAgent()
+            agent.session_id = "session_test"
+            agent.session_path = str(transcript)
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            compacted = [{"role": "user", "content": "summary"}]
+
+            with patch("ink_bridge.compact_agent_context") as compact:
+                compact.return_value.ok = True
+                compact.return_value.summary = "summary text"
+                compact.return_value.original_messages = 4
+                compact.return_value.compacted_messages = 1
+                compact.return_value.message = "Compacted 4 messages into summary context."
+                agent.llmclient.backend.history = compacted
+                bridge.compact("keep important details")
+
+            loaded = session_transcript.load_session(transcript)
+            self.assertEqual(compacted, loaded.backend_history)
+
     def test_compact_rejects_while_busy(self):
         agent = FakeAgent()
         events = []

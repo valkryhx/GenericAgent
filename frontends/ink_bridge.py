@@ -309,6 +309,7 @@ class GenericAgentBridge:
                 self.emit({"type": "local_command_output", "text": f"Compact failed: {result.message}"})
                 return
             self._replace_compact_log()
+            self._record_compact_transcript(result.message)
             self._rewind_snapshots.clear()
             text = result.message
             self.emit({"type": "local_command_output", "text": text})
@@ -329,6 +330,7 @@ class GenericAgentBridge:
                 result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
             if result.ok:
                 self._replace_compact_log()
+                self._record_compact_transcript(result.message)
                 self._rewind_snapshots.clear()
                 text = "Auto " + result.message
                 self.emit({"type": "local_command_output", "text": text})
@@ -351,6 +353,19 @@ class GenericAgentBridge:
             replace_log_with_compact_history(log_path, copy.deepcopy(self._backend_history()))
         except Exception as exc:
             self.emit({"type": "error", "code": "compact_log_failed", "message": str(exc)})
+
+    def _record_compact_transcript(self, message: str) -> None:
+        if session_transcript is None or not getattr(self.agent, "session_path", None):
+            return
+        try:
+            session_transcript.record_compact(
+                self.agent.session_path,
+                session_id=getattr(self.agent, "session_id", ""),
+                message=message,
+                backend_history_after=copy.deepcopy(self._backend_history()),
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "compact_transcript_failed", "message": str(exc)})
 
     def list_resume_sessions(self) -> None:
         if continue_list is None:
