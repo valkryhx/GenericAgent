@@ -60,6 +60,7 @@ import { parseTerminalInput } from './terminalInput.js'
 import { parseMouseEvent, parseMouseWheel } from './mouseWheel.js'
 import {
   preserveTranscriptScrollOnContentChange,
+  scrollOffsetForHistoryReplacement,
   scrollTranscriptBy,
   transcriptScrollStep,
   transcriptWheelStep,
@@ -504,6 +505,7 @@ export function App({ python, bridgeScript }: Props) {
         setFooterPanel(null)
         resumePendingRef.current = false
         flushDeltas()
+        setTranscriptScrollOffset(scrollOffsetForHistoryReplacement())
         dispatch(event)
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })

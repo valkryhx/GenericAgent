@@ -6,6 +6,10 @@ export function transcriptWheelStep(): number {
   return 3
 }
 
+export function scrollOffsetForHistoryReplacement(): number {
+  return Number.MAX_SAFE_INTEGER
+}
+
 export function maxTranscriptScrollOffset(totalRows: number, viewportRows: number): number {
   return Math.max(0, Math.floor(totalRows) - Math.max(1, Math.floor(viewportRows)))
 }

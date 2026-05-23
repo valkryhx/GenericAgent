@@ -4,6 +4,7 @@ import {
   clampTranscriptScrollOffset,
   maxTranscriptScrollOffset,
   preserveTranscriptScrollOnContentChange,
+  scrollOffsetForHistoryReplacement,
   scrollTranscriptBy,
   transcriptScrollStep,
   transcriptWheelStep,
@@ -27,6 +28,10 @@ test('preserveTranscriptScrollOnContentChange keeps the same historical rows vis
 
 test('preserveTranscriptScrollOnContentChange remains sticky at the bottom', () => {
   assert.equal(preserveTranscriptScrollOnContentChange(0, 40, 45, 10), 0)
+})
+
+test('scrollOffsetForHistoryReplacement starts restored history at the oldest rows', () => {
+  assert.equal(scrollOffsetForHistoryReplacement(), Number.MAX_SAFE_INTEGER)
 })
 
 test('transcript scroll helpers use stable page and wheel increments', () => {
