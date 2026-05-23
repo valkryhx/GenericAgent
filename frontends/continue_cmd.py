@@ -79,11 +79,22 @@ def _session_fingerprint(first_user, rounds):
 
 
 def _ui_session_fingerprint(path):
-    messages = extract_ui_messages(path)
-    users = [str(m.get('content') or '').strip() for m in messages if m.get('role') == 'user']
+    users = _ui_session_users(path)
     if not users:
         return None
     return _session_fingerprint(users[0], len(users))
+
+
+def _ui_session_users(path):
+    messages = extract_ui_messages(path)
+    return [str(m.get('content') or '').strip() for m in messages if m.get('role') == 'user' and str(m.get('content') or '').strip()]
+
+
+def _is_contiguous_subsequence(needle, haystack):
+    if not needle or len(needle) > len(haystack):
+        return False
+    n = len(needle)
+    return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
 
 def _recent_context(my_pid, n=5):
     """扫描最近 n 个 model_response 文件（排除自身），提取 lastQ / lastA。"""
@@ -121,10 +132,17 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     """Transcript sessions first, newest-first within each source."""
     transcripts = []
     transcript_keys = set()
+    transcript_user_sequences = []
     if session_transcript is not None:
-        for s in session_transcript.list_sessions(root=_SESSION_ROOT, exclude_session_id=exclude_session_id):
-            transcripts.append((s.path, s.mtime, s.preview, s.rounds))
+        all_transcripts = session_transcript.list_sessions(root=_SESSION_ROOT)
+        for s in all_transcripts:
             transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
+            users = [t.user_text.strip() for t in s.turns if t.user_text.strip()]
+            if users:
+                transcript_user_sequences.append(users)
+            if exclude_session_id and s.session_id == exclude_session_id:
+                continue
+            transcripts.append((s.path, s.mtime, s.preview, s.rounds))
     out = []
     files = glob.glob(_LOG_GLOB)
     if exclude_pid is not None:
@@ -140,7 +158,10 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
         except Exception: continue
         pairs = _pairs(content)
         if not pairs: continue
-        if _ui_session_fingerprint(f) in transcript_keys:
+        users = _ui_session_users(f)
+        if users and _session_fingerprint(users[0], len(users)) in transcript_keys:
+            continue
+        if users and any(_is_contiguous_subsequence(users, seq) for seq in transcript_user_sequences):
             continue
         out.append((f, os.path.getmtime(f), _preview_text(pairs), len(pairs)))
     transcripts.sort(key=lambda x: x[1], reverse=True)

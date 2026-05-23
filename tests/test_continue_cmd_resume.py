@@ -234,6 +234,64 @@ class ContinueCmdResumeTest(unittest.TestCase):
 
             self.assertEqual([str(transcript)], [item[0] for item in sessions])
 
+    def test_active_transcript_still_hides_covered_legacy_logs_when_excluded_from_picker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_root = root / "sessions"
+            log_dir = root / "model_responses"
+            log_dir.mkdir()
+            transcript = session_transcript.create_session(
+                root=transcript_root,
+                cwd="C:/repo",
+                session_id="session_active",
+            )
+            first_after = [{"role": "user", "content": "one"}]
+            second_after = first_after + [{"role": "assistant", "content": "two"}]
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_active",
+                turn_id=1,
+                source="user",
+                user_text="one",
+                assistant_text="a1",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_active",
+                turn_id=2,
+                source="user",
+                user_text="two",
+                assistant_text="a2",
+                backend_history_before=first_after,
+                backend_history_after=second_after,
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_active",
+                turn_id=3,
+                source="user",
+                user_text="three",
+                assistant_text="a3",
+                backend_history_before=second_after,
+                backend_history_after=second_after + [{"role": "user", "content": "three"}],
+            )
+            prefix_legacy = log_dir / "model_responses_111111.txt"
+            write_native_log_with_tool_continuation(prefix_legacy)
+            suffix_legacy = log_dir / "model_responses_222222.txt"
+            write_native_log(suffix_legacy, "three", "a3")
+            unrelated_legacy = log_dir / "model_responses_333333.txt"
+            write_native_log(unrelated_legacy, "other", "answer")
+
+            with (
+                patch.object(continue_cmd, "_LOG_GLOB", str(log_dir / "model_responses_*.txt")),
+                patch.object(continue_cmd, "_SESSION_ROOT", str(transcript_root)),
+            ):
+                sessions = continue_cmd.list_sessions(exclude_session_id="session_active")
+
+            self.assertEqual([str(unrelated_legacy)], [item[0] for item in sessions])
+
     def test_restore_dispatches_transcript_path_to_session_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")

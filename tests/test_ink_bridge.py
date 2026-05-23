@@ -295,6 +295,90 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual([], bridge._rewind_snapshots[1]["backend_history"])
             self.assertEqual(first_after, bridge._rewind_snapshots[2]["backend_history"])
 
+    def test_resume_transcript_replaces_ui_with_full_conversation_from_start(self):
+        import session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="高斯分布是什么",
+                assistant_text="高斯分布回答",
+                backend_history_before=[],
+                backend_history_after=[{"role": "user", "content": "高斯分布是什么"}],
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="高斯生平",
+                assistant_text="高斯生平回答",
+                backend_history_before=[{"role": "user", "content": "高斯分布是什么"}],
+                backend_history_after=[{"role": "user", "content": "高斯生平"}],
+            )
+            agent = FakeAgent()
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+                bridge.resume_session(str(transcript))
+
+            history_replace = next(event for event in events if event["type"] == "history_replace")
+            self.assertEqual(
+                [
+                    {"role": "user", "text": "高斯分布是什么", "taskId": 1},
+                    {"role": "assistant", "text": "高斯分布回答", "taskId": 1},
+                    {"role": "user", "text": "高斯生平", "taskId": 2},
+                    {"role": "assistant", "text": "高斯生平回答", "taskId": 2},
+                ],
+                history_replace["messages"],
+            )
+
+    def test_resume_transcript_switches_active_session_and_next_turn_appends_to_same_file(self):
+        import session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_old")
+            first_after = [{"role": "user", "content": "old question"}]
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_old",
+                turn_id=1,
+                source="user",
+                user_text="old question",
+                assistant_text="old answer",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            agent = FakeAgent()
+            agent.session_id = "session_new"
+            agent.session_path = str(Path(tmp) / "session_new.jsonl")
+            agent.session_turn_id = 0
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+                bridge.resume_session(str(transcript))
+            agent.llmclient.backend.history = first_after + [{"role": "user", "content": "follow up"}]
+            session_transcript.record_agent_turn(
+                agent,
+                user_text="follow up",
+                assistant_text="follow answer",
+                source="user",
+                backend_history_before=first_after,
+            )
+
+            loaded = session_transcript.load_session(transcript)
+            self.assertEqual("session_old", agent.session_id)
+            self.assertEqual(str(transcript), agent.session_path)
+            self.assertEqual(2, agent.session_turn_id)
+            self.assertEqual(["old question", "follow up"], [turn.user_text for turn in loaded.turns])
+            self.assertFalse(Path(agent.session_path).with_name("session_new.jsonl").exists())
+
     def test_rewind_restores_checkpoint_before_selected_task(self):
         agent = FakeAgent()
         events = []

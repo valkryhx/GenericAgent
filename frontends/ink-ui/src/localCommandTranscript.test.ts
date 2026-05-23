@@ -10,10 +10,12 @@ import {
 test('commandTextForLocalDecision returns display text for local actions and commands only', () => {
   assert.equal(commandTextForLocalDecision({ action: { type: 'help' } }), '/help')
   assert.equal(commandTextForLocalDecision({ action: { type: 'open_mcp' } }), '/mcp')
+  assert.equal(commandTextForLocalDecision({ action: { type: 'open_resume' } }), null)
   assert.equal(commandTextForLocalDecision({ command: { type: 'mcp_reconnect', server: 'demo' } }), '/mcp reconnect demo')
   assert.equal(commandTextForLocalDecision({ command: { type: 'model_switch', selector: '2' } }), '/model 2')
   assert.equal(commandTextForLocalDecision({ command: { type: 'compact', instructions: 'keep decisions' } }), '/compact keep decisions')
   assert.equal(commandTextForLocalDecision({ command: { type: 'compact', instructions: '' } }), '/compact')
+  assert.equal(commandTextForLocalDecision({ command: { type: 'resume_session_index', index: 2 } }), null)
   assert.equal(commandTextForLocalDecision({ command: { type: 'submit', text: 'hello' } }), null)
   assert.equal(commandTextForLocalDecision({ command: { type: 'skill_invoke', skill: 'imagegen', args: 'cat' } }), null)
 })

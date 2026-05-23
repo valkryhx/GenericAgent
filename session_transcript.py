@@ -199,6 +199,7 @@ def restore_agent_session(agent, path):
         agent.handler = None
     agent.session_id = loaded.session_id
     agent.session_path = loaded.path
+    agent.session_turn_id = loaded.rounds
     return RestoreResult(
         ok=True,
         message=f"已恢复 {loaded.rounds} 轮结构化会话（{Path(path).name}）",
@@ -208,6 +209,11 @@ def restore_agent_session(agent, path):
 
 def ensure_agent_session(agent, *, root=None, frontend=None):
     if getattr(agent, "session_path", None) and getattr(agent, "session_id", None):
+        if not hasattr(agent, "session_turn_id"):
+            try:
+                agent.session_turn_id = load_session(agent.session_path).rounds
+            except Exception:
+                agent.session_turn_id = 0
         return agent.session_path
     sid = new_session_id()
     path = create_session(root=root, cwd=os.getcwd(), session_id=sid, frontend=frontend)
