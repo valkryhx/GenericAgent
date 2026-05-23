@@ -2,9 +2,15 @@
 Pure functions + one `install(cls)` monkey-patch entry. No side effects at import.
 """
 import ast, glob, json, os, re, time
+try:
+    import session_transcript
+except Exception:
+    session_transcript = None
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         'temp', 'model_responses')
 _LOG_GLOB = os.path.join(_LOG_DIR, 'model_responses_*.txt')
+_SESSION_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'temp', 'sessions')
 _BLOCK_RE = re.compile(r'^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)',
                        re.DOTALL | re.MULTILINE)
 _SUMMARY_RE = re.compile(r'<summary>\s*(.*?)\s*</summary>', re.DOTALL)
@@ -99,7 +105,12 @@ def _parse_native_history(pairs):
     return history
 
 def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
-    """Newest-first list of (path, mtime, first_user_text, n_rounds)."""
+    """Transcript sessions first, newest-first within each source."""
+    transcripts = []
+    if session_transcript is not None:
+        for s in session_transcript.list_sessions(root=_SESSION_ROOT, exclude_session_id=exclude_session_id):
+            transcripts.append((s.path, s.mtime, s.preview, s.rounds))
+    out = []
     files = glob.glob(_LOG_GLOB)
     if exclude_pid is not None:
         tag = f'model_responses_{exclude_pid}.txt'
@@ -107,7 +118,6 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     if exclude_path:
         excluded = os.path.abspath(exclude_path)
         files = [f for f in files if os.path.abspath(f) != excluded]
-    out = []
     for f in files:
         try:
             with open(f, encoding='utf-8', errors='replace') as fh:
@@ -116,8 +126,9 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
         pairs = _pairs(content)
         if not pairs: continue
         out.append((f, os.path.getmtime(f), _preview_text(pairs), len(pairs)))
+    transcripts.sort(key=lambda x: x[1], reverse=True)
     out.sort(key=lambda x: x[1], reverse=True)
-    return out
+    return transcripts + out
 _MD_ESCAPE_RE = re.compile(r'([\\`*_\[\]])')
 def _escape_md(s): return _MD_ESCAPE_RE.sub(r'\\\1', s)
 
@@ -196,6 +207,12 @@ def format_list(sessions, limit=20):
 
 def restore(agent, path):
     """Restore session at path. Returns (msg, is_full)."""
+    if session_transcript is not None and session_transcript.is_transcript_path(path):
+        try:
+            result = session_transcript.restore_agent_session(agent, path)
+        except Exception as e:
+            return f'❌ 读取结构化会话失败: {e}', False
+        return f'✅ {result.message}\n(已写入 backend.history，可直接继续)', True
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             content = fh.read()
@@ -332,6 +349,11 @@ def extract_ui_messages(path):
     Turn markers. Tool calls and tool results are replayed in the same textual
     shape live agent_loop output uses.
     """
+    if session_transcript is not None and session_transcript.is_transcript_path(path):
+        try:
+            return session_transcript.load_session(path).ui_messages
+        except Exception:
+            return []
     try:
         with open(path, encoding='utf-8', errors='replace') as f: content = f.read()
     except Exception: return []
@@ -366,12 +388,14 @@ def handle_frontend_command(agent, query, exclude_pid=None):
     """Frontend-friendly /continue entry that returns text directly."""
     s = (query or '').strip()
     exclude_pid = os.getpid() if exclude_pid is None else exclude_pid
+    exclude_path = getattr(agent, 'log_path', None)
+    exclude_session_id = getattr(agent, 'session_id', None)
+    sessions = list_sessions(exclude_pid=exclude_pid, exclude_path=exclude_path, exclude_session_id=exclude_session_id)
     if s == '/continue':
-        return format_list(list_sessions(exclude_pid=exclude_pid))
+        return format_list(sessions)
     m = re.match(r'/continue\s+(\d+)\s*$', s)
     if not m:
         return '用法: /continue 或 /continue N'
-    sessions = list_sessions(exclude_pid=exclude_pid)
     idx = int(m.group(1)) - 1
     if not (0 <= idx < len(sessions)):
         return f'❌ 索引越界（有效范围 1-{len(sessions)}）'

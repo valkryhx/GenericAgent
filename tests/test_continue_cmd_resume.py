@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import session_transcript
 from frontends import continue_cmd
 
 
@@ -112,6 +113,62 @@ class ContinueCmdResumeTest(unittest.TestCase):
             self.assertIn("result text", messages[1]["content"])
             self.assertIn("LLM Running (Turn 2)", messages[1]["content"])
             self.assertEqual(2, len(messages))
+
+    def test_list_sessions_includes_transcripts_before_legacy_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript_root = root / "sessions"
+            log_dir = root / "model_responses"
+            log_dir.mkdir()
+            transcript = session_transcript.create_session(
+                root=transcript_root,
+                cwd="C:/repo",
+                session_id="session_test",
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="from transcript",
+                assistant_text="answer",
+                backend_history_before=[],
+                backend_history_after=[{"role": "user", "content": "from transcript"}],
+            )
+            legacy = log_dir / "model_responses_111111.txt"
+            write_native_log(legacy, "from legacy")
+
+            with (
+                patch.object(continue_cmd, "_LOG_GLOB", str(log_dir / "model_responses_*.txt")),
+                patch.object(continue_cmd, "_SESSION_ROOT", str(transcript_root)),
+            ):
+                sessions = continue_cmd.list_sessions()
+
+            self.assertEqual(str(transcript), sessions[0][0])
+            self.assertEqual("from transcript", sessions[0][2])
+            self.assertEqual(str(legacy), sessions[1][0])
+
+    def test_restore_dispatches_transcript_path_to_session_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            history = [{"role": "user", "content": "hello"}]
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="hello",
+                assistant_text="hi",
+                backend_history_before=[],
+                backend_history_after=history,
+            )
+            agent = FakeAgent(Path(tmp) / "model_responses_123456.txt")
+
+            message, ok = continue_cmd.restore(agent, str(transcript))
+
+            self.assertTrue(ok)
+            self.assertIn("结构化会话", message)
+            self.assertEqual(history, agent.llmclient.backend.history)
 
 
 if __name__ == "__main__":
