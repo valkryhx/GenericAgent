@@ -122,3 +122,46 @@ test('App scrolls a resumed history replacement to its first user message even w
     timers.forEach(timer => clearTimeout(timer))
   }
 })
+
+test('App enters the alternate screen before the first Ink frame is written', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => onEvent({ type: 'ready', version: 1 }), 20))
+    return {
+      send() {},
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('GenericAgent Ink'))
+    const combined = stdout.chunks.join('')
+    const alternateScreenIndex = combined.indexOf('\u001B[?1049h')
+    const firstFrameIndex = combined.indexOf('GenericAgent Ink')
+
+    assert.notEqual(alternateScreenIndex, -1)
+    assert.ok(alternateScreenIndex < firstFrameIndex)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})

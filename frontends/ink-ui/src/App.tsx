@@ -314,6 +314,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
+  const [terminalReady, setTerminalReady] = useState(false)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
   const [lastActivitySeconds, setLastActivitySeconds] = useState(0)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
@@ -426,6 +427,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
 
   useEffect(() => {
     stdout.write(enterMainScreenTerminalSequence)
+    setTerminalReady(true)
     return () => {
       cleanupTerminalForExit(stdout)
     }
@@ -802,6 +804,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     }
     return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null
   }
+  if (!terminalReady) return null
   return (
     <Box flexDirection="column" width={metrics.columns}>
       <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
