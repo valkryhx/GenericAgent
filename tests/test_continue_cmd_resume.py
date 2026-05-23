@@ -56,7 +56,10 @@ class ContinueCmdResumeTest(unittest.TestCase):
             old = log_dir / "model_responses_999999.txt"
             write_native_log(current, "current")
             write_native_log(old, "old")
-            with patch.object(continue_cmd, "_LOG_GLOB", str(log_dir / "model_responses_*.txt")):
+            with (
+                patch.object(continue_cmd, "_LOG_GLOB", str(log_dir / "model_responses_*.txt")),
+                patch.object(continue_cmd, "_SESSION_ROOT", str(log_dir / "empty_sessions")),
+            ):
                 sessions = continue_cmd.list_sessions(exclude_path=str(current))
             self.assertEqual([str(old)], [item[0] for item in sessions])
 

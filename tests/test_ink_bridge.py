@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+import os
 import subprocess
 import queue
 import sys
@@ -177,6 +178,42 @@ class InkBridgeTest(unittest.TestCase):
             events[-1],
         )
 
+    def test_list_resume_sessions_excludes_current_log_and_session(self):
+        agent = FakeAgent()
+        agent.log_path = "current-log.txt"
+        agent.session_id = "session_current"
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with patch("ink_bridge.continue_list", return_value=[]) as list_sessions:
+            bridge.list_resume_sessions()
+
+        list_sessions.assert_called_once_with(
+            exclude_pid=os.getpid(),
+            exclude_path="current-log.txt",
+            exclude_session_id="session_current",
+        )
+
+    def test_resume_session_by_index_excludes_current_log_and_session(self):
+        agent = FakeAgent()
+        agent.log_path = "current-log.txt"
+        agent.session_id = "session_current"
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with (
+            patch("ink_bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]) as list_sessions,
+            patch.object(bridge, "resume_session") as resume_session,
+        ):
+            bridge.resume_session_by_index(1)
+
+        list_sessions.assert_called_once_with(
+            exclude_pid=os.getpid(),
+            exclude_path="current-log.txt",
+            exclude_session_id="session_current",
+        )
+        resume_session.assert_called_once_with("session-a.txt")
+
     def test_resume_session_replaces_history_messages(self):
         agent = FakeAgent()
         events = []
@@ -212,6 +249,51 @@ class InkBridgeTest(unittest.TestCase):
         bridge.rewind(1)
         self.assertEqual([], agent.llmclient.backend.history)
         self.assertEqual({"type": "rewind_done", "taskId": 1, "text": "old q"}, events[-1])
+
+    def test_resume_transcript_uses_exact_backend_history_before_each_turn_for_rewind(self):
+        import session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            first_after = [
+                {"role": "system", "content": "seed"},
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "a1"},
+            ]
+            second_after = first_after + [
+                {"role": "tool", "content": "extra"},
+                {"role": "user", "content": "two"},
+                {"role": "assistant", "content": "a2"},
+            ]
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="one",
+                assistant_text="a1",
+                backend_history_before=[],
+                backend_history_after=first_after,
+            )
+            session_transcript.record_turn(
+                transcript,
+                session_id="session_test",
+                turn_id=2,
+                source="user",
+                user_text="two",
+                assistant_text="a2",
+                backend_history_before=first_after,
+                backend_history_after=second_after,
+            )
+            agent = FakeAgent()
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+                bridge.resume_session(str(transcript))
+
+            self.assertEqual([], bridge._rewind_snapshots[1]["backend_history"])
+            self.assertEqual(first_after, bridge._rewind_snapshots[2]["backend_history"])
 
     def test_rewind_restores_checkpoint_before_selected_task(self):
         agent = FakeAgent()

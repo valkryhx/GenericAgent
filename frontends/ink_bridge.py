@@ -100,6 +100,12 @@ except Exception:  # pragma: no cover - exercised only when optional frontend he
     continue_restore = None
 
 
+try:
+    import session_transcript
+except Exception:  # pragma: no cover - transcript resume falls back to legacy replay
+    session_transcript = None
+
+
 class GenericAgentBridge:
     def __init__(self, agent_factory: AgentFactory = default_agent_factory, emit: EmitFn | None = None) -> None:
         with backend_output_redirect():
@@ -351,7 +357,7 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
             return
         try:
-            sessions = continue_list(exclude_pid=os.getpid())
+            sessions = continue_list(**self._resume_exclusion_kwargs())
             self.emit(
                 {
                     "type": "resume_sessions",
@@ -374,7 +380,7 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
             return
         try:
-            sessions = continue_list(exclude_pid=os.getpid())
+            sessions = continue_list(**self._resume_exclusion_kwargs())
             idx = int(index) - 1
             if not (0 <= idx < len(sessions)):
                 self.emit({"type": "system", "text": f"索引越界（有效范围 1-{len(sessions)}）"})
@@ -459,7 +465,36 @@ class GenericAgentBridge:
         except Exception:
             return None
 
+    def _resume_exclusion_kwargs(self) -> dict[str, Any]:
+        return {
+            "exclude_pid": os.getpid(),
+            "exclude_path": getattr(self.agent, "log_path", None),
+            "exclude_session_id": getattr(self.agent, "session_id", None),
+        }
+
     def _resume_ui_messages_with_checkpoints(self, path: str) -> list[dict[str, Any]]:
+        if session_transcript is not None and session_transcript.is_transcript_path(path):
+            try:
+                loaded = session_transcript.load_session(path)
+            except Exception:
+                loaded = None
+            if loaded is not None:
+                messages: list[dict[str, Any]] = []
+                self._task_seq = 0
+                self._rewind_snapshots.clear()
+                for turn in loaded.turns:
+                    self._task_seq += 1
+                    task_id = self._task_seq
+                    messages.append({"role": "user", "text": turn.user_text, "taskId": task_id})
+                    self._rewind_snapshots[task_id] = {
+                        "text": turn.user_text,
+                        "history": [],
+                        "backend_history": copy.deepcopy(turn.backend_history_before),
+                        "last_tools": "",
+                    }
+                    if turn.assistant_text:
+                        messages.append({"role": "assistant", "text": turn.assistant_text, "taskId": task_id})
+                return messages
         backend_history = copy.deepcopy(self._backend_history())
         messages: list[dict[str, Any]] = []
         self._task_seq = 0
