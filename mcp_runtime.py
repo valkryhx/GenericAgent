@@ -15,6 +15,7 @@ MCP_TOOL_PREFIX = "mcp__"
 _MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 _DISCOVERY_CACHE: dict[tuple, "McpDiscovery"] = {}
 _MCP_LOG_DIR = Path(script_dir) / "temp" / "mcp_logs"
+_MCP_TOOLS_CACHE_PATH = Path(script_dir) / "temp" / "mcp_tools_cache.json"
 _MAX_MCP_DESCRIPTION_LENGTH = 2048
 
 
@@ -135,7 +136,7 @@ class McpManager:
                 )
 
     def status(self, timeout: Optional[float] = None) -> dict[str, Any]:
-        self.ensure_all_connected(timeout=timeout)
+        self.ensure_all_connected(timeout=timeout, retry_failed=True)
         with self.lock:
             servers = [self._server_summary(state) for state in self.states.values()]
             tools = [dict(tool) for state in self.states.values() for tool in state.tools]
@@ -160,7 +161,7 @@ class McpManager:
             self.loop.close()
 
     def discover(self, include_unavailable: bool = False, timeout: Optional[float] = None) -> McpDiscovery:
-        self.ensure_all_connected(timeout=timeout)
+        self.ensure_all_connected(timeout=timeout, retry_failed=False)
         discovery = McpDiscovery()
         with self.lock:
             for state in self.states.values():
@@ -176,14 +177,20 @@ class McpManager:
                 discovery.tool_refs.update(state.tool_refs)
         return discovery
 
-    def ensure_all_connected(self, timeout: Optional[float] = None) -> None:
-        names = []
+    def ensure_all_connected(self, timeout: Optional[float] = None, retry_failed: bool = True) -> None:
+        states = []
+        connect_timeout = _default_timeout(timeout)
         with self.lock:
-            for name, state in self.states.items():
-                if state.status != "disabled" and state.client is None:
-                    names.append(name)
-        for name in names:
-            self.ensure_connected(name, timeout=timeout)
+            for state in self.states.values():
+                if state.status == "disabled" or state.client is not None:
+                    continue
+                if state.status == "failed" and not retry_failed:
+                    continue
+                state.status = "pending"
+                state.error = ""
+                states.append(state)
+        if states:
+            self._run(self._connect_all(states, connect_timeout))
 
     def ensure_connected(self, server_name: str, timeout: Optional[float] = None) -> McpServerState:
         timeout = _default_timeout(timeout)
@@ -197,6 +204,25 @@ class McpManager:
             state.error = ""
         self._run(self._connect_and_fetch_tools(state, timeout))
         return state
+
+    async def _connect_all(self, states: list[McpServerState], timeout: float) -> None:
+        local_states = [state for state in states if _is_local_mcp_server(state.config)]
+        remote_states = [state for state in states if not _is_local_mcp_server(state.config)]
+        await asyncio.gather(
+            self._connect_batched(local_states, timeout, concurrency=1),
+            self._connect_batched(remote_states, timeout, concurrency=max(1, len(remote_states))),
+        )
+
+    async def _connect_batched(self, states: list[McpServerState], timeout: float, concurrency: int) -> None:
+        if not states:
+            return
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def connect(state: McpServerState) -> None:
+            async with semaphore:
+                await self._connect_and_fetch_tools(state, timeout)
+
+        await asyncio.gather(*(connect(state) for state in states))
 
     def call_tool(
         self,
@@ -496,6 +522,27 @@ def discover_mcp_tools(
     return [dict(tool) for tool in discovery.tools]
 
 
+def discover_mcp_tools_cached(
+    config_path: Optional[os.PathLike | str] = None,
+    include_unavailable: bool = False,
+    timeout: Optional[float] = None,
+    cache_path: Optional[os.PathLike | str] = None,
+) -> list[dict[str, Any]]:
+    cfg = load_mcp_config_with_disabled(config_path)
+    signature = _cache_signature(cfg, include_unavailable)
+    cache_file = Path(cache_path) if cache_path is not None else _MCP_TOOLS_CACHE_PATH
+    cached = _read_mcp_tools_cache(cache_file, signature)
+    if cached is not None:
+        return cached
+    tools = discover_mcp_tools(
+        config_path=config_path,
+        include_unavailable=include_unavailable,
+        timeout=timeout,
+    )
+    _write_mcp_tools_cache(cache_file, signature, tools)
+    return tools
+
+
 def discover_mcp(
     config_path: Optional[os.PathLike | str] = None,
     include_unavailable: bool = False,
@@ -536,6 +583,58 @@ def _make_fastmcp_client(Client, transport, server_name: str, timeout: float):
         if "unexpected keyword argument 'name'" not in str(e):
             raise
         return Client(transport, timeout=timeout, init_timeout=timeout)
+
+
+def _is_local_mcp_server(server_config: dict[str, Any]) -> bool:
+    cfg_type = str(server_config.get("transport") or server_config.get("type") or "").lower()
+    return bool(server_config.get("command") or cfg_type == "stdio")
+
+
+def _cache_signature(cfg: McpConfig, include_unavailable: bool) -> dict[str, Any]:
+    file_sig = None
+    if cfg.path:
+        try:
+            stat = cfg.path.stat()
+            file_sig = {
+                "path": str(cfg.path.resolve(strict=False)),
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+            }
+        except OSError:
+            file_sig = {"path": str(cfg.path), "mtime_ns": None, "size": None}
+    return {
+        "file": file_sig,
+        "servers": sorted(cfg.servers),
+        "include_unavailable": bool(include_unavailable),
+    }
+
+
+def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("signature") != signature:
+        return None
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        return None
+    return [dict(tool) for tool in tools if isinstance(tool, dict)]
+
+
+def _write_mcp_tools_cache(cache_path: Path, signature: dict[str, Any], tools: list[dict[str, Any]]) -> None:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {"signature": signature, "tools": tools, "cached_at": time.time()},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def _config_signature(cfg: McpConfig, include_unavailable: bool, timeout: float) -> tuple:

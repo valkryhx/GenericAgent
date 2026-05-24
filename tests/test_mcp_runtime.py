@@ -19,6 +19,7 @@ from mcp_runtime import (  # noqa: E402
     build_mcp_tool_name,
     call_mcp_tool,
     clear_mcp_cache,
+    discover_mcp_tools_cached,
     discover_mcp_tools,
     disable_mcp_server,
     enable_mcp_server,
@@ -126,6 +127,19 @@ def _write_failing_marker_server(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return script_path, marker_path
+
+
+def _write_failing_counting_server(tmp_path: Path) -> tuple[Path, Path]:
+    counter_path = tmp_path / "bad_server_starts.txt"
+    script_path = tmp_path / "failing_counting_mcp_server.py"
+    script_path.write_text(
+        "from pathlib import Path\n"
+        f"counter = Path({str(counter_path)!r})\n"
+        "counter.write_text(str(int(counter.read_text() or '0') + 1) if counter.exists() else '1')\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    return script_path, counter_path
 
 
 def _write_mcp_config(tmp_path: Path, server_script: Path) -> Path:
@@ -355,6 +369,34 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(second["status"], "success")
         self.assertEqual(starts, 1)
 
+    def test_cached_discovery_reuses_tool_schema_without_restarting_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_counting_server(tmp_path)
+            cache_path = tmp_path / "mcp_tools_cache.json"
+            config_path = _write_named_mcp_config(tmp_path, "counting", server_script)
+            reset_mcp_manager()
+
+            first_tools = discover_mcp_tools_cached(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+            )
+            reset_mcp_manager()
+            second_tools = discover_mcp_tools_cached(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+            )
+            starts = int((tmp_path / "starts.txt").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            {tool["function"]["name"] for tool in first_tools},
+            {tool["function"]["name"] for tool in second_tools},
+        )
+        self.assertIn("mcp__counting__echo", {tool["function"]["name"] for tool in second_tools})
+        self.assertEqual(starts, 1)
+
     def test_call_tool_only_connects_target_server(self):
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -378,6 +420,31 @@ class McpRuntimeTest(unittest.TestCase):
             self.assertIn("echo:target", json.dumps(result, ensure_ascii=False))
             self.assertFalse(bad_marker.exists())
             self.assertEqual(statuses, {"demo": "connected", "bad": "pending"})
+
+    def test_discover_does_not_retry_failed_servers_until_explicit_status_or_reconnect(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            bad_script, bad_counter = _write_failing_counting_server(tmp_path)
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {
+                    "demo": _write_demo_server(tmp_path),
+                    "bad": bad_script,
+                },
+            )
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            first_tools = discover_mcp_tools(timeout=20)
+            second_tools = discover_mcp_tools(timeout=20)
+            starts_after_discover = int(bad_counter.read_text(encoding="utf-8"))
+            mcp_status(timeout=20)
+            starts_after_status = int(bad_counter.read_text(encoding="utf-8"))
+
+        self.assertIn("mcp__demo__echo", {tool["function"]["name"] for tool in first_tools})
+        self.assertIn("mcp__demo__echo", {tool["function"]["name"] for tool in second_tools})
+        self.assertEqual(starts_after_discover, 1)
+        self.assertEqual(starts_after_status, 2)
 
     def test_unknown_mcp_server_does_not_connect_any_server(self):
         with _tempdir() as tmp:

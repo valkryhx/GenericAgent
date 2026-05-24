@@ -19,6 +19,7 @@ import session_transcript
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
+STREAM_FLUSH_CHARS = 16
 
 
 def _extract_image_paths(text):
@@ -70,6 +71,10 @@ def _native_image_input_enabled(llmclient):
     return isinstance(backend, NativeOAISession) and bool(getattr(backend, 'native_image_input', False))
 
 
+def should_flush_display_delta(full_resp, last_pos, chunk):
+    return len(full_resp) - last_pos >= STREAM_FLUSH_CHARS or 'LLM Running' in chunk
+
+
 def load_tool_schema(suffix='', include_mcp_tools=True):
     global TOOLS_SCHEMA
     with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
@@ -78,9 +83,9 @@ def load_tool_schema(suffix='', include_mcp_tools=True):
     if not include_mcp_tools:
         return
     try:
-        from mcp_runtime import discover_mcp_tools
+        from mcp_runtime import discover_mcp_tools_cached
         existing = {t.get("function", {}).get("name") for t in TOOLS_SCHEMA}
-        for tool in discover_mcp_tools():
+        for tool in discover_mcp_tools_cached():
             name = tool.get("function", {}).get("name")
             if name and name not in existing:
                 TOOLS_SCHEMA.append(tool)
@@ -281,7 +286,7 @@ class GenericAgent:
                     if consume_file(self.task_dir, '_stop'): self.abort() 
                     if self.stop_sig: break
                     full_resp += chunk
-                    if len(full_resp) - last_pos > 50 or 'LLM Running' in chunk:
+                    if should_flush_display_delta(full_resp, last_pos, chunk):
                         display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 'source': source})
                         last_pos = len(full_resp)
                 if self.inc_out and last_pos < len(full_resp): display_queue.put({'next': full_resp[last_pos:], 'source': source})
