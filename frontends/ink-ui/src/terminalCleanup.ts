@@ -10,3 +10,7 @@ export const exitTerminalCleanupSequence = `${mouseTrackingOff()}\u001B[0m${show
 export function cleanupTerminalForExit(stdout: Pick<NodeJS.WriteStream, 'write'>): void {
   stdout.write(exitTerminalCleanupSequence)
 }
+
+export function reassertMouseTracking(stdout: Pick<NodeJS.WriteStream, 'write'>): void {
+  stdout.write(mouseTrackingOn())
+}

@@ -54,7 +54,7 @@ import {
 } from './localCommandTranscript.js'
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
-import { cleanupTerminalForExit, enterMainScreenTerminalSequence } from './terminalCleanup.js'
+import { cleanupTerminalForExit, enterMainScreenTerminalSequence, reassertMouseTracking } from './terminalCleanup.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
 import { parseMouseEvent, parseMouseWheel } from './mouseWheel.js'
@@ -65,7 +65,7 @@ import {
   transcriptScrollStep,
   transcriptWheelStep,
 } from './transcriptScroll.js'
-import { transcriptScrollbar } from './transcriptScrollbar.js'
+import { scrollOffsetForScrollbarClick, shouldHandleScrollbarDrag, transcriptScrollbar } from './transcriptScrollbar.js'
 
 type Props = {
   python: string
@@ -73,10 +73,12 @@ type Props = {
   startBridgeClient?: typeof startBridge
 }
 
+const STDIN_RESUME_GAP_MS = 5000
+
 function TranscriptLineView({ line }: { line: TranscriptLine }) {
   if (line.parts?.length) {
     return (
-      <Text color={line.color} backgroundColor={line.backgroundColor}>
+      <Text color={line.color} backgroundColor={line.backgroundColor} wrap="truncate-end">
         {line.parts.map((part, index) => (
           <Text
             key={index}
@@ -94,7 +96,7 @@ function TranscriptLineView({ line }: { line: TranscriptLine }) {
     )
   }
   return (
-    <Text color={line.color} backgroundColor={line.backgroundColor}>
+    <Text color={line.color} backgroundColor={line.backgroundColor} wrap="truncate-end">
       {line.text}
     </Text>
   )
@@ -328,6 +330,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const modelPanelOpenRef = useRef(false)
   const pendingLocalCommandRef = useRef<string | null>(null)
   const pendingHistoryReplacementScrollRef = useRef(false)
+  const scrollbarDragRef = useRef(false)
+  const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
@@ -576,7 +580,28 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, wheel === 'up' ? delta : -delta, totalRows, viewportRows))
       return
     }
-    if (parseMouseEvent(mouseInput)) {
+    const mouseEvent = parseMouseEvent(mouseInput)
+    if (mouseEvent) {
+      if (mouseEvent.kind === 'release') {
+        scrollbarDragRef.current = false
+        return
+      }
+      if (mouseEvent.kind === 'wheel') {
+        return
+      }
+      const { totalRows, viewportRows } = transcriptRowsRef.current
+      if (shouldHandleScrollbarDrag({
+        kind: mouseEvent.kind,
+        x: mouseEvent.x,
+        columns: stdout.columns || 80,
+        dragging: scrollbarDragRef.current,
+      })) {
+        const offset = scrollOffsetForScrollbarClick({ totalRows, viewportRows, y: mouseEvent.y, viewportTop: 2 })
+        if (offset !== null) {
+          scrollbarDragRef.current = true
+          setTranscriptScrollOffset(offset)
+        }
+      }
       return
     }
     if (key.pageUp) {
@@ -721,6 +746,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   useEffect(() => {
     setRawMode(true)
     const handleData = (data: Buffer | string) => {
+      const currentStdinAt = Date.now()
+      if (currentStdinAt - lastStdinAtRef.current > STDIN_RESUME_GAP_MS) {
+        reassertMouseTracking(stdout)
+      }
+      lastStdinAtRef.current = currentStdinAt
       const parsed = parseTerminalInput(String(data))
       terminalInputHandlerRef.current?.(parsed.rawInput, parsed.key)
     }
@@ -729,7 +759,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       internal_eventEmitter.removeListener('input', handleData)
       setRawMode(false)
     }
-  }, [internal_eventEmitter, setRawMode])
+  }, [internal_eventEmitter, setRawMode, stdout])
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
