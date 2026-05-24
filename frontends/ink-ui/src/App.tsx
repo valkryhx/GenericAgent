@@ -788,7 +788,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     wrapTranscriptLines(transcriptLines(state.messages, { expandedTools }), Math.max(1, metrics.columns - 3))
   ), [state.messages, expandedTools, metrics.columns])
   const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
-  const effectiveTranscriptScrollOffset = preserveTranscriptScrollOnContentChange(
+  const historyReplacementScrollOffset = pendingHistoryReplacementScrollRef.current
+    ? scrollOffsetForHistoryReplacement(transcriptRows.length, metrics.messageRows)
+    : null
+  const effectiveTranscriptScrollOffset = historyReplacementScrollOffset ?? preserveTranscriptScrollOnContentChange(
     transcriptScrollOffset,
     previousTranscriptTotalRows,
     transcriptRows.length,
@@ -802,8 +805,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   useEffect(() => {
     if (!pendingHistoryReplacementScrollRef.current) return
     pendingHistoryReplacementScrollRef.current = false
-    setTranscriptScrollOffset(scrollOffsetForHistoryReplacement(visibleTranscript.totalRows, metrics.messageRows))
-  }, [metrics.messageRows, transcriptRows, visibleTranscript.totalRows])
+    setTranscriptScrollOffset(historyReplacementScrollOffset ?? scrollOffsetForHistoryReplacement(visibleTranscript.totalRows, metrics.messageRows))
+  }, [historyReplacementScrollOffset, metrics.messageRows, visibleTranscript.totalRows])
 
   useEffect(() => {
     if (transcriptScrollOffset !== visibleTranscript.scrollOffset) {

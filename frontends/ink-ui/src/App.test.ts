@@ -123,6 +123,60 @@ test('App scrolls a resumed history replacement to its first user message even w
   }
 })
 
+test('App renders the first restored frame at the oldest resumed message', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0))
+    timers.push(setTimeout(() => {
+      const messages: BridgeEvent & { type: 'history_replace' } = {
+        type: 'history_replace',
+        messages: [],
+      }
+      for (let index = 1; index <= 12; index++) {
+        messages.messages.push({ role: 'user', taskId: index, text: index === 1 ? '介绍美国' : `恢复问题 ${index}` })
+        messages.messages.push({ role: 'assistant', taskId: index, text: `恢复回答 ${index}` })
+      }
+      onEvent(messages)
+      onEvent({ type: 'system', text: '✅ 已恢复 12 轮结构化会话' })
+    }, 50))
+    return {
+      send() {},
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await delay(300)
+    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent Ink'))
+    const firstRestoredFrame = frames.find(frame => frame.includes('介绍美国') || frame.includes('恢复问题 12'))
+
+    assert.ok(firstRestoredFrame)
+    assert.match(firstRestoredFrame, /> 介绍美国/)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})
+
 test('App enters the alternate screen before the first Ink frame is written', async () => {
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
