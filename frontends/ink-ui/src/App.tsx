@@ -55,6 +55,7 @@ import {
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
 import { cleanupTerminalForExit, enterMainScreenTerminalSequence, reassertMouseTracking } from './terminalCleanup.js'
+import { cursorPosition, inputCursorPosition } from './terminalCursor.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
 import { parseMouseEvent, parseMouseWheel } from './mouseWheel.js'
@@ -766,6 +767,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const activePanel = mcpPanel || modelPanel || selector || footerPanel
   const inputRows = inputVisibleRowCount(input)
   const hasActivity = shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
+  const panelRows = modelPanel
+    ? modelPanelRows(modelPanel)
+    : mcpPanel
+      ? mcpPanelRows(mcpPanel)
+    : selector
+      ? Math.min(selectorSize(selector), 8) + 2
+    : slashItems.length > 0
+      ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
+      : 0
   const metrics = computeLayoutMetrics({
     rows: stdout.rows,
     columns,
@@ -774,16 +784,29 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
     inputRows,
-    panelRows: modelPanel
-      ? modelPanelRows(modelPanel)
-      : mcpPanel
-        ? mcpPanelRows(mcpPanel)
-      : selector
-        ? Math.min(selectorSize(selector), 8) + 2
-      : slashItems.length > 0
-        ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
-        : undefined,
+    panelRows,
   })
+  const inputLineItems = inputPromptLineItems(input, inputRows, cursorOffset)
+  const inputCursorLine = inputLineItems.findIndex(line => line.cursorColumn !== undefined)
+  const inputCursorColumn = inputLineItems.find(line => line.cursorColumn !== undefined)?.cursorColumn ?? 0
+
+  useEffect(() => {
+    if (!terminalReady || state.status === 'running' || state.status === 'stopping') return
+    const position = inputCursorPosition({
+      headerRows: metrics.headerRows,
+      messageRows: metrics.messageRows,
+      activityRows: 1,
+      errorRows: state.error ? 1 : 0,
+      panelRows: activePanel || slashItems.length > 0 ? panelRows : 0,
+      hintRows: 1,
+      inputBorderTopRows: 1,
+      inputPaddingLeftColumns: 1,
+      inputCursorLine: Math.max(0, inputCursorLine),
+      inputCursorColumn,
+    })
+    stdout.write(cursorPosition(position.row, position.column, metrics.rows, metrics.columns))
+  }, [activePanel, cursorOffset, input, inputCursorColumn, inputCursorLine, inputRows, metrics, panelRows, slashItems.length, state.error, state.status, stdout, terminalReady])
+
   const transcriptRows = useMemo(() => (
     wrapTranscriptLines(transcriptLines(state.messages, { expandedTools }), Math.max(1, metrics.columns - 3))
   ), [state.messages, expandedTools, metrics.columns])

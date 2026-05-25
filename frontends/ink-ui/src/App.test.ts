@@ -177,6 +177,41 @@ test('App renders the first restored frame at the oldest resumed message', async
   }
 })
 
+test('App parks the native terminal cursor on the visible input caret for IME', async () => {
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send() {},
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+
+    assert.match(stdout.chunks.join(''), /\x1b\[22;4H/)
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App enters the alternate screen before the first Ink frame is written', async () => {
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
