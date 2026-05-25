@@ -12,6 +12,9 @@ export const inputFrameBorderStyle = {
 } as const
 
 const DEFAULT_MAX_INPUT_ROWS = 6
+export const inputGutterColumns = 2
+export const inputRightReserveColumns = 1
+export const inputLeftPaddingColumns = 1
 
 export function inputPrompt(input: string): string {
   return `> ${input}`
@@ -25,6 +28,7 @@ export function inputPromptLines(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS
 }
 
 export type InputLineItem = {
+  gutter: string
   text: string
   cursorColumn?: number
 }
@@ -32,6 +36,10 @@ export type InputLineItem = {
 export type InputLinePart = {
   text: string
   inverse?: boolean
+}
+
+export function inputContentColumns(columns: number): number {
+  return Math.max(1, Math.floor(columns) - inputLeftPaddingColumns - inputGutterColumns - inputRightReserveColumns)
 }
 
 function clampCursorOffset(input: string, cursorOffset: number): number {
@@ -72,9 +80,8 @@ export function inputPromptLineItems(input: string, maxRows = DEFAULT_MAX_INPUT_
   const start = Math.min(Math.max(0, cursorRow - visibleRows + 1), maxStart)
   return rows.slice(start, start + visibleRows).map((line, index) => {
     const logicalRow = start + index
-    const prefix = logicalRow === 0 ? '> ' : '  '
-    const item: InputLineItem = { text: `${prefix}${line}` }
-    if (logicalRow === cursorRow) item.cursorColumn = stringWidth(prefix) + stringWidth(textBeforeOffset(line, cursorColumnInRow))
+    const item: InputLineItem = { gutter: logicalRow === 0 ? '> ' : '  ', text: line }
+    if (logicalRow === cursorRow) item.cursorColumn = stringWidth(textBeforeOffset(line, cursorColumnInRow))
     return item
   })
 }

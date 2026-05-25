@@ -12,6 +12,7 @@ export type InputCursorPositionInput = {
   hintRows: number
   inputBorderTopRows: number
   inputPaddingLeftColumns: number
+  inputGutterColumns: number
   inputCursorLine: number
   inputCursorColumn: number
 }
@@ -36,6 +37,6 @@ export function inputCursorPosition(input: InputCursorPositionInput): TerminalCu
       + input.hintRows
       + input.inputBorderTopRows
       + input.inputCursorLine,
-    column: input.inputPaddingLeftColumns + input.inputCursorColumn,
+    column: input.inputPaddingLeftColumns + input.inputGutterColumns + input.inputCursorColumn,
   }
 }

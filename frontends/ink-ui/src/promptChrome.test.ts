@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fixedInputLine, inputFrameBorderStyle, inputPrompt, inputPromptLineItems, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import { fixedInputLine, inputContentColumns, inputFrameBorderStyle, inputPrompt, inputPromptLineItems, inputPromptLines, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 
 test('inputPrompt uses a Claude-style greater-than marker', () => {
   assert.equal(inputPrompt('hello'), '> hello')
@@ -53,9 +53,14 @@ test('fixedInputLine keeps rendered input rows at a stable width', () => {
   assert.equal(fixedInputLine('> 你好', 8), '> 你好  ')
 })
 
+test('inputContentColumns reserves fixed gutter, left padding, and a right-edge cursor cell', () => {
+  assert.equal(inputContentColumns(20), 16)
+  assert.equal(1 + 2 + inputContentColumns(20), 19)
+})
+
 test('inputPromptLineItems uses terminal display width for wide characters', () => {
   assert.deepEqual(inputPromptLineItems('你好', 1, 1), [
-    { text: '> 你好', cursorColumn: 4 },
+    { gutter: '> ', text: '你好', cursorColumn: 2 },
   ])
 })
 
@@ -72,12 +77,12 @@ test('renderInputLine keeps wide-character cursor rendering width stable', () =>
 
 test('inputPromptLineItems keeps the cursor row visible in multiline input', () => {
   assert.deepEqual(inputPromptLineItems('one\ntwo\nthree\nfour', 2, 1), [
-    { text: '> one', cursorColumn: 3 },
-    { text: '  two' },
+    { gutter: '> ', text: 'one', cursorColumn: 1 },
+    { gutter: '  ', text: 'two' },
   ])
   assert.deepEqual(inputPromptLineItems('one\ntwo\nthree\nfour', 2, 18), [
-    { text: '  three' },
-    { text: '  four', cursorColumn: 6 },
+    { gutter: '  ', text: 'three' },
+    { gutter: '  ', text: 'four', cursorColumn: 4 },
   ])
 })
 

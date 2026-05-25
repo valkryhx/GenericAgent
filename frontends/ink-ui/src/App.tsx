@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Box, Text, useApp, useStdin, useStdout } from 'ink'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
@@ -42,7 +42,7 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { fixedInputLine, inputFrameBorderStyle, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import { fixedInputLine, inputContentColumns, inputFrameBorderStyle, inputGutterColumns, inputLeftPaddingColumns, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
@@ -75,6 +75,19 @@ type Props = {
 }
 
 const STDIN_RESUME_GAP_MS = 5000
+
+function isResumeSuccessNotice(text: string): boolean {
+  return /已恢复\s+\d+\s+轮/.test(text)
+}
+
+function resumeSuccessStatusText(text: string): string {
+  const normalized = text.replace(/^✅\s*/, '').split('\n', 1)[0] ?? text
+  const match = /已恢复\s+(\d+)\s+轮(?:结构化会话|完整对话|对话)?(?:（([^）]+)）)?/.exec(normalized)
+  if (!match) return normalized
+  const rounds = match[1]
+  const source = match[2]
+  return source ? `恢复完成：${rounds} 轮历史 · ${source}` : `恢复完成：${rounds} 轮历史`
+}
 
 function TranscriptLineView({ line }: { line: TranscriptLine }) {
   if (line.parts?.length) {
@@ -198,6 +211,13 @@ function ModelPanelView({ panel }: { panel: ModelPanelState }) {
 }
 
 function FooterPanelView({ panel }: { panel: FooterPanel }) {
+  if (panel.type === 'status') {
+    return (
+      <Box paddingX={1}>
+        <Text color="gray" wrap="truncate-end">{panel.text}</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column" paddingX={1}>
       {panel.text.split('\n').map((line, index) => (
@@ -243,7 +263,7 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
 
 function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number; columns: number }) {
   const lines = inputPromptLineItems(input, visibleRows, cursorOffset)
-  const contentColumns = Math.max(1, columns - 2)
+  const contentColumns = inputContentColumns(columns)
   return (
     <Box
       flexDirection="column"
@@ -256,15 +276,18 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { 
       borderBottom
       width="100%"
       height={visibleRows + 2}
-      paddingLeft={1}
+      paddingLeft={inputLeftPaddingColumns}
       overflow="hidden"
     >
       {lines.map((line, index) => (
-        <Text key={index} color="cyan" wrap="truncate-end">
-          {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
-            <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
-          ))}
-        </Text>
+        <Box key={index} width="100%" overflow="hidden">
+          <Text color="cyan" wrap="truncate-end">{line.gutter}</Text>
+          <Text color="cyan" wrap="truncate-end">
+            {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
+              <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
+            ))}
+          </Text>
+        </Box>
       ))}
     </Box>
   )
@@ -538,6 +561,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         }
         return
       }
+      if (event.type === 'system' && isResumeSuccessNotice(event.text)) {
+        pendingLocalCommandRef.current = null
+        setFooterPanel({ type: 'status', text: resumeSuccessStatusText(event.text) })
+        return
+      }
       if (event.type === 'system' && pendingLocalCommandRef.current) {
         appendLocalCommandOutput(event.text)
         return
@@ -790,7 +818,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const inputCursorLine = inputLineItems.findIndex(line => line.cursorColumn !== undefined)
   const inputCursorColumn = inputLineItems.find(line => line.cursorColumn !== undefined)?.cursorColumn ?? 0
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!terminalReady || state.status === 'running' || state.status === 'stopping') return
     const position = inputCursorPosition({
       headerRows: metrics.headerRows,
@@ -800,7 +828,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       panelRows: activePanel || slashItems.length > 0 ? panelRows : 0,
       hintRows: 1,
       inputBorderTopRows: 1,
-      inputPaddingLeftColumns: 1,
+      inputPaddingLeftColumns: inputLeftPaddingColumns,
+      inputGutterColumns,
       inputCursorLine: Math.max(0, inputCursorLine),
       inputCursorColumn,
     })
@@ -849,13 +878,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
-    if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{inputHint}</Text>
+    if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text>
     if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} columns={metrics.columns} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
       if (selector) return <SelectorView key={section} selector={selector} />
-      if (footerPanel) return <FooterPanelView key={section} panel={footerPanel} />
+      if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} />
       return null
     }
     return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null

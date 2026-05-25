@@ -19,7 +19,8 @@ test('inputCursorPosition parks the native cursor on the visible input caret', (
     hintRows: 1,
     inputBorderTopRows: 1,
     inputPaddingLeftColumns: 1,
+    inputGutterColumns: 2,
     inputCursorLine: 0,
     inputCursorColumn: 2,
-  }), { row: 21, column: 3 })
+  }), { row: 21, column: 5 })
 })

@@ -90,7 +90,7 @@ test('App scrolls a resumed history replacement to its first user message even w
         messages.messages.push({ role: 'assistant', taskId: index, text: `恢复回答 ${index}` })
       }
       onEvent(messages)
-      onEvent({ type: 'system', text: '✅ 已恢复 12 轮结构化会话' })
+      onEvent({ type: 'system', text: '✅ 已恢复 12 轮结构化会话（session.json）\n(已写入 backend.history，可直接继续)' })
     }, 90))
     return {
       send() {},
@@ -117,6 +117,10 @@ test('App scrolls a resumed history replacement to its first user message even w
     const finalFrame = await waitForFrame(stdout, frame => /> 介绍美国/.test(frame))
 
     assert.match(finalFrame, /> 介绍美国/)
+    assert.match(finalFrame, /恢复完成：12 轮历史 · session\.json/)
+    assert.doesNotMatch(finalFrame, /已写入 backend\.history/)
+    const transcriptArea = finalFrame.split('Enter send')[0] ?? finalFrame
+    assert.doesNotMatch(transcriptArea, /已恢复 12 轮结构化会话/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
@@ -141,7 +145,7 @@ test('App renders the first restored frame at the oldest resumed message', async
         messages.messages.push({ role: 'assistant', taskId: index, text: `恢复回答 ${index}` })
       }
       onEvent(messages)
-      onEvent({ type: 'system', text: '✅ 已恢复 12 轮结构化会话' })
+      onEvent({ type: 'system', text: '✅ 已恢复 12 轮结构化会话（session.json）\n(已写入 backend.history，可直接继续)' })
     }, 50))
     return {
       send() {},
@@ -171,6 +175,9 @@ test('App renders the first restored frame at the oldest resumed message', async
 
     assert.ok(firstRestoredFrame)
     assert.match(firstRestoredFrame, /> 介绍美国/)
+    assert.doesNotMatch(firstRestoredFrame, /已写入 backend\.history/)
+    const transcriptArea = firstRestoredFrame.split('Enter send')[0] ?? firstRestoredFrame
+    assert.doesNotMatch(transcriptArea, /已恢复 12 轮结构化会话/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
