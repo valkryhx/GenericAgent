@@ -102,6 +102,19 @@ test('handleInput sends stop for slash stop and Escape', () => {
   })
 })
 
+test('handleInput starts a fresh backend session for slash new and reset', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/new', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'new_session' },
+  })
+  assert.deepEqual(handleInput('/reset', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'new_session' },
+  })
+})
+
 test('handleInput opens Claude-style local selectors for resume and rewind', () => {
   const store = createPasteStore()
 

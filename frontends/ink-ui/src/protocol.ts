@@ -1,6 +1,7 @@
 export type BridgeCommand =
   | { type: 'submit'; text: string }
   | { type: 'stop' }
+  | { type: 'new_session' }
   | { type: 'list_resume_sessions' }
   | { type: 'resume_session'; id: string }
   | { type: 'resume_session_index'; index: number }

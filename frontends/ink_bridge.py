@@ -108,8 +108,9 @@ except Exception:  # pragma: no cover - transcript resume falls back to legacy r
 
 class GenericAgentBridge:
     def __init__(self, agent_factory: AgentFactory = default_agent_factory, emit: EmitFn | None = None) -> None:
+        self.agent_factory = agent_factory
         with backend_output_redirect():
-            self.agent = agent_factory()
+            self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
         self.emit = emit or make_stdout_emitter(sys.stdout)
@@ -164,6 +165,28 @@ class GenericAgentBridge:
                 self.emit({"type": "status", "status": "stopping"})
         else:
             self.emit({"type": "status", "status": "idle"})
+
+    def new_session(self) -> None:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return
+        try:
+            with backend_output_redirect():
+                self.agent.abort()
+        except Exception:
+            pass
+        with backend_output_redirect():
+            self.agent = self.agent_factory()
+            self.agent.inc_out = True
+            self.agent.verbose = True
+        self._task_seq = 0
+        self._rewind_snapshots.clear()
+        self._consume_thread = None
+        self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
+        self._agent_thread.start()
+        self.emit({"type": "history_replace", "messages": []})
+        self.emit({"type": "system", "text": "Started a new session."})
+        self.emit({"type": "status", "status": "idle"})
 
     def mcp_status(self) -> None:
         try:
@@ -606,6 +629,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.submit(str(command.get("text") or ""))
         elif cmd_type == "stop":
             bridge.stop()
+        elif cmd_type == "new_session":
+            bridge.new_session()
         elif cmd_type == "list_resume_sessions":
             bridge.list_resume_sessions()
         elif cmd_type == "resume_session":

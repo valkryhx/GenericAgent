@@ -144,6 +144,45 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([("first", "user")], agent.prompts)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
+    def test_new_session_replaces_agent_and_resets_visible_state(self):
+        agents = [FakeAgent(), FakeAgent()]
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agents.pop(0), emit=events.append)
+        old_agent = bridge.agent
+
+        bridge.submit("first")
+        old_agent.queues[0].put({"done": "first reply"})
+        bridge.wait_for_idle(timeout=1)
+
+        event_count = len(events)
+        bridge.new_session()
+        new_session_events = events[event_count:]
+        task_id = bridge.submit("second")
+        bridge.agent.queues[0].put({"done": "second reply"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertIsNot(old_agent, bridge.agent)
+        self.assertTrue(old_agent.aborted)
+        self.assertEqual(1, task_id)
+        self.assertEqual([], old_agent.prompts[1:])
+        self.assertEqual([("second", "user")], bridge.agent.prompts)
+        self.assertEqual([
+            {"type": "history_replace", "messages": []},
+            {"type": "system", "text": "Started a new session."},
+            {"type": "status", "status": "idle"},
+        ], new_session_events)
+
+    def test_new_session_is_rejected_while_agent_is_running(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.submit("busy")
+        bridge.new_session()
+
+        self.assertIs(agent, bridge.agent)
+        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+
     def test_stop_aborts_running_agent(self):
         agent = FakeAgent()
         events = []

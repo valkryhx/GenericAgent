@@ -15,6 +15,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/llm', description: 'Alias for /model' },
   { name: '/compact', description: 'Summarize and replace long conversation context' },
   { name: '/clear', description: 'Clear the visible transcript' },
+  { name: '/new', description: 'Start a fresh backend session' },
+  { name: '/reset', description: 'Alias for /new' },
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },

@@ -21,7 +21,7 @@ test('slashSuggestions shows all commands for a bare slash', () => {
 })
 
 test('slashSuggestions filters by command prefix only for single-line slash input', () => {
-  assert.deepEqual(slashSuggestions('/re').map(command => command.name), ['/resume', '/rewind'])
+  assert.deepEqual(slashSuggestions('/re').map(command => command.name), ['/reset', '/resume', '/rewind'])
   assert.deepEqual(slashSuggestions(' /re'), [])
   assert.deepEqual(slashSuggestions('/re\nmore'), [])
 })
@@ -32,6 +32,11 @@ test('slashSuggestions includes mcp command', () => {
 
 test('slashSuggestions includes compact command', () => {
   assert.ok(slashSuggestions('/c').some(command => command.name === '/compact'))
+})
+
+test('slashSuggestions includes new session commands', () => {
+  assert.ok(slashSuggestions('/n').some(command => command.name === '/new'))
+  assert.ok(slashSuggestions('/r').some(command => command.name === '/reset'))
 })
 
 test('slashSuggestions includes model commands', () => {
@@ -72,7 +77,7 @@ test('visibleSlashSuggestions returns a five-row scrolling window around selecti
 })
 
 test('completeSlashCommand inserts selected command with a trailing space', () => {
-  const [resume] = slashSuggestions('/res')
+  const resume = slashSuggestions('/res').find(command => command.name === '/resume')!
 
   assert.equal(completeSlashCommand(resume), '/resume ')
 })

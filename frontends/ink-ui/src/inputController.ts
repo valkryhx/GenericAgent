@@ -89,6 +89,7 @@ function parseSlashSubmit(
   }
   const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (compact) return { command: { type: 'compact', instructions: compact[1]?.trim() ?? '' } }
+  if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/clear') return { action: { type: 'clear' } }
   if (trimmed === '/help') return { action: { type: 'help' } }
