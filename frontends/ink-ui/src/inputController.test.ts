@@ -191,6 +191,15 @@ test('handleInput parses model slash commands', () => {
   })
 })
 
+test('handleInput opens the local theme picker for slash theme', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/theme', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_theme' },
+  })
+})
+
 test('handleInput parses compact slash commands', () => {
   const store = createPasteStore()
   assert.deepEqual(handleInput('/compact', '', { return: true }, 'idle', store), {

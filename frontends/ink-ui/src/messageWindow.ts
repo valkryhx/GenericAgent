@@ -1,6 +1,7 @@
 import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
+import type { InkTheme } from './theme.js'
 import stringWidth from 'string-width'
 
 export type TranscriptPart = MarkdownPart & {
@@ -86,10 +87,10 @@ export function visibleMessagesForViewport(
   return selected
 }
 
-export function transcriptLines(messages: ChatMessage[], options: { expandedTools: boolean }): TranscriptLine[] {
+export function transcriptLines(messages: ChatMessage[], options: { expandedTools: boolean; theme?: InkTheme }): TranscriptLine[] {
   const rows: TranscriptLine[] = []
   for (const message of messages) {
-    appendMessageLines(rows, message, options.expandedTools)
+    appendMessageLines(rows, message, options.expandedTools, options.theme)
   }
   return rows
 }
@@ -132,7 +133,7 @@ export function clampTranscriptScrollOffset(offset: number, totalRows: number, m
   return Math.min(maxScrollOffset, Math.max(0, Math.floor(offset)))
 }
 
-function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expandedTools: boolean): void {
+function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expandedTools: boolean, theme?: InkTheme): void {
   if (message.localCommand === 'input') {
     appendPlainLines(rows, message, message.text || ' ')
     return
@@ -147,8 +148,8 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
       rows.push({
         id: `${message.id}-${index}`,
         text: index === 0 ? `> ${line}` : `  ${line}`,
-        color: 'black',
-        backgroundColor: '#d7d7d7',
+        color: theme?.userText ?? 'black',
+        backgroundColor: theme?.userBackground ?? '#d7d7d7',
       })
     })
     rows.push(blankLine(`${message.id}-blank`))
@@ -160,7 +161,7 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
   }
 
   const body = formatAssistantText(message.text, { expanded: expandedTools }) || ' '
-  const markdownLines = renderMarkdownLines(body)
+  const markdownLines = renderMarkdownLines(body, theme)
   markdownLines.forEach((line, index) => {
     const prefix = index === 0 ? '✻ ' : '  '
     rows.push({

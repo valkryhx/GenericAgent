@@ -21,6 +21,15 @@ def exhaust_generator(gen):
         return stop.value
 
 
+def collect_generator_yields(gen):
+    chunks = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as stop:
+        return chunks, stop.value
+
+
 class CodeRunTest(unittest.TestCase):
     def test_python_print_finishes_without_timeout(self):
         result = exhaust_generator(code_run('print("test")', "python", timeout=5, cwd=str(REPO_ROOT / "temp")))
@@ -29,6 +38,16 @@ class CodeRunTest(unittest.TestCase):
         self.assertEqual(0, result["exit_code"])
         self.assertIn("test", result["stdout"])
         self.assertNotIn("Timeout Error", result["stdout"])
+
+    def test_status_display_uses_plain_exit_code_without_emoji(self):
+        chunks, result = collect_generator_yields(code_run('print("test")', "python", timeout=5, cwd=str(REPO_ROOT / "temp")))
+        display = "".join(chunks)
+
+        self.assertEqual("success", result["status"])
+        self.assertIn("[Status] Exit Code: 0", display)
+        self.assertNotIn("✅", display)
+        self.assertNotIn("❌", display)
+        self.assertNotIn("⏳", display)
 
     def test_subprocess_stdin_is_devnull_for_pipe_frontends(self):
         popen_kwargs = {}

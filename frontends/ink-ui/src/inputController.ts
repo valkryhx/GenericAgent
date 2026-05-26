@@ -25,7 +25,7 @@ export type InputDecision = {
   value: string
   cursorOffset?: number
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'clear' | 'help' | 'status' }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_theme' | 'clear' | 'help' | 'status' }
   exit?: boolean
 }
 
@@ -81,6 +81,7 @@ function parseSlashSubmit(
     return { command: { type: 'mcp_disable', server } }
   }
   if (/^\/(?:model|llm)$/.test(trimmed)) return { action: { type: 'open_model' } }
+  if (trimmed === '/theme') return { action: { type: 'open_theme' } }
   const modelSwitch = /^\/(?:model|llm)\s+(.+)$/.exec(trimmed)
   if (modelSwitch) {
     const selector = modelSwitch[1].trim()

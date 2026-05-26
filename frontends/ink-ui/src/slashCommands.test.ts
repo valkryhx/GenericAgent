@@ -44,6 +44,10 @@ test('slashSuggestions includes model commands', () => {
   assert.ok(slashSuggestions('/l').some(command => command.name === '/llm'))
 })
 
+test('slashSuggestions includes theme command', () => {
+  assert.ok(slashSuggestions('/t').some(command => command.name === '/theme'))
+})
+
 test('slashSuggestions includes matching skills after built-in commands', () => {
   const suggestions = slashSuggestions('/', [
     { name: 'imagegen', description: 'Generate images', source: 'codex', path: 'C:/skills/imagegen/SKILL.md' },

@@ -1,5 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Box, Text, useApp, useStdin, useStdout } from 'ink'
+import { getInkTheme, INK_THEME_NAMES, type InkTheme, type InkThemeName } from './theme.js'
+import { moveThemeSelection, themeDescription, themePanelRows } from './themePanel.js'
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
@@ -24,7 +26,6 @@ import type { BridgeEvent, ResumeSession, TokenUsage } from './protocol.js'
 import {
   loadingMcpPanel,
   mcpPanelRows,
-  mcpStatusColor,
   mcpStatusIcon,
   mcpToolsForServer,
   moveMcpSelection,
@@ -45,12 +46,11 @@ import {
 import { fixedInputLine, inputContentColumns, inputFrameBorderStyle, inputGutterColumns, inputLeftPaddingColumns, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { modelSwitchPanelText, type FooterPanel } from './footerPanel.js'
+import { modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
   commandTextForLocalDecision,
   dismissedLocalCommandOutput,
-  localCommandResultOutput,
 } from './localCommandTranscript.js'
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
 import { computeLayoutMetrics } from './layoutMetrics.js'
@@ -123,29 +123,29 @@ function formatResumeSession(session: ResumeSession): string {
   const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
   return `${stamp} - ${age} - ${session.rounds} turns - ${preview}`
 }
-function SelectorView({ selector }: { selector: SelectorState }) {
+function SelectorView({ selector, theme }: { selector: SelectorState; theme: InkTheme }) {
   const rows = visibleSelectorRows(selector, 8)
   const title = selector.mode === 'resume' ? 'Resume Conversation' : 'Rewind Conversation'
   const empty = selector.mode === 'resume' && selector.loading ? 'Loading conversations...' : selector.mode === 'resume' ? 'No resumable sessions found.' : 'Nothing to rewind to yet.'
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text bold>{title}</Text>
-      {rows.length === 0 ? <Text color="gray">{empty}</Text> : rows.map(row => {
+      {rows.length === 0 ? <Text color={theme.muted}>{empty}</Text> : rows.map(row => {
         const text = selector.mode === 'resume'
           ? formatResumeSession(selector.sessions[row.index]!)
           : selector.options[row.index]!.text.replace(/\s+/g, ' ').slice(0, 90) || '(empty)'
         return (
-        <Text key={`${selector.mode}-${row.index}`} color={row.selected ? 'cyan' : undefined} inverse={row.selected}>
+        <Text key={`${selector.mode}-${row.index}`} color={row.selected ? theme.accent : undefined} inverse={row.selected}>
           {row.selected ? '> ' : '  '}{text}
         </Text>
         )
       })}
-      <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
+      <Text color={theme.muted}>Enter select - Up/Down move - Esc cancel</Text>
     </Box>
   )
 }
 
-function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCommand[]; selected: number }) {
+function SlashSuggestionsView({ suggestions, selected, theme }: { suggestions: SlashCommand[]; selected: number; theme: InkTheme }) {
   const visible = visibleSlashSuggestions(suggestions, selected)
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -153,98 +153,99 @@ function SlashSuggestionsView({ suggestions, selected }: { suggestions: SlashCom
         const index = visible.startIndex + offset
         const active = index === selected
         return (
-          <Text key={command.name} color={active ? 'cyan' : undefined}>
+          <Text key={command.name} color={active ? theme.accent : undefined}>
             {active ? '> ' : '  '}{formatSlashSuggestionLine(command)}
           </Text>
         )
       })}
-      <Text color="gray">Tab/Enter complete - Up/Down move - Esc cancel</Text>
+      <Text color={theme.muted}>Tab/Enter complete - Up/Down move - Esc cancel</Text>
     </Box>
   )
 }
 
-function McpPanelView({ panel }: { panel: McpPanelState }) {
+function McpPanelView({ panel, theme }: { panel: McpPanelState; theme: InkTheme }) {
   const selected = panel.servers[panel.selected]
   const selectedTools = selected ? mcpToolsForServer(panel, selected.name) : []
   const serverRows = visibleMcpServerRows(panel, 5)
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text bold>MCP Servers</Text>
-      {panel.configPath ? <Text color="gray">Config: {panel.configPath}</Text> : null}
-      {panel.loading ? <Text color="gray">Loading MCP status...</Text> : null}
-      {!panel.loading && panel.servers.length === 0 ? <Text color="gray">No MCP servers configured.</Text> : null}
+      {panel.configPath ? <Text color={theme.muted}>Config: {panel.configPath}</Text> : null}
+      {panel.loading ? <Text color={theme.muted}>Loading MCP status...</Text> : null}
+      {!panel.loading && panel.servers.length === 0 ? <Text color={theme.muted}>No MCP servers configured.</Text> : null}
       {serverRows.map(row => {
         const server = panel.servers[row.index]!
         return (
-          <Text key={server.name} color={row.selected ? 'cyan' : undefined}>
+          <Text key={server.name} color={row.selected ? theme.accent : undefined}>
             {row.selected ? '> ' : '  '}
-            <Text color={mcpStatusColor(server.status)}>{mcpStatusIcon(server.status)}</Text>
+            <Text color={themeColorForMcpStatus(server.status, theme)}>{mcpStatusIcon(server.status)}</Text>
             {` ${server.name} - ${server.status} - ${server.transport} - ${server.tool_count} tools`}
           </Text>
         )
       })}
-      {selected ? <Text color="gray">Actions: /mcp reconnect {selected.name} - /mcp {selected.disabled ? 'enable' : 'disable'} {selected.name}</Text> : null}
-      {selected && panel.errors[selected.name] ? <Text color="red">{panel.errors[selected.name]}</Text> : null}
+      {selected ? <Text color={theme.muted}>Actions: /mcp reconnect {selected.name} - /mcp {selected.disabled ? 'enable' : 'disable'} {selected.name}</Text> : null}
+      {selected && panel.errors[selected.name] ? <Text color={theme.error}>{panel.errors[selected.name]}</Text> : null}
       {selectedTools.slice(0, 2).map(tool => (
-        <Text key={tool.function.name} color="gray">  - {tool.function.name}</Text>
+        <Text key={tool.function.name} color={theme.muted}>  - {tool.function.name}</Text>
       ))}
-      <Text color="gray">Up/Down move - Esc close</Text>
+      <Text color={theme.muted}>Up/Down move - Esc close</Text>
     </Box>
   )
 }
 
-function ModelPanelView({ panel }: { panel: ModelPanelState }) {
+function ModelPanelView({ panel, theme }: { panel: ModelPanelState; theme: InkTheme }) {
   return (
     <Box flexDirection="column" paddingX={1} flexShrink={0}>
       <Text bold>Models</Text>
-      {panel.models.length === 0 ? <Text color="gray">No models configured.</Text> : null}
+      {panel.models.length === 0 ? <Text color={theme.muted}>No models configured.</Text> : null}
       {panel.models.map((model, index) => (
-        <Text key={model.index} color={index === panel.selected ? 'cyan' : undefined}>
+        <Text key={model.index} color={index === panel.selected ? theme.accent : undefined}>
           {index === panel.selected ? '> ' : '  '}
-          <Text color={model.current ? 'green' : 'gray'}>{model.current ? '✓' : ' '}</Text>
+          <Text color={model.current ? theme.success : theme.muted}>{model.current ? '✓' : ' '}</Text>
           {` ${model.index}: ${model.name}`}
         </Text>
       ))}
-      <Text color="gray">Enter select - Up/Down move - Esc cancel</Text>
+      <Text color={theme.muted}>Enter select - Up/Down move - Esc cancel</Text>
     </Box>
   )
 }
 
-function FooterPanelView({ panel }: { panel: FooterPanel }) {
+function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme }) {
   if (panel.type === 'status') {
     return (
       <Box paddingX={1}>
-        <Text color="gray" wrap="truncate-end">{panel.text}</Text>
+        <Text color={theme.muted} wrap="truncate-end">{panel.text}</Text>
       </Box>
     )
   }
   return (
     <Box flexDirection="column" paddingX={1}>
       {panel.text.split('\n').map((line, index) => (
-        <Text key={index} color={index === 0 && panel.type === 'help' ? undefined : 'gray'}>{line}</Text>
+        <Text key={index} color={index === 0 && panel.type === 'help' ? undefined : theme.muted}>{line}</Text>
       ))}
-      <Text color="gray">Esc close</Text>
+      <Text color={theme.muted}>Esc close</Text>
     </Box>
   )
 }
 
-function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffset }: {
+function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffset, theme }: {
   height: number
   columns: number
   lines: TranscriptLine[]
   ready: boolean
   totalRows: number
   scrollOffset: number
+  theme: InkTheme
 }) {
   const scrollbar = transcriptScrollbar({ totalRows, viewportRows: height, scrollOffset })
   return (
     <Box flexDirection="row" height={height} width={columns} overflow="hidden">
       <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={Math.max(1, columns - 1)} overflow="hidden">
-        {ready ? <Text color="gray">Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+        {ready ? <Text color={theme.muted}>Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
       </Box>
       <Box flexDirection="column" width={1} height={height} overflow="hidden">
         {Array.from({ length: height }, (_, index) => (
-          <Text key={index} color={scrollbar.visible ? 'gray' : undefined}>
+          <Text key={index} color={scrollbar.visible ? theme.scrollbar : undefined}>
             {scrollbar.visible ? (index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize ? '█' : '│') : ' '}
           </Text>
         ))}
@@ -261,7 +262,7 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number; columns: number }) {
+function InputView({ input, cursorOffset, showCursor, visibleRows, columns, theme }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number; columns: number; theme: InkTheme }) {
   const lines = inputPromptLineItems(input, visibleRows, cursorOffset)
   const contentColumns = inputContentColumns(columns)
   return (
@@ -269,7 +270,7 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { 
       flexDirection="column"
       alignItems="flex-start"
       borderStyle={inputFrameBorderStyle}
-      borderColor="gray"
+      borderColor={theme.border}
       borderLeft={false}
       borderRight={false}
       borderTop
@@ -281,8 +282,8 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { 
     >
       {lines.map((line, index) => (
         <Box key={index} width="100%" overflow="hidden">
-          <Text color="cyan" wrap="truncate-end">{line.gutter}</Text>
-          <Text color="cyan" wrap="truncate-end">
+          <Text color={theme.accent} wrap="truncate-end">{line.gutter}</Text>
+          <Text color={theme.accent} wrap="truncate-end">
             {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
               <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
             ))}
@@ -293,10 +294,33 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns }: { 
   )
 }
 
-function ActivityView({ seconds, label, tokenUsage }: { seconds: number; label: string; tokenUsage: TokenUsage | null }) {
+function ActivityView({ seconds, label, tokenUsage, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; theme: InkTheme }) {
   return (
     <Box>
-      <Text color="yellow">{formatRunningStatus(seconds, label, tokenUsage)}</Text>
+      <Text color={theme.warning}>{formatRunningStatus(seconds, label, tokenUsage)}</Text>
+    </Box>
+  )
+}
+
+function themeColorForMcpStatus(status: string, theme: InkTheme): string {
+  if (status === 'connected') return theme.success
+  if (status === 'failed') return theme.error
+  if (status === 'disabled') return theme.muted
+  return theme.warning
+}
+
+function ThemePanelView({ selected, currentTheme, theme }: { selected: number; currentTheme: InkThemeName; theme: InkTheme }) {
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <Text bold>Themes</Text>
+      {INK_THEME_NAMES.map((themeName, index) => (
+        <Text key={themeName} color={index === selected ? theme.accent : undefined}>
+          {index === selected ? '> ' : '  '}
+          <Text color={themeName === currentTheme ? theme.success : theme.muted}>{themeName === currentTheme ? '✓' : ' '}</Text>
+          {` ${themeName.padEnd(9)} ${themeDescription(themeName)}`}
+        </Text>
+      ))}
+      <Text color={theme.muted}>Enter select - Up/Down move - Esc cancel</Text>
     </Box>
   )
 }
@@ -336,6 +360,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
+  const [themePanelSelected, setThemePanelSelected] = useState<number | null>(null)
+  const [themeName, setThemeName] = useState<InkThemeName>('default')
+  const theme = useMemo(() => getInkTheme(themeName), [themeName])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
@@ -357,7 +384,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const scrollbarDragRef = useRef(false)
   const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, footerPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   const appendLocalCommandInput = (commandText: string) => {
@@ -431,10 +458,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       setFooterPanel(null)
       modelPanelPendingRef.current = true
       bridgeRef.current?.send({ type: 'model_status' })
+    } else if (decision.action?.type === 'open_theme') {
+      setFooterPanel(null)
+      setThemePanelSelected(Math.max(0, INK_THEME_NAMES.indexOf(themeName)))
     } else if (decision.action?.type === 'help') {
       setFooterPanel({ type: 'help', text: helpText() })
     } else if (decision.action?.type === 'status') {
-      appendLocalCommandOutput(localCommandResultOutput('/status', state.status, state.messages.length))
+      setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
     }
     if (decision.exit) {
       exitCleanly()
@@ -705,6 +735,28 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         return
       }
     }
+    if (themePanelSelected !== null) {
+      if (key.escape) {
+        setThemePanelSelected(null)
+        dismissPendingLocalCommand()
+        return
+      }
+      if (key.upArrow) {
+        setThemePanelSelected(selected => moveThemeSelection(selected ?? 0, -1))
+        return
+      }
+      if (key.downArrow) {
+        setThemePanelSelected(selected => moveThemeSelection(selected ?? 0, 1))
+        return
+      }
+      if (key.return) {
+        const selectedTheme = INK_THEME_NAMES[themePanelSelected] ?? 'default'
+        setThemeName(selectedTheme)
+        setThemePanelSelected(null)
+        appendLocalCommandOutput(`Theme set to ${selectedTheme}`)
+        return
+      }
+    }
     if (selector) {
       const decision = handleSelectorInput(selector, key)
       setSelector(decision.selector)
@@ -792,13 +844,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
-  const activePanel = mcpPanel || modelPanel || selector || footerPanel
+  const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel
   const inputRows = inputVisibleRowCount(input)
   const hasActivity = shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const panelRows = modelPanel
     ? modelPanelRows(modelPanel)
     : mcpPanel
       ? mcpPanelRows(mcpPanel)
+    : themePanelSelected !== null
+      ? themePanelRows()
     : selector
       ? Math.min(selectorSize(selector), 8) + 2
     : slashItems.length > 0
@@ -837,8 +891,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   }, [activePanel, cursorOffset, input, inputCursorColumn, inputCursorLine, inputRows, metrics, panelRows, slashItems.length, state.error, state.status, stdout, terminalReady])
 
   const transcriptRows = useMemo(() => (
-    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools }), Math.max(1, metrics.columns - 3))
-  ), [state.messages, expandedTools, metrics.columns])
+    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), Math.max(1, metrics.columns - 3))
+  ), [state.messages, expandedTools, metrics.columns, theme])
   const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
   const historyReplacementScrollOffset = pendingHistoryReplacementScrollRef.current
     ? scrollOffsetForHistoryReplacement(transcriptRows.length, metrics.messageRows)
@@ -877,17 +931,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     hasSlashSuggestions: slashItems.length > 0,
   })
   const renderInputSection = (section: InputChromeSection) => {
-    if (section === 'error') return state.error ? <Text key={section} color="red">{state.error}</Text> : null
-    if (section === 'hint') return <Text key={section} color="gray" wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} columns={metrics.columns} />
+    if (section === 'error') return state.error ? <Text key={section} color={theme.error}>{state.error}</Text> : null
+    if (section === 'hint') return <Text key={section} color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text>
+    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} columns={metrics.columns} theme={theme} />
     if (section === 'panel') {
-      if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} />
-      if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} />
-      if (selector) return <SelectorView key={section} selector={selector} />
-      if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} />
+      if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} />
+      if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
+      if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
+      if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
+      if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }
-    return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} /> : null
+    return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} theme={theme} /> : null
   }
   if (!terminalReady) return null
   return (
@@ -903,9 +958,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         ready={visibleTranscript.totalRows === 0}
         totalRows={visibleTranscript.totalRows}
         scrollOffset={visibleTranscript.scrollOffset}
+        theme={theme}
       />
       <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-        {hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} /> : <ActivityPlaceholder />}
+        {hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}
         {inputSections.map(renderInputSection)}
       </BottomChrome>
     </Box>

@@ -12,6 +12,7 @@ import {
   wrapTranscriptLines,
 } from './messageWindow.js'
 import type { ChatMessage } from './protocol.js'
+import { getInkTheme } from './theme.js'
 
 test('visibleMessages keeps only the latest messages', () => {
   const messages: ChatMessage[] = Array.from({ length: 5 }, (_, i) => ({
@@ -114,6 +115,16 @@ test('transcriptLines renders assistant markdown as styled parts', () => {
   assert.equal(lines[0]!.text, '✻ Use bold and code.')
   assert.equal(lines[0]!.parts?.some(part => part.text === 'bold' && part.bold), true)
   assert.equal(lines[0]!.parts?.some(part => part.text === 'code' && part.color === 'cyan'), true)
+})
+
+test('transcriptLines applies lightmode colors to assistant markdown code and links', () => {
+  const lines = transcriptLines([
+    { id: 'a1', role: 'assistant', text: 'Use `code` and [docs](https://example.test).', done: true },
+  ], { expandedTools: false, theme: getInkTheme('lightmode') })
+
+  assert.equal(lines[0]!.parts?.some(part => part.text === 'code' && part.color === '#7c3aed'), true)
+  assert.equal(lines[0]!.parts?.some(part => part.text === 'docs' && part.color === '#2563eb' && part.underline), true)
+  assert.equal(lines[0]!.parts?.some(part => part.text === ' (https://example.test)' && part.color === '#64748b'), true)
 })
 
 test('wrapTranscriptLines preserves styled parts across wrapped rows', () => {

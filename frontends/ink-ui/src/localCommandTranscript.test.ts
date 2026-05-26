@@ -9,6 +9,7 @@ import {
 
 test('commandTextForLocalDecision returns display text for local actions and commands only', () => {
   assert.equal(commandTextForLocalDecision({ action: { type: 'help' } }), '/help')
+  assert.equal(commandTextForLocalDecision({ action: { type: 'status' } }), null)
   assert.equal(commandTextForLocalDecision({ action: { type: 'open_mcp' } }), '/mcp')
   assert.equal(commandTextForLocalDecision({ action: { type: 'open_resume' } }), null)
   assert.equal(commandTextForLocalDecision({ action: { type: 'open_rewind' } }), null)

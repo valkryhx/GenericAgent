@@ -1,4 +1,5 @@
 import { marked, type Token } from 'marked'
+import type { InkTheme } from './theme.js'
 
 export type MarkdownPart = {
   text: string
@@ -20,7 +21,7 @@ export function lineText(line: MarkdownLine): string {
   return line.text
 }
 
-export function renderMarkdownLines(markdown: string): MarkdownLine[] {
+export function renderMarkdownLines(markdown: string, theme?: InkTheme): MarkdownLine[] {
   const source = markdown || ''
   if (TOOL_SUMMARY_RE.test(source.trim())) {
     const text = source.trimEnd()
@@ -30,28 +31,28 @@ export function renderMarkdownLines(markdown: string): MarkdownLine[] {
   const tokens = marked.lexer(source, { gfm: true })
   const lines: MarkdownLine[] = []
   for (const token of tokens) {
-    appendToken(lines, token, {})
+    appendToken(lines, token, {}, theme)
   }
   return lines.length > 0 ? lines : [{ text: ' ', parts: [{ text: ' ' }] }]
 }
 
-function appendToken(lines: MarkdownLine[], token: Token, style: Partial<MarkdownPart>): void {
+function appendToken(lines: MarkdownLine[], token: Token, style: Partial<MarkdownPart>, theme?: InkTheme): void {
   switch (token.type) {
     case 'heading':
-      pushLine(lines, inlineParts(token.tokens ?? [], { ...style, bold: true }))
+      pushLine(lines, inlineParts(token.tokens ?? [], { ...style, bold: true }, theme))
       return
     case 'paragraph':
-      pushLine(lines, inlineParts(token.tokens ?? [], style))
+      pushLine(lines, inlineParts(token.tokens ?? [], style, theme))
       return
     case 'code':
       token.text.split('\n').forEach((line: string) => {
-        pushLine(lines, [{ text: `  ${line || ' '}`, color: 'gray' }])
+        pushLine(lines, [{ text: `  ${line || ' '}`, color: theme?.code ?? 'gray' }])
       })
       return
     case 'blockquote':
       for (const child of token.tokens ?? []) {
         const before = lines.length
-        appendToken(lines, child, { ...style, italic: true })
+        appendToken(lines, child, { ...style, italic: true }, theme)
         for (let i = before; i < lines.length; i++) {
           const line = lines[i]!
           line.parts = [{ text: '| ', dimColor: true }, ...line.parts]
@@ -62,7 +63,7 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
     case 'list':
       token.items.forEach((item: { tokens?: Token[] }, index: number) => {
         const marker = token.ordered ? `${token.start + index}. ` : '- '
-        const parts = inlineParts(flatListItemTokens(item.tokens ?? []), style)
+        const parts = inlineParts(flatListItemTokens(item.tokens ?? []), style, theme)
         pushLine(lines, [{ text: marker }, ...parts])
       })
       return
@@ -85,30 +86,30 @@ function flatListItemTokens(tokens: Token[]): Token[] {
   return tokens
 }
 
-function inlineParts(tokens: Token[], style: Partial<MarkdownPart>): MarkdownPart[] {
+function inlineParts(tokens: Token[], style: Partial<MarkdownPart>, theme?: InkTheme): MarkdownPart[] {
   const parts: MarkdownPart[] = []
   for (const token of tokens) {
     switch (token.type) {
       case 'text':
         if ('tokens' in token && Array.isArray(token.tokens)) {
-          parts.push(...inlineParts(token.tokens as Token[], style))
+          parts.push(...inlineParts(token.tokens as Token[], style, theme))
         } else {
           parts.push({ ...style, text: token.text })
         }
         break
       case 'strong':
-        parts.push(...inlineParts(token.tokens ?? [], { ...style, bold: true }))
+        parts.push(...inlineParts(token.tokens ?? [], { ...style, bold: true }, theme))
         break
       case 'em':
-        parts.push(...inlineParts(token.tokens ?? [], { ...style, italic: true }))
+        parts.push(...inlineParts(token.tokens ?? [], { ...style, italic: true }, theme))
         break
       case 'codespan':
-        parts.push({ ...style, text: token.text, color: 'cyan' })
+        parts.push({ ...style, text: token.text, color: theme?.code ?? 'cyan' })
         break
       case 'link':
-        parts.push(...inlineParts(token.tokens ?? [], { ...style, underline: true }))
+        parts.push(...inlineParts(token.tokens ?? [], { ...style, color: theme?.link, underline: true }, theme))
         if (token.href && token.href !== parts.at(-1)?.text) {
-          parts.push({ ...style, text: ` (${token.href})`, color: 'gray' })
+          parts.push({ ...style, text: ` (${token.href})`, color: theme?.linkUrl ?? 'gray' })
         }
         break
       case 'br':
