@@ -1,6 +1,7 @@
 import unittest
 
 from workflow_models import (
+    AgentResult,
     DEFAULT_PERMISSION_POLICY_VERSION,
     DEFAULT_PERMISSION_PROFILE,
     JOB_STATUSES,
@@ -95,6 +96,24 @@ class WorkflowModelsTest(unittest.TestCase):
         self.assertEqual("wf_test", data["runId"])
         self.assertEqual(3, data["sequence"])
         self.assertEqual({"artifactDir": "temp/sessions/session_test/workflows/wf_test"}, data["payload"])
+
+    def test_agent_result_round_trips_compact_payload(self):
+        result = AgentResult(
+            job_id="agent_1",
+            status="succeeded",
+            payload={"summary": "ok"},
+            transcript_ref="agents/agent_1/transcript.jsonl",
+            token_usage={"input": 1, "output": 2},
+            tool_summary={"Read": 3},
+        )
+
+        data = result.to_dict()
+        restored = AgentResult.from_dict(data)
+
+        self.assertEqual(result, restored)
+        self.assertEqual("agent_1", data["jobId"])
+        self.assertEqual({"summary": "ok"}, data["payload"])
+        self.assertEqual("agents/agent_1/transcript.jsonl", data["transcriptRef"])
 
     def test_new_run_id_uses_workflow_prefix(self):
         self.assertTrue(new_run_id().startswith("wf_"))

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_models import WorkflowEvent, WorkflowRun
+from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_store import WorkflowStore
 
 
@@ -55,6 +55,28 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertEqual(run, loaded)
             self.assertEqual("awaiting_approval", loaded.status)
             self.assertEqual("phase('A')", loaded.script)
+
+    def test_write_agent_result_persists_result_artifact_and_updates_job_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="work")],
+            )
+            run = store.create_run(run)
+            job = run.jobs[0]
+            result = AgentResult(job_id="agent_1", payload={"summary": "ok"})
+
+            result_ref = store.write_agent_result(run, job, result)
+
+            self.assertEqual("agents/agent_1/result.json", result_ref)
+            self.assertEqual(result_ref, job.result_ref)
+            result_path = Path(run.artifact_dir) / result_ref
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual("agent_1", data["jobId"])
+            self.assertEqual({"summary": "ok"}, data["payload"])
 
     def test_mark_running_jobs_stale_on_resume_projection(self):
         with tempfile.TemporaryDirectory() as tmp:

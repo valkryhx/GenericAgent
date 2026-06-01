@@ -144,6 +144,37 @@ class WorkflowRun:
 
 
 @dataclass
+class AgentResult:
+    job_id: str
+    status: str = "succeeded"
+    payload: dict = field(default_factory=dict)
+    transcript_ref: str | None = None
+    token_usage: dict = field(default_factory=dict)
+    tool_summary: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "jobId": self.job_id,
+            "status": self.status,
+            "payload": copy.deepcopy(self.payload),
+            "transcriptRef": self.transcript_ref,
+            "tokenUsage": copy.deepcopy(self.token_usage),
+            "toolSummary": copy.deepcopy(self.tool_summary),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentResult":
+        return cls(
+            job_id=str(data.get("jobId") or data.get("job_id") or ""),
+            status=str(data.get("status") or "succeeded"),
+            payload=copy.deepcopy(data.get("payload") or {}),
+            transcript_ref=data.get("transcriptRef") or data.get("transcript_ref"),
+            token_usage=copy.deepcopy(data.get("tokenUsage") or data.get("token_usage") or {}),
+            tool_summary=copy.deepcopy(data.get("toolSummary") or data.get("tool_summary") or {}),
+        )
+
+
+@dataclass
 class WorkflowEvent:
     run_id: str
     event_type: str

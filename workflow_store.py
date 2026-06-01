@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
+from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -54,6 +54,14 @@ class WorkflowStore:
         with (artifact_dir / "journal.jsonl").open("a", encoding="utf-8", errors="replace") as fh:
             fh.write(json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n")
         return event
+
+    def write_agent_result(self, run: WorkflowRun, job: WorkflowJob, result: AgentResult) -> str:
+        result_ref = f"agents/{job.job_id}/result.json"
+        result_path = self._run_dir(run) / result_ref
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(result_path, result.to_dict())
+        job.result_ref = result_ref
+        return result_ref
 
     def replay_events(self, run_id: str) -> list[WorkflowEvent]:
         artifact_dir = self._find_run_dir(run_id)
