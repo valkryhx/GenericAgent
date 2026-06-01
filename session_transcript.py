@@ -121,6 +121,22 @@ def record_rewind(path, *, session_id, keep_turns, backend_history_after):
     })
 
 
+def record_workflow_event(path, *, session_id, run_id, event_type, artifact_dir, result_ref=None, error=None):
+    event = {
+        "version": 1,
+        "type": event_type,
+        "session_id": session_id,
+        "created_at": _now_iso(),
+        "run_id": run_id,
+        "artifact_dir": artifact_dir,
+    }
+    if result_ref is not None:
+        event["result_ref"] = result_ref
+    if error is not None:
+        event["error"] = error
+    append_event(path, event)
+
+
 def _history_equal(left, right):
     return (left or []) == (right or [])
 
