@@ -55,6 +55,33 @@ class WorkflowStore:
             fh.write(json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n")
         return event
 
+    def append_permission_event(self, run: WorkflowRun, raw_event: dict) -> WorkflowEvent:
+        raw_run_id = raw_event.get("runId") or raw_event.get("run_id")
+        if raw_run_id and raw_run_id != run.run_id:
+            raise ValueError(f"permission event runId mismatch: {raw_run_id} != {run.run_id}")
+        event_type = str(raw_event.get("type") or raw_event.get("eventType") or raw_event.get("event_type") or "")
+        if event_type not in {"permission_profile_selected", "tool_allowed", "tool_denied"}:
+            raise ValueError(f"unsupported permission event type: {event_type}")
+        payload = {
+            "toolName": raw_event.get("toolName") or raw_event.get("tool_name"),
+            "profile": raw_event.get("profile"),
+            "decision": raw_event.get("decision"),
+            "reason": raw_event.get("reason"),
+            "permission": raw_event.get("permission") or {},
+        }
+        for key, value in raw_event.items():
+            if key not in {"type", "eventType", "event_type", "runId", "run_id", "sessionId", "session_id", "jobId", "job_id"} and key not in payload:
+                payload[key] = value
+        event = WorkflowEvent(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            job_id=raw_event.get("jobId") or raw_event.get("job_id"),
+            event_type=event_type,
+            sequence=self._next_sequence(run.run_id),
+            payload=payload,
+        )
+        return self.append_event(run, event)
+
     def write_agent_result(self, run: WorkflowRun, job: WorkflowJob, result: AgentResult) -> str:
         result_ref = f"agents/{job.job_id}/result.json"
         result_path = self._run_dir(run) / result_ref
@@ -136,6 +163,9 @@ class WorkflowStore:
         if not matches:
             raise FileNotFoundError(run_id)
         return matches[0]
+
+    def _next_sequence(self, run_id: str) -> int:
+        return max((event.sequence for event in self.replay_events(run_id)), default=0) + 1
 
     @staticmethod
     def _write_json(path: Path, data: dict):

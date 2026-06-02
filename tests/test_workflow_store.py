@@ -43,6 +43,70 @@ class WorkflowStoreTest(unittest.TestCase):
             lines = (Path(run.artifact_dir) / "journal.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(2, len(lines))
 
+    def test_append_permission_event_maps_raw_event_to_workflow_journal_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="work")],
+            )
+            run = store.create_run(run)
+            store.append_event(run, WorkflowEvent(run_id="wf_test", event_type="agent_started", sequence=1, job_id="agent_1"))
+            raw_event = {
+                "type": "tool_denied",
+                "runId": "wf_test",
+                "jobId": "agent_1",
+                "toolName": "file_write",
+                "profile": "read_only",
+                "decision": "deny",
+                "reason": "read_only_static_write_or_execute",
+                "permission": {
+                    "action": "deny",
+                    "reason": "read_only_static_write_or_execute",
+                    "profile": "read_only",
+                    "toolName": "file_write",
+                    "details": {},
+                },
+            }
+
+            stored = store.append_permission_event(run, raw_event)
+
+            self.assertEqual("tool_denied", stored.event_type)
+            self.assertEqual("wf_test", stored.run_id)
+            self.assertEqual("session_test", stored.session_id)
+            self.assertEqual("agent_1", stored.job_id)
+            self.assertEqual(2, stored.sequence)
+            self.assertEqual("file_write", stored.payload["toolName"])
+            self.assertEqual("read_only", stored.payload["profile"])
+            self.assertEqual("deny", stored.payload["decision"])
+            self.assertEqual("read_only_static_write_or_execute", stored.payload["reason"])
+            self.assertEqual("deny", stored.payload["permission"]["action"])
+            events = store.replay_events("wf_test")
+            self.assertEqual(["agent_started", "tool_denied"], [event.event_type for event in events])
+            self.assertEqual(stored, events[-1])
+
+    def test_append_permission_event_rejects_raw_event_from_different_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=""))
+            raw_event = {
+                "type": "tool_allowed",
+                "runId": "wf_other",
+                "jobId": "agent_1",
+                "toolName": "file_read",
+                "profile": "read_only",
+                "decision": "allow",
+                "reason": "read_only_static_safe",
+                "permission": {"action": "allow", "reason": "read_only_static_safe"},
+            }
+
+            with self.assertRaises(ValueError):
+                store.append_permission_event(run, raw_event)
+
+            self.assertEqual([], store.replay_events("wf_test"))
+
     def test_load_run_round_trips_current_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

@@ -173,6 +173,7 @@ class AgentScheduler:
             job.metadata["tokenUsage"] = result.token_usage
         if result.tool_summary is not None:
             job.metadata["toolSummary"] = result.tool_summary
+        self._append_permission_events_from_result(job, result)
         self._append("agent_completed", job, {"resultRef": job.result_ref, "result": result.to_artifact_dict()})
 
     def _fail_job(self, job: WorkflowJob, error: str, result: AgentResult | None = None) -> None:
@@ -192,7 +193,14 @@ class AgentScheduler:
                 job.metadata["toolSummary"] = result.tool_summary
             payload["resultRef"] = job.result_ref
             payload["result"] = result.to_artifact_dict()
+            self._append_permission_events_from_result(job, result)
         self._append("agent_failed", job, payload)
+
+    def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
+        for event in result.transcript_events:
+            if event.get("type") not in {"permission_profile_selected", "tool_allowed", "tool_denied"}:
+                continue
+            self.store.append_permission_event(self.run, {**event, "jobId": event.get("jobId") or job.job_id})
 
     def _cancel_job(self, job: WorkflowJob, *, reason: str) -> None:
         if job.status in {"succeeded", "failed", "cancelled", "cached", "skipped"}:

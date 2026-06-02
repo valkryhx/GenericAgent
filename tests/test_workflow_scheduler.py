@@ -50,6 +50,57 @@ class ProtocolMetadataRunner:
         self.cancelled.append(job.job_id)
 
 
+class PermissionEventsRunner:
+    def __init__(self, *, status="succeeded"):
+        self.status = status
+
+    def start(self, job):
+        pass
+
+    def poll(self, job):
+        return AgentResult(
+            job_id=job.job_id,
+            status=self.status,
+            payload={"summary": "permission checked"} if self.status == "succeeded" else {"error": "permission failure"},
+            transcript_events=[
+                {"type": "metadata", "runId": "wf_test", "jobId": job.job_id},
+                {
+                    "type": "permission_profile_selected",
+                    "runId": "wf_test",
+                    "jobId": job.job_id,
+                    "toolName": "file_read",
+                    "profile": "read_only",
+                    "decision": "allow",
+                    "reason": "read_only_static_safe",
+                    "permission": {"action": "allow", "reason": "read_only_static_safe", "profile": "read_only"},
+                },
+                {
+                    "type": "tool_allowed",
+                    "runId": "wf_test",
+                    "jobId": job.job_id,
+                    "toolName": "file_read",
+                    "profile": "read_only",
+                    "decision": "allow",
+                    "reason": "read_only_static_safe",
+                    "permission": {"action": "allow", "reason": "read_only_static_safe", "profile": "read_only"},
+                },
+                {
+                    "type": "tool_denied",
+                    "runId": "wf_test",
+                    "jobId": job.job_id,
+                    "toolName": "file_write",
+                    "profile": "read_only",
+                    "decision": "deny",
+                    "reason": "read_only_static_write_or_execute",
+                    "permission": {"action": "deny", "reason": "read_only_static_write_or_execute", "profile": "read_only"},
+                },
+            ],
+        )
+
+    def cancel(self, job):
+        pass
+
+
 class WorkflowSchedulerTest(unittest.TestCase):
     def make_scheduler(self, *, max_concurrent=4, max_total=1000, runner=None, run_kwargs=None):
         tmp = tempfile.TemporaryDirectory()
@@ -167,6 +218,40 @@ class WorkflowSchedulerTest(unittest.TestCase):
         completed_event = store.replay_events(run.run_id)[-1]
         self.assertEqual("agent_completed", completed_event.event_type)
         self.assertNotIn("transcriptEvents", completed_event.payload["result"])
+
+    def test_permission_events_from_successful_agent_result_are_written_to_journal_before_completion(self):
+        scheduler, store, run = self.make_scheduler(runner=PermissionEventsRunner())
+        job = scheduler.register_agent(prompt="check permissions")
+
+        scheduler.run_all()
+
+        events = store.replay_events(run.run_id)
+        self.assertEqual(
+            ["agent_registered", "agent_started", "permission_profile_selected", "tool_allowed", "tool_denied", "agent_completed"],
+            [event.event_type for event in events],
+        )
+        self.assertEqual(list(range(1, len(events) + 1)), [event.sequence for event in events])
+        denied = events[4]
+        self.assertEqual(job.job_id, denied.job_id)
+        self.assertEqual("file_write", denied.payload["toolName"])
+        self.assertEqual("read_only", denied.payload["profile"])
+        self.assertEqual("deny", denied.payload["decision"])
+        self.assertEqual("read_only_static_write_or_execute", denied.payload["reason"])
+        self.assertEqual("deny", denied.payload["permission"]["action"])
+
+    def test_permission_events_from_failed_agent_result_are_written_to_journal_before_failure(self):
+        scheduler, store, run = self.make_scheduler(runner=PermissionEventsRunner(status="failed"))
+        scheduler.register_agent(prompt="check permissions then fail")
+
+        scheduler.run_all()
+
+        events = store.replay_events(run.run_id)
+        self.assertEqual("agent_failed", events[-1].event_type)
+        self.assertEqual(
+            ["permission_profile_selected", "tool_allowed", "tool_denied"],
+            [event.event_type for event in events[2:5]],
+        )
+        self.assertEqual("file_write", events[4].payload["toolName"])
 
     def test_failed_agent_result_marks_job_failed_without_raising_or_killing_run(self):
         scheduler, store, run = self.make_scheduler(runner=FailedResultRunner())
