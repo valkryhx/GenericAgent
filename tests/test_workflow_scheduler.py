@@ -51,11 +51,13 @@ class ProtocolMetadataRunner:
 
 
 class WorkflowSchedulerTest(unittest.TestCase):
-    def make_scheduler(self, *, max_concurrent=4, max_total=1000, runner=None):
+    def make_scheduler(self, *, max_concurrent=4, max_total=1000, runner=None, run_kwargs=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store = WorkflowStore(root=tmp.name)
-        run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="spawn agents", status="running"))
+        run_data = {"run_id": "wf_test", "session_id": "session_test", "script": "spawn agents", "status": "running"}
+        run_data.update(run_kwargs or {})
+        run = store.create_run(WorkflowRun(**run_data))
         scheduler = AgentScheduler(
             store=store,
             run=run,
@@ -78,6 +80,9 @@ class WorkflowSchedulerTest(unittest.TestCase):
 
         self.assertEqual("queued", job.status)
         self.assertEqual(0, job.metadata["callIndex"])
+        self.assertEqual("wf_test", job.metadata["runId"])
+        self.assertEqual("inherit-current-permissions", job.metadata["permissionProfile"])
+        self.assertEqual("inherit-current-v1", job.metadata["permissionPolicyVersion"])
         cache_key = job.metadata["cacheKey"]
         self.assertEqual("inherit-current-permissions", cache_key["permissionProfile"])
         self.assertEqual("inherit-current-v1", cache_key["permissionPolicyVersion"])
@@ -90,6 +95,25 @@ class WorkflowSchedulerTest(unittest.TestCase):
         event = store.replay_events(run.run_id)[0]
         self.assertEqual(job.job_id, event.job_id)
         self.assertEqual(cache_key, event.payload["cacheKey"])
+
+    def test_cache_key_changes_when_permission_profile_or_policy_version_changes(self):
+        scheduler_a, _store_a, _run_a = self.make_scheduler()
+        scheduler_b, _store_b, _run_b = self.make_scheduler(
+            run_kwargs={
+                "run_id": "wf_test_b",
+                "permission_profile": "read_only",
+                "permission_policy_version": "read-only-v1",
+            }
+        )
+
+        job_a = scheduler_a.register_agent(prompt="same", options={"effort": "low"})
+        job_b = scheduler_b.register_agent(prompt="same", options={"effort": "low"})
+
+        self.assertNotEqual(job_a.metadata["cacheKey"], job_b.metadata["cacheKey"])
+        self.assertEqual("inherit-current-permissions", job_a.metadata["permissionProfile"])
+        self.assertEqual("read_only", job_b.metadata["permissionProfile"])
+        self.assertEqual("inherit-current-v1", job_a.metadata["permissionPolicyVersion"])
+        self.assertEqual("read-only-v1", job_b.metadata["permissionPolicyVersion"])
 
     def test_run_all_moves_successful_job_through_running_to_succeeded_and_writes_result(self):
         scheduler, store, run = self.make_scheduler(runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))

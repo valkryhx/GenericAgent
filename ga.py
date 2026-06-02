@@ -276,8 +276,19 @@ class GenericAgentHandler(BaseHandler):
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
         self._done_hooks = []
+        self.workflow_permission_policy = None
+        self.workflow_permission_context = {}
+        self.workflow_permission_event_callback = None
+        self._workflow_permission_profile_selected = False
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        policy = getattr(self, 'workflow_permission_policy', None)
+        if policy is not None:
+            decision = self._check_workflow_permission(tool_name, args or {})
+            if decision.action != 'allow':
+                status = 'approval_required' if decision.action == 'ask' else 'error'
+                yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
+                return StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
         if str(tool_name).startswith('mcp__'):
             args = args or {}
             args['_index'] = index; args['_tool_num'] = tool_num
@@ -286,6 +297,29 @@ class GenericAgentHandler(BaseHandler):
             _ = yield from try_call_generator(self.tool_after_callback, tool_name, args, response, ret)
             return ret
         return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+
+    def _check_workflow_permission(self, tool_name, args):
+        policy = self.workflow_permission_policy
+        decision = policy.evaluate(tool_name, args)
+        if not self._workflow_permission_profile_selected:
+            self._workflow_permission_profile_selected = True
+            self._emit_workflow_permission_event('permission_profile_selected', tool_name, decision)
+        event_type = 'tool_allowed' if decision.action == 'allow' else 'tool_denied'
+        self._emit_workflow_permission_event(event_type, tool_name, decision)
+        return decision
+
+    def _emit_workflow_permission_event(self, event_type, tool_name, decision):
+        callback = getattr(self, 'workflow_permission_event_callback', None)
+        if not callback:
+            return
+        from workflow_permissions import build_permission_event
+        event = build_permission_event(
+            event_type,
+            context=getattr(self, 'workflow_permission_context', None),
+            tool_name=tool_name,
+            decision=decision,
+        )
+        callback(event)
 
     def _dispatch_mcp_tool(self, tool_name, args, response):
         call_args = {k: v for k, v in (args or {}).items() if not str(k).startswith('_')}

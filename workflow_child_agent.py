@@ -119,6 +119,8 @@ class NativeGPTChildAgentRunner:
                 "phase": job.phase,
                 "label": job.metadata.get("label"),
                 "options": copy.deepcopy(job.metadata.get("options") or {}),
+                "permissionProfile": job.metadata.get("permissionProfile"),
+                "permissionPolicyVersion": job.metadata.get("permissionPolicyVersion"),
                 "configName": self.config_name,
                 "startedAt": started_at,
             }
@@ -160,6 +162,8 @@ class NativeGPTChildAgentRunner:
         run_id = job.metadata.get("runId") or job.metadata.get("run_id") or ""
         label = job.metadata.get("label") or ""
         options = copy.deepcopy(job.metadata.get("options") or {})
+        permission_profile = job.metadata.get("permissionProfile") or ""
+        permission_policy_version = job.metadata.get("permissionPolicyVersion") or ""
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
             f"runId: {run_id}",
@@ -167,6 +171,8 @@ class NativeGPTChildAgentRunner:
             f"phase: {job.phase or ''}",
             f"label: {label}",
             f"options: {options}",
+            f"permissionProfile: {permission_profile}",
+            f"permissionPolicyVersion: {permission_policy_version}",
             "",
             "Task:",
             job.prompt,

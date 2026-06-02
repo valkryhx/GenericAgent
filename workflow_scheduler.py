@@ -62,6 +62,9 @@ class AgentScheduler:
                 "callIndex": call_index,
                 "label": label,
                 "options": dict(options or {}),
+                "runId": self.run.run_id,
+                "permissionProfile": self.run.permission_profile,
+                "permissionPolicyVersion": self.run.permission_policy_version,
             },
         )
         job.metadata["cacheKey"] = self._cache_key(job)

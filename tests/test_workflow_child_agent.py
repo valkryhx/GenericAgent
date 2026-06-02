@@ -108,6 +108,34 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertIsNot(parent_history, created[0].history)
         self.assertEqual(12, created[0].max_tokens)
 
+    def test_child_prompt_or_metadata_carries_permission_profile(self):
+        created = []
+        def factory(config_name):
+            session = StubSession()
+            created.append(session)
+            return session
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="inspect permissions",
+            metadata={
+                "runId": "wf_test",
+                "permissionProfile": "read_only",
+                "permissionPolicyVersion": "read-only-v1",
+            },
+        )
+        runner = NativeGPTChildAgentRunner(session_factory=factory)
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        prompt = created[0].prompts[0]
+        self.assertIn("permissionProfile: read_only", prompt)
+        self.assertIn("permissionPolicyVersion: read-only-v1", prompt)
+        metadata_event = result.transcript_events[0]
+        self.assertEqual("metadata", metadata_event["type"])
+        self.assertEqual("read_only", metadata_event["permissionProfile"])
+        self.assertEqual("read-only-v1", metadata_event["permissionPolicyVersion"])
+
     def test_native_runner_reports_api_errors_as_failed_results_without_raising_from_poll(self):
         job = WorkflowJob(job_id="agent_1", prompt="fail please", metadata={"runId": "wf_test"})
         runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession(error=RuntimeError("api down")))
