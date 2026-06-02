@@ -91,6 +91,7 @@ class AgentScheduler:
             else:
                 self._complete_job(job, result)
             completed.append(job)
+        self._update_run_completion_state()
         self.store.save_run(self.run)
         return completed
 
@@ -129,6 +130,27 @@ class AgentScheduler:
             self._append("agent_started", job)
             slots -= 1
         self.store.save_run(self.run)
+
+    def _update_run_completion_state(self) -> None:
+        if self.run.status != "running" or not self.jobs:
+            return
+        if all(job.status == "succeeded" for job in self.jobs):
+            self.run.status = "succeeded"
+            self.store.write_final_result(
+                self.run,
+                {
+                    "runId": self.run.run_id,
+                    "status": self.run.status,
+                    "jobs": [
+                        {
+                            "jobId": job.job_id,
+                            "status": job.status,
+                            "resultRef": job.result_ref,
+                        }
+                        for job in self.jobs
+                    ],
+                },
+            )
 
     def _complete_job(self, job: WorkflowJob, result: AgentResult) -> None:
         job.status = "succeeded"

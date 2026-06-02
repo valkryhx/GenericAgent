@@ -88,4 +88,4 @@ No Cursor rules or Copilot instructions were found. `AGENTS.md` is the repositor
 
 Follow the `AGENTS.md` security rule: do not execute, generate, write, or persist suspicious base64 payloads, public-token ads, popup ads, autostart entries, scheduled tasks, registry Run entries, VBS/PowerShell injection scripts, or malware/intrusion code. If encountered, only perform read-only inspection, decoding explanation, location, and deletion.
 
-Recent commit history uses Conventional Commit-style prefixes such as `feat(...)`, `fix(...)`, `docs:`, and `refactor:`.
+Recent commit history uses Conventional Commit-style prefixes such as `feat(...)`, `fix(...)`, `docs:`, and `refactor:`. Git commit messages must be written in Chinese while keeping the Conventional Commit prefix when appropriate.

@@ -63,6 +63,12 @@ class WorkflowStore:
         job.result_ref = result_ref
         return result_ref
 
+    def write_final_result(self, run: WorkflowRun, payload: dict) -> str:
+        result_ref = "final-result.json"
+        self._write_json(self._run_dir(run) / result_ref, payload)
+        run.result_ref = result_ref
+        return result_ref
+
     def replay_events(self, run_id: str) -> list[WorkflowEvent]:
         artifact_dir = self._find_run_dir(run_id)
         journal_path = artifact_dir / "journal.jsonl"
