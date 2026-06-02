@@ -151,8 +151,20 @@ class AgentResult:
     transcript_ref: str | None = None
     token_usage: dict = field(default_factory=dict)
     tool_summary: dict = field(default_factory=dict)
+    transcript_events: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        return {
+            "jobId": self.job_id,
+            "status": self.status,
+            "payload": copy.deepcopy(self.payload),
+            "transcriptRef": self.transcript_ref,
+            "tokenUsage": copy.deepcopy(self.token_usage),
+            "toolSummary": copy.deepcopy(self.tool_summary),
+            "transcriptEvents": copy.deepcopy(self.transcript_events),
+        }
+
+    def to_artifact_dict(self) -> dict:
         return {
             "jobId": self.job_id,
             "status": self.status,
@@ -171,6 +183,7 @@ class AgentResult:
             transcript_ref=data.get("transcriptRef") or data.get("transcript_ref"),
             token_usage=copy.deepcopy(data.get("tokenUsage") or data.get("token_usage") or {}),
             tool_summary=copy.deepcopy(data.get("toolSummary") or data.get("tool_summary") or {}),
+            transcript_events=copy.deepcopy(data.get("transcriptEvents") or data.get("transcript_events") or []),
         )
 
 

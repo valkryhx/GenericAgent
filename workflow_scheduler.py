@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from workflow_child_agent import AgentResult, FakeChildAgentRunner
+from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_store import WorkflowStore
 
@@ -31,7 +31,7 @@ class AgentScheduler:
         *,
         store: WorkflowStore,
         run: WorkflowRun,
-        runner: FakeChildAgentRunner | None = None,
+        runner: ChildAgentRunner | None = None,
         config: SchedulerConfig | None = None,
     ):
         self.store = store
@@ -88,6 +88,10 @@ class AgentScheduler:
                 continue
             if result.status == "cancelled":
                 self._cancel_job(job, reason="cancelled")
+            elif result.status == "failed":
+                self._fail_job(job, str(result.payload.get("error") or "child agent failed"), result=result)
+                if failure_policy == "fail_fast":
+                    self._fail_fast(job.error or "child agent failed")
             else:
                 self._complete_job(job, result)
             completed.append(job)
@@ -155,20 +159,37 @@ class AgentScheduler:
     def _complete_job(self, job: WorkflowJob, result: AgentResult) -> None:
         job.status = "succeeded"
         job.error = None
+        if result.transcript_events:
+            transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
+            result.transcript_ref = result.transcript_ref or transcript_ref
         self.store.write_agent_result(self.run, job, result)
         job.metadata["result"] = result.payload
         if result.transcript_ref:
             job.metadata["transcriptRef"] = result.transcript_ref
         if result.token_usage:
             job.metadata["tokenUsage"] = result.token_usage
-        if result.tool_summary:
+        if result.tool_summary is not None:
             job.metadata["toolSummary"] = result.tool_summary
-        self._append("agent_completed", job, {"resultRef": job.result_ref, "result": result.to_dict()})
+        self._append("agent_completed", job, {"resultRef": job.result_ref, "result": result.to_artifact_dict()})
 
-    def _fail_job(self, job: WorkflowJob, error: str) -> None:
+    def _fail_job(self, job: WorkflowJob, error: str, result: AgentResult | None = None) -> None:
         job.status = "failed"
         job.error = error
-        self._append("agent_failed", job, {"error": error})
+        payload = {"error": error}
+        if result is not None:
+            if result.transcript_events:
+                transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
+                result.transcript_ref = result.transcript_ref or transcript_ref
+            self.store.write_agent_result(self.run, job, result)
+            if result.transcript_ref:
+                job.metadata["transcriptRef"] = result.transcript_ref
+            if result.token_usage:
+                job.metadata["tokenUsage"] = result.token_usage
+            if result.tool_summary is not None:
+                job.metadata["toolSummary"] = result.tool_summary
+            payload["resultRef"] = job.result_ref
+            payload["result"] = result.to_artifact_dict()
+        self._append("agent_failed", job, payload)
 
     def _cancel_job(self, job: WorkflowJob, *, reason: str) -> None:
         if job.status in {"succeeded", "failed", "cancelled", "cached", "skipped"}:

@@ -59,9 +59,18 @@ class WorkflowStore:
         result_ref = f"agents/{job.job_id}/result.json"
         result_path = self._run_dir(run) / result_ref
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json(result_path, result.to_dict())
+        self._write_json(result_path, result.to_artifact_dict())
         job.result_ref = result_ref
         return result_ref
+
+    def write_agent_transcript(self, run: WorkflowRun, job: WorkflowJob, events_or_messages: list[dict]) -> str:
+        transcript_ref = f"agents/{job.job_id}/transcript.jsonl"
+        transcript_path = self._run_dir(run) / transcript_ref
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        with transcript_path.open("w", encoding="utf-8", errors="replace") as fh:
+            for event in events_or_messages:
+                fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return transcript_ref
 
     def write_final_result(self, run: WorkflowRun, payload: dict) -> str:
         result_ref = "final-result.json"
@@ -94,7 +103,7 @@ class WorkflowStore:
         running_job_ids = {
             event.job_id
             for event in self.replay_events(run_id)
-            if event.event_type == "job_running" and event.job_id
+            if event.event_type in {"job_running", "agent_started"} and event.job_id
         }
         known_job_ids = {job.job_id for job in run.jobs}
         for job_id in sorted(running_job_ids - known_job_ids):

@@ -1,9 +1,53 @@
+import json
 import tempfile
 import unittest
+from pathlib import Path
 
-from workflow_models import WorkflowRun
+from workflow_models import AgentResult, WorkflowRun
 from workflow_scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig
 from workflow_store import WorkflowStore
+
+
+class FailedResultRunner:
+    def start(self, job):
+        pass
+
+    def poll(self, job):
+        return AgentResult(
+            job_id=job.job_id,
+            status="failed",
+            payload={"error": "api down"},
+            transcript_ref=f"agents/{job.job_id}/transcript.jsonl",
+            transcript_events=[{"type": "error", "error": "api down"}],
+        )
+
+    def cancel(self, job):
+        pass
+
+
+class ProtocolMetadataRunner:
+    def __init__(self):
+        self.started = []
+        self.cancelled = []
+
+    def start(self, job):
+        self.started.append(job.job_id)
+
+    def poll(self, job):
+        return AgentResult(
+            job_id=job.job_id,
+            payload={"summary": "real-ish child result", "text": "verbose child transcript text"},
+            transcript_ref=f"agents/{job.job_id}/transcript.jsonl",
+            token_usage={"input_tokens": 5, "output_tokens": 7},
+            tool_summary={},
+            transcript_events=[
+                {"type": "metadata", "runId": "wf_test", "jobId": job.job_id},
+                {"type": "assistant", "text": "verbose child transcript text"},
+            ],
+        )
+
+    def cancel(self, job):
+        self.cancelled.append(job.job_id)
 
 
 class WorkflowSchedulerTest(unittest.TestCase):
@@ -74,6 +118,46 @@ class WorkflowSchedulerTest(unittest.TestCase):
         statuses = [job.status for job in scheduler.jobs]
         self.assertEqual(3, statuses.count("running"))
         self.assertEqual(17, statuses.count("queued"))
+
+    def test_scheduler_accepts_protocol_runner_and_persists_child_transcript_metadata(self):
+        runner = ProtocolMetadataRunner()
+        scheduler, store, run = self.make_scheduler(runner=runner)
+        job = scheduler.register_agent(prompt="do protocol work")
+
+        scheduler.run_all()
+
+        self.assertEqual([job.job_id], runner.started)
+        self.assertEqual("agents/agent_1/transcript.jsonl", job.metadata["transcriptRef"])
+        self.assertEqual({"input_tokens": 5, "output_tokens": 7}, job.metadata["tokenUsage"])
+        self.assertEqual({}, job.metadata["toolSummary"])
+        transcript_path = Path(run.artifact_dir) / "agents" / "agent_1" / "transcript.jsonl"
+        self.assertTrue(transcript_path.exists())
+        transcript_lines = [json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual("metadata", transcript_lines[0]["type"])
+        self.assertEqual("assistant", transcript_lines[1]["type"])
+        result_path = Path(run.artifact_dir) / job.result_ref
+        result_data = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual("agents/agent_1/transcript.jsonl", result_data["transcriptRef"])
+        self.assertEqual({"summary": "real-ish child result", "text": "verbose child transcript text"}, result_data["payload"])
+        self.assertNotIn("transcriptEvents", result_data)
+        completed_event = store.replay_events(run.run_id)[-1]
+        self.assertEqual("agent_completed", completed_event.event_type)
+        self.assertNotIn("transcriptEvents", completed_event.payload["result"])
+
+    def test_failed_agent_result_marks_job_failed_without_raising_or_killing_run(self):
+        scheduler, store, run = self.make_scheduler(runner=FailedResultRunner())
+        job = scheduler.register_agent(prompt="api may fail")
+
+        scheduler.run_all(failure_policy="continue")
+
+        self.assertEqual("failed", job.status)
+        self.assertEqual("api down", job.error)
+        self.assertEqual("running", run.status)
+        self.assertEqual("agent_failed", self.event_types(store)[-1])
+        failed_event = store.replay_events(run.run_id)[-1]
+        self.assertNotIn("transcriptEvents", failed_event.payload["result"])
+        transcript_path = Path(run.artifact_dir) / "agents" / "agent_1" / "transcript.jsonl"
+        self.assertTrue(transcript_path.exists())
 
     def test_total_agents_cap_rejects_excess_job_and_records_event(self):
         scheduler, store, _ = self.make_scheduler(max_total=2)

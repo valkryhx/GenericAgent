@@ -67,7 +67,14 @@ class WorkflowStoreTest(unittest.TestCase):
             )
             run = store.create_run(run)
             job = run.jobs[0]
-            result = AgentResult(job_id="agent_1", payload={"summary": "ok"})
+            result = AgentResult(
+                job_id="agent_1",
+                payload={"summary": "ok"},
+                transcript_ref="agents/agent_1/transcript.jsonl",
+                token_usage={"input_tokens": 1},
+                tool_summary={"Read": 2},
+                transcript_events=[{"type": "assistant", "text": "verbose"}],
+            )
 
             result_ref = store.write_agent_result(run, job, result)
 
@@ -77,19 +84,50 @@ class WorkflowStoreTest(unittest.TestCase):
             data = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertEqual("agent_1", data["jobId"])
             self.assertEqual({"summary": "ok"}, data["payload"])
+            self.assertEqual("agents/agent_1/transcript.jsonl", data["transcriptRef"])
+            self.assertEqual({"input_tokens": 1}, data["tokenUsage"])
+            self.assertEqual({"Read": 2}, data["toolSummary"])
+            self.assertNotIn("transcriptEvents", data)
 
-    def test_mark_running_jobs_stale_on_resume_projection(self):
+    def test_write_agent_transcript_persists_jsonl_under_agent_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
-            run = WorkflowRun(run_id="wf_test", session_id="session_test", script="", status="running")
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="work")],
+            )
             run = store.create_run(run)
-            store.append_event(run, WorkflowEvent(run_id="wf_test", event_type="job_running", sequence=1, job_id="agent_1"))
+            job = run.jobs[0]
+            events = [
+                {"type": "metadata", "runId": "wf_test", "jobId": "agent_1"},
+                {"type": "assistant", "text": "ok"},
+            ]
 
-            projected = store.project_resume_state("wf_test")
+            transcript_ref = store.write_agent_transcript(run, job, events)
 
-            self.assertEqual("interrupted", projected.status)
-            events = store.replay_events("wf_test")
-            self.assertEqual("workflow_interrupted", events[-1].event_type)
+            self.assertEqual("agents/agent_1/transcript.jsonl", transcript_ref)
+            transcript_path = Path(run.artifact_dir) / transcript_ref
+            lines = transcript_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(2, len(lines))
+            self.assertEqual(events, [json.loads(line) for line in lines])
+
+    def test_mark_running_jobs_stale_on_resume_projection(self):
+        for event_type in ("agent_started", "job_running"):
+            with self.subTest(event_type=event_type):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = WorkflowStore(root=tmp)
+                    run = WorkflowRun(run_id="wf_test", session_id="session_test", script="", status="running")
+                    run = store.create_run(run)
+                    store.append_event(run, WorkflowEvent(run_id="wf_test", event_type=event_type, sequence=1, job_id="agent_1"))
+
+                    projected = store.project_resume_state("wf_test")
+
+                    self.assertEqual("interrupted", projected.status)
+                    self.assertEqual("stale", projected.jobs[0].status)
+                    events = store.replay_events("wf_test")
+                    self.assertEqual("workflow_interrupted", events[-1].event_type)
 
 
 if __name__ == "__main__":
