@@ -113,3 +113,48 @@ test('applyBridgeEvent rewinds to before selected user task', () => {
 
   assert.deepEqual(state.messages.map(message => message.id), ['u-1', 'a-1'])
 })
+
+
+test('applyBridgeEvent tracks workflow run events and final results', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_draft',
+    run: { runId: 'wf_1', sessionId: 's1', status: 'awaiting_approval' },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_event',
+    event: { type: 'workflow_approval_requested', runId: 'wf_1', sequence: 1, payload: {} },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_run',
+    run: { runId: 'wf_1', sessionId: 's1', status: 'succeeded', resultRef: 'final-result.json' },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_final',
+    runId: 'wf_1',
+    result: { status: 'succeeded', result: { ok: true } },
+  })
+
+  assert.equal(state.workflows.length, 1)
+  assert.equal(state.workflows[0].status, 'succeeded')
+  assert.equal(state.workflowEvents[0].type, 'workflow_approval_requested')
+  assert.deepEqual(state.workflowResults.wf_1, { status: 'succeeded', result: { ok: true } })
+})
+
+test('applyBridgeEvent stores workflow list and detail payloads', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_runs',
+    runs: [{ runId: 'wf_1', sessionId: 's1', status: 'awaiting_approval' }],
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_detail',
+    run: { runId: 'wf_1', sessionId: 's1', status: 'awaiting_approval' },
+    script: 'return 1',
+    events: [{ type: 'workflow_approval_requested', runId: 'wf_1', sequence: 1, payload: {} }],
+  })
+
+  assert.equal(state.workflows.length, 1)
+  assert.equal(state.workflowDetails.wf_1.script, 'return 1')
+  assert.equal(state.workflowDetails.wf_1.events.length, 1)
+})

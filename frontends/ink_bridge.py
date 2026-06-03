@@ -107,7 +107,13 @@ except Exception:  # pragma: no cover - transcript resume falls back to legacy r
 
 
 class GenericAgentBridge:
-    def __init__(self, agent_factory: AgentFactory = default_agent_factory, emit: EmitFn | None = None) -> None:
+    def __init__(
+        self,
+        agent_factory: AgentFactory = default_agent_factory,
+        emit: EmitFn | None = None,
+        workflow_root: str | os.PathLike[str] | None = None,
+        workflow_runtime_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self.agent_factory = agent_factory
         with backend_output_redirect():
             self.agent = self.agent_factory()
@@ -117,6 +123,15 @@ class GenericAgentBridge:
         self._task_seq = 0
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
+        self._workflow_threads: dict[str, threading.Thread] = {}
+        self._workflow_emitted_sequences: dict[str, set[int]] = {}
+        self.workflow_runtime_factory = workflow_runtime_factory
+        with backend_output_redirect():
+            from workflow_controller import WorkflowController
+            from workflow_store import WorkflowStore
+
+        self.workflow_store = WorkflowStore(root=workflow_root)
+        self.workflow_controller = WorkflowController(store=self.workflow_store)
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
 
@@ -342,6 +357,159 @@ class GenericAgentBridge:
         finally:
             self.emit({"type": "activity", "label": None})
             self.emit({"type": "status", "status": "idle"})
+
+    def workflow_draft(self, script: str) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        try:
+            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+            with backend_output_redirect():
+                run = self.workflow_controller.create_draft(session_id=session_id, script=str(script or ""))
+                run = self.workflow_controller.request_approval(run.run_id)
+            self.emit({"type": "workflow_draft", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return run.run_id
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_draft_failed", "message": str(exc)})
+            return ""
+
+    def workflow_approve(self, run_id: str, *, args: Any = None, timeout_seconds: float | None = None) -> bool:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return False
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_controller.approve(run_id)
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_approve_failed", "message": str(exc)})
+            return False
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, timeout_seconds),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        return True
+
+    def workflow_list(self) -> None:
+        try:
+            runs = self._list_workflow_runs()
+            self.emit({"type": "workflow_runs", "runs": [self._workflow_run_payload(run) for run in runs]})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
+
+    def workflow_detail(self, run_id: str) -> None:
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(str(run_id or ""))
+                events = self.workflow_store.replay_events(run.run_id)
+            self.emit({"type": "workflow_detail", "run": self._workflow_run_payload(run), "script": run.script, "events": [event.to_dict() for event in events]})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
+
+    def workflow_stop(self, run_id: str, *, reason: str = "") -> bool:
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(str(run_id or ""))
+                if run.status in {"draft", "awaiting_approval", "interrupted"}:
+                    run = self.workflow_controller.cancel(run.run_id, reason=reason or "stopped from Ink bridge")
+                elif run.status == "running":
+                    run = self.workflow_controller.stop(run.run_id, reason=reason or "stopped from Ink bridge")
+                else:
+                    self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+                    return True
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return True
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_stop_failed", "message": str(exc)})
+            return False
+
+    def wait_for_workflow_idle(self, run_id: str, timeout: float | None = None) -> None:
+        thread = self._workflow_threads.get(str(run_id or ""))
+        if thread is not None:
+            thread.join(timeout=timeout)
+
+    def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None) -> None:
+        try:
+            self.emit({"type": "status", "status": "running"})
+            self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(run_id)
+                runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
+                runtime.run(run, args=args)
+                current = self.workflow_store.load_run(run_id)
+            self._emit_workflow_events(run_id)
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+            self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+        except Exception as exc:
+            try:
+                current = self.workflow_store.load_run(run_id)
+                self._emit_workflow_events(run_id)
+                self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+                self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+            except Exception:
+                pass
+            self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
+        finally:
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
+
+    def _make_workflow_runtime(self, *, timeout_seconds: float | None):
+        kwargs = {"store": self.workflow_store}
+        if timeout_seconds is not None:
+            kwargs["timeout_seconds"] = float(timeout_seconds)
+        if self.workflow_runtime_factory is not None:
+            return self.workflow_runtime_factory(**kwargs)
+        with backend_output_redirect():
+            from workflow_runtime import WorkflowRuntime
+        return WorkflowRuntime(**kwargs)
+
+    def _emit_workflow_events(self, run_id: str) -> None:
+        seen = self._workflow_emitted_sequences.setdefault(run_id, set())
+        with backend_output_redirect():
+            events = self.workflow_store.replay_events(run_id)
+        for event in events:
+            if event.sequence in seen:
+                continue
+            seen.add(event.sequence)
+            self.emit({"type": "workflow_event", "event": event.to_dict()})
+
+    def _workflow_run_payload(self, run) -> dict[str, Any]:
+        data = run.to_dict()
+        data.pop("script", None)
+        return data
+
+    def _workflow_final_payload(self, run) -> dict[str, Any]:
+        if not run.artifact_dir or not run.result_ref:
+            return {"runId": run.run_id, "status": run.status, "error": run.error}
+        result_path = os.path.join(run.artifact_dir, run.result_ref)
+        try:
+            with open(result_path, "r", encoding="utf-8", errors="replace") as fh:
+                return json.load(fh)
+        except Exception:
+            return {"runId": run.run_id, "status": run.status, "error": run.error}
+
+    def _list_workflow_runs(self):
+        root = self.workflow_store.root
+        runs = []
+        with backend_output_redirect():
+            for state_path in root.glob("*/workflows/*/state.json"):
+                try:
+                    runs.append(self.workflow_store.load_run(state_path.parent.name))
+                except Exception:
+                    pass
+        runs.sort(key=lambda run: str(run.run_id))
+        return runs
 
     def _auto_compact_if_needed(self, pending_text: str) -> bool:
         if compact_agent_context is None or should_auto_compact_agent is None:
@@ -657,6 +825,18 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
         elif cmd_type == "compact":
             bridge.compact(str(command.get("instructions") or ""))
+        elif cmd_type == "workflow_draft":
+            bridge.workflow_draft(str(command.get("script") or ""))
+        elif cmd_type == "workflow_approve":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            bridge.workflow_approve(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
+        elif cmd_type == "workflow_list":
+            bridge.workflow_list()
+        elif cmd_type == "workflow_detail":
+            bridge.workflow_detail(str(command.get("runId") or command.get("run_id") or ""))
+        elif cmd_type == "workflow_stop":
+            bridge.workflow_stop(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
             try:

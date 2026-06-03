@@ -15,6 +15,11 @@ export type BridgeCommand =
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
+  | { type: 'workflow_draft'; script: string }
+  | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_list' }
+  | { type: 'workflow_detail'; runId: string }
+  | { type: 'workflow_stop'; runId: string; reason?: string }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -67,6 +72,65 @@ export type TokenUsage = {
   totalTokens: number
 }
 
+
+export type WorkflowRunStatus =
+  | 'draft'
+  | 'awaiting_approval'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'killed'
+  | 'interrupted'
+  | string
+
+export type WorkflowJobStatus =
+  | 'registered'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'killed'
+  | 'cached'
+  | 'skipped'
+  | 'stale'
+  | string
+
+export type WorkflowJob = {
+  jobId: string
+  prompt?: string
+  status: WorkflowJobStatus
+  phase?: string | null
+  resultRef?: string | null
+  error?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export type WorkflowRun = {
+  version?: number
+  runId: string
+  sessionId: string
+  status: WorkflowRunStatus
+  artifactDir?: string | null
+  permissionProfile?: string
+  permissionPolicyVersion?: string
+  jobs?: WorkflowJob[]
+  resultRef?: string | null
+  error?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export type WorkflowEvent = {
+  version?: number
+  type: string
+  runId: string
+  sessionId?: string | null
+  jobId?: string | null
+  sequence: number
+  payload?: Record<string, unknown>
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -86,6 +150,12 @@ export type BridgeEvent =
   | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'model_switch_result'; ok: boolean; message: string }
   | { type: 'skill_status'; skills: SkillStatus[] }
+  | { type: 'workflow_draft'; run: WorkflowRun }
+  | { type: 'workflow_run'; run: WorkflowRun }
+  | { type: 'workflow_runs'; runs: WorkflowRun[] }
+  | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[] }
+  | { type: 'workflow_event'; event: WorkflowEvent }
+  | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'error'; code: string; message: string; taskId?: number }
 
 export type ChatMessage = {

@@ -1,4 +1,4 @@
-import type { BridgeEvent, ChatMessage, TokenUsage } from './protocol.js'
+import type { BridgeEvent, ChatMessage, TokenUsage, WorkflowEvent, WorkflowRun } from './protocol.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
@@ -6,6 +6,10 @@ export type AppState = {
   tokenUsage: TokenUsage | null
   messages: ChatMessage[]
   error: string | null
+  workflows: WorkflowRun[]
+  workflowEvents: WorkflowEvent[]
+  workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[] }>
+  workflowResults: Record<string, Record<string, unknown>>
 }
 
 export const initialState: AppState = {
@@ -14,6 +18,10 @@ export const initialState: AppState = {
   tokenUsage: null,
   messages: [],
   error: null,
+  workflows: [],
+  workflowEvents: [],
+  workflowDetails: {},
+  workflowResults: {},
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
@@ -31,6 +39,32 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'error') {
     return { ...state, error: event.message }
+  }
+
+  if (event.type === 'workflow_draft' || event.type === 'workflow_run') {
+    const existing = state.workflows.filter(run => run.runId !== event.run.runId)
+    return { ...state, workflows: [...existing, event.run], error: null }
+  }
+  if (event.type === 'workflow_runs') {
+    return { ...state, workflows: event.runs, error: null }
+  }
+  if (event.type === 'workflow_detail') {
+    const existing = state.workflows.filter(run => run.runId !== event.run.runId)
+    return {
+      ...state,
+      workflows: [...existing, event.run],
+      workflowDetails: {
+        ...state.workflowDetails,
+        [event.run.runId]: { run: event.run, script: event.script, events: event.events },
+      },
+      error: null,
+    }
+  }
+  if (event.type === 'workflow_event') {
+    return { ...state, workflowEvents: [...state.workflowEvents, event.event], error: null }
+  }
+  if (event.type === 'workflow_final') {
+    return { ...state, workflowResults: { ...state.workflowResults, [event.runId]: event.result }, error: null }
   }
   if (event.type === 'system') {
     return {

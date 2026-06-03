@@ -776,6 +776,84 @@ class InkBridgeTest(unittest.TestCase):
         self.assertNotIn("<skill>", events[0]["text"])
         self.assertEqual("status", events[1]["type"])
 
+
+    def test_workflow_draft_creates_run_and_emits_approval_event(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+
+            run_id = bridge.workflow_draft('export const meta = { name: "demo" }\nreturn { ok: true }')
+
+            self.assertTrue(run_id.startswith("wf_"))
+            self.assertEqual("workflow_draft", events[-2]["type"])
+            self.assertEqual(run_id, events[-2]["run"]["runId"])
+            self.assertEqual("awaiting_approval", events[-2]["run"]["status"])
+            self.assertEqual("workflow_event", events[-1]["type"])
+            self.assertEqual("workflow_approval_requested", events[-1]["event"]["type"])
+            self.assertEqual(run_id, events[-1]["event"]["runId"])
+
+    def test_workflow_approve_runs_runtime_and_emits_final_result(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class FakeRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+                self.timeout_seconds = timeout_seconds
+
+            def run(self, run, *, args=None):
+                from workflow_models import WorkflowEvent
+                self.store.append_event(run, WorkflowEvent(run_id=run.run_id, session_id=run.session_id, event_type="workflow_log", sequence=99, payload={"message": "runtime saw args", "args": args}))
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True, "args": args}}
+                self.store.write_final_result(run, payload)
+                run.status = "succeeded"
+                self.store.save_run(run)
+                return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: FakeRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            approved = bridge.workflow_approve(run_id, args={"value": 7}, timeout_seconds=3)
+            bridge.wait_for_workflow_idle(run_id, timeout=1)
+
+            self.assertTrue(approved)
+            event_types = [event["type"] for event in events]
+            self.assertIn("workflow_run", event_types)
+            self.assertIn("workflow_final", event_types)
+            final_event = next(event for event in events if event["type"] == "workflow_final")
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual({"ok": True, "args": {"value": 7}}, final_event["result"]["result"])
+            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("workflow_started", workflow_events)
+            self.assertIn("workflow_log", workflow_events)
+
+    def test_workflow_list_detail_and_stop_commands(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+
+            bridge.workflow_list()
+            bridge.workflow_detail(run_id)
+            bridge.workflow_stop(run_id, reason="user stop")
+
+            runs_event = next(event for event in events if event["type"] == "workflow_runs")
+            detail_event = next(event for event in events if event["type"] == "workflow_detail")
+            run_events = [event for event in events if event["type"] == "workflow_run"]
+            self.assertEqual([run_id], [run["runId"] for run in runs_event["runs"]])
+            self.assertEqual("return 1", detail_event["script"])
+            self.assertEqual("cancelled", run_events[-1]["run"]["status"])
+
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
             json.dumps({"type": "mcp_status"}) + "\n"
@@ -841,6 +919,29 @@ class InkBridgeTest(unittest.TestCase):
             run_jsonl_loop(stdin, stdout)
 
         bridge.compact.assert_called_once_with("keep decisions")
+
+
+    def test_jsonl_loop_routes_workflow_commands(self):
+        stdin = io.StringIO(
+            json.dumps({"type": "workflow_draft", "script": "return 1"}) + "\n"
+            + json.dumps({"type": "workflow_approve", "runId": "wf_1", "args": {"x": 1}, "timeoutSeconds": 2}) + "\n"
+            + json.dumps({"type": "workflow_list"}) + "\n"
+            + json.dumps({"type": "workflow_detail", "runId": "wf_1"}) + "\n"
+            + json.dumps({"type": "workflow_stop", "runId": "wf_1", "reason": "user"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+
+        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            run_jsonl_loop(stdin, stdout)
+
+        bridge.workflow_draft.assert_called_once_with("return 1")
+        bridge.workflow_approve.assert_called_once_with("wf_1", args={"x": 1}, timeout_seconds=2.0)
+        bridge.workflow_list.assert_called_once_with()
+        bridge.workflow_detail.assert_called_once_with("wf_1")
+        bridge.workflow_stop.assert_called_once_with("wf_1", reason="user")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(
