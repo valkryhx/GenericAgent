@@ -15,6 +15,11 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'model_status') return '/model ?'
   if (command.type === 'model_switch') return `/model ${command.selector}`
   if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
+  if (command.type === 'workflow_list') return '/workflows'
+  if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
+  if (command.type === 'workflow_approve') return `/workflow approve ${command.runId}`
+  if (command.type === 'workflow_deny') return `/workflow deny ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
+  if (command.type === 'workflow_stop') return `/workflow stop ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
   if (command.type === 'stop') return '/stop'
   return null
 }
@@ -30,6 +35,8 @@ export function dismissedLocalCommandOutput(commandText: string): string {
     continue: 'Resume',
     rewind: 'Rewind',
     checkpoint: 'Rewind',
+    workflows: 'Workflows',
+    workflow: 'Workflow',
   }
   return `${labels[commandName] ?? commandName} dialog dismissed`
 }

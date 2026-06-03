@@ -7,6 +7,7 @@ import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
+import { workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, type WorkflowPanelState } from './workflowPanel.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
   transcriptLines,
@@ -228,6 +229,18 @@ function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme
   )
 }
 
+function WorkflowPanelView({ panel, theme }: { panel: WorkflowPanelState; theme: InkTheme }) {
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {workflowPanelRows(panel).map((line, index, rows) => (
+        <Text key={index} color={index === 0 ? theme.accent : index >= 4 && index < rows.length - 1 ? undefined : theme.muted} wrap="truncate-end">
+          {line}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffset, theme }: {
   height: number
   columns: number
@@ -340,6 +353,8 @@ function helpText(): string {
     '/resume N, /continue N - resume by index',
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
+    '/workflows - inspect workflow runs and approval controls',
+    '/workflow detail|approve|deny|stop RUN_ID - control workflows',
     '/clear - clear display only',
     '/status - show current frontend status',
     '/model, /llm - show and switch AI models',
@@ -364,6 +379,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const [themeName, setThemeName] = useState<InkThemeName>('default')
   const theme = useMemo(() => getInkTheme(themeName), [themeName])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
+  const [workflowPanel, setWorkflowPanel] = useState<WorkflowPanelState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
@@ -384,7 +400,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const scrollbarDragRef = useRef(false)
   const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, workflowPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   const appendLocalCommandInput = (commandText: string) => {
@@ -427,6 +443,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     }
     if (decision.command) {
       setFooterPanel(null)
+      if (decision.command.type.startsWith('workflow_')) {
+        setWorkflowPanel(null)
+      }
       const command = decision.command
       if (command.type === 'submit') {
         setInputHistory(history => recordInput(history, command.text))
@@ -579,6 +598,26 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         dispatch(event)
         return
       }
+      if (event.type === 'workflow_runs') {
+        dispatch(event)
+        if (event.runs.length > 0) {
+          const candidate = event.runs.find(run => run.status === 'awaiting_approval') ?? event.runs[0]
+          if (candidate) bridgeRef.current?.send({ type: 'workflow_detail', runId: candidate.runId })
+        }
+        return
+      }
+      if (event.type === 'workflow_detail') {
+        dispatch(event)
+        setWorkflowPanel(workflowPanelFromDetail(event))
+        if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
+        return
+      }
+      if (event.type === 'workflow_run') {
+        dispatch(event)
+        setWorkflowPanel(panel => panel && panel.run.runId === event.run.runId ? { ...panel, run: event.run } : panel)
+        if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
+        return
+      }
       if (event.type === 'rewind_done') {
         const commandText = pendingLocalCommandRef.current
         setSelector(null)
@@ -706,6 +745,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       }
       if (key.downArrow) {
         setMcpPanel(panel => panel ? moveMcpSelection(panel, 1) : panel)
+        return
+      }
+    }
+    if (workflowPanel) {
+      if (key.escape) {
+        setWorkflowPanel(null)
+        dismissPendingLocalCommand()
+        return
+      }
+      const command = workflowPanelCommandForKey(workflowPanel, key, rawInput)
+      if (command) {
+        bridgeRef.current?.send(command)
         return
       }
     }
@@ -844,7 +895,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
-  const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel
+  const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
   const inputRows = inputVisibleRowCount(input)
   const hasActivity = shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const panelRows = modelPanel
@@ -855,6 +906,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       ? themePanelRows()
     : selector
       ? Math.min(selectorSize(selector), 8) + 2
+    : workflowPanel
+      ? Math.min(workflowPanelRows(workflowPanel).length, 8)
     : slashItems.length > 0
       ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
       : 0
@@ -939,6 +992,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
+      if (workflowPanel) return <WorkflowPanelView key={section} panel={workflowPanel} theme={theme} />
       if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }

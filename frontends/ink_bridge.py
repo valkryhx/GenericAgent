@@ -178,6 +178,20 @@ class GenericAgentBridge:
                     self.agent.abort()
             finally:
                 self.emit({"type": "status", "status": "stopping"})
+            return
+        stopped_workflow = False
+        for run_id, thread in list(self._workflow_threads.items()):
+            if not thread.is_alive():
+                continue
+            try:
+                with backend_output_redirect():
+                    run = self.workflow_store.load_run(run_id)
+                if run.status in {"running", "interrupted"}:
+                    stopped_workflow = self.workflow_stop(run_id, reason="stopped from Ink bridge") or stopped_workflow
+            except Exception:
+                continue
+        if stopped_workflow:
+            self.emit({"type": "status", "status": "stopping"})
         else:
             self.emit({"type": "status", "status": "idle"})
 
@@ -416,10 +430,29 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
 
-    def workflow_stop(self, run_id: str, *, reason: str = "") -> bool:
+    def workflow_deny(self, run_id: str, *, reason: str = "") -> bool:
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
         try:
             with backend_output_redirect():
-                run = self.workflow_store.load_run(str(run_id or ""))
+                run = self.workflow_controller.deny(run_id, reason=reason or "denied from Ink bridge")
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return True
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_deny_failed", "message": str(exc)})
+            return False
+
+    def workflow_stop(self, run_id: str, *, reason: str = "") -> bool:
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(run_id)
                 if run.status in {"draft", "awaiting_approval", "interrupted"}:
                     run = self.workflow_controller.cancel(run.run_id, reason=reason or "stopped from Ink bridge")
                 elif run.status == "running":
@@ -835,6 +868,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":
             bridge.workflow_detail(str(command.get("runId") or command.get("run_id") or ""))
+        elif cmd_type == "workflow_deny":
+            bridge.workflow_deny(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "workflow_stop":
             bridge.workflow_stop(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "shutdown":

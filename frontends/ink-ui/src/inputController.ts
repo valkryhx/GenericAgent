@@ -92,6 +92,17 @@ function parseSlashSubmit(
   if (compact) return { command: { type: 'compact', instructions: compact[1]?.trim() ?? '' } }
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
+  if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
+  const workflowAction = /^\/workflow\s+(detail|approve|deny|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (workflowAction) {
+    const action = workflowAction[1]
+    const runId = workflowAction[2]
+    const reason = workflowAction[3]?.trim()
+    if (action === 'detail') return { command: { type: 'workflow_detail', runId } }
+    if (action === 'approve') return { command: { type: 'workflow_approve', runId } }
+    if (action === 'deny') return { command: { type: 'workflow_deny', runId, ...(reason ? { reason } : {}) } }
+    return { command: { type: 'workflow_stop', runId, ...(reason ? { reason } : {}) } }
+  }
   if (trimmed === '/clear') return { action: { type: 'clear' } }
   if (trimmed === '/help') return { action: { type: 'help' } }
   if (trimmed === '/status') return { action: { type: 'status' } }

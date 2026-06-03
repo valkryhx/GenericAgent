@@ -19,6 +19,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/new', description: 'Start a fresh backend session' },
   { name: '/reset', description: 'Alias for /new' },
   { name: '/stop', description: 'Stop the current backend task' },
+  { name: '/workflows', description: 'Show workflow runs and approval controls' },
+  { name: '/workflow', description: 'Show or control workflow runs' },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },
   { name: '/continue', description: 'Alias for /resume' },

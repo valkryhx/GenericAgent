@@ -6,6 +6,7 @@ import subprocess
 import queue
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -845,7 +846,7 @@ class InkBridgeTest(unittest.TestCase):
 
             bridge.workflow_list()
             bridge.workflow_detail(run_id)
-            bridge.workflow_stop(run_id, reason="user stop")
+            bridge.workflow_deny(run_id, reason="user deny")
 
             runs_event = next(event for event in events if event["type"] == "workflow_runs")
             detail_event = next(event for event in events if event["type"] == "workflow_detail")
@@ -853,6 +854,59 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual([run_id], [run["runId"] for run in runs_event["runs"]])
             self.assertEqual("return 1", detail_event["script"])
             self.assertEqual("cancelled", run_events[-1]["run"]["status"])
+            workflow_events = [event["event"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("workflow_denied", [event["type"] for event in workflow_events])
+            denied = next(event for event in workflow_events if event["type"] == "workflow_denied")
+            self.assertEqual("user deny", denied["payload"]["reason"])
+
+    def test_workflow_stop_rejects_blank_run_id_with_protocol_error(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+
+            stopped = bridge.workflow_stop("", reason="user")
+
+        self.assertFalse(stopped)
+        self.assertEqual("error", events[-1]["type"])
+        self.assertEqual("workflow_bad_run_id", events[-1]["code"])
+
+    def test_stop_stops_active_running_workflow_instead_of_reporting_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runtime_started = threading.Event()
+        release_runtime = threading.Event()
+
+        class BlockingRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None):
+                runtime_started.set()
+                release_runtime.wait(timeout=2)
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: BlockingRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return 1")
+            self.assertTrue(bridge.workflow_approve(run_id))
+            self.assertTrue(runtime_started.wait(timeout=1))
+
+            bridge.stop()
+            release_runtime.set()
+            bridge.wait_for_workflow_idle(run_id, timeout=1)
+
+            run = bridge.workflow_store.load_run(run_id)
+            self.assertEqual("killed", run.status)
+            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("workflow_killed", workflow_events)
+            self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["status"] == "killed" for event in events))
 
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
@@ -927,6 +981,7 @@ class InkBridgeTest(unittest.TestCase):
             + json.dumps({"type": "workflow_approve", "runId": "wf_1", "args": {"x": 1}, "timeoutSeconds": 2}) + "\n"
             + json.dumps({"type": "workflow_list"}) + "\n"
             + json.dumps({"type": "workflow_detail", "runId": "wf_1"}) + "\n"
+            + json.dumps({"type": "workflow_deny", "runId": "wf_1", "reason": "no"}) + "\n"
             + json.dumps({"type": "workflow_stop", "runId": "wf_1", "reason": "user"}) + "\n"
             + json.dumps({"type": "shutdown"}) + "\n"
         )
@@ -941,6 +996,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge.workflow_approve.assert_called_once_with("wf_1", args={"x": 1}, timeout_seconds=2.0)
         bridge.workflow_list.assert_called_once_with()
         bridge.workflow_detail.assert_called_once_with("wf_1")
+        bridge.workflow_deny.assert_called_once_with("wf_1", reason="no")
         bridge.workflow_stop.assert_called_once_with("wf_1", reason="user")
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):

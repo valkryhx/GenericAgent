@@ -221,6 +221,39 @@ test('handleInput parses known skill slash commands without using args as the sk
   })
 })
 
+test('handleInput parses workflow list and control slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/workflows', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow list', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow detail wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_detail', runId: 'wf_demo' },
+  })
+  assert.deepEqual(handleInput('/workflow approve wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_approve', runId: 'wf_demo' },
+  })
+  assert.deepEqual(handleInput('/workflow deny wf_demo no thanks', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_deny', runId: 'wf_demo', reason: 'no thanks' },
+  })
+  assert.deepEqual(handleInput('/workflow stop wf_demo user stop', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_stop', runId: 'wf_demo', reason: 'user stop' },
+  })
+})
+
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
   const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)
