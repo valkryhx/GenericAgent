@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from workflow_child_agent import FakeChildAgentRunner
-from workflow_models import WorkflowEvent, WorkflowRun
+from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
 
@@ -56,12 +59,20 @@ class WorkflowRuntime:
 
     def run(self, run: WorkflowRun, *, args: Any = None) -> WorkflowRuntimeResult:
         self._scan_script(run.script)
+        self._logs = []
+        self._phases = []
         if not run.artifact_dir:
             run = self.store.create_run(run)
         if run.status in {"draft", "awaiting_approval"}:
             run.status = "running"
             self.store.save_run(run)
-        scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config)
+        scheduler = AgentScheduler(
+            store=self.store,
+            run=run,
+            runner=self.runner,
+            config=self.scheduler_config,
+            manage_run_completion=False,
+        )
         process = subprocess.Popen(
             [self._node_executable(), str(self.worker_path)],
             stdin=subprocess.PIPE,
@@ -70,47 +81,83 @@ class WorkflowRuntime:
             text=True,
             encoding="utf-8",
         )
+        reader_queue, reader_done = self._start_reader(process)
+        deadline = time.monotonic() + self.timeout_seconds
+        pending_rpc_jobs: dict[int, WorkflowJob] = {}
         try:
-            ready = self._read_message(process)
+            ready = self._wait_for_message(process, reader_queue, reader_done, deadline)
             if ready.get("type") != "ready":
                 raise RuntimeError(f"workflow worker did not become ready: {ready}")
-            self._send(process, {"type": "start", "script": run.script, "args": args})
+            timeout_ms = max(1, int(self.timeout_seconds * 1000))
+            self._send(process, {"type": "start", "script": run.script, "args": args, "timeoutMs": timeout_ms})
             while True:
-                message = self._read_message(process)
+                self._raise_if_deadline_expired(deadline)
+                self._raise_if_externally_killed(run, scheduler, process)
+
+                for completed_job in scheduler.tick(failure_policy="continue"):
+                    self._complete_pending_rpc(process, pending_rpc_jobs, completed_job)
+
+                message = self._next_message(process, reader_queue, reader_done, deadline)
+                if message is None:
+                    continue
                 message_type = message.get("type")
                 if message_type == "rpc":
-                    value = self._handle_rpc(scheduler, message)
-                    self._send(process, {"type": "rpc_result", "id": message.get("id"), "ok": True, "value": value})
+                    self._handle_rpc(scheduler, message, pending_rpc_jobs)
                 elif message_type == "event":
                     self._handle_worker_event(run, message)
                 elif message_type == "done":
-                    final_payload = {"runId": run.run_id, "status": "succeeded", "result": message.get("result")}
+                    final_payload = self._final_payload(run, "succeeded", result=message.get("result"))
                     self.store.write_final_result(run, final_payload)
                     run.status = "succeeded"
+                    run.error = None
                     self.store.save_run(run)
                     return WorkflowRuntimeResult(run=run, result=message.get("result"), logs=list(self._logs), phases=list(self._phases))
                 elif message_type == "error":
                     raise RuntimeError(message.get("error") or "workflow worker failed")
         except Exception as exc:
-            run.status = "failed"
-            run.error = str(exc)
-            self.store.write_final_result(run, {"runId": run.run_id, "status": "failed", "error": str(exc)})
-            self.store.save_run(run)
-            self._append(run, "workflow_failed", {"error": str(exc)})
+            reason = str(exc)
+            self._cancel_unfinished_jobs(scheduler, reason=reason)
+            current = self._safe_load_current_run(run)
+            if current.status == "killed":
+                run.status = "killed"
+                run.error = current.error or reason
+                self.store.write_final_result(run, self._final_payload(run, "killed", error=run.error))
+                self.store.save_run(run)
+                self._append(run, "workflow_killed", {"error": run.error})
+            else:
+                run.status = "failed"
+                run.error = reason
+                self.store.write_final_result(run, self._final_payload(run, "failed", error=reason))
+                self.store.save_run(run)
+                self._append(run, "workflow_failed", {"error": reason})
             raise
         finally:
             self._terminate(process)
+            reader_done.set()
 
-    def _handle_rpc(self, scheduler: AgentScheduler, message: dict) -> Any:
+    def _handle_rpc(self, scheduler: AgentScheduler, message: dict, pending_rpc_jobs: dict[int, WorkflowJob]) -> None:
         method = message.get("method")
         params = message.get("params") or {}
         if method != "agent":
             raise RuntimeError(f"unsupported workflow rpc: {method}")
-        job = scheduler.register_agent(prompt=str(params.get("prompt") or ""), options=params.get("options") or {})
-        scheduler.run_all()
-        if job.status != "succeeded":
-            raise RuntimeError(job.error or f"workflow agent failed: {job.job_id}")
-        return job.metadata.get("result") or {}
+        options = params.get("options") or {}
+        label = options.get("label") if isinstance(options, dict) else None
+        job = scheduler.register_agent(prompt=str(params.get("prompt") or ""), label=label, options=options)
+        pending_rpc_jobs[int(message.get("id"))] = job
+
+    def _complete_pending_rpc(self, process: subprocess.Popen, pending_rpc_jobs: dict[int, WorkflowJob], job: WorkflowJob) -> None:
+        rpc_id = None
+        for candidate_id, candidate_job in pending_rpc_jobs.items():
+            if candidate_job.job_id == job.job_id:
+                rpc_id = candidate_id
+                break
+        if rpc_id is None:
+            return
+        pending_rpc_jobs.pop(rpc_id, None)
+        if job.status == "succeeded":
+            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": job.metadata.get("result") or {}})
+        else:
+            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": job.error or f"workflow agent failed: {job.job_id}"})
 
     def _handle_worker_event(self, run: WorkflowRun, message: dict) -> None:
         method = message.get("method")
@@ -141,6 +188,43 @@ class WorkflowRuntime:
             ),
         )
 
+    def _start_reader(self, process: subprocess.Popen) -> tuple[queue.Queue, threading.Event]:
+        if process.stdout is None:
+            raise RuntimeError("workflow worker stdout unavailable")
+        messages: queue.Queue = queue.Queue()
+        done = threading.Event()
+
+        def reader() -> None:
+            try:
+                for line in process.stdout:
+                    messages.put(line)
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        return messages, done
+
+    def _wait_for_message(self, process: subprocess.Popen, messages: queue.Queue, done: threading.Event, deadline: float) -> dict:
+        while True:
+            self._raise_if_deadline_expired(deadline)
+            message = self._next_message(process, messages, done, deadline)
+            if message is not None:
+                return message
+
+    def _next_message(self, process: subprocess.Popen, messages: queue.Queue, done: threading.Event, deadline: float) -> dict | None:
+        timeout = min(0.02, max(0.0, deadline - time.monotonic()))
+        try:
+            line = messages.get(timeout=timeout)
+        except queue.Empty:
+            if process.poll() is not None and done.is_set():
+                stderr = process.stderr.read() if process.stderr else ""
+                raise RuntimeError(f"workflow worker exited unexpectedly: {stderr.strip()}")
+            return None
+        if not line:
+            return None
+        return json.loads(line)
+
     def _read_message(self, process: subprocess.Popen) -> dict:
         if process.stdout is None:
             raise RuntimeError("workflow worker stdout unavailable")
@@ -156,6 +240,60 @@ class WorkflowRuntime:
         process.stdin.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
         process.stdin.flush()
 
+    def _raise_if_deadline_expired(self, deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("workflow runtime deadline exceeded")
+
+    def _raise_if_externally_killed(self, run: WorkflowRun, scheduler: AgentScheduler, process: subprocess.Popen) -> None:
+        current = self._safe_load_current_run(run)
+        if current.status != "killed":
+            return
+        run.status = "killed"
+        run.error = current.error or "workflow killed"
+        self._cancel_unfinished_jobs(scheduler, reason=run.error)
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+        raise RuntimeError(f"workflow killed: {run.error}")
+
+    def _safe_load_current_run(self, run: WorkflowRun) -> WorkflowRun:
+        try:
+            return self.store.load_run(run.run_id)
+        except Exception:
+            return run
+
+    def _cancel_unfinished_jobs(self, scheduler: AgentScheduler, *, reason: str) -> None:
+        for job in list(scheduler.jobs):
+            if job.status == "queued":
+                scheduler._cancel_job(job, reason=reason)
+            elif job.status == "running":
+                scheduler.runner.cancel(job)
+                scheduler._cancel_job(job, reason=reason)
+        scheduler.store.save_run(scheduler.run)
+
+    def _final_payload(self, run: WorkflowRun, status: str, *, result: Any = None, error: str | None = None) -> dict:
+        payload: dict[str, Any] = {
+            "runId": run.run_id,
+            "status": status,
+            "jobs": [
+                {
+                    "jobId": job.job_id,
+                    "status": job.status,
+                    "resultRef": job.result_ref,
+                    "error": job.error,
+                }
+                for job in run.jobs
+            ],
+        }
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        return payload
+
     def _terminate(self, process: subprocess.Popen) -> None:
         if process.poll() is None:
             process.terminate()
@@ -163,9 +301,16 @@ class WorkflowRuntime:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 process.kill()
+                try:
+                    process.wait(timeout=1)
+                except Exception:
+                    pass
         for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None and not stream.closed:
-                stream.close()
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _node_executable() -> str:

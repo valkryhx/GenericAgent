@@ -27,20 +27,20 @@ function transformScript(script) {
   return String(script || '').replace(/\bexport\s+const\s+meta\s*=/, 'const meta =');
 }
 
-async function executeScript(script, args) {
+async function executeScript(script, args, options) {
   const sandbox = {
     args,
     agent: (prompt, options) => rpc('agent', { prompt, options: options || {} }),
     phase: (name) => event('phase', { name }),
     log: (message) => event('log', { message }),
     parallel: async (items) => Promise.all((items || []).map((item) => (typeof item === 'function' ? item() : item))),
-    pipeline: async (items, ...stages) => Promise.all((items || []).map(async (item, index) => {
-      let value = item;
+    pipeline: async (items, ...stages) => {
+      let values = items || [];
       for (const stage of stages) {
-        value = await stage(value, item, index);
+        values = await Promise.all(values.map((value, index) => stage(value, (items || [])[index], index)));
       }
-      return value;
-    })),
+      return values;
+    },
     console: {
       log: (...parts) => event('log', { message: parts.map(String).join(' ') }),
       error: (...parts) => event('log', { message: parts.map(String).join(' ') }),
@@ -60,7 +60,8 @@ async function executeScript(script, args) {
   });
   const wrapped = `(async () => {\n${transformScript(script)}\n})()`;
   const compiled = new vm.Script(wrapped, { filename: 'workflow-script.js' });
-  return await compiled.runInContext(context, { timeout: 1000 });
+  const timeout = Math.max(1, Number(options && options.timeoutMs) || 1000);
+  return await compiled.runInContext(context, { timeout });
 }
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -87,7 +88,7 @@ rl.on('line', async (line) => {
   if (message.type !== 'start') return;
 
   try {
-    const result = await executeScript(message.script || '', message.args);
+    const result = await executeScript(message.script || '', message.args, { timeoutMs: message.timeoutMs });
     emit({ type: 'done', result });
   } catch (error) {
     emit({ type: 'error', error: error && error.stack ? error.stack : String(error) });

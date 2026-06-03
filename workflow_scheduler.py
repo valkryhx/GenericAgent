@@ -33,11 +33,13 @@ class AgentScheduler:
         run: WorkflowRun,
         runner: ChildAgentRunner | None = None,
         config: SchedulerConfig | None = None,
+        manage_run_completion: bool = True,
     ):
         self.store = store
         self.run = run
         self.runner = runner or FakeChildAgentRunner()
         self.config = config or SchedulerConfig()
+        self.manage_run_completion = bool(manage_run_completion)
         self.jobs = self.run.jobs
         self._stopping = False
 
@@ -98,7 +100,8 @@ class AgentScheduler:
             else:
                 self._complete_job(job, result)
             completed.append(job)
-        self._update_run_completion_state()
+        if self.manage_run_completion:
+            self._update_run_completion_state()
         self.store.save_run(self.run)
         return completed
 
