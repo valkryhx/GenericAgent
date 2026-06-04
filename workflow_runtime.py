@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from workflow_child_agent import FakeChildAgentRunner
+from workflow_child_agent import AgentResult, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
@@ -57,7 +57,7 @@ class WorkflowRuntime:
         self._logs: list[str] = []
         self._phases: list[str] = []
 
-    def run(self, run: WorkflowRun, *, args: Any = None) -> WorkflowRuntimeResult:
+    def run(self, run: WorkflowRun, *, args: Any = None, resume_from_run_id: str | None = None) -> WorkflowRuntimeResult:
         self._scan_script(run.script)
         self._logs = []
         self._phases = []
@@ -66,12 +66,14 @@ class WorkflowRuntime:
         if run.status in {"draft", "awaiting_approval"}:
             run.status = "running"
             self.store.save_run(run)
+        resume_plan = self._build_resume_plan(run, args=args, resume_from_run_id=resume_from_run_id)
         scheduler = AgentScheduler(
             store=self.store,
             run=run,
             runner=self.runner,
             config=self.scheduler_config,
             manage_run_completion=False,
+            args=args,
         )
         process = subprocess.Popen(
             [self._node_executable(), str(self.worker_path)],
@@ -102,7 +104,7 @@ class WorkflowRuntime:
                     continue
                 message_type = message.get("type")
                 if message_type == "rpc":
-                    self._handle_rpc(scheduler, message, pending_rpc_jobs)
+                    self._handle_rpc(scheduler, message, pending_rpc_jobs, resume_plan=resume_plan, process=process)
                 elif message_type == "event":
                     self._handle_worker_event(run, message)
                 elif message_type == "done":
@@ -135,14 +137,37 @@ class WorkflowRuntime:
             self._terminate(process)
             reader_done.set()
 
-    def _handle_rpc(self, scheduler: AgentScheduler, message: dict, pending_rpc_jobs: dict[int, WorkflowJob]) -> None:
+    def _handle_rpc(
+        self,
+        scheduler: AgentScheduler,
+        message: dict,
+        pending_rpc_jobs: dict[int, WorkflowJob],
+        *,
+        resume_plan: list[dict] | None = None,
+        process: subprocess.Popen | None = None,
+    ) -> None:
         method = message.get("method")
         params = message.get("params") or {}
         if method != "agent":
             raise RuntimeError(f"unsupported workflow rpc: {method}")
         options = params.get("options") or {}
         label = options.get("label") if isinstance(options, dict) else None
-        job = scheduler.register_agent(prompt=str(params.get("prompt") or ""), label=label, options=options)
+        prompt = str(params.get("prompt") or "")
+        call_index = len(scheduler.jobs)
+        cached = self._match_cached_agent(resume_plan, call_index=call_index, prompt=prompt, options=options, scheduler=scheduler)
+        if cached is not None:
+            job = scheduler.register_cached_agent(
+                prompt=prompt,
+                label=label,
+                options=options,
+                result=cached["result"],
+                source_run_id=cached.get("sourceRunId"),
+                source_job_id=cached.get("sourceJobId"),
+            )
+            if process is not None:
+                self._send(process, {"type": "rpc_result", "id": int(message.get("id")), "ok": True, "value": job.metadata.get("result") or {}})
+            return
+        job = scheduler.register_agent(prompt=prompt, label=label, options=options)
         pending_rpc_jobs[int(message.get("id"))] = job
 
     def _complete_pending_rpc(self, process: subprocess.Popen, pending_rpc_jobs: dict[int, WorkflowJob], job: WorkflowJob) -> None:
@@ -170,6 +195,70 @@ class WorkflowRuntime:
             text = str(params.get("message") or "")
             self._logs.append(text)
             self._append(run, "workflow_log", {"message": text})
+
+    def _build_resume_plan(self, run: WorkflowRun, *, args: Any = None, resume_from_run_id: str | None = None) -> list[dict]:
+        if not resume_from_run_id or resume_from_run_id == run.run_id:
+            return []
+        try:
+            source_run = self.store.load_run(resume_from_run_id)
+        except Exception:
+            return []
+        if source_run.session_id != run.session_id:
+            return []
+        plan: list[dict] = []
+        for source_job in source_run.jobs:
+            if source_job.status not in {"succeeded", "cached"}:
+                break
+            source_key = source_job.metadata.get("cacheKey") or {}
+            if source_key.get("argsHash") != AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args)._cache_key(
+                WorkflowJob(job_id="probe", prompt=source_job.prompt, metadata={"callIndex": source_job.metadata.get("callIndex", len(plan)), "options": source_job.metadata.get("options") or {}})
+            ).get("argsHash"):
+                break
+            if source_key.get("permissionProfile") != run.permission_profile:
+                break
+            if source_key.get("permissionPolicyVersion") != run.permission_policy_version:
+                break
+            try:
+                result = self.store.read_agent_result(source_run, source_job)
+            except Exception:
+                break
+            plan.append(
+                {
+                    "callIndex": source_job.metadata.get("callIndex", len(plan)),
+                    "prompt": source_job.prompt,
+                    "options": source_job.metadata.get("options") or {},
+                    "promptHash": source_key.get("promptHash"),
+                    "optionsHash": source_key.get("optionsHash"),
+                    "result": result,
+                    "sourceRunId": source_run.run_id,
+                    "sourceJobId": source_job.job_id,
+                }
+            )
+        return plan
+
+    def _match_cached_agent(
+        self,
+        resume_plan: list[dict] | None,
+        *,
+        call_index: int,
+        prompt: str,
+        options: dict,
+        scheduler: AgentScheduler,
+    ) -> dict | None:
+        if not resume_plan or call_index >= len(resume_plan):
+            return None
+        candidate = resume_plan[call_index]
+        probe = WorkflowJob(job_id="probe", prompt=prompt, metadata={"callIndex": call_index, "options": dict(options or {})})
+        key = scheduler._cache_key(probe)
+        if candidate.get("callIndex") != call_index:
+            return None
+        if candidate.get("promptHash") != key.get("promptHash"):
+            del resume_plan[call_index:]
+            return None
+        if candidate.get("optionsHash") != key.get("optionsHash"):
+            del resume_plan[call_index:]
+            return None
+        return candidate
 
     def _scan_script(self, script: str) -> None:
         for token in FORBIDDEN_SCRIPT_TOKENS:

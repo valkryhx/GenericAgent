@@ -805,9 +805,9 @@ class InkBridgeTest(unittest.TestCase):
                 self.store = store
                 self.timeout_seconds = timeout_seconds
 
-            def run(self, run, *, args=None):
+            def run(self, run, *, args=None, resume_from_run_id=None):
                 from workflow_models import WorkflowEvent
-                self.store.append_event(run, WorkflowEvent(run_id=run.run_id, session_id=run.session_id, event_type="workflow_log", sequence=99, payload={"message": "runtime saw args", "args": args}))
+                self.store.append_event(run, WorkflowEvent(run_id=run.run_id, session_id=run.session_id, event_type="workflow_log", sequence=99, payload={"message": "runtime saw args", "args": args, "resumeFromRunId": resume_from_run_id}))
                 payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True, "args": args}}
                 self.store.write_final_result(run, payload)
                 run.status = "succeeded"
@@ -835,6 +835,105 @@ class InkBridgeTest(unittest.TestCase):
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("workflow_started", workflow_events)
             self.assertIn("workflow_log", workflow_events)
+
+    def test_workflow_resume_runs_new_run_with_resume_source(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runtime_calls = []
+
+        class FakeRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+                self.timeout_seconds = timeout_seconds
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                runtime_calls.append({"runId": run.run_id, "args": args, "resumeFromRunId": resume_from_run_id})
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"resumedFrom": resume_from_run_id, "args": args}}
+                self.store.write_final_result(run, payload)
+                run.status = "succeeded"
+                self.store.save_run(run)
+                return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: FakeRuntime(**kwargs),
+            )
+            source_run_id = bridge.workflow_draft("return { ok: true }")
+            source = bridge.workflow_store.load_run(source_run_id)
+            source.status = "succeeded"
+            bridge.workflow_store.save_run(source)
+
+            resumed = bridge.workflow_resume(source_run_id, args={"value": 9}, timeout_seconds=4)
+            bridge.wait_for_workflow_idle(resumed, timeout=1)
+
+            self.assertTrue(resumed.startswith("wf_"))
+            self.assertNotEqual(source_run_id, resumed)
+            self.assertEqual([{"runId": resumed, "args": {"value": 9}, "resumeFromRunId": source_run_id}], runtime_calls)
+            self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["runId"] == resumed for event in events))
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == resumed)
+            self.assertEqual({"resumedFrom": source_run_id, "args": {"value": 9}}, final_event["result"]["result"])
+
+    def test_workflow_resume_rejects_blank_run_id_with_protocol_error(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+
+            resumed = bridge.workflow_resume("", args={"value": 1})
+
+        self.assertEqual("", resumed)
+        self.assertEqual("error", events[-1]["type"])
+        self.assertEqual("workflow_bad_run_id", events[-1]["code"])
+
+    def test_workflow_resume_rejects_unfinished_source_run(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            source_run_id = bridge.workflow_draft("return 1")
+
+            resumed = bridge.workflow_resume(source_run_id)
+
+        self.assertEqual("", resumed)
+        self.assertEqual("error", events[-1]["type"])
+        self.assertEqual("workflow_resume_failed", events[-1]["code"])
+        self.assertIn("from awaiting_approval", events[-1]["message"])
+
+    def test_workflow_resume_rejects_denied_cancelled_source_run(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runtime_calls = []
+
+        class FakeRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                runtime_calls.append(run.run_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: FakeRuntime(**kwargs),
+            )
+            source_run_id = bridge.workflow_draft("return 1")
+            bridge.workflow_deny(source_run_id, reason="user deny")
+
+            resumed = bridge.workflow_resume(source_run_id)
+
+        self.assertEqual("", resumed)
+        self.assertEqual([], runtime_calls)
+        self.assertEqual("error", events[-1]["type"])
+        self.assertEqual("workflow_resume_failed", events[-1]["code"])
+        self.assertIn("from cancelled", events[-1]["message"])
 
     def test_workflow_list_detail_and_stop_commands(self):
         agent = FakeAgent()
@@ -882,7 +981,7 @@ class InkBridgeTest(unittest.TestCase):
             def __init__(self, *, store, timeout_seconds=10.0):
                 self.store = store
 
-            def run(self, run, *, args=None):
+            def run(self, run, *, args=None, resume_from_run_id=None):
                 runtime_started.set()
                 release_runtime.wait(timeout=2)
                 return None
@@ -979,6 +1078,7 @@ class InkBridgeTest(unittest.TestCase):
         stdin = io.StringIO(
             json.dumps({"type": "workflow_draft", "script": "return 1"}) + "\n"
             + json.dumps({"type": "workflow_approve", "runId": "wf_1", "args": {"x": 1}, "timeoutSeconds": 2}) + "\n"
+            + json.dumps({"type": "workflow_resume", "runId": "wf_1", "args": {"y": 2}, "timeoutSeconds": 3}) + "\n"
             + json.dumps({"type": "workflow_list"}) + "\n"
             + json.dumps({"type": "workflow_detail", "runId": "wf_1"}) + "\n"
             + json.dumps({"type": "workflow_deny", "runId": "wf_1", "reason": "no"}) + "\n"
@@ -994,6 +1094,7 @@ class InkBridgeTest(unittest.TestCase):
 
         bridge.workflow_draft.assert_called_once_with("return 1")
         bridge.workflow_approve.assert_called_once_with("wf_1", args={"x": 1}, timeout_seconds=2.0)
+        bridge.workflow_resume.assert_called_once_with("wf_1", args={"y": 2}, timeout_seconds=3.0)
         bridge.workflow_list.assert_called_once_with()
         bridge.workflow_detail.assert_called_once_with("wf_1")
         bridge.workflow_deny.assert_called_once_with("wf_1", reason="no")

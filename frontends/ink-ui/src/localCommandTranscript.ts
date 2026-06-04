@@ -18,6 +18,7 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'workflow_list') return '/workflows'
   if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
   if (command.type === 'workflow_approve') return `/workflow approve ${command.runId}`
+  if (command.type === 'workflow_resume') return `/workflow resume ${command.runId}`
   if (command.type === 'workflow_deny') return `/workflow deny ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
   if (command.type === 'workflow_stop') return `/workflow stop ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
   if (command.type === 'stop') return '/stop'

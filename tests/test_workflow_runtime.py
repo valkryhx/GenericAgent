@@ -44,6 +44,16 @@ class FailingAndHangingRunner:
         self.cancelled_job_ids.add(job.job_id)
 
 
+class CountingRunner(FakeChildAgentRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.started_job_ids = []
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+        super().start(job)
+
+
 class FakeStream:
     def __init__(self):
         self.closed = False
@@ -239,6 +249,186 @@ return result.summary
             self.assertEqual("Scout", loaded.jobs[0].metadata["label"])
             registered = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_registered")
             self.assertEqual("Scout", registered.payload["label"])
+
+    def test_runtime_reuses_cached_agent_when_resuming_same_script_and_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('inspect repo', { label: 'Scout' })
+return { summary: result.summary }
+"""
+            original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+            WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "cached ok"}})).run(
+                original,
+                args={"target": "repo"},
+            )
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running"))
+            runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+            runtime = WorkflowRuntime(store=store, runner=runner)
+
+            outcome = runtime.run(resumed, args={"target": "repo"}, resume_from_run_id="wf_source")
+
+            self.assertEqual({"summary": "cached ok"}, outcome.result)
+            self.assertEqual([], runner.started_job_ids)
+            loaded = store.load_run("wf_resumed")
+            self.assertEqual("cached", loaded.jobs[0].status)
+            self.assertEqual({"summary": "cached ok"}, loaded.jobs[0].metadata["result"])
+            event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+            self.assertIn("agent_cached", event_types)
+            self.assertNotIn("agent_started", event_types)
+
+    def test_runtime_does_not_reuse_cached_agent_when_resume_args_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('inspect ' + args.target)
+return result.summary
+"""
+            original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+            WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "old"}})).run(
+                original,
+                args={"target": "old"},
+            )
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running"))
+            runner = CountingRunner(results={"agent_1": {"summary": "new"}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"target": "new"},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual("new", outcome.result)
+            self.assertEqual(["agent_1"], runner.started_job_ids)
+            loaded = store.load_run("wf_resumed")
+            self.assertEqual("succeeded", loaded.jobs[0].status)
+            event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+            self.assertNotIn("agent_cached", event_types)
+            self.assertIn("agent_started", event_types)
+
+    def test_runtime_does_not_reuse_cached_agent_when_resume_args_change_type_only(self):
+        for source_args, resumed_args in (({}, "{}"), (None, "null")):
+            with self.subTest(source_args=source_args, resumed_args=resumed_args):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = WorkflowStore(root=tmp)
+                    script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+                    original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+                    WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "old"}})).run(
+                        original,
+                        args=source_args,
+                    )
+                    resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running"))
+                    runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+                    outcome = WorkflowRuntime(store=store, runner=runner).run(
+                        resumed,
+                        args=resumed_args,
+                        resume_from_run_id="wf_source",
+                    )
+
+                    self.assertEqual("fresh", outcome.result)
+                    self.assertEqual(["agent_1"], runner.started_job_ids)
+                    event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+                    self.assertNotIn("agent_cached", event_types)
+
+    def test_runtime_does_not_reuse_cached_agent_across_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+            original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_source", script=script, status="running"))
+            WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "old"}})).run(
+                original,
+                args={"same": True},
+            )
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_other", script=script, status="running"))
+            runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"same": True},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual("fresh", outcome.result)
+            self.assertEqual(["agent_1"], runner.started_job_ids)
+            event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+            self.assertNotIn("agent_cached", event_types)
+
+    def test_runtime_cached_agent_transcript_ref_points_to_resumed_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+            original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+            source_runner = CountingRunner(results={"agent_1": {"summary": "old"}})
+            WorkflowRuntime(store=store, runner=source_runner).run(original, args={"same": True})
+            source_job = store.load_run("wf_source").jobs[0]
+            store.write_agent_transcript(original, source_job, [{"type": "assistant", "text": "source transcript"}])
+            source_result = store.read_agent_result(original, source_job)
+            source_result.transcript_ref = "agents/agent_1/transcript.jsonl"
+            store.write_agent_result(original, source_job, source_result)
+
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running"))
+            runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"same": True},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual("old", outcome.result)
+            self.assertEqual([], runner.started_job_ids)
+            loaded = store.load_run("wf_resumed")
+            cached_job = loaded.jobs[0]
+            self.assertEqual("cached", cached_job.status)
+            self.assertEqual("agents/agent_1/transcript.jsonl", cached_job.metadata["transcriptRef"])
+            transcript_path = Path(loaded.artifact_dir) / cached_job.metadata["transcriptRef"]
+            self.assertTrue(transcript_path.exists())
+            self.assertEqual([{"type": "assistant", "text": "source transcript"}], [json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines()])
+
+    def test_runtime_reuses_longest_unchanged_agent_prefix_after_script_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            source_script = """
+const first = await agent('same first')
+const second = await agent('old second')
+return [first.summary, second.summary]
+"""
+            source = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=source_script, status="running"))
+            WorkflowRuntime(
+                store=store,
+                runner=CountingRunner(results={"agent_1": {"summary": "first cached"}, "agent_2": {"summary": "old"}}),
+            ).run(source, args={"same": True})
+            resumed_script = """
+const first = await agent('same first')
+const second = await agent('new second')
+return [first.summary, second.summary]
+"""
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=resumed_script, status="running"))
+            runner = CountingRunner(results={"agent_2": {"summary": "new fresh"}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"same": True},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual(["first cached", "new fresh"], outcome.result)
+            self.assertEqual(["agent_2"], runner.started_job_ids)
+            loaded = store.load_run("wf_resumed")
+            self.assertEqual(["cached", "succeeded"], [job.status for job in loaded.jobs])
+            event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+            self.assertEqual(1, event_types.count("agent_cached"))
+            self.assertEqual(1, event_types.count("agent_started"))
 
     def test_runtime_timeout_kills_never_resolving_async_script(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -93,13 +93,14 @@ function parseSlashSubmit(
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
-  const workflowAction = /^\/workflow\s+(detail|approve|deny|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  const workflowAction = /^\/workflow\s+(detail|approve|resume|deny|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (workflowAction) {
     const action = workflowAction[1]
     const runId = workflowAction[2]
     const reason = workflowAction[3]?.trim()
     if (action === 'detail') return { command: { type: 'workflow_detail', runId } }
     if (action === 'approve') return { command: { type: 'workflow_approve', runId } }
+    if (action === 'resume') return { command: { type: 'workflow_resume', runId } }
     if (action === 'deny') return { command: { type: 'workflow_deny', runId, ...(reason ? { reason } : {}) } }
     return { command: { type: 'workflow_stop', runId, ...(reason ? { reason } : {}) } }
   }

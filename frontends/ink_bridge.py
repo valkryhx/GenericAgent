@@ -406,13 +406,56 @@ class GenericAgentBridge:
             return False
         thread = threading.Thread(
             target=self._run_workflow_runtime,
-            args=(run.run_id, args, timeout_seconds),
+            args=(run.run_id, args, timeout_seconds, None),
             daemon=True,
             name=f"ga-ink-workflow-{run.run_id}",
         )
         self._workflow_threads[run.run_id] = thread
         thread.start()
         return True
+
+    def workflow_resume(self, run_id: str, *, args: Any = None, timeout_seconds: float | None = None) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        source_run_id = str(run_id or "")
+        if not source_run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return ""
+        try:
+            with backend_output_redirect():
+                from workflow_models import WorkflowEvent
+
+                source = self.workflow_store.load_run(source_run_id)
+                if source.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                    raise ValueError(f"cannot resume workflow {source_run_id} from {source.status}")
+                resumed = self.workflow_controller.create_draft(session_id=source.session_id, script=source.script)
+                resumed.status = "running"
+                resumed.metadata["resumeFromRunId"] = source_run_id
+                self.workflow_store.save_run(resumed)
+                self.workflow_store.append_event(
+                    resumed,
+                    WorkflowEvent(
+                        run_id=resumed.run_id,
+                        session_id=resumed.session_id,
+                        event_type="workflow_started",
+                        sequence=max((event.sequence for event in self.workflow_store.replay_events(resumed.run_id)), default=0) + 1,
+                        payload={"resumeFromRunId": source_run_id},
+                    ),
+                )
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(resumed)})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_resume_failed", "message": str(exc)})
+            return ""
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(resumed.run_id, args, timeout_seconds, source_run_id),
+            daemon=True,
+            name=f"ga-ink-workflow-{resumed.run_id}",
+        )
+        self._workflow_threads[resumed.run_id] = thread
+        thread.start()
+        return resumed.run_id
 
     def workflow_list(self) -> None:
         try:
@@ -472,14 +515,14 @@ class GenericAgentBridge:
         if thread is not None:
             thread.join(timeout=timeout)
 
-    def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None) -> None:
+    def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
         try:
             self.emit({"type": "status", "status": "running"})
             self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
             with backend_output_redirect():
                 run = self.workflow_store.load_run(run_id)
                 runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
-                runtime.run(run, args=args)
+                runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
                 current = self.workflow_store.load_run(run_id)
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
@@ -864,6 +907,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
             timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
             bridge.workflow_approve(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
+        elif cmd_type == "workflow_resume":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            bridge.workflow_resume(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
         elif cmd_type == "workflow_list":
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":

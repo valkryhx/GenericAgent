@@ -19,6 +19,7 @@ test('commandTextForLocalDecision returns display text for local actions and com
   assert.equal(commandTextForLocalDecision({ command: { type: 'compact', instructions: '' } }), '/compact')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_list' } }), '/workflows')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_detail', runId: 'wf_demo' } }), '/workflow detail wf_demo')
+  assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_resume', runId: 'wf_demo' } }), '/workflow resume wf_demo')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_deny', runId: 'wf_demo', reason: 'no' } }), '/workflow deny wf_demo no')
   assert.equal(commandTextForLocalDecision({ command: { type: 'resume_session_index', index: 2 } }), null)
   assert.equal(commandTextForLocalDecision({ command: { type: 'rewind', taskId: 2 } }), null)

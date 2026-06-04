@@ -379,18 +379,42 @@ GA_RUN_REAL_LLM_TESTS=1 python -m unittest tests.test_workflow_real_llm_integrat
   - permission profile
   - expected tool/agent count
 
-### P8：Workflow list/detail UI
+### P8：Workflow Resume / cache replay
 
-目标：让用户可从 UI 查看历史 workflow runs、events、jobs、artifacts。
+目标：支持从既有 workflow run 恢复执行，并复用最长未变 agent 调用前缀，避免重复消耗子智能体调用。
 
-建议范围：
+已实现范围：
 
-- run list
-- run detail
-- job detail
-- event timeline
-- result artifact viewer
-- child transcript viewer，但必须避免污染 parent conversation
+- `WorkflowRuntime.run(..., resume_from_run_id=...)` 支持从历史 run 构建 cache plan。
+- `AgentScheduler` 的 cache key 使用真实 `argsHash`，并保留 permission profile/version。
+- 对相同 args、相同 prompt/options、相同权限的历史 agent 结果写入新 run 的 `cached` job。
+- 缓存命中写入 `agent_cached` event，并直接把结果返回给 JS worker，不启动 child runner。
+- script 变更时按 call index 复用最长未变 agent 前缀，遇到 prompt/options/args/权限差异即停止复用。
+- `WorkflowStore.read_agent_result()` 可读取历史 `agents/<job_id>/result.json` artifact。
+- Ink bridge 增加 `workflow_resume` JSONL 命令，基于源 run 创建新 run 并传入 `resume_from_run_id`。
+- Ink UI 增加 `/workflow resume RUN_ID`、本地命令回显、panel `r` 恢复快捷键和帮助文案。
+
+真实 API E2E 自测：
+
+- 已编写 `tests/p8_real_api_e2e.py` 作为 opt-in harness，默认不进入 unittest，也不会在未设置环境变量时消耗真实 API。
+- 默认跳过验证已通过：直接运行脚本会返回 `skipped: true`，原因是需显式设置 `GA_RUN_REAL_API_E2E=1`。
+- 已使用用户指定的 `native_oai_config` / `gpt-native` / `gpt-5.5` 执行一次真实 P8 E2E，结果通过，且 `secretScan: []`。
+- runtime 层真实 E2E 覆盖 `WorkflowRuntime`、JS worker、`NativeGPTChildAgentRunner`、`agent()`、`parallel()`、`pipeline()`、`resume_from_run_id`。
+- source run 启动 7 个真实 child agent job，全部 `succeeded`，且 result/transcript artifact 存在。
+- resumed run 复用 7 个 cached job，事件包含 7 个 `agent_cached`，没有再次启动真实 API child job，且最终 result 与 source run 一致。
+- bridge 层真实 E2E 覆盖 workflow draft / approve / final 流程，1 个真实 child agent job 成功完成。
+
+回归验证：
+
+- `python -m unittest tests.test_workflow_runtime tests.test_workflow_scheduler tests.test_workflow_store tests.test_ink_bridge`：89 tests passed。
+- `npm --prefix D:/git_codes/GenericAgent/frontends/ink-ui run typecheck`：passed。
+- `npm --prefix D:/git_codes/GenericAgent/frontends/ink-ui run test`：184 tests passed。曾出现一次已知 App resume scroll/status transient failure，立即重跑通过。
+
+后续可扩展：
+
+- 更细粒度的 result artifact viewer。
+- child transcript viewer，但必须避免污染 parent conversation。
+- 更丰富的 resume diff 展示，例如哪些 job 命中 cache、哪些 job fresh rerun。
 
 ### P9：Saved workflow registry
 

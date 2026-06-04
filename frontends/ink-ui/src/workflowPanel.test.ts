@@ -47,3 +47,15 @@ test('workflowPanelCommandForKey maps approval keyboard shortcuts', () => {
     reason: 'stopped from Ink UI',
   })
 })
+
+test('workflowPanelCommandForKey maps resume shortcut for completed or interrupted runs', () => {
+  const panel = workflowPanelFromDetail({ run: { ...awaitingRun, status: 'interrupted' }, script: 'return 1', events: [] })
+
+  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'r'), {
+    type: 'workflow_resume',
+    runId: 'wf_demo',
+  })
+  assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 'r'), null)
+  assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'cancelled' } }, {}, 'r'), null)
+  assert.equal(workflowPanelRows(panel).at(-1), 'Enter approve - r resume - d deny - s stop - Esc close')
+})

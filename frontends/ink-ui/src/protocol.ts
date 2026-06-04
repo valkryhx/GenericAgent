@@ -17,6 +17,7 @@ export type BridgeCommand =
   | { type: 'compact'; instructions: string }
   | { type: 'workflow_draft'; script: string }
   | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_resume'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_deny'; runId: string; reason?: string }
   | { type: 'workflow_list' }
   | { type: 'workflow_detail'; runId: string }

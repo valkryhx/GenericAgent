@@ -244,6 +244,10 @@ test('handleInput parses workflow list and control slash commands', () => {
     value: '',
     command: { type: 'workflow_approve', runId: 'wf_demo' },
   })
+  assert.deepEqual(handleInput('/workflow resume wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_resume', runId: 'wf_demo' },
+  })
   assert.deepEqual(handleInput('/workflow deny wf_demo no thanks', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'workflow_deny', runId: 'wf_demo', reason: 'no thanks' },

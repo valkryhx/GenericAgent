@@ -153,6 +153,38 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertEqual({"Read": 2}, data["toolSummary"])
             self.assertNotIn("transcriptEvents", data)
 
+    def test_read_agent_result_loads_persisted_result_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="work")],
+            )
+            run = store.create_run(run)
+            job = run.jobs[0]
+            store.write_agent_result(
+                run,
+                job,
+                AgentResult(
+                    job_id="agent_1",
+                    payload={"summary": "ok"},
+                    transcript_ref="agents/agent_1/transcript.jsonl",
+                    token_usage={"input_tokens": 1},
+                    tool_summary={"Read": 2},
+                ),
+            )
+
+            loaded = store.read_agent_result(run, job)
+
+            self.assertEqual("agent_1", loaded.job_id)
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual({"summary": "ok"}, loaded.payload)
+            self.assertEqual("agents/agent_1/transcript.jsonl", loaded.transcript_ref)
+            self.assertEqual({"input_tokens": 1}, loaded.token_usage)
+            self.assertEqual({"Read": 2}, loaded.tool_summary)
+
     def test_write_agent_transcript_persists_jsonl_under_agent_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

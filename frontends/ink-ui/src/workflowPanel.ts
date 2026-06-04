@@ -19,15 +19,20 @@ export function workflowPanelRows(panel: WorkflowPanelState): string[] {
   const permission = panel.run.permissionProfile || '(default)'
   const jobs = panel.run.jobs?.length ?? 0
   const scriptLines = panel.script.split('\n')
+  const controls = resumeableWorkflowStatuses.has(panel.run.status)
+    ? 'Enter approve - r resume - d deny - s stop - Esc close'
+    : 'Enter approve - d deny - s stop - Esc close'
   return [
     `Workflow ${panel.run.runId} - ${panel.run.status}`,
     `Permission: ${permission}`,
     `Jobs: ${jobs}`,
     'Script:',
     ...(scriptLines.length > 0 ? scriptLines : ['']),
-    'Enter approve - d deny - s stop - Esc close',
+    controls,
   ]
 }
+
+const resumeableWorkflowStatuses = new Set(['failed', 'killed', 'interrupted', 'succeeded'])
 
 export function workflowPanelCommandForKey(
   panel: WorkflowPanelState,
@@ -43,6 +48,9 @@ export function workflowPanelCommandForKey(
   }
   if (lowered === 's' && panel.run.status === 'running') {
     return { type: 'workflow_stop', runId: panel.run.runId, reason: 'stopped from Ink UI' }
+  }
+  if (lowered === 'r' && resumeableWorkflowStatuses.has(panel.run.status)) {
+    return { type: 'workflow_resume', runId: panel.run.runId }
   }
   return null
 }

@@ -354,7 +354,7 @@ function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
     '/workflows - inspect workflow runs and approval controls',
-    '/workflow detail|approve|deny|stop RUN_ID - control workflows',
+    '/workflow detail|approve|resume|deny|stop RUN_ID - control workflows',
     '/clear - clear display only',
     '/status - show current frontend status',
     '/model, /llm - show and switch AI models',

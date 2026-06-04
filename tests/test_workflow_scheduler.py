@@ -166,6 +166,55 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("inherit-current-v1", job_a.metadata["permissionPolicyVersion"])
         self.assertEqual("read-only-v1", job_b.metadata["permissionPolicyVersion"])
 
+    def test_cache_key_args_hash_uses_runtime_args(self):
+        scheduler_a, _store_a, _run_a = self.make_scheduler()
+        scheduler_b, _store_b, _run_b = self.make_scheduler(run_kwargs={"run_id": "wf_test_b"})
+        scheduler_a.args = {"target": "alpha"}
+        scheduler_b.args = {"target": "beta"}
+
+        job_a = scheduler_a.register_agent(prompt="same", options={"effort": "low"})
+        job_b = scheduler_b.register_agent(prompt="same", options={"effort": "low"})
+
+        self.assertNotEqual(job_a.metadata["cacheKey"]["argsHash"], job_b.metadata["cacheKey"]["argsHash"])
+        self.assertNotEqual(job_a.metadata["cacheKey"], job_b.metadata["cacheKey"])
+
+    def test_cache_key_distinguishes_json_values_from_json_like_strings(self):
+        scheduler_object, _store_object, _run_object = self.make_scheduler()
+        scheduler_string, _store_string, _run_string = self.make_scheduler(run_kwargs={"run_id": "wf_test_string"})
+        scheduler_none, _store_none, _run_none = self.make_scheduler(run_kwargs={"run_id": "wf_test_none"})
+        scheduler_null_string, _store_null_string, _run_null_string = self.make_scheduler(run_kwargs={"run_id": "wf_test_null_string"})
+        scheduler_object.args = {}
+        scheduler_string.args = "{}"
+        scheduler_none.args = None
+        scheduler_null_string.args = "null"
+
+        object_job = scheduler_object.register_agent(prompt="same")
+        string_job = scheduler_string.register_agent(prompt="same")
+        none_job = scheduler_none.register_agent(prompt="same")
+        null_string_job = scheduler_null_string.register_agent(prompt="same")
+
+        self.assertNotEqual(object_job.metadata["cacheKey"]["argsHash"], string_job.metadata["cacheKey"]["argsHash"])
+        self.assertNotEqual(none_job.metadata["cacheKey"]["argsHash"], null_string_job.metadata["cacheKey"]["argsHash"])
+
+    def test_run_all_marks_cached_jobs_as_successful_completion(self):
+        scheduler, store, run = self.make_scheduler()
+        scheduler.register_cached_agent(
+            prompt="cached work",
+            result=AgentResult(job_id="agent_source", payload={"summary": "cached"}),
+            source_run_id="wf_source",
+            source_job_id="agent_1",
+        )
+
+        completed = scheduler.run_all()
+
+        self.assertEqual([], completed)
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("succeeded", loaded.status)
+        self.assertEqual("cached", loaded.jobs[0].status)
+        final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+        self.assertEqual("succeeded", final_result["status"])
+        self.assertEqual("cached", final_result["jobs"][0]["status"])
+
     def test_run_all_moves_successful_job_through_running_to_succeeded_and_writes_result(self):
         scheduler, store, run = self.make_scheduler(runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
         job = scheduler.register_agent(prompt="do work")

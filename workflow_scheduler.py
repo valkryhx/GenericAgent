@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass
@@ -34,12 +35,14 @@ class AgentScheduler:
         runner: ChildAgentRunner | None = None,
         config: SchedulerConfig | None = None,
         manage_run_completion: bool = True,
+        args=None,
     ):
         self.store = store
         self.run = run
         self.runner = runner or FakeChildAgentRunner()
         self.config = config or SchedulerConfig()
         self.manage_run_completion = bool(manage_run_completion)
+        self.args = args
         self.jobs = self.run.jobs
         self._stopping = False
 
@@ -73,6 +76,57 @@ class AgentScheduler:
         self.jobs.append(job)
         self.store.save_run(self.run)
         self._append("agent_registered", job, {"cacheKey": job.metadata["cacheKey"], "label": label})
+        return job
+
+    def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None) -> WorkflowJob:
+        if len(self.jobs) >= self.config.max_total:
+            self._append("agent_rejected", payload={"reason": "max_total_exceeded", "maxTotal": self.config.max_total})
+            raise RuntimeError("workflow agent limit exceeded")
+        call_index = len(self.jobs)
+        job = WorkflowJob(
+            job_id=f"agent_{call_index + 1}",
+            prompt=prompt,
+            status="cached",
+            metadata={
+                "callIndex": call_index,
+                "label": label,
+                "options": dict(options or {}),
+                "runId": self.run.run_id,
+                "permissionProfile": self.run.permission_profile,
+                "permissionPolicyVersion": self.run.permission_policy_version,
+                "result": result.payload,
+                "cachedFromRunId": source_run_id,
+                "cachedFromJobId": source_job_id,
+            },
+        )
+        job.metadata["cacheKey"] = self._cache_key(job)
+        cached_result = copy.deepcopy(result)
+        cached_result.job_id = job.job_id
+        if cached_result.transcript_ref:
+            copied_ref = None
+            if source_run_id:
+                copied_ref = self.store.copy_agent_transcript(source_run_id, cached_result.transcript_ref, self.run, job)
+            cached_result.transcript_ref = copied_ref
+        if cached_result.transcript_ref:
+            job.metadata["transcriptRef"] = cached_result.transcript_ref
+        if cached_result.token_usage:
+            job.metadata["tokenUsage"] = cached_result.token_usage
+        if cached_result.tool_summary is not None:
+            job.metadata["toolSummary"] = cached_result.tool_summary
+        self.store.write_agent_result(self.run, job, cached_result)
+        self.jobs.append(job)
+        self.store.save_run(self.run)
+        self._append(
+            "agent_cached",
+            job,
+            {
+                "cacheKey": job.metadata["cacheKey"],
+                "label": label,
+                "sourceRunId": source_run_id,
+                "sourceJobId": source_job_id,
+                "resultRef": job.result_ref,
+            },
+        )
         return job
 
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
@@ -113,6 +167,9 @@ class AgentScheduler:
             after = [(job.job_id, job.status) for job in self.jobs]
             if before == after and any(job.status == "running" for job in self.jobs):
                 continue
+        if self.manage_run_completion:
+            self._update_run_completion_state()
+            self.store.save_run(self.run)
         return completed
 
     def stop(self, *, reason: str = "") -> None:
@@ -144,7 +201,7 @@ class AgentScheduler:
     def _update_run_completion_state(self) -> None:
         if self.run.status != "running" or not self.jobs:
             return
-        if all(job.status == "succeeded" for job in self.jobs):
+        if all(job.status in {"succeeded", "cached"} for job in self.jobs):
             self.run.status = "succeeded"
             self.store.write_final_result(
                 self.run,
@@ -226,7 +283,7 @@ class AgentScheduler:
         options = job.metadata.get("options") or {}
         return {
             "scriptHash": _stable_hash(self.run.script),
-            "argsHash": _stable_hash({}),
+            "argsHash": _stable_hash(self.args),
             "callIndex": job.metadata.get("callIndex", 0),
             "promptHash": _stable_hash(job.prompt),
             "optionsHash": _stable_hash(options),
@@ -252,8 +309,28 @@ class AgentScheduler:
 
 
 def _stable_hash(value) -> str:
-    if isinstance(value, str):
-        data = value
-    else:
-        data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    data = json.dumps(_hashable_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _hashable_value(value):
+    if value is None:
+        return {"__gaWorkflowType": "none", "value": None}
+    if isinstance(value, bool):
+        return {"__gaWorkflowType": "bool", "value": value}
+    if isinstance(value, str):
+        return {"__gaWorkflowType": "str", "value": value}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"__gaWorkflowType": "int", "value": value}
+    if isinstance(value, float):
+        return {"__gaWorkflowType": "float", "value": value}
+    if isinstance(value, list):
+        return {"__gaWorkflowType": "list", "value": [_hashable_value(item) for item in value]}
+    if isinstance(value, tuple):
+        return {"__gaWorkflowType": "tuple", "value": [_hashable_value(item) for item in value]}
+    if isinstance(value, dict):
+        return {
+            "__gaWorkflowType": "dict",
+            "value": [[_hashable_value(key), _hashable_value(value[key])] for key in sorted(value.keys(), key=lambda item: json.dumps(_hashable_value(item), ensure_ascii=False, sort_keys=True, separators=(",", ":")))],
+        }
+    return {"__gaWorkflowType": type(value).__name__, "value": copy.deepcopy(value)}

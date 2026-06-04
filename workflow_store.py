@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
@@ -90,6 +91,17 @@ class WorkflowStore:
         job.result_ref = result_ref
         return result_ref
 
+    def read_agent_result(self, run: WorkflowRun | str, job: WorkflowJob | str) -> AgentResult:
+        artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
+        if isinstance(job, WorkflowJob):
+            result_ref = job.result_ref or f"agents/{job.job_id}/result.json"
+        else:
+            result_ref = f"agents/{job}/result.json"
+        result_path = artifact_dir / result_ref
+        if not result_path.exists():
+            raise FileNotFoundError(str(result_path))
+        return AgentResult.from_dict(json.loads(result_path.read_text(encoding="utf-8")))
+
     def write_agent_transcript(self, run: WorkflowRun, job: WorkflowJob, events_or_messages: list[dict]) -> str:
         transcript_ref = f"agents/{job.job_id}/transcript.jsonl"
         transcript_path = self._run_dir(run) / transcript_ref
@@ -98,6 +110,18 @@ class WorkflowStore:
             for event in events_or_messages:
                 fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
         return transcript_ref
+
+    def copy_agent_transcript(self, source_run: WorkflowRun | str, source_ref: str, target_run: WorkflowRun, target_job: WorkflowJob) -> str | None:
+        if not source_ref:
+            return None
+        source_path = self._run_dir(source_run) / source_ref if isinstance(source_run, WorkflowRun) else self._find_run_dir(source_run) / source_ref
+        if not source_path.exists():
+            return None
+        target_ref = f"agents/{target_job.job_id}/transcript.jsonl"
+        target_path = self._run_dir(target_run) / target_ref
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, target_path)
+        return target_ref
 
     def write_final_result(self, run: WorkflowRun, payload: dict) -> str:
         result_ref = "final-result.json"
