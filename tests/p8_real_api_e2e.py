@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
@@ -75,6 +76,23 @@ log('start p8 real api permission inheritance smoke');
 const result = await agent('Return one short safe sentence. Do not call tools, MCP, or skills. Avoid secrets. Include token GA_P8_INHERIT_PERMISSION_SMOKE if natural.', {label:'inherit-permission-smoke'});
 return {
   marker: 'GA_P8_INHERIT_PERMISSION_SMOKE_DONE',
+  summaryLength: String(result.summary || '').length
+};
+'''
+
+TOOL_INHERITANCE_SCRIPT = r'''
+phase('P8 Real API Native Tool Inheritance File Skill MCP');
+log('start p8 real api native child file skill mcp inheritance e2e');
+const result = await agent(`You must prove NativeGPTChildAgentRunner tool calling by using tools before the final answer.
+Use exactly these three tools in this order:
+1. file_read with path '${args.markerPath}' and show_linenos=false.
+2. load_skill with skill 'p8-real-tool-skill' and search_roots ['${args.skillRoot}'].
+3. mcp__p8_stub__read_marker with marker 'GA_P8_REAL_TOOL_MCP_INPUT'.
+After all three tool calls, return one short sentence containing GA_P8_REAL_TOOL_INHERITANCE_DONE. Do not write files, execute code, access network, read mykey.py, read mykey.json, read mcp.json, or call any other tool.`, {
+  label:'real-tool-inheritance-file-skill-mcp'
+});
+return {
+  marker: 'GA_P8_REAL_TOOL_INHERITANCE_DONE',
   summaryLength: String(result.summary || '').length
 };
 '''
@@ -271,6 +289,21 @@ def check_profile(summary: dict) -> bool:
     return ok
 
 
+def _make_tool_inheritance_fixture(root: Path) -> tuple[Path, Path]:
+    fixture = root / "tool_inheritance_fixture"
+    fixture.mkdir(parents=True, exist_ok=True)
+    marker_path = fixture / "marker.txt"
+    marker_path.write_text("GA_P8_REAL_TOOL_FILE_READ_MARKER\n", encoding="utf-8")
+    skill_root = fixture / "skills"
+    skill_dir = skill_root / "p8-real-tool-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: p8-real-tool-skill\ndescription: P8 real API tool inheritance smoke skill\nallowed-tools: [file_read, mcp__p8_stub__read_marker]\n---\n# P8 Real Tool Skill\nReturn the skill marker GA_P8_REAL_TOOL_SKILL_MARKER when summarizing this skill.\n",
+        encoding="utf-8",
+    )
+    return marker_path, skill_root
+
+
 def run_inherit_permission_smoke_case(root: Path) -> dict:
     store = WorkflowStore(root / "inherit_permission_smoke")
     run = store.create_run(WorkflowRun(run_id="wf_p8_inherit_permission_smoke", session_id="p8_real_api_inherit_permission", script=INHERIT_PERMISSION_SMOKE_SCRIPT, status="running"))
@@ -310,7 +343,8 @@ def run_inherit_permission_smoke_case(root: Path) -> dict:
         and metadata.get("permissionPolicyVersion") == "inherit-current-v1"
         and metadata.get("configName") == CONFIG_NAME
         and "transcriptEvents" not in result_data
-        and result_data.get("toolSummary") == {}
+        and set((result_data.get("toolSummary") or {}).get("allowedTools") or []) <= {"no_tool"}
+        and (result_data.get("toolSummary") or {}).get("denied", 0) == 0
         and len(str(payload.get("summary") or "")) > 0
         and jobs
         and jobs[0].get("resultExists")
@@ -335,6 +369,97 @@ def run_inherit_permission_smoke_case(root: Path) -> dict:
         "artifactDir": str(artifact_dir),
     }
 
+
+
+def _minimal_tool_inheritance_schema(mcp_schema: dict) -> list[dict]:
+    tools = json.loads((REPO / "assets" / "tools_schema.json").read_text(encoding="utf-8"))
+    selected = [tool for tool in tools if (tool.get("function") or {}).get("name") in {"file_read", "load_skill"}]
+    selected.append(mcp_schema)
+    return selected
+
+
+def run_tool_inheritance_real_api_case(root: Path) -> dict:
+    marker_path, skill_root = _make_tool_inheritance_fixture(root)
+    store = WorkflowStore(root / "tool_inheritance_smoke")
+    run = store.create_run(WorkflowRun(run_id="wf_p8_tool_inheritance_smoke", session_id="p8_real_api_tool_inheritance", script=TOOL_INHERITANCE_SCRIPT, status="running", permission_profile="read_only", permission_policy_version="read-only-v1"))
+    mcp_schema = {
+        "type": "function",
+        "function": {
+            "name": "mcp__p8_stub__read_marker",
+            "description": "Read a deterministic marker from the P8 in-process MCP stub.",
+            "parameters": {
+                "type": "object",
+                "properties": {"marker": {"type": "string"}},
+                "required": ["marker"],
+            },
+        },
+    }
+    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=512, max_turns=12, tools_schema_factory=lambda: _minimal_tool_inheritance_schema(mcp_schema))
+    runtime = WorkflowRuntime(
+        store=store,
+        runner=runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2),
+        timeout_seconds=360.0,
+    )
+    start = time.time()
+    with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_schema]), mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "GA_P8_REAL_TOOL_MCP_MARKER", "input": "GA_P8_REAL_TOOL_MCP_INPUT"}) as call_mcp:
+        outcome = runtime.run(run, args={"suite": "p8-real-api", "case": "native-tool-calling-file-skill-mcp", "markerPath": str(marker_path), "skillRoot": str(skill_root)})
+    elapsed = time.time() - start
+    loaded = store.load_run(run.run_id)
+    artifact_dir = Path(loaded.artifact_dir)
+    job = loaded.jobs[0] if loaded.jobs else None
+    result_path = artifact_dir / (job.result_ref or f"agents/{job.job_id}/result.json") if job else artifact_dir / "missing.json"
+    result_data = load_json(result_path) if result_path.exists() else {}
+    transcript_ref = (job.metadata.get("transcriptRef") if job else None) or result_data.get("transcriptRef")
+    transcript_path = artifact_dir / transcript_ref if transcript_ref else None
+    transcript_events = read_jsonl(transcript_path) if transcript_path and transcript_path.exists() else []
+    event_types_for_run = event_types(store, loaded.run_id)
+    tool_calls = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_call"]
+    tool_results = [event for event in transcript_events if event.get("type") == "tool_result"]
+    allowed_tools = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_allowed"]
+    tool_summary = result_data.get("toolSummary") or {}
+    payload = result_data.get("payload") or {}
+    denied_tools = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_denied"]
+    expected_tools = {"file_read", "load_skill", "mcp__p8_stub__read_marker"}
+    skill_ok = any(event.get("toolName") == "load_skill" and (event.get("data") or {}).get("status") == "success" and (event.get("data") or {}).get("name") == "p8-real-tool-skill" and "GA_P8_REAL_TOOL_SKILL_MARKER" in str(event.get("data")) for event in tool_results)
+    file_ok = any(event.get("toolName") == "file_read" and "GA_P8_REAL_TOOL_FILE_READ_MARKER" in str(event.get("data")) for event in tool_results)
+    mcp_ok = any(event.get("toolName") == "mcp__p8_stub__read_marker" and "GA_P8_REAL_TOOL_MCP_MARKER" in str(event.get("data")) for event in tool_results)
+    passed = (
+        outcome.run.status == "succeeded"
+        and loaded.status == "succeeded"
+        and runner.started_job_ids == ["agent_1"]
+        and bool(job and job.status == "succeeded")
+        and expected_tools.issubset(set(tool_calls))
+        and expected_tools.issubset(set(allowed_tools))
+        and expected_tools.issubset(set(tool_summary.get("allowedTools") or []))
+        and tool_summary.get("denied") == 0
+        and not denied_tools
+        and file_ok
+        and skill_ok
+        and mcp_ok
+        and call_mcp.call_count == 1
+        and "transcriptEvents" not in result_data
+        and len(str(payload.get("summary") or "")) > 0
+    )
+    return {
+        "passed": passed,
+        "elapsedSeconds": round(elapsed, 2),
+        "runId": loaded.run_id,
+        "status": loaded.status,
+        "startedJobIds": runner.started_job_ids,
+        "eventCounts": {etype: event_types_for_run.count(etype) for etype in sorted(set(event_types_for_run))},
+        "toolCalls": tool_calls,
+        "allowedTools": allowed_tools,
+        "deniedTools": denied_tools,
+        "toolSummary": tool_summary,
+        "fileReadOk": file_ok,
+        "skillLoadOk": skill_ok,
+        "mcpReadOk": mcp_ok,
+        "mcpCallCount": call_mcp.call_count,
+        "resultJsonOmitsTranscriptEvents": "transcriptEvents" not in result_data,
+        "summaryLength": len(str(payload.get("summary") or "")),
+        "artifactDir": str(artifact_dir),
+    }
 
 
 def run_runtime_real_api_case(root: Path) -> dict:
@@ -700,18 +825,20 @@ def main() -> int:
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
             inherit_permission_smoke = run_inherit_permission_smoke_case(root)
+            tool_inheritance_smoke = run_tool_inheritance_real_api_case(root)
             runtime_case = run_runtime_real_api_case(root)
             failed_resume_case = run_failed_source_resume_real_api_case(root)
             killed_resume_case = run_killed_source_resume_real_api_case(root)
             bridge_case = run_bridge_real_api_case(root)
         summary["capturedLogChars"] = len(captured.getvalue())
         summary["cases"]["inheritPermissionSmoke"] = inherit_permission_smoke
+        summary["cases"]["nativeToolCallingFileSkillMcp"] = tool_inheritance_smoke
         summary["cases"]["runtimeAgentParallelPipelineResume"] = runtime_case
         summary["cases"]["failedSourceResumeLongestPrefix"] = failed_resume_case
         summary["cases"]["killedSourceResumeLongestPrefix"] = killed_resume_case
         summary["cases"]["bridgeDraftApproveFinal"] = bridge_case
         summary["secretScan"] = scan_for_secret_material(root)
-        summary["passed"] = inherit_permission_smoke.get("passed") and runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
+        summary["passed"] = inherit_permission_smoke.get("passed") and tool_inheritance_smoke.get("passed") and runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
         return 0 if summary["passed"] else 2
     except Exception as exc:
         summary["error"] = f"{type(exc).__name__}: {exc}"
