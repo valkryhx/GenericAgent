@@ -46,7 +46,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
 | **Unit (Bridge)** | 正常路径 + 部分拒绝路径 | `test_ink_bridge.py` | 6 |
-| **Real API E2E** | 正常主路径 + failed/killed resume（工作区已验证，未提交） | `p8_real_api_e2e.py` | 4 cases |
+| **Real API E2E** | 正常主路径 + failed/killed resume（已由 `93c635e` 提交）+ 权限继承 metadata smoke（opt-in） | `p8_real_api_e2e.py` | 5 cases |
 | **Bridge E2E** | 仅正常路径（succeeded 终态） | `p8_real_api_e2e.py` | 1 case |
 
 ### 1.4 总体覆盖度估算
@@ -88,7 +88,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | 连续 3 轮全部通过 | `runtime_case` + `failed_resume_case` + `killed_resume_case` + `bridge_case` 全部 `passed == True` |
 | `secretScan: []` | `scan_for_secret_material()` 返回空列表 |
 
-### 2.2 Failed Source Run Resume（已验证，未提交）
+### 2.2 Failed Source Run Resume（已由 `93c635e` 提交）
 
 **用例：** `run_failed_source_resume_real_api_case()`
 
@@ -105,7 +105,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Event 计数正确 | `agent_cached: 1`, `agent_started: 1`, `agent_completed: 1` |
 | Result marker 正确 | `"GA_P8_FAILED_RESUME_DONE"` |
 
-### 2.3 Killed Source Run Resume（已验证，未提交）
+### 2.3 Killed Source Run Resume（已由 `93c635e` 提交）
 
 **用例：** `run_killed_source_resume_real_api_case()`
 
@@ -121,7 +121,27 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Resumed run 最终 `succeeded` | 确认 |
 | Result marker 正确 | `"GA_P8_KILLED_RESUME_DONE"` |
 
-### 2.4 Bridge Draft/Approve/Final 成功（已提交）
+### 2.4 权限 / MCP / Skills / Tools 继承最小切片（已补半真实 E2E + opt-in smoke）
+
+**文件：** `tests/test_workflow_permission_inheritance_e2e.py` + `tests/p8_real_api_e2e.py`
+
+| 验收点 | 结果 |
+|---|---|
+| 默认 permission profile 为 `inherit-current-permissions` | deterministic E2E 断言 run/job/cacheKey |
+| policy version 为 `inherit-current-v1` | deterministic E2E 与真实 API smoke 均断言 metadata/cacheKey |
+| Child 通过真实 dispatch 使用内置写工具 | 半真实 runner 调用 `GenericAgentHandler.dispatch("file_write")`，inherit 下允许 |
+| Child 加载临时 skill | 使用 tempfile `SKILL.md`，`load_skill` 记录 active skill 与 allowed tools |
+| Child 调用 MCP 工具 | stub `mcp_runtime.call_mcp_tool`，inherit 下允许；read_only 下不执行 stub |
+| read_only 反事实 | 同一 runner 下 `file_write` 与非只读 MCP 被 deny |
+| Permission events 落盘 | child transcript 与 workflow journal 包含 `permission_profile_selected` / `tool_allowed` / `tool_denied` |
+| Result artifact 隔离 | `result.json` 不内联 `transcriptEvents`，只保留 `transcriptRef` / `toolSummary` / payload |
+| Parent transcript 隔离 | parent session transcript 不包含 child tool marker、skill marker、MCP marker 或 permission events |
+| Profile/version cache miss | profile 或 policy version 改变时不命中 source cache；完全相同时命中并复制 transcript |
+| 真实 API metadata smoke | `GA_RUN_REAL_API_E2E=1` 时新增单 job smoke，验证 Native child 在继承权限 metadata 下完成且摘要脱敏 |
+
+当前限制：真实 `NativeGPTChildAgentRunner` 仍只继承权限 metadata/prompt，不实例化 `GenericAgentHandler`，不让真实 LLM 主动调用内置工具、skills 或 MCP；完整执行链路仍是后续工作。
+
+### 2.5 Bridge Draft/Approve/Final 成功（已提交）
 
 **用例：** `run_bridge_real_api_case()`
 
@@ -249,10 +269,10 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | 维度 | 详情 |
 |---|---|
 | **缺口描述** | 这是最明确的约束之一：默认 workflow/child agent 权限不能 read-only，必须继承 GenericAgent 当前权限。当前 P8 真实 E2E 只测了 LLM 文本返回，没有让 child agent 真正使用任何工具/skills/MCP。 |
-| **当前覆盖** | Cache key 包含 permission 字段和 policy version（单元测试覆盖）。Permission 事件 journal 写入（成功/失败场景）。Store 层默认 profile 为 `"inherit-current-permissions"`。 |
-| **缺失内容** | ① Child agent 使用内置只读工具；② Child agent 调用测试 skill；③ Child agent 调用测试 MCP tool；④ 验证 profile 为 `inherit-current-permissions`；⑤ Tool summary artifact 写入；⑥ Child transcript 中 tool events 不污染 parent session transcript |
-| **风险评级** | **高** |
-| **建议优先级** | **P0** |
+| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；半真实 deterministic E2E 已覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；真实 API opt-in smoke 已覆盖 Native child 在继承权限 metadata/cacheKey 下完成。 |
+| **缺失内容** | ① 真实 `NativeGPTChildAgentRunner` 尚未实例化 `GenericAgentHandler`；② 真实 LLM child 尚不能主动调用并被拦截内置工具；③ 真实 Native child 尚未继承父 MCP discovery/call；④ 真实 Native child 尚未继承 active skill/allowed_tools；⑤ explicit approval 工作流内审批闭环仍缺失 |
+| **风险评级** | **中-高** |
+| **建议优先级** | **P0（执行链路后续）** |
 
 ### 项目 10：大 Artifact / Transcript 隔离 E2E
 

@@ -69,6 +69,16 @@ const result = await agent('Reply with one concise sentence containing token GA_
 return { marker: 'GA_P8_BRIDGE_DONE', length: String(result.summary || '').length };
 '''
 
+INHERIT_PERMISSION_SMOKE_SCRIPT = r'''
+phase('P8 Real API Permission Inheritance Smoke');
+log('start p8 real api permission inheritance smoke');
+const result = await agent('Return one short safe sentence. Do not call tools, MCP, or skills. Avoid secrets. Include token GA_P8_INHERIT_PERMISSION_SMOKE if natural.', {label:'inherit-permission-smoke'});
+return {
+  marker: 'GA_P8_INHERIT_PERMISSION_SMOKE_DONE',
+  summaryLength: String(result.summary || '').length
+};
+'''
+
 FAILED_SOURCE_SCRIPT = r'''
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
@@ -259,6 +269,72 @@ def check_profile(summary: dict) -> bool:
     summary["profile"] = profile
     summary["profileOk"] = ok
     return ok
+
+
+def run_inherit_permission_smoke_case(root: Path) -> dict:
+    store = WorkflowStore(root / "inherit_permission_smoke")
+    run = store.create_run(WorkflowRun(run_id="wf_p8_inherit_permission_smoke", session_id="p8_real_api_inherit_permission", script=INHERIT_PERMISSION_SMOKE_SCRIPT, status="running"))
+    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=64)
+    runtime = WorkflowRuntime(
+        store=store,
+        runner=runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2),
+        timeout_seconds=180.0,
+    )
+    start = time.time()
+    outcome = runtime.run(run, args={"suite": "p8-real-api", "case": "inherit-permission-smoke"})
+    elapsed = time.time() - start
+    loaded = store.load_run(run.run_id)
+    artifact_dir = Path(loaded.artifact_dir)
+    jobs = summarize_jobs(loaded, artifact_dir)
+    job = loaded.jobs[0] if loaded.jobs else None
+    result_path = artifact_dir / (job.result_ref or f"agents/{job.job_id}/result.json") if job else artifact_dir / "missing.json"
+    result_data = load_json(result_path) if result_path.exists() else {}
+    transcript_ref = (job.metadata.get("transcriptRef") if job else None) or result_data.get("transcriptRef")
+    transcript_path = artifact_dir / transcript_ref if transcript_ref else None
+    transcript_events = read_jsonl(transcript_path) if transcript_path and transcript_path.exists() else []
+    metadata_events = [event for event in transcript_events if event.get("type") == "metadata"]
+    metadata = metadata_events[0] if metadata_events else {}
+    event_types_for_run = event_types(store, loaded.run_id)
+    cache_key = (job.metadata.get("cacheKey") if job else {}) or {}
+    payload = result_data.get("payload") or {}
+    passed = (
+        outcome.run.status == "succeeded"
+        and loaded.status == "succeeded"
+        and runner.started_job_ids == ["agent_1"]
+        and len(loaded.jobs) == 1
+        and bool(job and job.status == "succeeded")
+        and cache_key.get("permissionProfile") == "inherit-current-permissions"
+        and cache_key.get("permissionPolicyVersion") == "inherit-current-v1"
+        and metadata.get("permissionProfile") == "inherit-current-permissions"
+        and metadata.get("permissionPolicyVersion") == "inherit-current-v1"
+        and metadata.get("configName") == CONFIG_NAME
+        and "transcriptEvents" not in result_data
+        and result_data.get("toolSummary") == {}
+        and len(str(payload.get("summary") or "")) > 0
+        and jobs
+        and jobs[0].get("resultExists")
+        and jobs[0].get("transcriptExists")
+    )
+    return {
+        "passed": passed,
+        "elapsedSeconds": round(elapsed, 2),
+        "runId": loaded.run_id,
+        "status": loaded.status,
+        "startedJobIds": runner.started_job_ids,
+        "eventCounts": {etype: event_types_for_run.count(etype) for etype in sorted(set(event_types_for_run))},
+        "jobs": jobs,
+        "permissionProfile": cache_key.get("permissionProfile"),
+        "permissionPolicyVersion": cache_key.get("permissionPolicyVersion"),
+        "metadataPermissionProfile": metadata.get("permissionProfile"),
+        "metadataPermissionPolicyVersion": metadata.get("permissionPolicyVersion"),
+        "metadataConfigName": metadata.get("configName"),
+        "resultJsonOmitsTranscriptEvents": "transcriptEvents" not in result_data,
+        "toolSummary": result_data.get("toolSummary"),
+        "summaryLength": len(str(payload.get("summary") or "")),
+        "artifactDir": str(artifact_dir),
+    }
+
 
 
 def run_runtime_real_api_case(root: Path) -> dict:
@@ -623,17 +699,19 @@ def main() -> int:
             return 2
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            inherit_permission_smoke = run_inherit_permission_smoke_case(root)
             runtime_case = run_runtime_real_api_case(root)
             failed_resume_case = run_failed_source_resume_real_api_case(root)
             killed_resume_case = run_killed_source_resume_real_api_case(root)
             bridge_case = run_bridge_real_api_case(root)
         summary["capturedLogChars"] = len(captured.getvalue())
+        summary["cases"]["inheritPermissionSmoke"] = inherit_permission_smoke
         summary["cases"]["runtimeAgentParallelPipelineResume"] = runtime_case
         summary["cases"]["failedSourceResumeLongestPrefix"] = failed_resume_case
         summary["cases"]["killedSourceResumeLongestPrefix"] = killed_resume_case
         summary["cases"]["bridgeDraftApproveFinal"] = bridge_case
         summary["secretScan"] = scan_for_secret_material(root)
-        summary["passed"] = runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
+        summary["passed"] = inherit_permission_smoke.get("passed") and runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
         return 0 if summary["passed"] else 2
     except Exception as exc:
         summary["error"] = f"{type(exc).__name__}: {exc}"

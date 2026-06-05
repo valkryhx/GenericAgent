@@ -121,7 +121,7 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2
 
 目标：验证 P8 最核心的“最长成功前缀复用”在失败、停止或中断 run 上也成立。
 
-当前进展：已完成 failed source run 与 killed source run 的真实 API E2E，并扩展到 `tests/p8_real_api_e2e.py`。这部分尚未提交。
+当前进展：已完成 failed source run 与 killed source run 的真实 API E2E，并已由 `93c635e` 提交到 `tests/p8_real_api_e2e.py`。
 
 已验证 failed source run resume：
 
@@ -243,14 +243,21 @@ awaiting_approval -> running -> interrupted
 
 用户明确要求：默认 workflow/child agent 权限不能 read-only，必须继承 GenericAgent 当前普通 agent 的内置工具、skills、MCP 权限。
 
-当前 P8 真实 E2E 只测了 LLM child agent 文本返回，没有让 child agent 真实使用：
+当前新增进展：
+
+- `tests/test_workflow_permission_inheritance_e2e.py` 增加默认可跑的半真实 deterministic E2E。
+- 覆盖 `inherit-current-permissions` 下 child 通过真实 `GenericAgentHandler.dispatch` 使用 `file_write`、`load_skill` 与 stub MCP tool。
+- 覆盖 `read_only` 反事实：同一 runner 下 `file_write` 与非只读 MCP 被阻断，`load_skill` 仍允许。
+- 覆盖 permission profile/version 进入 `cacheKey`，且 profile 或 policy version 改变时 resume cache miss；完全相同时 cache hit 并复制 transcript。
+- 验证 child transcript/journal 写入 permission/tool events，result artifact 不内联 `transcriptEvents`，parent session transcript 不包含 child tool/skill/MCP 细节。
+- `tests/p8_real_api_e2e.py` 增加 opt-in 最小真实 API smoke：在 `inherit-current-permissions` metadata/cache key 下使用 `NativeGPTChildAgentRunner` 完成单个真实 child run，默认不跑。
+
+仍未让真实 Native child agent 主动使用：
 
 - 内置工具。
 - skills。
 - MCP tools。
-- permission profile inheritance。
-- tool summary artifact。
-- child transcript 中 tool events 隔离。
+- tool permission enforcement 链路。
 
 建议覆盖：
 
@@ -346,7 +353,7 @@ awaiting_approval -> running -> interrupted
 2. `cache key 真实变体 E2E`：验证 args/prompt/options/permission profile 改动时 cache hit/miss 完全正确。
 3. `timeout / stop E2E`：最贴近真实网络环境、慢响应和任务超时问题。
 4. `rate limit / 并发压力真实 E2E`：最容易暴露真实 API 服务商限制。
-5. `权限 / MCP / skills / tools 继承 E2E`：最贴近 dynamic workflow 权限继承要求。
+5. `权限 / MCP / skills / tools 继承 E2E`：已补默认可跑的半真实 deterministic 最小切片与真实 API metadata smoke；后续重点是真实 Native child 的工具/skill/MCP 执行链路。
 
 ## 安全与执行约束
 
