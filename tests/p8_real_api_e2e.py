@@ -32,6 +32,7 @@ CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
 EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
 EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
+REAL_MCP_OPT_IN = os.environ.get("GA_RUN_REAL_MCP_E2E") == "1"
 
 SECRET_PATTERNS = [
     ("bearer", re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)),
@@ -93,6 +94,21 @@ After all three tool calls, return one short sentence containing GA_P8_REAL_TOOL
 });
 return {
   marker: 'GA_P8_REAL_TOOL_INHERITANCE_DONE',
+  summaryLength: String(result.summary || '').length
+};
+'''
+
+REAL_MCP_DIAGNOSTIC_SCRIPT = r'''
+phase('P8 Real MCP Diagnostic');
+log('start p8 real non-mock mcp diagnostic');
+const result = await agent(`Use the real MCP tool ${args.toolName} exactly once before final answer.
+Call it with exactly this JSON argument object: ${args.toolArgsJson}.
+After the tool call, return one short sentence containing token GA_P8_REAL_MCP_DIAGNOSTIC_DONE.
+Do not call file tools, do not call skills, do not read mykey.py, mykey.json, or mcp.json, and do not call any other tool.`, {
+  label:'real-mcp-diagnostic'
+});
+return {
+  marker: 'GA_P8_REAL_MCP_DIAGNOSTIC_DONE',
   summaryLength: String(result.summary || '').length
 };
 '''
@@ -462,6 +478,91 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
     }
 
 
+def _pick_real_mcp_diagnostic_tool() -> tuple[str | None, dict, dict]:
+    try:
+        import mcp_runtime
+        mcp_runtime.clear_mcp_cache()
+        mcp_runtime.reset_mcp_manager()
+        tools = mcp_runtime.discover_mcp_tools_cached(timeout=20)
+    except Exception as exc:
+        return None, {}, {"error": f"{type(exc).__name__}: {exc}"}
+    schemas_by_name = {(tool.get("function") or {}).get("name") or "": tool for tool in tools}
+    names = sorted(name for name in schemas_by_name if name)
+    preferred = [
+        ("mcp__fetch__fetch", {"url": "https://example.com", "max_length": 200}),
+        ("mcp__context7__resolve-library-id", {"libraryName": "React", "query": "Resolve React docs for P8 real MCP diagnostic."}),
+        ("mcp__tavily__tavily_search", {"query": "React official documentation", "max_results": 1, "search_depth": "basic", "topic": "general"}),
+        ("mcp__exa__web_search_exa", {"query": "React official documentation", "numResults": 1}),
+        ("mcp__memory__search_nodes", {"query": "P8 real MCP diagnostic"}),
+    ]
+    for name, args in preferred:
+        if name in names:
+            return name, args, {"availableToolCount": len(names), "selectedFrom": "preferred", "schema": schemas_by_name[name]}
+    for name in names:
+        if "search" in name or "query" in name or "resolve" in name:
+            return name, {"query": "P8 real MCP diagnostic"}, {"availableToolCount": len(names), "selectedFrom": "fallback", "schema": schemas_by_name[name]}
+    return None, {}, {"availableToolCount": len(names), "availableToolsSample": names[:20], "error": "no suitable real MCP diagnostic tool discovered"}
+
+
+def run_real_mcp_diagnostic_case(root: Path) -> dict:
+    if not REAL_MCP_OPT_IN:
+        return {"passed": False, "skipped": True, "reason": "set GA_RUN_REAL_MCP_E2E=1 to run non-mock real MCP diagnostic"}
+    tool_name, tool_args, discovery = _pick_real_mcp_diagnostic_tool()
+    if not tool_name:
+        return {"passed": False, "skipped": True, "reason": discovery.get("error") or "no real MCP tool discovered", "discovery": sanitize(discovery)}
+    selected_schema = discovery.pop("schema", None)
+    if not selected_schema:
+        return {"passed": False, "skipped": True, "reason": "selected real MCP schema is missing", "discovery": sanitize(discovery)}
+    store = WorkflowStore(root / "real_mcp_diagnostic")
+    run = store.create_run(WorkflowRun(run_id="wf_p8_real_mcp_diagnostic", session_id="p8_real_api_real_mcp", script=REAL_MCP_DIAGNOSTIC_SCRIPT, status="running", permission_profile="read_only", permission_policy_version="read-only-v1"))
+    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=384, max_turns=8, tools_schema_factory=lambda: [selected_schema])
+    runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2), timeout_seconds=360.0)
+    start = time.time()
+    error = None
+    try:
+        outcome = runtime.run(run, args={"suite": "p8-real-api", "case": "real-mcp-diagnostic", "toolName": tool_name, "toolArgsJson": json.dumps(tool_args, ensure_ascii=False)})
+    except Exception as exc:
+        outcome = None
+        error = f"{type(exc).__name__}: {exc}"
+    elapsed = time.time() - start
+    loaded = store.load_run(run.run_id)
+    artifact_dir = Path(loaded.artifact_dir)
+    job = loaded.jobs[0] if loaded.jobs else None
+    result_path = artifact_dir / (job.result_ref or f"agents/{job.job_id}/result.json") if job else artifact_dir / "missing.json"
+    result_data = load_json(result_path) if result_path.exists() else {}
+    transcript_ref = (job.metadata.get("transcriptRef") if job else None) or result_data.get("transcriptRef")
+    transcript_path = artifact_dir / transcript_ref if transcript_ref else None
+    transcript_events = read_jsonl(transcript_path) if transcript_path and transcript_path.exists() else []
+    tool_calls = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_call"]
+    tool_results = [event for event in transcript_events if event.get("type") == "tool_result"]
+    allowed_tools = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_allowed"]
+    denied_tools = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_denied"]
+    tool_result_text = "\n".join(str(event.get("data"))[:1000] for event in tool_results if event.get("toolName") == tool_name)
+    mcp_called = tool_name in tool_calls
+    mcp_returned = any(event.get("toolName") == tool_name for event in tool_results)
+    return {
+        "passed": bool((outcome is not None and outcome.run.status == "succeeded") and loaded.status == "succeeded" and mcp_called and mcp_returned and not denied_tools),
+        "diagnosticOnly": True,
+        "skipped": False,
+        "elapsedSeconds": round(elapsed, 2),
+        "runId": loaded.run_id,
+        "status": loaded.status,
+        "error": sanitize(error),
+        "selectedTool": tool_name,
+        "selectedArgs": sanitize(tool_args),
+        "discovery": sanitize(discovery),
+        "startedJobIds": runner.started_job_ids,
+        "toolCalls": tool_calls,
+        "allowedTools": allowed_tools,
+        "deniedTools": denied_tools,
+        "toolSummary": result_data.get("toolSummary"),
+        "mcpCalled": mcp_called,
+        "mcpReturned": mcp_returned,
+        "toolResultPreview": sanitize(tool_result_text[:1000]),
+        "artifactDir": str(artifact_dir),
+    }
+
+
 def run_runtime_real_api_case(root: Path) -> dict:
     store = WorkflowStore(root / "runtime")
     run = store.create_run(WorkflowRun(run_id="wf_p8_runtime_source", session_id="p8_real_api_runtime", script=RUNTIME_SCRIPT, status="running"))
@@ -813,6 +914,7 @@ def main() -> int:
         "cases": {},
         "secretScan": [],
         "error": None,
+        "diagnostics": {},
     }
     if not OPT_IN:
         summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real API workflow E2E"})
@@ -830,6 +932,13 @@ def main() -> int:
             failed_resume_case = run_failed_source_resume_real_api_case(root)
             killed_resume_case = run_killed_source_resume_real_api_case(root)
             bridge_case = run_bridge_real_api_case(root)
+            if REAL_MCP_OPT_IN:
+                try:
+                    real_mcp_diagnostic = run_real_mcp_diagnostic_case(root)
+                except Exception as exc:
+                    real_mcp_diagnostic = {"passed": False, "diagnosticOnly": True, "error": f"{type(exc).__name__}: {exc}"}
+            else:
+                real_mcp_diagnostic = None
         summary["capturedLogChars"] = len(captured.getvalue())
         summary["cases"]["inheritPermissionSmoke"] = inherit_permission_smoke
         summary["cases"]["nativeToolCallingFileSkillMcp"] = tool_inheritance_smoke
@@ -837,6 +946,8 @@ def main() -> int:
         summary["cases"]["failedSourceResumeLongestPrefix"] = failed_resume_case
         summary["cases"]["killedSourceResumeLongestPrefix"] = killed_resume_case
         summary["cases"]["bridgeDraftApproveFinal"] = bridge_case
+        if real_mcp_diagnostic is not None:
+            summary["diagnostics"]["realMcpDiagnostic"] = real_mcp_diagnostic
         summary["secretScan"] = scan_for_secret_material(root)
         summary["passed"] = inherit_permission_smoke.get("passed") and tool_inheritance_smoke.get("passed") and runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
         return 0 if summary["passed"] else 2
