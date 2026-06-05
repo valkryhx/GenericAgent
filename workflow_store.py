@@ -32,6 +32,7 @@ class WorkflowStore:
         artifact_dir = self._run_dir(run)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = str(artifact_dir)
+        self._preserve_external_kill(run, artifact_dir)
         self._write_json(artifact_dir / "run.json", run.to_dict())
         self._write_json(artifact_dir / "state.json", run.to_dict())
         (artifact_dir / "script.js").write_text(run.script or "", encoding="utf-8")
@@ -190,6 +191,18 @@ class WorkflowStore:
 
     def _next_sequence(self, run_id: str) -> int:
         return max((event.sequence for event in self.replay_events(run_id)), default=0) + 1
+
+    def _preserve_external_kill(self, run: WorkflowRun, artifact_dir: Path) -> None:
+        if run.status == "killed":
+            return
+        state_path = artifact_dir / "state.json"
+        if not state_path.exists():
+            return
+        current = WorkflowRun.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+        if current.status != "killed":
+            return
+        run.status = "killed"
+        run.error = current.error
 
     @staticmethod
     def _write_json(path: Path, data: dict):

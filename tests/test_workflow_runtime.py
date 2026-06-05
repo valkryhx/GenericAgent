@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 
 from workflow_child_agent import AgentResult, FakeChildAgentRunner
-from workflow_models import WorkflowRun
+from workflow_models import WorkflowJob, WorkflowRun
 from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
+from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
 
 
@@ -532,6 +532,32 @@ return results
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("killed", final_result["status"])
             self.assertEqual("workflow_killed", store.replay_events("wf_test")[-1].event_type)
+
+    def test_runtime_preserves_external_kill_when_cancelling_stale_running_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_test",
+                    session_id="session_test",
+                    script="return await new Promise(() => {})",
+                    status="running",
+                    jobs=[WorkflowJob(job_id="agent_1", prompt="work", status="running")],
+                )
+            )
+            runtime = WorkflowRuntime(store=store, timeout_seconds=0.1)
+            scheduler = AgentScheduler(store=store, run=run, runner=runtime.runner, manage_run_completion=False)
+            killed = store.load_run("wf_test")
+            killed.status = "killed"
+            killed.error = "user requested stop"
+            store.save_run(killed)
+
+            runtime._cancel_unfinished_jobs(scheduler, reason="workflow runtime deadline exceeded")
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("killed", loaded.status)
+            self.assertEqual("user requested stop", loaded.error)
+            self.assertEqual("cancelled", loaded.jobs[0].status)
 
     def test_runtime_terminate_escalates_to_kill_and_waits(self):
         process = FakeProcessForTerminate()

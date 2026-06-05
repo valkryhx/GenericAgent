@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,49 @@ const result = await agent('Reply with one concise sentence containing token GA_
 return { marker: 'GA_P8_BRIDGE_DONE', length: String(result.summary || '').length };
 '''
 
+FAILED_SOURCE_SCRIPT = r'''
+phase('P8 Failed Source Resume E2E');
+log('start p8 failed source resume e2e');
+const first = await agent('Reply with one concise sentence containing token GA_P8_FAILED_PREFIX.', {label:'failed-prefix'});
+throw new Error('GA_P8_FORCED_SOURCE_FAILURE after prefix length ' + String(first.summary || '').length);
+'''
+
+RESUME_AFTER_FAILED_SCRIPT = r'''
+phase('P8 Failed Source Resume E2E');
+log('resume p8 failed source resume e2e');
+const first = await agent('Reply with one concise sentence containing token GA_P8_FAILED_PREFIX.', {label:'failed-prefix'});
+const second = await agent('Reply with one concise sentence containing token GA_P8_FAILED_RESUME_FRESH.', {label:'resume-fresh'});
+return {
+  marker: 'GA_P8_FAILED_RESUME_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length
+};
+'''
+
+KILLED_SOURCE_SCRIPT = r'''
+phase('P8 Killed Source Resume E2E');
+log('start p8 killed source resume e2e');
+const first = await agent('Reply with one concise sentence containing token GA_P8_KILLED_PREFIX.', {label:'killed-prefix'});
+const second = await agent('Reply with one concise sentence containing token GA_P8_KILLED_SOURCE_SHOULD_BE_CANCELLED.', {label:'killed-cancelled'});
+return {
+  marker: 'GA_P8_KILLED_SOURCE_UNEXPECTED_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length
+};
+'''
+
+RESUME_AFTER_KILLED_SCRIPT = r'''
+phase('P8 Killed Source Resume E2E');
+log('resume p8 killed source resume e2e');
+const first = await agent('Reply with one concise sentence containing token GA_P8_KILLED_PREFIX.', {label:'killed-prefix'});
+const second = await agent('Reply with one concise sentence containing token GA_P8_KILLED_RESUME_FRESH.', {label:'killed-resume-fresh'});
+return {
+  marker: 'GA_P8_KILLED_RESUME_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length
+};
+'''
+
 
 class CountingNativeRunner(NativeGPTChildAgentRunner):
     def __init__(self, **kwargs):
@@ -77,6 +121,24 @@ class CountingNativeRunner(NativeGPTChildAgentRunner):
     def start(self, job) -> None:
         self.started_job_ids.append(job.job_id)
         return super().start(job)
+
+
+class GateOnSecondStartRunner(CountingNativeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.second_started = threading.Event()
+        self.cancelled_job_ids: list[str] = []
+
+    def start(self, job) -> None:
+        if job.job_id == "agent_2":
+            self.started_job_ids.append(job.job_id)
+            self.second_started.set()
+            return
+        return super().start(job)
+
+    def cancel(self, job) -> None:
+        self.cancelled_job_ids.append(job.job_id)
+        return None
 
 
 class MinimalAgent:
@@ -272,6 +334,211 @@ def run_runtime_real_api_case(root: Path) -> dict:
     }
 
 
+def run_failed_source_resume_real_api_case(root: Path) -> dict:
+    store = WorkflowStore(root / "failed_resume")
+    source = store.create_run(WorkflowRun(run_id="wf_p8_failed_source", session_id="p8_real_api_failed_resume", script=FAILED_SOURCE_SCRIPT, status="running"))
+    source_runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=96)
+    source_runtime = WorkflowRuntime(
+        store=store,
+        runner=source_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+        timeout_seconds=240.0,
+    )
+    start = time.time()
+    source_error = None
+    try:
+        source_runtime.run(source, args={"suite": "p8-real-api", "case": "failed-resume"})
+    except Exception as exc:
+        source_error = f"{type(exc).__name__}: {exc}"
+    elapsed = time.time() - start
+    source_loaded = store.load_run(source.run_id)
+    source_artifact_dir = Path(source_loaded.artifact_dir)
+    source_jobs = summarize_jobs(source_loaded, source_artifact_dir)
+    source_types = event_types(store, source.run_id)
+
+    resumed = store.create_run(WorkflowRun(run_id="wf_p8_failed_resumed", session_id="p8_real_api_failed_resume", script=RESUME_AFTER_FAILED_SCRIPT, status="running"))
+    resume_runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=96)
+    resume_runtime = WorkflowRuntime(
+        store=store,
+        runner=resume_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+        timeout_seconds=240.0,
+    )
+    resume_outcome = resume_runtime.run(resumed, args={"suite": "p8-real-api", "case": "failed-resume"}, resume_from_run_id=source_loaded.run_id)
+    resumed_loaded = store.load_run(resumed.run_id)
+    resumed_artifact_dir = Path(resumed_loaded.artifact_dir)
+    resumed_jobs = summarize_jobs(resumed_loaded, resumed_artifact_dir)
+    resumed_types = event_types(store, resumed.run_id)
+
+    source_ok = (
+        source_loaded.status == "failed"
+        and source_error is not None
+        and "GA_P8_FORCED_SOURCE_FAILURE" in source_error
+        and source_runner.started_job_ids == ["agent_1"]
+        and len(source_loaded.jobs) == 1
+        and source_jobs[0]["status"] == "succeeded"
+        and source_jobs[0]["resultExists"]
+        and source_jobs[0]["transcriptExists"]
+        and "workflow_failed" in source_types
+    )
+    resume_ok = (
+        resumed_loaded.status == "succeeded"
+        and resume_runner.started_job_ids == ["agent_2"]
+        and len(resumed_loaded.jobs) == 2
+        and resumed_jobs[0]["status"] == "cached"
+        and resumed_jobs[0]["cachedFromRunId"] == source_loaded.run_id
+        and resumed_jobs[0]["cachedFromJobId"] == "agent_1"
+        and resumed_jobs[0]["resultExists"]
+        and resumed_jobs[0]["transcriptExists"]
+        and resumed_jobs[1]["status"] == "succeeded"
+        and resumed_jobs[1]["resultExists"]
+        and resumed_jobs[1]["transcriptExists"]
+        and resumed_types.count("agent_cached") == 1
+        and resumed_types.count("agent_started") == 1
+        and resumed_types.count("agent_completed") == 1
+        and (resume_outcome.result or {}).get("marker") == "GA_P8_FAILED_RESUME_DONE"
+    )
+    return {
+        "passed": source_ok and resume_ok,
+        "elapsedSeconds": round(elapsed, 2),
+        "sourceRunId": source_loaded.run_id,
+        "sourceStatus": source_loaded.status,
+        "sourceError": sanitize(source_error),
+        "sourceStartedJobIds": source_runner.started_job_ids,
+        "sourceEventCounts": {etype: source_types.count(etype) for etype in sorted(set(source_types))},
+        "sourceJobs": source_jobs,
+        "resumedRunId": resumed_loaded.run_id,
+        "resumedStatus": resumed_loaded.status,
+        "resumedStartedJobIds": resume_runner.started_job_ids,
+        "resumedEventCounts": {etype: resumed_types.count(etype) for etype in sorted(set(resumed_types))},
+        "resumedJobs": resumed_jobs,
+        "resumeResultShape": sanitize(resume_outcome.result),
+        "artifactDir": str(source_artifact_dir),
+        "resumedArtifactDir": str(resumed_artifact_dir),
+    }
+
+
+
+def run_killed_source_resume_real_api_case(root: Path) -> dict:
+    store = WorkflowStore(root / "killed_resume")
+    source = store.create_run(WorkflowRun(run_id="wf_p8_killed_source", session_id="p8_real_api_killed_resume", script=KILLED_SOURCE_SCRIPT, status="running"))
+    source_runner = GateOnSecondStartRunner(config_name=CONFIG_NAME, max_tokens=96)
+    source_runtime = WorkflowRuntime(
+        store=store,
+        runner=source_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+        timeout_seconds=360.0,
+    )
+    errors: list[str] = []
+    start = time.time()
+
+    def run_source():
+        try:
+            source_runtime.run(source, args={"suite": "p8-real-api", "case": "killed-resume"})
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    thread = threading.Thread(target=run_source, daemon=True)
+    thread.start()
+    second_seen = False
+    second_deadline = time.time() + 240.0
+    while time.time() < second_deadline:
+        try:
+            current = store.load_run(source.run_id)
+            source_events = store.replay_events(source.run_id)
+        except Exception:
+            time.sleep(0.05)
+            continue
+        second_seen = any(event.event_type == "agent_started" and event.job_id == "agent_2" for event in source_events) and any(job.job_id == "agent_2" and job.status == "running" for job in current.jobs)
+        if second_seen:
+            break
+        time.sleep(0.05)
+    if second_seen:
+        killed = store.load_run(source.run_id)
+        killed.status = "killed"
+        killed.error = "GA_P8_FORCED_SOURCE_KILL"
+        store.save_run(killed)
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            current = store.load_run(source.run_id)
+            if current.status == "killed" and any(job.status == "cancelled" for job in current.jobs):
+                break
+            time.sleep(0.05)
+    elapsed = time.time() - start
+    source_loaded = store.load_run(source.run_id)
+    source_artifact_dir = Path(source_loaded.artifact_dir)
+    source_jobs = summarize_jobs(source_loaded, source_artifact_dir)
+    source_types = event_types(store, source.run_id)
+
+    resumed = store.create_run(WorkflowRun(run_id="wf_p8_killed_resumed", session_id="p8_real_api_killed_resume", script=RESUME_AFTER_KILLED_SCRIPT, status="running"))
+    resume_runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=96)
+    resume_runtime = WorkflowRuntime(
+        store=store,
+        runner=resume_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+        timeout_seconds=240.0,
+    )
+    resume_outcome = resume_runtime.run(resumed, args={"suite": "p8-real-api", "case": "killed-resume"}, resume_from_run_id=source_loaded.run_id)
+    resumed_loaded = store.load_run(resumed.run_id)
+    resumed_artifact_dir = Path(resumed_loaded.artifact_dir)
+    resumed_jobs = summarize_jobs(resumed_loaded, resumed_artifact_dir)
+    resumed_types = event_types(store, resumed.run_id)
+
+    source_ok = (
+        second_seen
+        and not thread.is_alive()
+        and source_loaded.status == "killed"
+        and bool(errors)
+        and "GA_P8_FORCED_SOURCE_KILL" in errors[0]
+        and source_runner.started_job_ids == ["agent_1", "agent_2"]
+        and len(source_loaded.jobs) == 2
+        and source_jobs[0]["status"] == "succeeded"
+        and source_jobs[0]["resultExists"]
+        and source_jobs[0]["transcriptExists"]
+        and source_jobs[1]["status"] == "cancelled"
+        and "workflow_killed" in source_types
+    )
+    resume_ok = (
+        resumed_loaded.status == "succeeded"
+        and resume_runner.started_job_ids == ["agent_2"]
+        and len(resumed_loaded.jobs) == 2
+        and resumed_jobs[0]["status"] == "cached"
+        and resumed_jobs[0]["cachedFromRunId"] == source_loaded.run_id
+        and resumed_jobs[0]["cachedFromJobId"] == "agent_1"
+        and resumed_jobs[0]["resultExists"]
+        and resumed_jobs[0]["transcriptExists"]
+        and resumed_jobs[1]["status"] == "succeeded"
+        and resumed_jobs[1]["resultExists"]
+        and resumed_jobs[1]["transcriptExists"]
+        and resumed_types.count("agent_cached") == 1
+        and resumed_types.count("agent_started") == 1
+        and resumed_types.count("agent_completed") == 1
+        and (resume_outcome.result or {}).get("marker") == "GA_P8_KILLED_RESUME_DONE"
+    )
+    return {
+        "passed": source_ok and resume_ok,
+        "elapsedSeconds": round(elapsed, 2),
+        "sourceRunId": source_loaded.run_id,
+        "sourceStatus": source_loaded.status,
+        "sourceErrors": sanitize(errors),
+        "sourceSecondStarted": second_seen,
+        "sourceThreadAlive": thread.is_alive(),
+        "sourceStartedJobIds": source_runner.started_job_ids,
+        "sourceCancelledJobIds": source_runner.cancelled_job_ids,
+        "sourceEventCounts": {etype: source_types.count(etype) for etype in sorted(set(source_types))},
+        "sourceJobs": source_jobs,
+        "resumedRunId": resumed_loaded.run_id,
+        "resumedStatus": resumed_loaded.status,
+        "resumedStartedJobIds": resume_runner.started_job_ids,
+        "resumedEventCounts": {etype: resumed_types.count(etype) for etype in sorted(set(resumed_types))},
+        "resumedJobs": resumed_jobs,
+        "resumeResultShape": sanitize(resume_outcome.result),
+        "artifactDir": str(source_artifact_dir),
+        "resumedArtifactDir": str(resumed_artifact_dir),
+    }
+
+
+
 def run_bridge_real_api_case(root: Path) -> dict:
     events: list[dict] = []
     runtime_started_jobs: list[str] = []
@@ -357,12 +624,16 @@ def main() -> int:
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
             runtime_case = run_runtime_real_api_case(root)
+            failed_resume_case = run_failed_source_resume_real_api_case(root)
+            killed_resume_case = run_killed_source_resume_real_api_case(root)
             bridge_case = run_bridge_real_api_case(root)
         summary["capturedLogChars"] = len(captured.getvalue())
         summary["cases"]["runtimeAgentParallelPipelineResume"] = runtime_case
+        summary["cases"]["failedSourceResumeLongestPrefix"] = failed_resume_case
+        summary["cases"]["killedSourceResumeLongestPrefix"] = killed_resume_case
         summary["cases"]["bridgeDraftApproveFinal"] = bridge_case
         summary["secretScan"] = scan_for_secret_material(root)
-        summary["passed"] = runtime_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
+        summary["passed"] = runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
         return 0 if summary["passed"] else 2
     except Exception as exc:
         summary["error"] = f"{type(exc).__name__}: {exc}"
