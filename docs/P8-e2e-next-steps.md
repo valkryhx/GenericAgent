@@ -37,6 +37,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | `0a3b330` | 接入 Ink 工作流协议 |
 | `f840926` | 增加 Ink 工作流审批界面 |
 | **`aa0a2b0`** | **实现 P8 resume 缓存复用（关键交付提交）** |
+| `93c635e` | 补充 P8 failed 和 killed resume 真实 E2E |
+| `fa2954d` | 补充 P8 权限继承 deterministic E2E |
+| `0eee3ef` | 补完 Native child 工具继承验证 |
+| `4f4e04f` | 补充真实 API 工具继承 E2E |
+| `42b0b6c` | 增加真实 MCP 诊断 E2E |
 
 ### 1.3 按层覆盖总结
 
@@ -46,7 +51,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
 | **Unit (Bridge)** | 正常路径 + 部分拒绝路径 | `test_ink_bridge.py` | 6 |
-| **Real API E2E** | 正常主路径 + failed/killed resume（已由 `93c635e` 提交）+ 权限继承 metadata smoke（opt-in） | `p8_real_api_e2e.py` | 5 cases |
+| **Real API E2E** | 正常主路径 + failed/killed resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 MCP diagnostic（opt-in） | `p8_real_api_e2e.py` | 6 main cases + 1 diagnostic |
 | **Bridge E2E** | 仅正常路径（succeeded 终态） | `p8_real_api_e2e.py` | 1 case |
 
 ### 1.4 总体覆盖度估算
@@ -56,11 +61,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 - ✅ 完全覆盖（单元 + 真实 API E2E）：1 项（正常主路径）
 - 🔶 单元覆盖完全但无真实 API E2E：3 项（parallel 部分失败、kill/stop/interrupted、cache key 变体）
 - 🔶 单元覆盖部分 + 真实 API E2E 部分：3 项（超时边界、failed/killed resume、大 artifact 隔离）
-- ❌ 完全未覆盖（任何层级）：5 项（网络抖动、rate limit/429、bridge 终态事件、返回格式异常、权限/MCP/skills 继承）
+- ❌ 完全未覆盖（任何层级）：4 项（网络抖动、rate limit/429、bridge 终态事件、返回格式异常）
 
 **粗估百分比：**
 - 单元测试覆盖率：~85%（几乎全部核心路径已覆盖）
-- 真实 API E2E 覆盖率：~25%（仅正常路径和 failed/killed resume）
+- 真实 API E2E 覆盖率：~40%（正常路径、failed/killed resume、权限/工具/skill/MCP 继承与真实 MCP diagnostic 已覆盖）
 - Bridge E2E 覆盖率：~15%（仅 succeeded 路径）
 
 ---
@@ -121,25 +126,27 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Resumed run 最终 `succeeded` | 确认 |
 | Result marker 正确 | `"GA_P8_KILLED_RESUME_DONE"` |
 
-### 2.4 权限 / MCP / Skills / Tools 继承最小切片（已补半真实 E2E + opt-in smoke）
+### 2.4 权限 / MCP / Skills / Tools 继承（已补 Native child 执行链路 + 真实 API + 真实 MCP diagnostic）
 
-**文件：** `tests/test_workflow_permission_inheritance_e2e.py` + `tests/p8_real_api_e2e.py`
+**文件：** `tests/test_workflow_permission_inheritance_e2e.py` + `tests/test_workflow_child_agent.py` + `tests/p8_real_api_e2e.py` + `tests/test_p8_real_api_e2e_diagnostic.py`
 
 | 验收点 | 结果 |
 |---|---|
-| 默认 permission profile 为 `inherit-current-permissions` | deterministic E2E 断言 run/job/cacheKey |
+| 默认 permission profile 为 `inherit-current-permissions` | deterministic E2E 断言 run/job/cacheKey；真实 API smoke 断言 metadata/cacheKey |
 | policy version 为 `inherit-current-v1` | deterministic E2E 与真实 API smoke 均断言 metadata/cacheKey |
-| Child 通过真实 dispatch 使用内置写工具 | 半真实 runner 调用 `GenericAgentHandler.dispatch("file_write")`，inherit 下允许 |
-| Child 加载临时 skill | 使用 tempfile `SKILL.md`，`load_skill` 记录 active skill 与 allowed tools |
-| Child 调用 MCP 工具 | stub `mcp_runtime.call_mcp_tool`，inherit 下允许；read_only 下不执行 stub |
-| read_only 反事实 | 同一 runner 下 `file_write` 与非只读 MCP 被 deny |
+| Native child 接入工具执行链路 | `0eee3ef` 让 `NativeGPTChildAgentRunner` 通过 `agent_runner_loop -> GenericAgentHandler.dispatch -> ToolPermissionPolicy` 执行工具 |
+| Child 通过 dispatch 使用内置工具 | deterministic E2E 覆盖 `file_write`；Native child 测试覆盖 `file_read`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read` |
+| Child 加载临时 skill | deterministic E2E 与 Native child 测试覆盖 `load_skill`；真实 API case 验证真实模型主动调用并 `skillLoadOk=true` |
+| Child 调用受控 MCP 工具 | deterministic/Native child 测试覆盖 stub MCP；真实 API case 验证真实模型主动调用 `mcp__p8_stub__read_marker` 且 `mcpReadOk=true` |
+| 真实 MCP 非 mock 调用 | `42b0b6c` 新增 `GA_RUN_REAL_MCP_E2E=1` diagnostic-only case；实际调用 `mcp__fetch__fetch` 读取 `https://example.com`，返回 `Example Domain` |
+| read_only 反事实 | 同一 runner 下 `file_write` 与非只读 MCP 被 deny；只读命名 MCP 可按策略放行 |
 | Permission events 落盘 | child transcript 与 workflow journal 包含 `permission_profile_selected` / `tool_allowed` / `tool_denied` |
 | Result artifact 隔离 | `result.json` 不内联 `transcriptEvents`，只保留 `transcriptRef` / `toolSummary` / payload |
 | Parent transcript 隔离 | parent session transcript 不包含 child tool marker、skill marker、MCP marker 或 permission events |
 | Profile/version cache miss | profile 或 policy version 改变时不命中 source cache；完全相同时命中并复制 transcript |
-| 真实 API metadata smoke | `GA_RUN_REAL_API_E2E=1` 时新增单 job smoke，验证 Native child 在继承权限 metadata 下完成且摘要脱敏 |
+| 默认不烧真实 API/MCP | `python tests/p8_real_api_e2e.py` 默认 skip；真实 API 用 `GA_RUN_REAL_API_E2E=1`；真实 MCP 诊断另需 `GA_RUN_REAL_MCP_E2E=1` |
 
-当前限制：真实 `NativeGPTChildAgentRunner` 仍只继承权限 metadata/prompt，不实例化 `GenericAgentHandler`，不让真实 LLM 主动调用内置工具、skills 或 MCP；完整执行链路仍是后续工作。
+当前限制：真实 MCP diagnostic 是 diagnostic-only，不纳入主 `summary.passed` 门禁；结果依赖本机 MCP 配置、网络和外部 MCP 服务状态。Context7 未出现在 GenericAgent 当前 `mcp_runtime` discovery 列表中，当前真实 MCP 诊断覆盖的是已配置可用的 `fetch` MCP。
 
 ### 2.5 Bridge Draft/Approve/Final 成功（已提交）
 
@@ -155,7 +162,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Runtime 实际启动了 child agent | `runtime_started_jobs == ["agent_1"]` |
 | Event 完整性 | 关键事件全部出现 |
 
-### 2.5 单元测试覆盖的核心实现细节
+### 2.6 单元测试覆盖的核心实现细节
 
 | 实现细节 | 文件 | 测试方法 |
 |---|---|---|
@@ -268,11 +275,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 这是最明确的约束之一：默认 workflow/child agent 权限不能 read-only，必须继承 GenericAgent 当前权限。当前 P8 真实 E2E 只测了 LLM 文本返回，没有让 child agent 真正使用任何工具/skills/MCP。 |
-| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；半真实 deterministic E2E 已覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；真实 API opt-in smoke 已覆盖 Native child 在继承权限 metadata/cacheKey 下完成。 |
-| **缺失内容** | ① 真实 `NativeGPTChildAgentRunner` 尚未实例化 `GenericAgentHandler`；② 真实 LLM child 尚不能主动调用并被拦截内置工具；③ 真实 Native child 尚未继承父 MCP discovery/call；④ 真实 Native child 尚未继承 active skill/allowed_tools；⑤ explicit approval 工作流内审批闭环仍缺失 |
-| **风险评级** | **中-高** |
-| **建议优先级** | **P0（执行链路后续）** |
+| **缺口描述** | 该项原缺口是默认 workflow/child agent 不能退化为 read-only，且真实 Native child 要能使用工具/skills/MCP。当前已补默认 deterministic、Native child 本体、真实 API tool-calling、真实 MCP diagnostic 四层覆盖。 |
+| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；deterministic E2E 覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；`NativeGPTChildAgentRunner` 已接入 `GenericAgentHandler.dispatch`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read`/`load_skill`/stub MCP；`realMcpDiagnostic` 覆盖非 mock 真实 MCP `mcp__fetch__fetch`。 |
+| **剩余边界** | ① explicit approval 工作流内审批闭环仍缺失；② Context7 未出现在当前 GenericAgent MCP discovery 中，若本机后续配置 Context7，可补 Context7 专项 diagnostic；③ 真实 MCP diagnostic 是报告型，不纳入主门禁。 |
+| **风险评级** | **低-中** |
+| **建议优先级** | **P3（扩展/专项诊断）** |
 
 ### 项目 10：大 Artifact / Transcript 隔离 E2E
 
@@ -366,31 +373,24 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ---
 
-#### 4.3 权限 / MCP / Skills / Tools 继承 E2E
+#### 4.3 权限 / MCP / Skills / Tools 继承 E2E（已完成，保留扩展项）
 
-**目标：** 验证 child agent 默认权限继承 GenericAgent 当前权限（非 read-only），tool events 隔离在 child transcript 内。
+**状态：** 已由 `fa2954d`、`0eee3ef`、`4f4e04f`、`42b0b6c` 覆盖核心验收点。
 
-**前置条件：**
-- Store 层默认 permission profile 为 `"inherit-current-permissions"`（已实现）
-- Cache key 包含 permission 字段（已实现，已单元测试）
-- `PermissionEventsRunner` 已存在
+已完成：
+- Child agent 默认权限不是 read-only。
+- Native child 本体走 `GenericAgentHandler.dispatch`。
+- Tool events 只写入 child transcript / artifact。
+- Parent backend history 不包含 child tool transcript。
+- Cache key 包含 permission profile 和 policy version。
+- Permission profile/policy version 改动导致 cache miss。
+- 真实 API child 主动调用 `file_read`、`load_skill`、受控 MCP。
+- 真实 MCP 非 mock diagnostic 调用 `mcp__fetch__fetch`。
 
-**建议实现方式：**
-1. **单元测试扩展**：使用 FakeChildAgentRunner 注入 tool events，验证 bridge 事件路由
-2. **真实 runner 工具调用**：让 child agent 调用安全工具，验证：
-   - Tool summary artifact 写入
-   - Child transcript 包含 tool events
-   - Parent session transcript **不包含** child tool events
-3. **Permissions 继承验证**：验证 default profile 为 `inherit-current-permissions`
-
-**关键验收点：**
-- Child agent 默认权限不是 read-only
-- Tool events 只写入 child transcript / artifact
-- Parent backend history 不包含 child tool transcript
-- Cache key 包含正确的 permission profile 和 policy version
-- Permission profile 改动导致 cache miss
-
-**估计工作量：** 2-3 天
+剩余扩展项：
+- 如当前 GenericAgent MCP 配置后续加入 Context7，可补 Context7 专项 diagnostic。
+- explicit approval 工作流内审批闭环仍未覆盖。
+- 真实 MCP diagnostic 目前是 diagnostic-only，若要变成门禁需另行评估稳定性和成本。
 
 ---
 

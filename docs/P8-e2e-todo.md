@@ -243,37 +243,36 @@ awaiting_approval -> running -> interrupted
 
 用户明确要求：默认 workflow/child agent 权限不能 read-only，必须继承 GenericAgent 当前普通 agent 的内置工具、skills、MCP 权限。
 
-当前新增进展：
+当前新增进展（已提交）：
 
-- `tests/test_workflow_permission_inheritance_e2e.py` 增加默认可跑的半真实 deterministic E2E。
-- 覆盖 `inherit-current-permissions` 下 child 通过真实 `GenericAgentHandler.dispatch` 使用 `file_write`、`load_skill` 与 stub MCP tool。
-- 覆盖 `read_only` 反事实：同一 runner 下 `file_write` 与非只读 MCP 被阻断，`load_skill` 仍允许。
-- 覆盖 permission profile/version 进入 `cacheKey`，且 profile 或 policy version 改变时 resume cache miss；完全相同时 cache hit 并复制 transcript。
-- 验证 child transcript/journal 写入 permission/tool events，result artifact 不内联 `transcriptEvents`，parent session transcript 不包含 child tool/skill/MCP 细节。
-- `tests/p8_real_api_e2e.py` 增加 opt-in 最小真实 API smoke：在 `inherit-current-permissions` metadata/cache key 下使用 `NativeGPTChildAgentRunner` 完成单个真实 child run，默认不跑。
+- `fa2954d test(workflow): 补充 P8 权限继承 E2E` 增加默认可跑的半真实 deterministic E2E。
+- `0eee3ef test(workflow): 补完 Native child 工具继承验证` 让 `NativeGPTChildAgentRunner` 具备可测试的工具执行路径：`agent_runner_loop -> GenericAgentHandler.dispatch -> ToolPermissionPolicy`。
+- `4f4e04f test(workflow): 补充真实 API 工具继承 E2E` 在 opt-in 真实 API harness 中新增 `nativeToolCallingFileSkillMcp`，用真实 `native_oai_config` / `gpt-native` / `gpt-5.5` child agent 主动调用 `file_read`、`load_skill` 与受控 stub MCP。
+- `42b0b6c test(workflow): 增加真实 MCP 诊断 E2E` 在 `GA_RUN_REAL_MCP_E2E=1` 下新增 diagnostic-only 的真实 MCP 非 mock 调用，实际发现并调用 `mcp__fetch__fetch` 读取 `https://example.com`，返回 `Example Domain`。
 
-仍未让真实 Native child agent 主动使用：
+已覆盖：
 
-- 内置工具。
-- skills。
-- MCP tools。
-- tool permission enforcement 链路。
+- `inherit-current-permissions` 下 child 通过真实 `GenericAgentHandler.dispatch` 使用工具。
+- `read_only` 反事实：`file_write` 与非只读 MCP 被阻断，`load_skill` 仍允许。
+- permission profile/version 进入 `cacheKey`，且 profile 或 policy version 改变时 resume cache miss；完全相同时 cache hit 并复制 transcript。
+- child transcript/journal 写入 permission/tool events，result artifact 不内联 `transcriptEvents`，parent session transcript 不包含 child tool/skill/MCP 细节。
+- 真实 API `nativeToolCallingFileSkillMcp`：真实 child agent 的 `toolCalls` 包含 `file_read`、`load_skill`、`mcp__p8_stub__read_marker`、`no_tool`，`toolSummary.denied == 0`，`fileReadOk/skillLoadOk/mcpReadOk == true`。
+- 真实 MCP diagnostic：不 mock `mcp_runtime.call_mcp_tool`，通过真实 `mcp_runtime.discover_mcp_tools_cached()` 发现 MCP 工具，在 `GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1` 下真实调用 `mcp__fetch__fetch`，`mcpCalled/mcpReturned == true`，`secretScan: []`。
 
-建议覆盖：
+当前边界：
 
-- child agent 使用一个安全的内置只读工具。
-- child agent 调用一个测试 skill。
-- child agent 调用一个测试 MCP tool。
-- 验证 permission profile 为 `inherit-current-permissions`。
-- 验证 tool summary 写入 artifact。
-- 验证 child transcript 不污染 parent session transcript。
+- `nativeToolCallingFileSkillMcp` 中的 MCP 是受控 stub，用于稳定验证真实模型 tool-calling 与权限/转发链路。
+- `realMcpDiagnostic` 调用真实 MCP，但设计为 diagnostic-only，不纳入主 `summary.passed` 门禁；其结果依赖本机 MCP 配置、网络和外部 MCP 服务状态。
+- 当前未把 Context7 纳入 GenericAgent P8 runtime，因为 `mcp_runtime` 当前发现到的本机 MCP 工具包含 `fetch`、`memory`、`sequential-thinking`、`tavily`，未发现 context7。
 
-验收要点：
+验收要点状态：
 
-- 默认不是 read-only。
-- 继承权限信息进入 cache key。
-- tools/skills/MCP 调用事件只进入 child transcript/artifact。
-- parent backend history 不包含 child 内部 tool transcript。
+- 默认不是 read-only：已覆盖。
+- 继承权限信息进入 cache key：已覆盖。
+- tools/skills/MCP 调用事件只进入 child transcript/artifact：已覆盖。
+- parent backend history 不包含 child 内部 tool transcript：已覆盖。
+- 真实 API child 主动调用内置工具/skill/MCP：已覆盖。
+- 真实 MCP 非 mock 调用：已通过 diagnostic 覆盖。
 
 ### 10. 大 artifact / transcript 隔离 E2E
 
@@ -353,7 +352,7 @@ awaiting_approval -> running -> interrupted
 2. `cache key 真实变体 E2E`：验证 args/prompt/options/permission profile 改动时 cache hit/miss 完全正确。
 3. `timeout / stop E2E`：最贴近真实网络环境、慢响应和任务超时问题。
 4. `rate limit / 并发压力真实 E2E`：最容易暴露真实 API 服务商限制。
-5. `权限 / MCP / skills / tools 继承 E2E`：已补默认可跑的半真实 deterministic 最小切片与真实 API metadata smoke；后续重点是真实 Native child 的工具/skill/MCP 执行链路。
+5. `真实 MCP 覆盖扩展`：已补 diagnostic-only 的真实 `mcp__fetch__fetch` 非 mock 调用；如后续需要，可在本机 GenericAgent MCP 配置出现 Context7 后补 Context7 专项 diagnostic。
 
 ## 安全与执行约束
 
