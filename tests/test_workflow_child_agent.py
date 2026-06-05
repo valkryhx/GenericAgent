@@ -52,6 +52,53 @@ class StubSession:
         self.cancelled = True
 
 
+class StubToolFunction:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class StubToolCall:
+    def __init__(self, name, arguments, id="tool_1"):
+        import json
+        self.function = StubToolFunction(name, json.dumps(arguments))
+        self.id = id
+
+
+class StubToolResponse:
+    def __init__(self, content, tool_calls=None):
+        self.thinking = ""
+        self.content = content
+        self.tool_calls = tool_calls or []
+        self.raw = content
+        self.stop_reason = "tool_use" if self.tool_calls else "end_turn"
+
+
+class StubToolClient:
+    def __init__(self, responses, usage=None):
+        self.responses = list(responses)
+        self.requests = []
+        self.tools_seen = []
+        self.last_usage_tokens = usage if usage is not None else {"input_tokens": 5, "output_tokens": 4}
+        self.cancelled = False
+        self.last_tools = ""
+
+    def chat(self, messages, tools=None):
+        self.requests.append(messages)
+        self.tools_seen.append(tools)
+        if not self.responses:
+            raise AssertionError("no stub response available")
+        response = self.responses.pop(0)
+        def gen():
+            if response.content:
+                yield response.content
+            return response
+        return gen()
+
+    def cancel_current_request(self):
+        self.cancelled = True
+
+
 class NativeGPTChildAgentRunnerTest(unittest.TestCase):
     def wait_for_result(self, runner, job, timeout=2.0):
         deadline = time.time() + timeout
@@ -176,6 +223,107 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual(2, len(created))
         self.assertIsNot(created[0], created[1])
         self.assertEqual(2, sum(len(session.prompts) for session in created))
+
+    def test_native_tool_runner_allows_file_read_through_generic_handler_dispatch(self):
+        client = StubToolClient([
+            StubToolResponse("<summary>need read</summary>", [StubToolCall("file_read", {"path": __file__, "show_linenos": False})]),
+            StubToolResponse("<summary>done</summary>read complete"),
+        ])
+        job = WorkflowJob(
+            job_id="agent_tool_read",
+            prompt="read test file",
+            metadata={"runId": "wf_test", "permissionProfile": "inherit-current-permissions", "permissionPolicyVersion": "inherit-current-v1"},
+        )
+        tools = [
+            {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertIn("read complete", result.payload["text"])
+        self.assertEqual({"input_tokens": 5, "output_tokens": 4}, result.token_usage)
+        self.assertTrue(client.tools_seen and client.tools_seen[0] == tools)
+        self.assertTrue(any(event.get("type") == "tool_call" and event.get("toolName") == "file_read" for event in result.transcript_events))
+        self.assertTrue(any(event.get("type") == "tool_result" and event.get("toolName") == "file_read" for event in result.transcript_events))
+        self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
+        self.assertEqual(0, result.tool_summary["denied"])
+
+    def test_native_tool_runner_loads_skill_and_mcp_through_generic_handler_dispatch(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            skill_dir = os.path.join(td, "sample-skill")
+            os.makedirs(skill_dir)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("---\nname: sample-skill\ndescription: sample skill\nallowed-tools: [file_read]\n---\n# Sample skill\n")
+            client = StubToolClient([
+                StubToolResponse("<summary>load skill and mcp</summary>", [
+                    StubToolCall("load_skill", {"skill": "sample-skill", "search_roots": [td]}, id="tool_skill"),
+                    StubToolCall("mcp__deterministic__read_marker", {"marker": "ok"}, id="tool_mcp"),
+                ]),
+                StubToolResponse("<summary>done</summary>skill and mcp complete"),
+            ])
+            tools = [
+                {"type": "function", "function": {"name": "load_skill", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}},
+            ]
+            job = WorkflowJob(job_id="agent_tool_mcp", prompt="load skill and read marker", metadata={"runId": "wf_test"})
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "ok"}) as call_mcp:
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            call_mcp.assert_called_once_with("mcp__deterministic__read_marker", {"marker": "ok"})
+            self.assertIn("load_skill", result.tool_summary["allowedTools"])
+            self.assertIn("mcp__deterministic__read_marker", result.tool_summary["allowedTools"])
+            skill_results = [event for event in result.transcript_events if event.get("type") == "tool_result" and event.get("toolName") == "load_skill"]
+            self.assertEqual("success", skill_results[0]["data"]["status"])
+            self.assertEqual("sample-skill", skill_results[0]["data"]["name"])
+
+    def test_native_tool_runner_read_only_denies_write_and_non_read_mcp_before_dispatch(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            marker = os.path.join(td, "blocked.txt")
+            client = StubToolClient([
+                StubToolResponse("<summary>try writes</summary>", [
+                    StubToolCall("file_write", {"path": marker, "content": "blocked"}, id="tool_write"),
+                    StubToolCall("mcp__deterministic__write_marker", {"marker": "blocked"}, id="tool_mcp_write"),
+                ]),
+                StubToolResponse("<summary>done</summary>denied safely"),
+            ])
+            tools = [
+                {"type": "function", "function": {"name": "file_write", "parameters": {"type": "object", "properties": {}}}},
+                {"type": "function", "function": {"name": "mcp__deterministic__write_marker", "parameters": {"type": "object", "properties": {}}}},
+            ]
+            job = WorkflowJob(
+                job_id="agent_read_only",
+                prompt="try blocked writes",
+                metadata={"runId": "wf_test", "permissionProfile": "read_only", "permissionPolicyVersion": "read-only-v1"},
+            )
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("mcp_runtime.call_mcp_tool") as call_mcp:
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            self.assertFalse(os.path.exists(marker))
+            call_mcp.assert_not_called()
+            self.assertIn("file_write", result.tool_summary["deniedTools"])
+            self.assertIn("mcp__deterministic__write_marker", result.tool_summary["deniedTools"])
+            self.assertEqual(2, result.tool_summary["denied"])
+            self.assertTrue(any(event.get("type") == "tool_denied" and event.get("toolName") == "file_write" for event in result.transcript_events))
+            self.assertTrue(any(event.get("type") == "tool_result" and event.get("data", {}).get("permission", {}).get("action") == "deny" for event in result.transcript_events))
 
 
 if __name__ == "__main__":

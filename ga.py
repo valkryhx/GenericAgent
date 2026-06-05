@@ -288,7 +288,9 @@ class GenericAgentHandler(BaseHandler):
             if decision.action != 'allow':
                 status = 'approval_required' if decision.action == 'ask' else 'error'
                 yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
-                return StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                return ret
         if str(tool_name).startswith('mcp__'):
             args = args or {}
             args['_index'] = index; args['_tool_num'] = tool_num
