@@ -25,6 +25,8 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
     cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
     if code_type in ["python", "py"]:
+        if code_cwd is not None and not os.path.isdir(code_cwd):
+            return {"status": "error", "msg": f"code_cwd does not exist: {code_cwd}"}
         tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
         cr_header = os.path.join(script_dir, 'assets', 'code_run_header.py')
         if os.path.exists(cr_header):
@@ -96,7 +98,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         if 'process' in locals(): process.kill()
         return {"status": "error", "msg": str(e)}
     finally:
-        if code_type == "python" and tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
+        if code_type in ["python", "py"] and tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
 
 
 def ask_user(question, candidates=None):

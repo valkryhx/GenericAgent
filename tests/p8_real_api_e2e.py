@@ -902,6 +902,35 @@ def run_bridge_real_api_case(root: Path) -> dict:
     }
 
 
+def run_case_safely(case_name: str, fn, *args, diagnostic_only: bool = False, **kwargs) -> dict:
+    start = time.time()
+    try:
+        result = fn(*args, **kwargs)
+        if not isinstance(result, dict):
+            return {
+                "passed": False,
+                "skipped": False,
+                "diagnosticOnly": diagnostic_only,
+                "error": f"case returned non-dict: {type(result).__name__}",
+                "exceptionType": "InvalidCaseResult",
+                "elapsedSeconds": round(time.time() - start, 2),
+            }
+        result.setdefault("passed", False)
+        result.setdefault("skipped", False)
+        if diagnostic_only:
+            result.setdefault("diagnosticOnly", True)
+        return sanitize(result)
+    except Exception as exc:
+        return {
+            "passed": False,
+            "skipped": False,
+            "diagnosticOnly": diagnostic_only,
+            "error": sanitize(str(exc)),
+            "exceptionType": type(exc).__name__,
+            "elapsedSeconds": round(time.time() - start, 2),
+        }
+
+
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="ga_p8_real_api_e2e_"))
     summary: dict[str, Any] = {
@@ -926,30 +955,18 @@ def main() -> int:
             return 2
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            inherit_permission_smoke = run_inherit_permission_smoke_case(root)
-            tool_inheritance_smoke = run_tool_inheritance_real_api_case(root)
-            runtime_case = run_runtime_real_api_case(root)
-            failed_resume_case = run_failed_source_resume_real_api_case(root)
-            killed_resume_case = run_killed_source_resume_real_api_case(root)
-            bridge_case = run_bridge_real_api_case(root)
+            summary["cases"]["inheritPermissionSmoke"] = run_case_safely("inheritPermissionSmoke", run_inherit_permission_smoke_case, root)
+            summary["cases"]["nativeToolCallingFileSkillMcp"] = run_case_safely("nativeToolCallingFileSkillMcp", run_tool_inheritance_real_api_case, root)
+            summary["cases"]["runtimeAgentParallelPipelineResume"] = run_case_safely("runtimeAgentParallelPipelineResume", run_runtime_real_api_case, root)
+            summary["cases"]["failedSourceResumeLongestPrefix"] = run_case_safely("failedSourceResumeLongestPrefix", run_failed_source_resume_real_api_case, root)
+            summary["cases"]["killedSourceResumeLongestPrefix"] = run_case_safely("killedSourceResumeLongestPrefix", run_killed_source_resume_real_api_case, root)
+            summary["cases"]["bridgeDraftApproveFinal"] = run_case_safely("bridgeDraftApproveFinal", run_bridge_real_api_case, root)
             if REAL_MCP_OPT_IN:
-                try:
-                    real_mcp_diagnostic = run_real_mcp_diagnostic_case(root)
-                except Exception as exc:
-                    real_mcp_diagnostic = {"passed": False, "diagnosticOnly": True, "error": f"{type(exc).__name__}: {exc}"}
-            else:
-                real_mcp_diagnostic = None
+                summary["diagnostics"]["realMcpDiagnostic"] = run_case_safely("realMcpDiagnostic", run_real_mcp_diagnostic_case, root, diagnostic_only=True)
         summary["capturedLogChars"] = len(captured.getvalue())
-        summary["cases"]["inheritPermissionSmoke"] = inherit_permission_smoke
-        summary["cases"]["nativeToolCallingFileSkillMcp"] = tool_inheritance_smoke
-        summary["cases"]["runtimeAgentParallelPipelineResume"] = runtime_case
-        summary["cases"]["failedSourceResumeLongestPrefix"] = failed_resume_case
-        summary["cases"]["killedSourceResumeLongestPrefix"] = killed_resume_case
-        summary["cases"]["bridgeDraftApproveFinal"] = bridge_case
-        if real_mcp_diagnostic is not None:
-            summary["diagnostics"]["realMcpDiagnostic"] = real_mcp_diagnostic
         summary["secretScan"] = scan_for_secret_material(root)
-        summary["passed"] = inherit_permission_smoke.get("passed") and tool_inheritance_smoke.get("passed") and runtime_case.get("passed") and failed_resume_case.get("passed") and killed_resume_case.get("passed") and bridge_case.get("passed") and not summary["secretScan"]
+        required_cases_passed = all(case.get("passed") for case in summary["cases"].values())
+        summary["passed"] = required_cases_passed and not summary["secretScan"]
         return 0 if summary["passed"] else 2
     except Exception as exc:
         summary["error"] = f"{type(exc).__name__}: {exc}"
