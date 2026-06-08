@@ -19,6 +19,9 @@ if str(FRONTENDS) not in sys.path:
 
 
 from ink_bridge import GenericAgentBridge, encode_event, make_stdout_emitter, run_jsonl_loop  # noqa: E402
+from workflow_child_agent import AgentResult  # noqa: E402
+from workflow_runtime import WorkflowRuntime  # noqa: E402
+from workflow_scheduler import SchedulerConfig  # noqa: E402
 
 
 class FakeBackend:
@@ -31,6 +34,37 @@ class FakeClient:
     def __init__(self):
         self.backend = FakeBackend()
         self.last_tools = ""
+
+
+class PartialFailureRunner:
+    def __init__(self):
+        self.started_job_ids = []
+        self.cancelled_job_ids = set()
+        self.success_done = False
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+
+    def poll(self, job):
+        if job.job_id == "agent_1" and not self.success_done:
+            self.success_done = True
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "bridge success artifact"},
+                transcript_events=[{"type": "assistant", "text": "bridge success transcript"}],
+            )
+        if job.job_id == "agent_2" and self.success_done:
+            return AgentResult(
+                job_id=job.job_id,
+                status="failed",
+                payload={"error": "bridge partial failure"},
+                transcript_events=[{"type": "error", "error": "bridge partial failure"}],
+            )
+        return None
+
+    def cancel(self, job):
+        self.cancelled_job_ids.add(job.job_id)
 
 
 class FakeAgent:
@@ -938,6 +972,73 @@ class InkBridgeTest(unittest.TestCase):
 
             error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
             self.assertIn("deadline", error_event["message"])
+            self.assertEqual({"type": "activity", "label": None}, events[-2])
+            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
+    def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runner = PartialFailureRunner()
+
+        def runtime_factory(*, store, timeout_seconds=10.0):
+            return WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=4),
+                timeout_seconds=timeout_seconds,
+            )
+
+        script = """
+const results = await parallel([() => agent('bridge success'), () => agent('bridge failure')])
+return results
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=runtime_factory,
+            )
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            thread = bridge._workflow_threads[run_id]
+            self.assertFalse(thread.is_alive())
+            run = bridge.workflow_store.load_run(run_id)
+            artifact_dir = Path(run.artifact_dir)
+            self.assertEqual("failed", run.status)
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual(["succeeded", "failed"], [job.status for job in run.jobs])
+
+            success_result = json.loads((artifact_dir / run.jobs[0].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", success_result["status"])
+            self.assertEqual("bridge success artifact", success_result["payload"]["summary"])
+            self.assertNotIn("transcriptEvents", success_result)
+            self.assertTrue((artifact_dir / run.jobs[0].metadata["transcriptRef"]).exists())
+
+            failed_result = json.loads((artifact_dir / run.jobs[1].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("failed", failed_result["status"])
+            self.assertEqual("bridge partial failure", failed_result["payload"]["error"])
+            self.assertNotIn("transcriptEvents", failed_result)
+            self.assertTrue((artifact_dir / run.jobs[1].metadata["transcriptRef"]).exists())
+
+            final_payload = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_payload["status"])
+            self.assertIn("bridge partial failure", final_payload["error"])
+
+            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
+            self.assertEqual("failed", terminal_run["run"]["status"])
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertIn("bridge partial failure", final_event["result"]["error"])
+            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
+            self.assertIn("bridge partial failure", error_event["message"])
+            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("agent_completed", workflow_events)
+            self.assertIn("agent_failed", workflow_events)
+            self.assertIn("workflow_failed", workflow_events)
             self.assertEqual({"type": "activity", "label": None}, events[-2])
             self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 

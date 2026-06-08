@@ -44,6 +44,37 @@ class FailingAndHangingRunner:
         self.cancelled_job_ids.add(job.job_id)
 
 
+class SucceedsThenFailsRunner:
+    def __init__(self):
+        self.started_job_ids = []
+        self.completed_success = False
+        self.cancelled_job_ids = set()
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+
+    def poll(self, job):
+        if job.job_id == "agent_1" and not self.completed_success:
+            self.completed_success = True
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "agent one succeeded"},
+                transcript_events=[{"type": "assistant", "text": "agent one transcript"}],
+            )
+        if job.job_id == "agent_2" and self.completed_success:
+            return AgentResult(
+                job_id=job.job_id,
+                status="failed",
+                payload={"error": "agent two failed after one success"},
+                transcript_events=[{"type": "error", "error": "agent two failed after one success"}],
+            )
+        return None
+
+    def cancel(self, job):
+        self.cancelled_job_ids.add(job.job_id)
+
+
 class CountingRunner(FakeChildAgentRunner):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -663,6 +694,57 @@ return results
             self.assertIn("agent_failed", event_types)
             self.assertIn("agent_cancelled", event_types)
             self.assertEqual("workflow_failed", event_types[-1])
+
+    def test_runtime_parallel_partial_failure_preserves_success_artifact_and_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            runner = SucceedsThenFailsRunner()
+            script = """
+const results = await parallel([() => agent('succeeds first'), () => agent('fails second')])
+return results
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2), timeout_seconds=2.0)
+
+            with self.assertRaisesRegex(RuntimeError, "agent two failed after one success"):
+                runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            self.assertEqual("failed", loaded.status)
+            self.assertIn("agent two failed after one success", loaded.error)
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual([], sorted(runner.cancelled_job_ids))
+            self.assertEqual(["succeeded", "failed"], [job.status for job in loaded.jobs])
+
+            success_result_path = artifact_dir / loaded.jobs[0].result_ref
+            self.assertTrue(success_result_path.exists())
+            success_result = json.loads(success_result_path.read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", success_result["status"])
+            self.assertEqual("agent one succeeded", success_result["payload"]["summary"])
+            self.assertNotIn("transcriptEvents", success_result)
+            success_transcript = artifact_dir / loaded.jobs[0].metadata["transcriptRef"]
+            self.assertTrue(success_transcript.exists())
+
+            failed_result_path = artifact_dir / loaded.jobs[1].result_ref
+            self.assertTrue(failed_result_path.exists())
+            failed_result = json.loads(failed_result_path.read_text(encoding="utf-8"))
+            self.assertEqual("failed", failed_result["status"])
+            self.assertEqual("agent two failed after one success", failed_result["payload"]["error"])
+            self.assertNotIn("transcriptEvents", failed_result)
+            failed_transcript = artifact_dir / loaded.jobs[1].metadata["transcriptRef"]
+            self.assertTrue(failed_transcript.exists())
+
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["status"])
+            self.assertIn("agent two failed after one success", final_result["error"])
+            event_types = [event.event_type for event in store.replay_events("wf_test")]
+            self.assertLess(event_types.index("agent_completed"), event_types.index("agent_failed"))
+            self.assertEqual("workflow_failed", event_types[-1])
+            failed_event = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_failed")
+            self.assertEqual("agent_2", failed_event.job_id)
+            self.assertEqual("agent two failed after one success", failed_event.payload["error"])
+            self.assertEqual("agents/agent_2/result.json", failed_event.payload["resultRef"])
 
     def test_runtime_observes_external_kill_state(self):
         with tempfile.TemporaryDirectory() as tmp:

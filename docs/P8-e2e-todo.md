@@ -36,6 +36,7 @@
 - interrupted source run resume 已覆盖：已成功 job 可按最长成功前缀复用，后续 job fresh rerun；同时验证 stale/running middle job 阻断后续复用，以及 cached artifact/transcript/event metadata。
 - 真实 API harness 已支持 case 级 `run_case_safely` 诊断，便于定位单个真实 E2E case 的失败原因；同时补充 `code_run` 缺失 `code_cwd` 的明确 error，以及 `py` alias 清理 `.ai.py`。
 - 真实 API timeout bridge diagnostic 已补充为 diagnostic-only，不纳入主门禁，用于 opt-in 观察真实 native GPT / bridge / runtime timeout 链路。
+- parallel 部分失败已补 runtime deterministic、bridge 半集成和真实 API diagnostic-only 覆盖：成功 job artifact/transcript 保留，失败 job result/transcript 与 `agent_failed` 事件可追踪，workflow final 为 failed，bridge final/error/idle 收敛。
 
 已提交的 opt-in harness：
 
@@ -117,22 +118,20 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2
 
 目标：验证并发任务中部分 child agent 失败时，其他任务和整体 workflow 的状态处理是否正确。
 
-单元测试已有 fake runner 覆盖部分 failure policy，但还没有真实/半真实 E2E。
+当前状态：核心覆盖已补齐。新增 runtime deterministic 测试验证一个 child 成功、另一个 child 失败时，成功/失败 job 的 artifact 与 transcript 均保留，`agent_failed` 和 `workflow_failed` 可追踪；新增 bridge 半集成测试验证 `workflow_run(status=failed)`、`workflow_final(status=failed)`、`error(code=workflow_run_failed)` 与 activity/status idle 收敛；新增 `realApiParallelPartialFailureDiagnostic` 在真实 native GPT opt-in 主套件中执行成功 child，并用受控 runner 注入第二个 child 失败。
 
-建议覆盖：
+建议继续观察 / 扩展：
 
-- parallel 中一个 child timeout，另一个 child 成功。
-- parallel 中一个 child API error，另一个 child 成功。
-- parallel 中部分 jobs failed 后，workflow result 如何返回。
-- 成功 job 和失败 job 的 artifact 是否都正确写入。
-- `agent_failed` 事件是否包含脱敏 error，不内联完整 transcript。
+- provider 自然 timeout、429、5xx 导致的 parallel 部分失败，归入 rate limit / 网络抖动专项。
+- fail_fast 策略的 runtime DSL 变体，后续如果 runtime 暴露 failure_policy 可补。
+- 继续确认 diagnostic-only 不纳入主门禁，真实 API artifact 仍保持 `secretScan: []`。
 
 验收要点：
 
-- 成功 job 不被失败 job 污染。
-- failed job 有明确 error payload。
-- workflow 最终状态和 failure policy 一致。
-- bridge 不挂死。
+- 成功 job 不被失败 job 污染：已覆盖。
+- failed job 有明确 error payload：已覆盖。
+- workflow 最终状态和 failure policy 一致：已覆盖当前 runtime continue/fail 整体语义。
+- bridge 不挂死：已覆盖 final/error/idle。
 
 ### 5. failed / killed / interrupted run resume E2E
 

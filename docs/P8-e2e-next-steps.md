@@ -51,26 +51,26 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 层 | 当前覆盖 | 文件 | 用例数 |
 |---|---|---|---|
-| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill | `test_workflow_runtime.py` | 14 |
+| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure | `test_workflow_runtime.py` | 15 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle 覆盖 | `test_ink_bridge.py` | 50 |
-| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 2 diagnostics |
-| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout diagnostic |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + parallel partial failure final/error/idle 覆盖 | `test_ink_bridge.py` | 51 |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 3 diagnostics |
+| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel diagnostics |
 
 ### 1.4 总体覆盖度估算
 
-**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f` / `d13bde5` 及后续 timeout diagnostic 补强）：**
+**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f` / `d13bde5` 及后续 timeout/parallel diagnostic 补强）：**
 
-- ✅ 完全或主路径充分覆盖：3 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承）
-- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：3 项（bridge 非成功终态事件、parallel 部分失败、cache key 变体）
+- ✅ 完全或主路径充分覆盖：4 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承、parallel 部分失败 deterministic/diagnostic 覆盖）
+- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：2 项（bridge 非成功终态事件、cache key 变体）
 - 🔶 部分覆盖：3 项（超时边界、大 artifact 隔离、JS Worker 异常脚本）
 - ❌ 仍基本未覆盖：3 项（网络抖动/稳定性、rate limit/429、真实 API 返回格式异常）
 
 **粗估百分比：**
 - 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
-- 真实 API E2E 覆盖率：~60%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、真实 native GPT 主套件通过）
-- Bridge 覆盖率：~55-60%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle 已覆盖；mid-call stop/kill 真实路径仍需补强）
+- 真实 API E2E 覆盖率：~65%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、parallel partial failure diagnostic、真实 native GPT 主套件通过）
+- Bridge 覆盖率：~60-65%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle、parallel partial failure final/error/idle 已覆盖；mid-call stop/kill 真实路径仍需补强）
 - P0 阻塞缺口：0
 
 ---
@@ -263,11 +263,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | Scheduler 层 `continue`/`fail_fast` 已单元测试。但没有任何真实/半真实 E2E 验证 parallel 中部分 child agent 真实失败。 |
-| **当前覆盖** | 单元测试 `test_continue_failure_policy_keeps_other_jobs_running`、`test_fail_fast_failure_policy_cancels_queued_and_running_jobs_and_fails_run`、`test_runtime_worker_error_after_parallel_cancels_pending_jobs` |
-| **缺失内容** | ① parallel 中 child timeout + 其他 child 成功的真实 E2E；② parallel 中 child API error + 其他 child 成功的真实 E2E；③ 成功/失败 job 的 artifact 写入验证；④ `agent_failed` 事件脱敏 error 验证；⑤ bridge 层 `workflow_failed` 事件中部分失败信息 |
-| **风险评级** | 中 |
-| **建议优先级** | **P1** |
+| **缺口描述** | 原缺口是没有真实/半真实 E2E 验证 parallel 中部分 child agent 真实失败。当前已补 runtime deterministic、bridge 半集成和真实 API diagnostic-only 三层覆盖。 |
+| **当前覆盖** | Scheduler 层 `continue`/`fail_fast` 单元测试；`test_runtime_worker_error_after_parallel_cancels_pending_jobs`；新增 runtime `test_runtime_parallel_partial_failure_preserves_success_artifact_and_failed_result`；新增 bridge `test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts`；新增 `realApiParallelPartialFailureDiagnostic`。 |
+| **剩余内容** | ① 真实 provider 自然 API error / 429 / timeout 的压力场景仍归入 rate limit/网络抖动专项；② fail_fast runtime 真实 DSL 变体后续可作为扩展；③ diagnostic 稳定性持续观察。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **已完成核心覆盖 / P2 扩展观察** |
 
 ### 项目 5：Failed / Killed / Interrupted Run Resume E2E
 
@@ -412,16 +412,18 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 - Scheduler 层 failure_policy 已实现并单元测试
 - Worker error + parallel cancel 逻辑已单元测试
 
-**建议实现方式：**
-- 3-agent parallel script，一个 agent timeout（短 timeout）/一个正常
-- 验证：成功 job artifact 写入、失败 job 的 `agent_failed` 事件（脱敏）、bridge 终态正确
+**已实现方式：**
+- Runtime deterministic：`parallel()` 中一个 child 成功后另一个 child 返回 failed，验证成功/失败 job artifact、transcript、`agent_completed`/`agent_failed`、`final-result.json(status=failed)`。
+- Bridge 半集成：通过真实 `WorkflowRuntime` + 受控 runner 验证 bridge 看到 `workflow_run(status=failed)`、`workflow_final(status=failed)`、`error(code=workflow_run_failed)`，并最终 activity/status idle。
+- 真实 API diagnostic-only：`realApiParallelPartialFailureDiagnostic` 使用真实 native GPT 执行成功 child，另一个 child 由受控 runner 注入失败；输出成功/失败 job、artifact、event、final 状态摘要，不纳入主门禁。
 
 **关键验收点：**
 - 成功 job 不被失败 job 污染
-- Failed job 有明确脱敏 error payload
-- Workflow 终态与 failure policy 一致
+- Failed job 有明确 error payload 和 result artifact
+- Workflow 终态与当前 runtime continue/failure 行为一致：整体 failed，已完成 job artifact 保留
+- Bridge 不挂死，final/error/idle 收敛
 
-**估计工作量：** 1 天
+**状态：** 核心 deterministic/bridge/真实 API diagnostic 覆盖已完成；provider 自然 429/timeout 归入 P2 rate limit/网络抖动专项。
 
 ---
 

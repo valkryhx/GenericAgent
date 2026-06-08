@@ -21,7 +21,7 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 from ink_bridge import GenericAgentBridge
-from workflow_child_agent import NativeGPTChildAgentRunner
+from workflow_child_agent import AgentResult, NativeGPTChildAgentRunner
 from workflow_controller import WorkflowController
 from workflow_models import WorkflowRun
 from workflow_runtime import WorkflowRuntime
@@ -127,6 +127,19 @@ return {
 };
 '''
 
+PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT = r'''
+phase('P8 Real API Parallel Partial Failure Diagnostic');
+log('start p8 real api parallel partial failure diagnostic');
+const results = await parallel([
+  () => agent('Reply with one concise safe sentence containing token GA_P8_PARALLEL_PARTIAL_SUCCESS. Do not call tools, MCP, or skills.', {label:'parallel-partial-success'}),
+  () => agent('This child is intentionally failed by the diagnostic runner after the first child succeeds.', {label:'parallel-partial-injected-failure'}),
+]);
+return {
+  marker: 'GA_P8_PARALLEL_PARTIAL_FAILURE_UNEXPECTED_DONE',
+  resultCount: results.length
+};
+'''
+
 FAILED_SOURCE_SCRIPT = r'''
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
@@ -197,6 +210,42 @@ class GateOnSecondStartRunner(CountingNativeRunner):
     def cancel(self, job) -> None:
         self.cancelled_job_ids.append(job.job_id)
         return None
+
+
+class InjectSecondFailureAfterFirstSuccessRunner(CountingNativeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.first_succeeded = threading.Event()
+        self.injected_failed_job_ids: list[str] = []
+        self.cancelled_job_ids: list[str] = []
+
+    def start(self, job) -> None:
+        if job.job_id == "agent_2":
+            self.started_job_ids.append(job.job_id)
+            return
+        return super().start(job)
+
+    def poll(self, job):
+        if job.job_id == "agent_2":
+            if not self.first_succeeded.is_set():
+                return None
+            if job.job_id not in self.injected_failed_job_ids:
+                self.injected_failed_job_ids.append(job.job_id)
+            return AgentResult(
+                job_id=job.job_id,
+                status="failed",
+                payload={"error": "GA_P8_PARALLEL_PARTIAL_INJECTED_FAILURE"},
+                transcript_ref=f"agents/{job.job_id}/transcript.jsonl",
+                transcript_events=[{"type": "error", "error": "GA_P8_PARALLEL_PARTIAL_INJECTED_FAILURE"}],
+            )
+        result = super().poll(job)
+        if result is not None and result.status == "succeeded":
+            self.first_succeeded.set()
+        return result
+
+    def cancel(self, job) -> None:
+        self.cancelled_job_ids.append(job.job_id)
+        return super().cancel(job)
 
 
 class MinimalAgent:
@@ -916,6 +965,70 @@ def run_bridge_real_api_case(root: Path) -> dict:
     }
 
 
+def run_real_api_parallel_partial_failure_diagnostic_case(root: Path) -> dict:
+    store = WorkflowStore(root / "parallel_partial_failure_diagnostic")
+    run = store.create_run(WorkflowRun(run_id="wf_p8_parallel_partial_failure_diagnostic", session_id="p8_real_api_parallel_partial_failure", script=PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT, status="running"))
+    runner = InjectSecondFailureAfterFirstSuccessRunner(config_name=CONFIG_NAME, max_tokens=96)
+    runtime = WorkflowRuntime(
+        store=store,
+        runner=runner,
+        scheduler_config=SchedulerConfig(max_concurrent=2, max_total=4),
+        timeout_seconds=180.0,
+    )
+    start = time.time()
+    error = None
+    try:
+        runtime.run(run, args={"suite": "p8-real-api", "case": "parallel-partial-failure-diagnostic"})
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    elapsed = time.time() - start
+    loaded = store.load_run(run.run_id)
+    artifact_dir = Path(loaded.artifact_dir)
+    jobs = summarize_jobs(loaded, artifact_dir)
+    event_types_for_run = event_types(store, loaded.run_id)
+    final_path = artifact_dir / "final-result.json"
+    final_payload = load_json(final_path) if final_path.exists() else {}
+    parent_transcript_leak = False
+    success_jobs = [job for job in jobs if job["status"] == "succeeded"]
+    failed_jobs = [job for job in jobs if job["status"] == "failed"]
+    passed = (
+        loaded.status == "failed"
+        and bool(error and "GA_P8_PARALLEL_PARTIAL_INJECTED_FAILURE" in error)
+        and final_payload.get("status") == "failed"
+        and "GA_P8_PARALLEL_PARTIAL_INJECTED_FAILURE" in str(final_payload.get("error"))
+        and runner.started_job_ids == ["agent_1", "agent_2"]
+        and runner.injected_failed_job_ids == ["agent_2"]
+        and len(success_jobs) == 1
+        and len(failed_jobs) == 1
+        and all(job.get("resultExists") and job.get("transcriptExists") and job.get("resultJsonOmitsTranscriptEvents") for job in jobs)
+        and "agent_completed" in event_types_for_run
+        and "agent_failed" in event_types_for_run
+        and event_types_for_run[-1] == "workflow_failed"
+        and not parent_transcript_leak
+    )
+    return {
+        "passed": passed,
+        "diagnosticOnly": True,
+        "skipped": False,
+        "elapsedSeconds": round(elapsed, 2),
+        "runId": loaded.run_id,
+        "status": loaded.status,
+        "error": sanitize(error),
+        "startedJobIds": runner.started_job_ids,
+        "injectedFailedJobIds": runner.injected_failed_job_ids,
+        "cancelledJobIds": runner.cancelled_job_ids,
+        "eventCounts": {etype: event_types_for_run.count(etype) for etype in sorted(set(event_types_for_run))},
+        "jobs": jobs,
+        "successJobCount": len(success_jobs),
+        "failedJobCount": len(failed_jobs),
+        "finalStatus": final_payload.get("status"),
+        "finalError": sanitize(final_payload.get("error")),
+        "parentTranscriptLeak": parent_transcript_leak,
+        "artifactDir": str(artifact_dir),
+    }
+
+
+
 def run_real_api_timeout_bridge_final_diagnostic_case(root: Path) -> dict:
     events: list[dict] = []
     runtime_started_jobs: list[str] = []
@@ -1084,6 +1197,12 @@ def main() -> int:
             summary["cases"]["failedSourceResumeLongestPrefix"] = run_case_safely("failedSourceResumeLongestPrefix", run_failed_source_resume_real_api_case, root)
             summary["cases"]["killedSourceResumeLongestPrefix"] = run_case_safely("killedSourceResumeLongestPrefix", run_killed_source_resume_real_api_case, root)
             summary["cases"]["bridgeDraftApproveFinal"] = run_case_safely("bridgeDraftApproveFinal", run_bridge_real_api_case, root)
+            summary["diagnostics"]["realApiParallelPartialFailureDiagnostic"] = run_case_safely(
+                "realApiParallelPartialFailureDiagnostic",
+                run_real_api_parallel_partial_failure_diagnostic_case,
+                root,
+                diagnostic_only=True,
+            )
             summary["diagnostics"]["realApiTimeoutBridgeFinalDiagnostic"] = run_case_safely(
                 "realApiTimeoutBridgeFinalDiagnostic",
                 run_real_api_timeout_bridge_final_diagnostic_case,
