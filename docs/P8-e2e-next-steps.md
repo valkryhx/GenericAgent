@@ -45,6 +45,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | `9e00a05` | 补充 bridge 非成功终态覆盖 |
 | `f8b1850` | 补充 interrupted resume 前缀复用覆盖 |
 | `1c8933f` | 增强真实 API 失败诊断 |
+| `d13bde5` | 补充 bridge timeout 终态覆盖 |
 
 ### 1.3 按层覆盖总结
 
@@ -53,13 +54,13 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill | `test_workflow_runtime.py` | 14 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 | `test_ink_bridge.py` | 49 |
-| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 1 diagnostic |
-| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖，真实 API bridge 非成功路径仍作为 P1/P2 补强项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle 覆盖 | `test_ink_bridge.py` | 50 |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 2 diagnostics |
+| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout diagnostic |
 
 ### 1.4 总体覆盖度估算
 
-**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f`）：**
+**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f` / `d13bde5` 及后续 timeout diagnostic 补强）：**
 
 - ✅ 完全或主路径充分覆盖：3 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承）
 - 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：3 项（bridge 非成功终态事件、parallel 部分失败、cache key 变体）
@@ -67,9 +68,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 - ❌ 仍基本未覆盖：3 项（网络抖动/稳定性、rate limit/429、真实 API 返回格式异常）
 
 **粗估百分比：**
-- 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态已补）
-- 真实 API E2E 覆盖率：~55-60%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、真实 native GPT 主套件通过）
-- Bridge 覆盖率：~40-50%（succeeded 主路径、resume 拒绝、stop、非成功终态事件已有覆盖；真实 API bridge 非成功路径仍需视测试层级补强）
+- 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
+- 真实 API E2E 覆盖率：~60%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、真实 native GPT 主套件通过）
+- Bridge 覆盖率：~55-60%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle 已覆盖；mid-call stop/kill 真实路径仍需补强）
 - P0 阻塞缺口：0
 
 ---
@@ -232,11 +233,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 超时场景只使用 fake runner 验证（`NeverFinishesRunner`）。从未在真实 LLM API 调用场景下触发超时。`p8_real_api_e2e.py` 中的 `timeout_seconds` 设置很大（420/360/240/180），测试通过时超时从未被命中。 |
-| **当前覆盖** | 单元测试 `test_runtime_timeout_cancels_running_child_agents`（fake runner）。JS worker 侧 `test_runtime_timeout_kills_never_resolving_async_script` 和 `test_runtime_timeout_uses_configured_deadline_for_sync_infinite_loop`。 |
-| **缺失内容** | ① 真实 API 响应极慢时的超时行为；② Bridge 层 `workflow_approve(..., timeout_seconds=极短值)`；③ JS worker 子进程 terminate/kill 与端口回收；④ 超时后 bridge 的 `workflow_final`/error event；⑤ 超时后 activity/status 恢复 idle |
-| **风险评级** | 中 |
-| **建议优先级** | **P1** |
+| **缺口描述** | 真实 API 主路径仍使用大 timeout（420/360/240/180），不会把 timeout 作为主门禁触发；这是为了避免真实网络波动影响主套件稳定性。 |
+| **当前覆盖** | Runtime timeout 单元、JS worker timeout 单元、`d13bde5` 近真实 bridge timeout failed/final/error/idle 覆盖，以及 `realApiTimeoutBridgeFinalDiagnostic` 真实 API diagnostic-only 覆盖。 |
+| **剩余内容** | ① 长期观察真实 API timeout diagnostic 的稳定性；② 真实网络慢响应统计；③ 若后续证明稳定，再考虑更细粒度的资源回收指标。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **观察项 / P2 稳定性诊断** |
 
 ### 项目 2：真实 API 网络抖动 / 慢响应持续 E2E
 
@@ -292,11 +293,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | Bridge failed/killed/interrupted 非成功终态事件已补覆盖。剩余重点是 timeout 场景、真实 API bridge 失败路径、`_workflow_final_payload` fallback 在 artifact 缺失/损坏时的行为，以及 `_run_workflow_runtime` runtime exception 分支的真实/完整链路。 |
-| **当前覆盖** | `9e00a05` 已补充 bridge 非成功终态覆盖；既有 bridge succeeded 主路径、resume 拒绝、stop fake runtime 覆盖；failed final fallback、runtime exception final/error/idle、killed stop final 均已有基础覆盖。 |
-| **剩余内容** | ① timeout 后 bridge event 流；② 真实 API bridge failed/killed/interrupted 路径；③ result.json 缺失/损坏时 fallback payload 的更完整验证；④ runtime exception 后 error event 与 idle 恢复的端到端补强。 |
-| **风险评级** | 中 |
-| **建议优先级** | **P1** |
+| **缺口描述** | Bridge failed/killed/interrupted 非成功终态事件已补覆盖；timeout failed/final/error/idle 也已补近真实覆盖和真实 API diagnostic-only 覆盖。剩余重点转为真实 API bridge failed/killed/interrupted 路径、`_workflow_final_payload` fallback 在 artifact 缺失/损坏时的行为，以及 `_run_workflow_runtime` runtime exception 分支的真实/完整链路。 |
+| **当前覆盖** | `9e00a05` 已补充 bridge 非成功终态覆盖；`d13bde5` 已补充 timeout 后 bridge event 流；新增 `realApiTimeoutBridgeFinalDiagnostic` 覆盖真实 API timeout 诊断路径；既有 bridge succeeded 主路径、resume 拒绝、stop fake runtime、failed final fallback、runtime exception final/error/idle、killed stop final 均已有覆盖。 |
+| **剩余内容** | ① 真实 API bridge failed/killed/interrupted 路径；② result.json 缺失/损坏时 fallback payload 的更完整验证；③ runtime exception 后 error event 与 idle 恢复的端到端补强；④ timeout diagnostic 的持续稳定性观察。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **P2** |
 
 ### 项目 8：真实 API 返回格式异常 E2E
 
@@ -358,10 +359,10 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 保留的高价值工作转入 P1/P2：
 
-- timeout 后 bridge final/error 事件真实路径。
 - parallel 部分失败真实/半真实 E2E。
 - mid-call kill/stop 真实 E2E。
 - bridge 非成功终态真实 API 端到端补强。
+- timeout diagnostic 持续稳定性观察。
 
 ---
 
@@ -380,49 +381,16 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 **覆盖核查结论：**
 
-已有覆盖是分层覆盖，并未完整关闭本项：
+本项当前已进入收尾状态：
 
 - Runtime timeout 单元层已覆盖：`test_runtime_timeout_kills_never_resolving_async_script`、`test_runtime_timeout_uses_configured_deadline_for_sync_infinite_loop`、`test_runtime_timeout_cancels_running_child_agents`、`test_runtime_terminate_escalates_to_kill_and_waits`。
 - Bridge 非成功终态基础覆盖已由 `9e00a05` 补齐：failed/killed/interrupted/fallback/exception 的 final/error/idle 路径已有单元/半集成覆盖。
 - Bridge timeout 参数传递已有覆盖：approve/resume/JSONL 能把 `timeoutSeconds` 传到 runtime factory。
-- 真实 API bridge succeeded 主路径已覆盖，但使用大 timeout，未触发 timeout。
+- 真实 API bridge succeeded 主路径已覆盖，但使用大 timeout，不触发 timeout。
+- 第一阶段已由 `d13bde5` 完成：`test_workflow_approve_timeout_emits_failed_final_error_and_idle` 使用真实 `WorkflowRuntime`、永不 resolve 的 JS Promise 与 `workflow_approve(..., timeout_seconds=0.2)`，验证 runtime deadline 后 run failed、`final-result.json`、`workflow_final(status=failed)`、`workflow_failed`、`error(code=workflow_run_failed)` 与最终 idle 收敛。
+- 第二阶段已补强到真实 API harness：`tests/p8_real_api_e2e.py` 中新增 diagnostic-only `realApiTimeoutBridgeFinalDiagnostic`，在 `GA_RUN_REAL_API_E2E=1` 下运行，但不纳入主 `summary["passed"]` 门禁，输出 case 级脱敏摘要：run status、finalSeen、workflowFailedSeen、errorSeen、idleSeen、activityCleared、threadAliveAfterWait 等；顶层 `summary["secretScan"]` 统一报告 artifact secret 扫描结果。
 
-仍缺的是：`workflow_approve(..., timeout_seconds=极短值)` 真正触发 runtime deadline 后，bridge 的 terminal failed/final/error/idle 事件链。
-
-**建议实现方式：**
-
-第一阶段先补 deterministic / 近真实 bridge 测试，避免重复烧真实 API：
-
-- 在 `tests/test_ink_bridge.py` 新增 `test_workflow_approve_timeout_emits_failed_final_error_and_idle`（名称可调整）。
-- 使用真实 `WorkflowRuntime` 或接近真实 runtime，而不是只用 FakeRuntime 直接返回 failed。
-- workflow script 使用永不 resolve：
-
-```javascript
-return await new Promise(() => {})
-```
-
-- 调用：
-
-```python
-bridge.workflow_approve(run_id, timeout_seconds=0.2)
-bridge.wait_for_workflow_idle(run_id, timeout=...)
-```
-
-- 断言 store 中 run 进入 `failed`，`final-result.json` status 为 `failed`，error 包含 deadline/timeout。
-- 断言 bridge event 中存在 terminal `workflow_run`、`workflow_final(status=failed)`、`workflow_failed` 或 `error` 事件。
-- 断言最后收敛到：
-
-```python
-{"type": "activity", "label": None}
-{"type": "status", "status": "idle"}
-```
-
-第二阶段再考虑 opt-in 真实 API timeout diagnostic：
-
-- 在 `tests/p8_real_api_e2e.py` 增加 diagnostic-only case，例如 `realApiTimeoutBridgeFinalDiagnostic`。
-- 默认不纳入主 `summary["passed"]`，避免真实网络波动导致主门禁不稳定。
-- 仅在 `GA_RUN_REAL_API_E2E=1` 下运行，且保持 `GA_RUN_REAL_MCP_E2E` 默认关闭。
-- 输出脱敏摘要：run status、finalSeen、errorSeen、idleSeen、secretScan。
+**后续仅剩观察项：** 真实 API timeout diagnostic 受本机网络、provider 响应速度和真实模型流式取消时机影响，应作为诊断报告持续观察；不要把它升级为默认门禁，除非后续证明足够稳定。
 
 **关键验收点：**
 - 不挂死，不遗留 running run，不遗留僵尸子进程
@@ -432,7 +400,7 @@ bridge.wait_for_workflow_idle(run_id, timeout=...)
 - final-result artifact 可读，错误信息脱敏
 - 不污染 parent transcript
 
-**估计工作量：** 1 天（deterministic/bridge）；真实 API diagnostic 另计 0.5 天
+**状态：** 第一阶段 deterministic/近真实 bridge 覆盖已完成；第二阶段真实 API diagnostic-only 覆盖已补充。
 
 ---
 

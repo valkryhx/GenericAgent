@@ -11,6 +11,7 @@
 - `9e00a05 test(workflow): 补充 bridge 非成功终态覆盖`
 - `f8b1850 test(workflow): 补充 interrupted resume 前缀复用覆盖`
 - `1c8933f test(workflow): 增强真实 API 失败诊断`
+- `d13bde5 test(workflow): 补充 bridge timeout 终态覆盖`
 
 已完成：
 
@@ -31,8 +32,10 @@
 - 真实 native GPT P8 主套件已在 `GA_RUN_REAL_API_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5` 下复跑通过：6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]`。
 - `secretScan: []`，未发现密钥泄漏。
 - bridge 非成功终态已覆盖：`failed` / `killed` / `interrupted` 均可收敛为明确终态事件，不再停留 running；包含 failed final fallback、runtime exception final/error/idle、failed/killed/interrupted source resume bridge 允许路径，以及 killed stop `workflow_final(status=killed)`。
+- bridge timeout 终态已覆盖：`workflow_approve(..., timeout_seconds=极短值)` 触发真实 `WorkflowRuntime` deadline 后，验证 run failed、`final-result.json`、`workflow_final(status=failed)`、`workflow_failed`、`error(code=workflow_run_failed)` 与 activity/status idle 收敛。
 - interrupted source run resume 已覆盖：已成功 job 可按最长成功前缀复用，后续 job fresh rerun；同时验证 stale/running middle job 阻断后续复用，以及 cached artifact/transcript/event metadata。
 - 真实 API harness 已支持 case 级 `run_case_safely` 诊断，便于定位单个真实 E2E case 的失败原因；同时补充 `code_run` 缺失 `code_cwd` 的明确 error，以及 `py` alias 清理 `.ai.py`。
+- 真实 API timeout bridge diagnostic 已补充为 diagnostic-only，不纳入主门禁，用于 opt-in 观察真实 native GPT / bridge / runtime timeout 链路。
 
 已提交的 opt-in harness：
 
@@ -51,7 +54,9 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 
 目标：验证真实网络/API 慢响应或超时时，workflow 不会假死，最终状态、事件和资源回收正确。
 
-建议覆盖：
+当前状态：第一阶段 bridge timeout deterministic/近真实覆盖已由 `d13bde5` 完成；第二阶段已在真实 API harness 中补充 `realApiTimeoutBridgeFinalDiagnostic` diagnostic-only case。该 case 仅在 `GA_RUN_REAL_API_E2E=1` 下运行，不纳入主 `summary["passed"]` 门禁，用于持续观察真实 native GPT 链路 timeout/final/error/idle 收敛。
+
+建议继续观察：
 
 - `WorkflowRuntime(timeout_seconds=极短值)`。
 - bridge 层 `workflow_approve(... timeout_seconds=极短值)`。
@@ -378,10 +383,10 @@ awaiting_approval -> running -> interrupted
 
 建议优先补以下 5 类：
 
-1. `P1 timeout / stop / mid-call 边界真实 E2E`：覆盖真实网络慢响应、极短 timeout、stop/kill 后资源回收与 resume 行为。当前核查结论：runtime timeout 单元、bridge 非成功终态基础覆盖、timeout 参数传递和真实 API bridge succeeded 主路径均已存在；仍缺 `workflow_approve(..., timeout_seconds=极短值)` 真正触发 timeout 后的 bridge terminal failed/final/error/idle 事件链。建议先在 `tests/test_ink_bridge.py` 补 deterministic/近真实 bridge timeout 测试，再考虑 `tests/p8_real_api_e2e.py` diagnostic-only 真实 API timeout case。
-2. `P1 parallel 部分失败真实/半真实 E2E`：验证部分 child 失败时成功 job、失败 job、artifact、failure policy 与 bridge 终态一致。
+1. `P1 parallel 部分失败真实/半真实 E2E`：验证部分 child 失败时成功 job、失败 job、artifact、failure policy 与 bridge 终态一致。
+2. `P1 stop / mid-call 边界真实 E2E`：覆盖 LLM 调用进行中 stop/kill 后资源回收、bridge final/idle 收敛与 resume 行为。
 3. `P2 JS worker 异常脚本 bridge E2E`：覆盖脚本 throw、pipeline/parallel thunk throw、非法 options、不可序列化返回和安全扫描拒绝后的 bridge 事件。
-4. `P2 rate limit/429、网络抖动 diagnostic`：用 opt-in 压力/稳定性诊断暴露真实 API 服务商限流、429、5xx 与高 fan-out 下的收敛问题。
+4. `P2 rate limit/429、网络抖动 diagnostic`：用 opt-in 压力/稳定性诊断暴露真实 API 服务商限流、429、5xx 与高 fan-out 下的收敛问题；timeout diagnostic 已作为观察项进入真实 API harness。
 5. `P3 cache key 真实变体、大 artifact、Context7/explicit approval 专项`：验证 args/prompt/options/permission profile 改动的真实 hit/miss、大 transcript 隔离，以及后续 Context7/审批闭环专项。
 
 原 P0 “bridge 非成功终态完全缺失 / interrupted source resume 完全缺失”已更新为：基础 deterministic/bridge 单元已完成，剩余是 opt-in 真实 API/完整 bridge E2E 层。

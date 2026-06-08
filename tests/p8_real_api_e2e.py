@@ -113,6 +113,20 @@ return {
 };
 '''
 
+TIMEOUT_BRIDGE_DIAGNOSTIC_SCRIPT = r'''
+phase('P8 Real API Timeout Bridge Diagnostic');
+log('start p8 real api timeout bridge diagnostic');
+const result = await agent(`Generate a deliberately long but safe response with many short numbered lines.
+Do not call tools, MCP, or skills. Do not read mykey.py, mykey.json, or mcp.json.
+Include token GA_P8_TIMEOUT_BRIDGE_DIAGNOSTIC if you finish before cancellation.`, {
+  label:'timeout-bridge-real'
+});
+return {
+  marker: 'GA_P8_TIMEOUT_BRIDGE_DIAGNOSTIC_UNEXPECTED_DONE',
+  summaryLength: String(result.summary || '').length
+};
+'''
+
 FAILED_SOURCE_SCRIPT = r'''
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
@@ -902,6 +916,115 @@ def run_bridge_real_api_case(root: Path) -> dict:
     }
 
 
+def run_real_api_timeout_bridge_final_diagnostic_case(root: Path) -> dict:
+    events: list[dict] = []
+    runtime_started_jobs: list[str] = []
+    run_id: str | None = None
+
+    def runtime_factory(*, store, timeout_seconds=10.0):
+        runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=512)
+        runtime_started_jobs_ref = runner.started_job_ids
+        runtime = WorkflowRuntime(
+            store=store,
+            runner=runner,
+            scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2),
+            timeout_seconds=timeout_seconds,
+        )
+        original_run = runtime.run
+
+        def run_and_record(*args, **kwargs):
+            try:
+                return original_run(*args, **kwargs)
+            finally:
+                runtime_started_jobs.extend(runtime_started_jobs_ref)
+
+        runtime.run = run_and_record
+        return runtime
+
+    bridge = GenericAgentBridge(
+        agent_factory=MinimalAgent,
+        emit=events.append,
+        workflow_root=root / "timeout_bridge_diagnostic",
+        workflow_runtime_factory=runtime_factory,
+    )
+    try:
+        start = time.time()
+        run_id = bridge.workflow_draft(TIMEOUT_BRIDGE_DIAGNOSTIC_SCRIPT)
+        approved = bridge.workflow_approve(
+            run_id,
+            args={"suite": "p8-real-api", "case": "timeout-bridge-diagnostic"},
+            timeout_seconds=0.5,
+        )
+        bridge.wait_for_workflow_idle(run_id, timeout=90.0)
+        elapsed = time.time() - start
+        try:
+            loaded = bridge.workflow_store.load_run(run_id)
+        except Exception:
+            loaded = None
+        thread = bridge._workflow_threads.get(run_id) if run_id else None
+        thread_alive_after_wait = bool(thread and thread.is_alive())
+        final_events = [event for event in events if event.get("type") == "workflow_final" and event.get("runId") == run_id]
+        workflow_event_types = [event.get("event", {}).get("type") for event in events if event.get("type") == "workflow_event"]
+        error_events = [event for event in events if event.get("type") == "error"]
+        status_events = [event.get("status") for event in events if event.get("type") == "status"]
+        activity_events = [event.get("label") for event in events if event.get("type") == "activity"]
+        final_result = final_events[-1].get("result") if final_events else {}
+        final_error = final_result.get("error") or (loaded.error if loaded else None)
+        artifact_dir = Path(loaded.artifact_dir) if loaded and loaded.artifact_dir else None
+        final_artifact_path = artifact_dir / "final-result.json" if artifact_dir else None
+        final_artifact = load_json(final_artifact_path) if final_artifact_path and final_artifact_path.exists() else {}
+        deadline_seen = "deadline" in str(final_error).lower() or "timeout" in str(final_error).lower()
+        final_seen = bool(final_events)
+        error_seen = any(event.get("code") == "workflow_run_failed" for event in error_events)
+        idle_seen = bool(status_events and status_events[-1] == "idle")
+        activity_cleared = bool(activity_events and activity_events[-1] is None)
+        workflow_failed_seen = "workflow_failed" in workflow_event_types
+        failed_status_seen = bool(loaded and loaded.status == "failed") or final_result.get("status") == "failed"
+        passed = (
+            bool(run_id)
+            and approved
+            and failed_status_seen
+            and final_seen
+            and workflow_failed_seen
+            and error_seen
+            and idle_seen
+            and activity_cleared
+            and deadline_seen
+            and not thread_alive_after_wait
+            and final_artifact.get("status") == "failed"
+        )
+        return {
+            "passed": passed,
+            "diagnosticOnly": True,
+            "skipped": False,
+            "elapsedSeconds": round(elapsed, 2),
+            "runId": run_id,
+            "approved": approved,
+            "status": loaded.status if loaded else None,
+            "error": sanitize(final_error),
+            "deadlineSeen": deadline_seen,
+            "finalSeen": final_seen,
+            "workflowFailedSeen": workflow_failed_seen,
+            "errorSeen": error_seen,
+            "idleSeen": idle_seen,
+            "activityCleared": activity_cleared,
+            "threadAliveAfterWait": thread_alive_after_wait,
+            "finalStatus": final_result.get("status"),
+            "finalArtifactStatus": final_artifact.get("status"),
+            "startedJobIds": runtime_started_jobs,
+            "eventTypes": [event.get("type") for event in events],
+            "workflowEventTypes": workflow_event_types,
+            "errorCodes": [event.get("code") for event in error_events],
+            "artifactDir": str(artifact_dir) if artifact_dir else None,
+        }
+    finally:
+        try:
+            bridge.stop()
+        except Exception:
+            pass
+
+
+
 def run_case_safely(case_name: str, fn, *args, diagnostic_only: bool = False, **kwargs) -> dict:
     start = time.time()
     try:
@@ -961,6 +1084,12 @@ def main() -> int:
             summary["cases"]["failedSourceResumeLongestPrefix"] = run_case_safely("failedSourceResumeLongestPrefix", run_failed_source_resume_real_api_case, root)
             summary["cases"]["killedSourceResumeLongestPrefix"] = run_case_safely("killedSourceResumeLongestPrefix", run_killed_source_resume_real_api_case, root)
             summary["cases"]["bridgeDraftApproveFinal"] = run_case_safely("bridgeDraftApproveFinal", run_bridge_real_api_case, root)
+            summary["diagnostics"]["realApiTimeoutBridgeFinalDiagnostic"] = run_case_safely(
+                "realApiTimeoutBridgeFinalDiagnostic",
+                run_real_api_timeout_bridge_final_diagnostic_case,
+                root,
+                diagnostic_only=True,
+            )
             if REAL_MCP_OPT_IN:
                 summary["diagnostics"]["realMcpDiagnostic"] = run_case_safely("realMcpDiagnostic", run_real_mcp_diagnostic_case, root, diagnostic_only=True)
         summary["capturedLogChars"] = len(captured.getvalue())
