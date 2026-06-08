@@ -67,6 +67,43 @@ class PartialFailureRunner:
         self.cancelled_job_ids.add(job.job_id)
 
 
+class StopThenResumeRunner:
+    def __init__(self):
+        self.started_job_ids = []
+        self.cancelled_job_ids = []
+        self.first_completed = False
+        self.second_started = threading.Event()
+        self.second_cancelled_once = False
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+        if job.job_id == "agent_2":
+            self.second_started.set()
+
+    def poll(self, job):
+        if job.job_id == "agent_1" and not self.first_completed:
+            self.first_completed = True
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "prefix cached by resume"},
+                transcript_events=[{"type": "assistant", "text": "prefix transcript"}],
+            )
+        if job.job_id == "agent_2" and self.second_cancelled_once:
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "fresh after stop"},
+                transcript_events=[{"type": "assistant", "text": "fresh transcript"}],
+            )
+        return None
+
+    def cancel(self, job):
+        self.cancelled_job_ids.append(job.job_id)
+        if job.job_id == "agent_2":
+            self.second_cancelled_once = True
+
+
 class FakeAgent:
     def __init__(self):
         self.inc_out = False
@@ -1039,6 +1076,93 @@ return results
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)
             self.assertIn("workflow_failed", workflow_events)
+            self.assertEqual({"type": "activity", "label": None}, events[-2])
+            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
+    def test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runner = StopThenResumeRunner()
+
+        def runtime_factory(*, store, timeout_seconds=10.0):
+            return WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+                timeout_seconds=timeout_seconds,
+            )
+
+        script = """
+const first = await agent('prefix succeeds')
+const second = await agent('stop while this is running')
+return { marker: 'GA_STOP_RESUME_DONE', first: first.summary, second: second.summary }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=runtime_factory,
+            )
+            source_run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(source_run_id, timeout_seconds=5.0))
+            self.assertTrue(runner.second_started.wait(timeout=3.0))
+
+            self.assertTrue(bridge.workflow_stop(source_run_id, reason="user stop after prefix"))
+            bridge.wait_for_workflow_idle(source_run_id, timeout=5)
+            source_thread = bridge._workflow_threads[source_run_id]
+            self.assertFalse(source_thread.is_alive())
+
+            source = bridge.workflow_store.load_run(source_run_id)
+            source_artifact_dir = Path(source.artifact_dir)
+            self.assertEqual("killed", source.status)
+            self.assertIn("user stop after prefix", source.error)
+            self.assertEqual(["succeeded", "cancelled"], [job.status for job in source.jobs])
+            self.assertEqual(["agent_2"], runner.cancelled_job_ids)
+            self.assertTrue((source_artifact_dir / source.jobs[0].result_ref).exists())
+            self.assertTrue((source_artifact_dir / source.jobs[0].metadata["transcriptRef"]).exists())
+            source_final = json.loads((source_artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("killed", source_final["status"])
+            self.assertIn("user stop after prefix", source_final["error"])
+
+            source_terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == source_run_id][-1]
+            self.assertEqual("killed", source_terminal_run["run"]["status"])
+            source_final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == source_run_id)
+            self.assertEqual("killed", source_final_event["result"]["status"])
+            self.assertIn("user stop after prefix", source_final_event["result"]["error"])
+
+            resumed_run_id = bridge.workflow_resume(source_run_id, timeout_seconds=5.0)
+            self.assertTrue(resumed_run_id)
+            bridge.wait_for_workflow_idle(resumed_run_id, timeout=5)
+            resumed_thread = bridge._workflow_threads[resumed_run_id]
+            self.assertFalse(resumed_thread.is_alive())
+
+            resumed = bridge.workflow_store.load_run(resumed_run_id)
+            resumed_artifact_dir = Path(resumed.artifact_dir)
+            self.assertEqual("succeeded", resumed.status)
+            self.assertEqual(["cached", "succeeded"], [job.status for job in resumed.jobs])
+            self.assertEqual(source_run_id, resumed.jobs[0].metadata["cachedFromRunId"])
+            self.assertEqual("agent_1", resumed.jobs[0].metadata["cachedFromJobId"])
+            self.assertTrue((resumed_artifact_dir / resumed.jobs[0].result_ref).exists())
+            self.assertTrue((resumed_artifact_dir / resumed.jobs[0].metadata["transcriptRef"]).exists())
+            self.assertTrue((resumed_artifact_dir / resumed.jobs[1].result_ref).exists())
+            self.assertTrue((resumed_artifact_dir / resumed.jobs[1].metadata["transcriptRef"]).exists())
+            resumed_final = json.loads((resumed_artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", resumed_final["status"])
+            self.assertEqual("GA_STOP_RESUME_DONE", resumed_final["result"]["marker"])
+
+            workflow_events_by_run = {}
+            for event in events:
+                if event.get("type") != "workflow_event":
+                    continue
+                workflow_events_by_run.setdefault(event["event"]["runId"], []).append(event["event"]["type"])
+            self.assertIn("agent_cancelled", workflow_events_by_run[source_run_id])
+            self.assertIn("workflow_killed", workflow_events_by_run[source_run_id])
+            self.assertIn("agent_cached", workflow_events_by_run[resumed_run_id])
+            self.assertIn("agent_completed", workflow_events_by_run[resumed_run_id])
+            final_events = [event for event in events if event["type"] == "workflow_final"]
+            self.assertEqual({source_run_id, resumed_run_id}, {event["runId"] for event in final_events})
             self.assertEqual({"type": "activity", "label": None}, events[-2])
             self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 

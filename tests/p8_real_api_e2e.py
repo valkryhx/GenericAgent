@@ -140,6 +140,18 @@ return {
 };
 '''
 
+BRIDGE_STOP_RESUME_DIAGNOSTIC_SCRIPT = r'''
+phase('P8 Real API Bridge Stop Resume Diagnostic');
+log('start p8 real api bridge stop resume diagnostic');
+const first = await agent('Reply with one concise safe sentence containing token GA_P8_BRIDGE_STOP_PREFIX. Do not call tools, MCP, or skills.', {label:'bridge-stop-prefix'});
+const second = await agent('Reply with one concise safe sentence containing token GA_P8_BRIDGE_STOP_FRESH. Do not call tools, MCP, or skills.', {label:'bridge-stop-fresh'});
+return {
+  marker: 'GA_P8_BRIDGE_STOP_RESUME_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length
+};
+'''
+
 FAILED_SOURCE_SCRIPT = r'''
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
@@ -245,6 +257,32 @@ class InjectSecondFailureAfterFirstSuccessRunner(CountingNativeRunner):
 
     def cancel(self, job) -> None:
         self.cancelled_job_ids.append(job.job_id)
+        return super().cancel(job)
+
+
+class GateSecondUntilStoppedRunner(CountingNativeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.second_started = threading.Event()
+        self.cancelled_job_ids: list[str] = []
+        self.second_cancelled_once = False
+
+    def start(self, job) -> None:
+        if job.job_id == "agent_2" and not self.second_cancelled_once:
+            self.started_job_ids.append(job.job_id)
+            self.second_started.set()
+            return
+        return super().start(job)
+
+    def poll(self, job):
+        if job.job_id == "agent_2" and not self.second_cancelled_once:
+            return None
+        return super().poll(job)
+
+    def cancel(self, job) -> None:
+        self.cancelled_job_ids.append(job.job_id)
+        if job.job_id == "agent_2":
+            self.second_cancelled_once = True
         return super().cancel(job)
 
 
@@ -965,6 +1003,114 @@ def run_bridge_real_api_case(root: Path) -> dict:
     }
 
 
+def run_real_api_bridge_stop_resume_diagnostic_case(root: Path) -> dict:
+    events: list[dict] = []
+    runner = GateSecondUntilStoppedRunner(config_name=CONFIG_NAME, max_tokens=96)
+
+    def runtime_factory(*, store, timeout_seconds=10.0):
+        return WorkflowRuntime(
+            store=store,
+            runner=runner,
+            scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+            timeout_seconds=timeout_seconds,
+        )
+
+    bridge = GenericAgentBridge(
+        agent_factory=MinimalAgent,
+        emit=events.append,
+        workflow_root=root / "bridge_stop_resume_diagnostic",
+        workflow_runtime_factory=runtime_factory,
+    )
+    source_run_id = None
+    resumed_run_id = None
+    start = time.time()
+    try:
+        source_run_id = bridge.workflow_draft(BRIDGE_STOP_RESUME_DIAGNOSTIC_SCRIPT)
+        approved = bridge.workflow_approve(source_run_id, args={"suite": "p8-real-api", "case": "bridge-stop-resume-diagnostic"}, timeout_seconds=240.0)
+        second_started = runner.second_started.wait(timeout=180.0)
+        stopped = bridge.workflow_stop(source_run_id, reason="GA_P8_BRIDGE_STOP_DIAGNOSTIC") if second_started else False
+        bridge.wait_for_workflow_idle(source_run_id, timeout=60.0)
+        source_thread = bridge._workflow_threads.get(source_run_id)
+        source_thread_alive = bool(source_thread and source_thread.is_alive())
+        source = bridge.workflow_store.load_run(source_run_id)
+        source_artifact_dir = Path(source.artifact_dir)
+        source_jobs = summarize_jobs(source, source_artifact_dir)
+        source_event_types = event_types(bridge.workflow_store, source.run_id)
+
+        resumed_run_id = bridge.workflow_resume(source_run_id, args={"suite": "p8-real-api", "case": "bridge-stop-resume-diagnostic"}, timeout_seconds=240.0) if source.status == "killed" else ""
+        if resumed_run_id:
+            bridge.wait_for_workflow_idle(resumed_run_id, timeout=300.0)
+        resumed_thread = bridge._workflow_threads.get(resumed_run_id) if resumed_run_id else None
+        resumed_thread_alive = bool(resumed_thread and resumed_thread.is_alive())
+        resumed = bridge.workflow_store.load_run(resumed_run_id) if resumed_run_id else None
+        resumed_artifact_dir = Path(resumed.artifact_dir) if resumed and resumed.artifact_dir else None
+        resumed_jobs = summarize_jobs(resumed, resumed_artifact_dir) if resumed and resumed_artifact_dir else []
+        resumed_event_types = event_types(bridge.workflow_store, resumed.run_id) if resumed else []
+        final_events = [event for event in events if event.get("type") == "workflow_final"]
+        source_final = next((event.get("result") for event in final_events if event.get("runId") == source_run_id), {})
+        resumed_final = next((event.get("result") for event in final_events if event.get("runId") == resumed_run_id), {})
+        status_events = [event.get("status") for event in events if event.get("type") == "status"]
+        activity_events = [event.get("label") for event in events if event.get("type") == "activity"]
+        cached_prefix = bool(resumed_jobs and resumed_jobs[0].get("status") == "cached" and resumed_jobs[0].get("cachedFromRunId") == source_run_id)
+        fresh_after_stop = bool(len(resumed_jobs) > 1 and resumed_jobs[1].get("status") == "succeeded")
+        passed = (
+            approved
+            and second_started
+            and stopped
+            and not source_thread_alive
+            and not resumed_thread_alive
+            and source.status == "killed"
+            and [job.get("status") for job in source_jobs] == ["succeeded", "cancelled"]
+            and source_final.get("status") == "killed"
+            and resumed is not None
+            and resumed.status == "succeeded"
+            and cached_prefix
+            and fresh_after_stop
+            and resumed_final.get("status") == "succeeded"
+            and "agent_cancelled" in source_event_types
+            and "workflow_killed" in source_event_types
+            and "agent_cached" in resumed_event_types
+            and "agent_completed" in resumed_event_types
+            and bool(status_events and status_events[-1] == "idle")
+            and bool(activity_events and activity_events[-1] is None)
+        )
+        return {
+            "passed": passed,
+            "diagnosticOnly": True,
+            "skipped": False,
+            "elapsedSeconds": round(time.time() - start, 2),
+            "sourceRunId": source_run_id,
+            "sourceStatus": source.status,
+            "sourceApproved": approved,
+            "sourceSecondStarted": second_started,
+            "sourceStopped": stopped,
+            "sourceThreadAlive": source_thread_alive,
+            "sourceJobs": source_jobs,
+            "sourceEventCounts": {etype: source_event_types.count(etype) for etype in sorted(set(source_event_types))},
+            "sourceFinalStatus": source_final.get("status"),
+            "sourceCancelledJobIds": runner.cancelled_job_ids,
+            "resumedRunId": resumed_run_id,
+            "resumedStatus": resumed.status if resumed else None,
+            "resumedThreadAlive": resumed_thread_alive,
+            "resumedJobs": resumed_jobs,
+            "resumedEventCounts": {etype: resumed_event_types.count(etype) for etype in sorted(set(resumed_event_types))},
+            "resumedFinalStatus": resumed_final.get("status"),
+            "cachedPrefix": cached_prefix,
+            "freshAfterStop": fresh_after_stop,
+            "eventTypes": [event.get("type") for event in events],
+            "idleSeen": bool(status_events and status_events[-1] == "idle"),
+            "activityCleared": bool(activity_events and activity_events[-1] is None),
+            "artifactDir": str(source_artifact_dir),
+            "resumedArtifactDir": str(resumed_artifact_dir) if resumed_artifact_dir else None,
+        }
+    finally:
+        try:
+            bridge.stop()
+        except Exception:
+            pass
+
+
+
 def run_real_api_parallel_partial_failure_diagnostic_case(root: Path) -> dict:
     store = WorkflowStore(root / "parallel_partial_failure_diagnostic")
     run = store.create_run(WorkflowRun(run_id="wf_p8_parallel_partial_failure_diagnostic", session_id="p8_real_api_parallel_partial_failure", script=PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT, status="running"))
@@ -1197,6 +1343,12 @@ def main() -> int:
             summary["cases"]["failedSourceResumeLongestPrefix"] = run_case_safely("failedSourceResumeLongestPrefix", run_failed_source_resume_real_api_case, root)
             summary["cases"]["killedSourceResumeLongestPrefix"] = run_case_safely("killedSourceResumeLongestPrefix", run_killed_source_resume_real_api_case, root)
             summary["cases"]["bridgeDraftApproveFinal"] = run_case_safely("bridgeDraftApproveFinal", run_bridge_real_api_case, root)
+            summary["diagnostics"]["realApiBridgeStopResumeDiagnostic"] = run_case_safely(
+                "realApiBridgeStopResumeDiagnostic",
+                run_real_api_bridge_stop_resume_diagnostic_case,
+                root,
+                diagnostic_only=True,
+            )
             summary["diagnostics"]["realApiParallelPartialFailureDiagnostic"] = run_case_safely(
                 "realApiParallelPartialFailureDiagnostic",
                 run_real_api_parallel_partial_failure_diagnostic_case,

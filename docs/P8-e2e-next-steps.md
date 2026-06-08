@@ -54,9 +54,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure | `test_workflow_runtime.py` | 15 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + parallel partial failure final/error/idle 覆盖 | `test_ink_bridge.py` | 51 |
-| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 3 diagnostics |
-| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel diagnostics |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + parallel partial failure final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 52 |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 4 diagnostics |
+| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/stop-resume diagnostics |
 
 ### 1.4 总体覆盖度估算
 
@@ -69,8 +69,8 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 **粗估百分比：**
 - 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
-- 真实 API E2E 覆盖率：~65%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、parallel partial failure diagnostic、真实 native GPT 主套件通过）
-- Bridge 覆盖率：~60-65%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle、parallel partial failure final/error/idle 已覆盖；mid-call stop/kill 真实路径仍需补强）
+- 真实 API E2E 覆盖率：~68%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、parallel partial failure diagnostic、bridge stop/resume diagnostic、真实 native GPT 主套件通过）
+- Bridge 覆盖率：~65-70%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle、parallel partial failure final/error/idle、workflow_stop + resume prefix 串联已覆盖；真实 provider streaming stop 仍需作为 P2 诊断观察）
 - P0 阻塞缺口：0
 
 ---
@@ -283,11 +283,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 没有测试在 **LLM 调用进行中**（streaming 途中）杀死/停止 workflow。bridge 层 interrupted/stop 的基础终态事件已覆盖，剩余是 mid-call 真实 API 完整链路。 |
-| **当前覆盖** | 单元测试 `test_runtime_observes_external_kill_state`（fake runner）、`test_stop_cancels_queued_jobs_and_requests_cancellation_for_running_jobs`、Bridge `test_stop_stops_active_running_workflow`（`BlockingRuntime` fake runner）；`9e00a05` 覆盖 killed stop `workflow_final(status=killed)` 和非成功终态事件。 |
-| **缺失内容** | ① LLM 调用 streaming 进行中被 kill/stop；② 中断后 artifact 保留；③ mid-call 真实 API 场景下 bridge interrupted/stop 事件与 final/idle 收敛；④ 中断后 resume 完整性 |
-| **风险评级** | 中 |
-| **建议优先级** | **P1** |
+| **缺口描述** | 原缺口是 workflow_stop / kill 期间 completed prefix、running child cancel、killed final/idle 与 resume 前缀复用没有串成完整链路。当前已补 bridge 半集成和真实 API diagnostic-only 覆盖；真正 provider streaming 途中取消仍保留为稳定性诊断观察项。 |
+| **当前覆盖** | 单元测试 `test_runtime_observes_external_kill_state`、Scheduler stop 单元、Bridge `test_stop_stops_active_running_workflow`、`9e00a05` killed final；新增 `test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix` 串联 workflow_stop + completed prefix + running child cancel + killed final + resume cached prefix；新增 `realApiBridgeStopResumeDiagnostic` 以真实 native GPT prefix + 受控 running child 验证 bridge stop/resume 诊断链路。 |
+| **剩余内容** | ① provider 真实 streaming 调用途中被 cancel 的端到端稳定性观察；② UI 层快捷键/面板触发 stop 的完整前端 E2E；③ 更多 stop reason / permission / args 变体。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **核心覆盖已完成 / P2 真实 streaming 诊断观察** |
 
 ### 项目 7：Bridge 非成功终态 / 超时后的 Final/Error 事件 E2E
 
@@ -436,17 +436,16 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 - Scheduler stop 逻辑已实现
 - Bridge stop 逻辑已实现
 
-**建议实现方式：**
-- 在 `p8_real_api_e2e.py` 中新增 mid-call kill 场景
-- 使用需要较长 LLM 响应的 prompt
-- 在 child agent 的 `start()` 返回后但 `poll()` 返回前，外部设置 run status = "killed"
+**已实现方式：**
+- Bridge 半集成：`test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix` 使用真实 `WorkflowRuntime` 和受控 runner，验证 `workflow_stop` 发生在 `agent_1` 成功、`agent_2` running 后；source run killed，`agent_2` cancelled，`workflow_final(status=killed)`，随后 `workflow_resume` 中 `agent_1` cached、`agent_2` fresh succeeded。
+- 真实 API diagnostic-only：`realApiBridgeStopResumeDiagnostic` 使用真实 native GPT 产出 prefix job，第二个 job 受控 gate/hang，通过 bridge `workflow_stop` 停止并 resume，验证 cached prefix、fresh rerun、final/idle 和 artifact。
 
 **关键验收点：**
-- 不挂死，不遗留 running workflow
-- 已完成结果可恢复
-- Resume 不重复执行已完成 job
+- 不挂死，不遗留 running workflow：已覆盖 source/resumed thread 退出与 idle 收敛
+- 已完成结果可恢复：已覆盖 source `agent_1` artifact/transcript 与 resumed cached artifact
+- Resume 不重复执行已完成 job：已覆盖 `cachedPrefix=true` 与后续 fresh job
 
-**估计工作量：** 1.5 天
+**状态：** 核心 bridge/runtime/真实 API diagnostic 覆盖已完成；真实 provider streaming cancel 作为 P2 稳定性诊断观察项。
 
 ---
 
