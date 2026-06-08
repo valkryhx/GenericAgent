@@ -836,6 +836,73 @@ class InkBridgeTest(unittest.TestCase):
             self.assertIn("workflow_started", workflow_events)
             self.assertIn("workflow_log", workflow_events)
 
+    def test_workflow_approve_failed_terminal_run_emits_failed_final_fallback(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class FailingTerminalRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                run.status = "failed"
+                run.error = "deterministic failure"
+                run.result_ref = None
+                self.store.save_run(run)
+                return type("RuntimeResult", (), {"run": run, "result": None})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: FailingTerminalRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: false }")
+            self.assertTrue(bridge.workflow_approve(run_id))
+            bridge.wait_for_workflow_idle(run_id, timeout=1)
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual(
+                {"runId": run_id, "status": "failed", "error": "deterministic failure"},
+                final_event["result"],
+            )
+
+    def test_workflow_runtime_exception_emits_error_final_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class ExplodingRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                run.status = "failed"
+                run.error = "runtime exploded"
+                self.store.save_run(run)
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: ExplodingRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("throw new Error('boom')")
+            self.assertTrue(bridge.workflow_approve(run_id))
+            bridge.wait_for_workflow_idle(run_id, timeout=1)
+
+            self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["runId"] == run_id for event in events))
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual({"runId": run_id, "status": "failed", "error": "runtime exploded"}, final_event["result"])
+            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
+            self.assertEqual("boom", error_event["message"])
+            self.assertEqual({"type": "activity", "label": None}, events[-2])
+            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
     def test_workflow_resume_runs_new_run_with_resume_source(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
@@ -876,6 +943,43 @@ class InkBridgeTest(unittest.TestCase):
             self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["runId"] == resumed for event in events))
             final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == resumed)
             self.assertEqual({"resumedFrom": source_run_id, "args": {"value": 9}}, final_event["result"]["result"])
+
+    def test_workflow_resume_allows_failed_killed_and_interrupted_source_runs(self):
+        for terminal_status in ("failed", "killed", "interrupted"):
+            with self.subTest(status=terminal_status):
+                agent = FakeAgent()
+                agent.session_id = f"session_workflow_{terminal_status}"
+                events = []
+                runtime_calls = []
+
+                class FakeRuntime:
+                    def __init__(self, *, store, timeout_seconds=10.0):
+                        self.store = store
+
+                    def run(self, run, *, args=None, resume_from_run_id=None):
+                        runtime_calls.append(resume_from_run_id)
+                        run.status = "succeeded"
+                        self.store.write_final_result(run, {"runId": run.run_id, "status": "succeeded", "result": {}})
+                        self.store.save_run(run)
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    bridge = GenericAgentBridge(
+                        agent_factory=lambda: agent,
+                        emit=events.append,
+                        workflow_root=tmp,
+                        workflow_runtime_factory=lambda **kwargs: FakeRuntime(**kwargs),
+                    )
+                    source_run_id = bridge.workflow_draft("return 1")
+                    source = bridge.workflow_store.load_run(source_run_id)
+                    source.status = terminal_status
+                    bridge.workflow_store.save_run(source)
+
+                    resumed = bridge.workflow_resume(source_run_id)
+                    bridge.wait_for_workflow_idle(resumed, timeout=1)
+
+                    self.assertTrue(resumed.startswith("wf_"))
+                    self.assertEqual([source_run_id], runtime_calls)
+                    self.assertFalse(any(event["type"] == "error" and event.get("code") == "workflow_resume_failed" for event in events))
 
     def test_workflow_resume_rejects_blank_run_id_with_protocol_error(self):
         agent = FakeAgent()
@@ -1006,6 +1110,32 @@ class InkBridgeTest(unittest.TestCase):
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("workflow_killed", workflow_events)
             self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["status"] == "killed" for event in events))
+            self.assertTrue(
+                any(
+                    event["type"] == "workflow_final"
+                    and event["runId"] == run_id
+                    and event["result"]["status"] == "killed"
+                    for event in events
+                )
+            )
+
+    def test_workflow_final_payload_falls_back_for_terminal_run_without_or_with_bad_result_ref(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            run = bridge.workflow_store.load_run(run_id)
+            run.status = "failed"
+            run.error = "no result"
+            run.result_ref = None
+            self.assertEqual({"runId": run_id, "status": "failed", "error": "no result"}, bridge._workflow_final_payload(run))
+
+            run.status = "killed"
+            run.error = "bad result"
+            run.artifact_dir = tmp
+            run.result_ref = "missing-result.json"
+            self.assertEqual({"runId": run_id, "status": "killed", "error": "bad result"}, bridge._workflow_final_payload(run))
 
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
