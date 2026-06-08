@@ -6,6 +6,12 @@
 
 提交：`aa0a2b0 feat(workflow): 实现 P8 resume 缓存复用`
 
+补充提交：
+
+- `9e00a05 test(workflow): 补充 bridge 非成功终态覆盖`
+- `f8b1850 test(workflow): 补充 interrupted resume 前缀复用覆盖`
+- `1c8933f test(workflow): 增强真实 API 失败诊断`
+
 已完成：
 
 - 正常主路径真实 API E2E。
@@ -22,7 +28,11 @@
 - Ink bridge draft / approve / final 成功。
 - bridge workflow 状态流：`awaiting_approval -> running -> succeeded`。
 - 连续 3 轮真实 API 主路径 E2E 全部通过。
+- 真实 native GPT P8 主套件已在 `GA_RUN_REAL_API_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5` 下复跑通过：6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]`。
 - `secretScan: []`，未发现密钥泄漏。
+- bridge 非成功终态已覆盖：`failed` / `killed` / `interrupted` 均可收敛为明确终态事件，不再停留 running；包含 failed final fallback、runtime exception final/error/idle、failed/killed/interrupted source resume bridge 允许路径，以及 killed stop `workflow_final(status=killed)`。
+- interrupted source run resume 已覆盖：已成功 job 可按最长成功前缀复用，后续 job fresh rerun；同时验证 stale/running middle job 阻断后续复用，以及 cached artifact/transcript/event metadata。
+- 真实 API harness 已支持 case 级 `run_case_safely` 诊断，便于定位单个真实 E2E case 的失败原因；同时补充 `code_run` 缺失 `code_cwd` 的明确 error，以及 `py` alias 清理 `.ai.py`。
 
 已提交的 opt-in harness：
 
@@ -32,6 +42,8 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 ```
 
 默认不设置 `GA_RUN_REAL_API_E2E=1` 时必须跳过，避免默认测试烧真实 API。
+
+`1c8933f` 后真实 API harness 支持 case 级诊断输出，用于定位单个真实 API E2E case 的耗时、失败原因和脱敏摘要。
 
 ## 还没做的 E2E
 
@@ -149,13 +161,25 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2
 - resumed event 包含 `agent_cached: 1`、`agent_started: 1`、`agent_completed: 1`。
 - `secretScan: []`。
 
-仍未覆盖：interrupted source run 的 resume、bridge 层 failed/killed/interrupted source resume、prompt/options/args/permission profile 变体的真实 E2E。
+已验证 interrupted source run resume：
+
+- source run 中已完成 job 的 result/transcript artifact 保留。
+- source run 进入 `interrupted` 非成功终态。
+- resumed run 复用 interrupted source run 的最长成功前缀。
+- interrupted 后未完成的 job 不复用，会 fresh real API rerun。
+- stale/running middle job 会阻断后续复用，避免错误跳过中间不确定状态。
+- cached artifact/transcript/event metadata 指向 source run/job 且保持可追踪。
+- resumed run 最终可继续收敛到成功终态。
+
+当前进展：failed / killed / interrupted source run 的 resume 前缀复用均已有覆盖；其中 interrupted source run resume 已由 `f8b1850` 覆盖，验证已成功 job 可复用、未完成/中断后的 job 会 fresh rerun。
+
+仍未覆盖：prompt/options/args/permission profile 变体的真实 E2E；bridge 层 source resume 如仍缺少完整链路覆盖，应单独标注具体缺口。
 
 建议继续覆盖：
 
-- bridge 层 failed source run 经 `workflow_resume` 恢复。
-- bridge 层 killed source run 经 `workflow_resume` 恢复。
-- interrupted source run 中已成功 job 的 cache replay。
+- bridge 层 failed source run 经 `workflow_resume` 恢复的完整真实 API 链路。
+- bridge 层 killed source run 经 `workflow_resume` 恢复的完整真实 API 链路。
+- 如需提升覆盖层级，补充 interrupted source run resume 的完整 bridge 链路验证。
 - prompt 改动后只复用改动前的前缀。
 - options 改动后停止复用。
 - args 改动后不复用。
@@ -190,30 +214,35 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2
 - 已完成结果可恢复。
 - resume 不重复执行已完成 job。
 
-### 7. bridge 超时后的 final/error 事件 E2E
+### 7. bridge 非成功终态 final/error 事件 E2E
 
-目标：验证 bridge 在非成功 workflow 结束时也能向 UI 发出明确终态。
+目标：验证 bridge 在非成功 workflow 结束时也能向 UI 发出明确终态；timeout 专项仍归入第 1 节真实 API 超时边界。
 
-当前 bridge 真实 E2E 只覆盖成功路径：
+当前进展：已由 `9e00a05` 补充 bridge 非成功终态覆盖。
+
+已覆盖状态流：
 
 ```text
 awaiting_approval -> running -> succeeded
-```
-
-还需要覆盖：
-
-```text
 awaiting_approval -> running -> failed
 awaiting_approval -> running -> killed
 awaiting_approval -> running -> interrupted
 ```
 
-验收要点：
+已覆盖细节：
 
-- 优先 emit `workflow_final`。
-- 如果没有 final，也必须 emit 明确 error/status。
-- UI 不应一直显示 running。
-- workflow panel 能显示失败/中断事件。
+- failed final fallback。
+- runtime exception 后 final/error/idle 恢复。
+- failed/killed/interrupted source resume bridge 允许路径。
+- killed stop `workflow_final(status=killed)`。
+
+验收要点状态：
+
+- 优先 emit `workflow_final`：已覆盖。
+- 如果没有 final，也必须 emit 明确 error/status：已覆盖 fallback / exception 分支。
+- 非成功终态不再停留 running：已覆盖。
+- bridge 能向 UI 暴露明确 final/error/status：已覆盖。
+- workflow panel 能显示失败/中断事件：基础事件链已覆盖；真实 UI 展示仍可在完整 bridge E2E 中补强。
 
 ### 8. 真实 API 返回格式异常 E2E
 
@@ -258,6 +287,7 @@ awaiting_approval -> running -> interrupted
 - child transcript/journal 写入 permission/tool events，result artifact 不内联 `transcriptEvents`，parent session transcript 不包含 child tool/skill/MCP 细节。
 - 真实 API `nativeToolCallingFileSkillMcp`：真实 child agent 的 `toolCalls` 包含 `file_read`、`load_skill`、`mcp__p8_stub__read_marker`、`no_tool`，`toolSummary.denied == 0`，`fileReadOk/skillLoadOk/mcpReadOk == true`。
 - 真实 MCP diagnostic：不 mock `mcp_runtime.call_mcp_tool`，通过真实 `mcp_runtime.discover_mcp_tools_cached()` 发现 MCP 工具，在 `GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1` 下真实调用 `mcp__fetch__fetch`，`mcpCalled/mcpReturned == true`，`secretScan: []`。
+- 真实 native GPT 主套件已通过，当前真实 API 主路径、工具继承与诊断 case 具备稳定回归基线。
 
 当前边界：
 
@@ -346,13 +376,15 @@ awaiting_approval -> running -> interrupted
 
 ## 推荐下一步优先级
 
-建议优先补以下 4 类：
+建议优先补以下 5 类：
 
-1. `bridge 层 failed/killed/interrupted source resume E2E`：把已验证的 runtime 层失败/停止 resume 提升到完整 Ink bridge 链路。
-2. `cache key 真实变体 E2E`：验证 args/prompt/options/permission profile 改动时 cache hit/miss 完全正确。
-3. `timeout / stop E2E`：最贴近真实网络环境、慢响应和任务超时问题。
-4. `rate limit / 并发压力真实 E2E`：最容易暴露真实 API 服务商限制。
-5. `真实 MCP 覆盖扩展`：已补 diagnostic-only 的真实 `mcp__fetch__fetch` 非 mock 调用；如后续需要，可在本机 GenericAgent MCP 配置出现 Context7 后补 Context7 专项 diagnostic。
+1. `P1 timeout / stop / mid-call 边界真实 E2E`：覆盖真实网络慢响应、极短 timeout、stop/kill 后资源回收与 resume 行为。
+2. `P1 parallel 部分失败真实/半真实 E2E`：验证部分 child 失败时成功 job、失败 job、artifact、failure policy 与 bridge 终态一致。
+3. `P2 JS worker 异常脚本 bridge E2E`：覆盖脚本 throw、pipeline/parallel thunk throw、非法 options、不可序列化返回和安全扫描拒绝后的 bridge 事件。
+4. `P2 rate limit/429、网络抖动 diagnostic`：用 opt-in 压力/稳定性诊断暴露真实 API 服务商限流、429、5xx 与高 fan-out 下的收敛问题。
+5. `P3 cache key 真实变体、大 artifact、Context7/explicit approval 专项`：验证 args/prompt/options/permission profile 改动的真实 hit/miss、大 transcript 隔离，以及后续 Context7/审批闭环专项。
+
+原 P0 “bridge 非成功终态完全缺失 / interrupted source resume 完全缺失”已更新为：基础 deterministic/bridge 单元已完成，剩余是 opt-in 真实 API/完整 bridge E2E 层。
 
 ## 安全与执行约束
 
@@ -364,3 +396,4 @@ awaiting_approval -> running -> interrupted
 - 不提交 `mykey.py`、`mykey.json`、`mcp.json`。
 - 不提交真实 API 输出 artifact。
 - 压力测试必须单独环境变量控制，避免误触发高成本或限流。
+- case 级诊断输出只能包含脱敏摘要、case 名称、状态、耗时和错误类型，不得输出 provider key、完整原始请求或未脱敏响应。

@@ -42,6 +42,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | `0eee3ef` | 补完 Native child 工具继承验证 |
 | `4f4e04f` | 补充真实 API 工具继承 E2E |
 | `42b0b6c` | 增加真实 MCP 诊断 E2E |
+| `9e00a05` | 补充 bridge 非成功终态覆盖 |
+| `f8b1850` | 补充 interrupted resume 前缀复用覆盖 |
+| `1c8933f` | 增强真实 API 失败诊断 |
 
 ### 1.3 按层覆盖总结
 
@@ -50,23 +53,24 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill | `test_workflow_runtime.py` | 14 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + 部分拒绝路径 | `test_ink_bridge.py` | 6 |
-| **Real API E2E** | 正常主路径 + failed/killed resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 MCP diagnostic（opt-in） | `p8_real_api_e2e.py` | 6 main cases + 1 diagnostic |
-| **Bridge E2E** | 仅正常路径（succeeded 终态） | `p8_real_api_e2e.py` | 1 case |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 | `test_ink_bridge.py` | 49 |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 1 diagnostic |
+| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖，真实 API bridge 非成功路径仍作为 P1/P2 补强项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage |
 
 ### 1.4 总体覆盖度估算
 
-**按 TODO 文档的 12 项评估：**
+**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f`）：**
 
-- ✅ 完全覆盖（单元 + 真实 API E2E）：1 项（正常主路径）
-- 🔶 单元覆盖完全但无真实 API E2E：3 项（parallel 部分失败、kill/stop/interrupted、cache key 变体）
-- 🔶 单元覆盖部分 + 真实 API E2E 部分：3 项（超时边界、failed/killed resume、大 artifact 隔离）
-- ❌ 完全未覆盖（任何层级）：4 项（网络抖动、rate limit/429、bridge 终态事件、返回格式异常）
+- ✅ 完全或主路径充分覆盖：3 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承）
+- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：3 项（bridge 非成功终态事件、parallel 部分失败、cache key 变体）
+- 🔶 部分覆盖：3 项（超时边界、大 artifact 隔离、JS Worker 异常脚本）
+- ❌ 仍基本未覆盖：3 项（网络抖动/稳定性、rate limit/429、真实 API 返回格式异常）
 
 **粗估百分比：**
-- 单元测试覆盖率：~85%（几乎全部核心路径已覆盖）
-- 真实 API E2E 覆盖率：~40%（正常路径、failed/killed resume、权限/工具/skill/MCP 继承与真实 MCP diagnostic 已覆盖）
-- Bridge E2E 覆盖率：~15%（仅 succeeded 路径）
+- 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态已补）
+- 真实 API E2E 覆盖率：~55-60%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、真实 native GPT 主套件通过）
+- Bridge 覆盖率：~40-50%（succeeded 主路径、resume 拒绝、stop、非成功终态事件已有覆盖；真实 API bridge 非成功路径仍需视测试层级补强）
+- P0 阻塞缺口：0
 
 ---
 
@@ -126,7 +130,21 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Resumed run 最终 `succeeded` | 确认 |
 | Result marker 正确 | `"GA_P8_KILLED_RESUME_DONE"` |
 
-### 2.4 权限 / MCP / Skills / Tools 继承（已补 Native child 执行链路 + 真实 API + 真实 MCP diagnostic）
+### 2.4 Interrupted Source Run Resume（已由 `f8b1850` 补充）
+
+**用例：** `run_interrupted_source_resume_real_api_case()` 及配套 deterministic/bridge 单元覆盖
+
+| 验收点 | 结果 |
+|---|---|
+| Source run 中已完成 job 可作为成功前缀 | 确认 |
+| Source run 中 running/interrupted job 不被错误复用 | 确认 |
+| Resume 后仅复用最长成功前缀 | 确认 |
+| Stale / interrupted 后续 job 重新执行 | 确认 |
+| Resumed run 最终成功 | 确认 |
+| Prefix cache metadata 指向 source run/job | 确认 |
+| Cached artifact/transcript/event metadata 保持可追踪 | 确认 |
+
+### 2.5 权限 / MCP / Skills / Tools 继承（已补 Native child 执行链路 + 真实 API + 真实 MCP diagnostic）
 
 **文件：** `tests/test_workflow_permission_inheritance_e2e.py` + `tests/test_workflow_child_agent.py` + `tests/p8_real_api_e2e.py` + `tests/test_p8_real_api_e2e_diagnostic.py`
 
@@ -145,10 +163,13 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Parent transcript 隔离 | parent session transcript 不包含 child tool marker、skill marker、MCP marker 或 permission events |
 | Profile/version cache miss | profile 或 policy version 改变时不命中 source cache；完全相同时命中并复制 transcript |
 | 默认不烧真实 API/MCP | `python tests/p8_real_api_e2e.py` 默认 skip；真实 API 用 `GA_RUN_REAL_API_E2E=1`；真实 MCP 诊断另需 `GA_RUN_REAL_MCP_E2E=1` |
+| 真实 native GPT 主套件通过 | 6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]` |
 
 当前限制：真实 MCP diagnostic 是 diagnostic-only，不纳入主 `summary.passed` 门禁；结果依赖本机 MCP 配置、网络和外部 MCP 服务状态。Context7 未出现在 GenericAgent 当前 `mcp_runtime` discovery 列表中，当前真实 MCP 诊断覆盖的是已配置可用的 `fetch` MCP。
 
-### 2.5 Bridge Draft/Approve/Final 成功（已提交）
+真实 native GPT 主套件已通过，说明该链路不只是 deterministic/stub 覆盖，主流程在真实模型调用下也已验证。
+
+### 2.6 Bridge Draft/Approve/Final 成功（已提交）
 
 **用例：** `run_bridge_real_api_case()`
 
@@ -162,7 +183,23 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | Runtime 实际启动了 child agent | `runtime_started_jobs == ["agent_1"]` |
 | Event 完整性 | 关键事件全部出现 |
 
-### 2.6 单元测试覆盖的核心实现细节
+### 2.7 Bridge 非成功终态事件覆盖（已由 `9e00a05` 补充）
+
+**文件：** `tests/test_ink_bridge.py`
+
+| 验收点 | 结果 |
+|---|---|
+| failed 终态事件流 | 已覆盖 |
+| killed 终态事件流 | 已覆盖 |
+| interrupted 终态事件流 | 已覆盖 |
+| 非成功终态仍 emit `workflow_final` | 已覆盖 |
+| failed final fallback | 已覆盖 |
+| runtime exception / fallback final payload | 已覆盖 |
+| failed/killed/interrupted source resume bridge 允许路径 | 已覆盖 |
+| killed stop `workflow_final(status=killed)` | 已覆盖 |
+| 运行结束后 activity/status 清理 | 已覆盖 |
+
+### 2.8 单元测试覆盖的核心实现细节
 
 | 实现细节 | 文件 | 测试方法 |
 |---|---|---|
@@ -235,31 +272,31 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | **Interrupted source resume 完全缺失（无任何层级测试）。** Bridge 层的 failed/killed/interrupted resume 为零覆盖。 |
-| **当前覆盖** | Failed source resume: 运行时层真实 API E2E（未提交）。Killed source resume: 运行时层真实 API E2E（未提交）。Store 层 `test_mark_running_jobs_stale_on_resume_projection`。Bridge 层只测试了 succeeded source resume。 |
-| **缺失内容** | ① interrupted source run resume — 构建 running 状态 run 然后从中 resume；② Bridge 层 `workflow_resume(failed_source_run_id)`；③ Bridge 层 `workflow_resume(killed_source_run_id)`；④ Prompt/options/args/permission profile 变体下的 resume |
-| **风险评级** | **高** |
-| **建议优先级** | **P0** |
+| **缺口描述** | Failed/killed/interrupted source resume 的核心前缀复用路径已覆盖。剩余缺口主要是 bridge 层真实 API 场景、更多 options/args/permission profile 组合，以及异常恢复后的 UI 端到端确认。 |
+| **当前覆盖** | Failed source resume 与 killed source resume 已有真实 API E2E；`f8b1850` 已补充 interrupted resume 前缀复用覆盖；Store 层 `test_mark_running_jobs_stale_on_resume_projection` 覆盖 running job stale 投影；`9e00a05` 已补 failed/killed/interrupted source resume bridge 允许路径。 |
+| **剩余内容** | ① Bridge 层对 failed/killed/interrupted source resume 的完整真实 API E2E；② Prompt/options/args/permission profile 变体下的 resume；③ interrupted 场景 artifact 与 parent transcript 隔离的更大规模验证。 |
+| **风险评级** | 中 |
+| **建议优先级** | **P2** |
 
 ### 项目 6：Kill / Stop / Interrupted 真实 E2E
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 没有测试在 **LLM 调用进行中**（streaming 途中）杀死/停止 workflow。bridge 层 `workflow_interrupted` 路径完全未测试。 |
-| **当前覆盖** | 单元测试 `test_runtime_observes_external_kill_state`（fake runner）、`test_stop_cancels_queued_jobs_and_requests_cancellation_for_running_jobs`、Bridge `test_stop_stops_active_running_workflow`（`BlockingRuntime` fake runner） |
-| **缺失内容** | ① LLM 调用 streaming 进行中被 kill/stop；② 中断后 artifact 保留；③ Bridge 层 `workflow_interrupted` 事件；④ 中断后 resume 完整性 |
+| **缺口描述** | 没有测试在 **LLM 调用进行中**（streaming 途中）杀死/停止 workflow。bridge 层 interrupted/stop 的基础终态事件已覆盖，剩余是 mid-call 真实 API 完整链路。 |
+| **当前覆盖** | 单元测试 `test_runtime_observes_external_kill_state`（fake runner）、`test_stop_cancels_queued_jobs_and_requests_cancellation_for_running_jobs`、Bridge `test_stop_stops_active_running_workflow`（`BlockingRuntime` fake runner）；`9e00a05` 覆盖 killed stop `workflow_final(status=killed)` 和非成功终态事件。 |
+| **缺失内容** | ① LLM 调用 streaming 进行中被 kill/stop；② 中断后 artifact 保留；③ mid-call 真实 API 场景下 bridge interrupted/stop 事件与 final/idle 收敛；④ 中断后 resume 完整性 |
 | **风险评级** | 中 |
 | **建议优先级** | **P1** |
 
-### 项目 7：Bridge 超时后的 Final/Error 事件 E2E
+### 项目 7：Bridge 非成功终态 / 超时后的 Final/Error 事件 E2E
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | bridge `_run_workflow_runtime` 的 `except` 分支几乎完全无测试覆盖。`_workflow_final_payload` 的 fallback 路径完全无测试。当前只覆盖 `succeeded` 终态。 |
-| **当前覆盖** | 完全无覆盖 |
-| **缺失内容** | ① `failed` 终态的 bridge event 流；② `killed` 终态；③ `interrupted` 终态；④ `_workflow_final_payload` 在 result.json 缺失时的 fallback；⑤ `_run_workflow_runtime` 的 except 分支在异常后是否正确 emit error |
-| **风险评级** | **高** |
-| **建议优先级** | **P0** |
+| **缺口描述** | Bridge failed/killed/interrupted 非成功终态事件已补覆盖。剩余重点是 timeout 场景、真实 API bridge 失败路径、`_workflow_final_payload` fallback 在 artifact 缺失/损坏时的行为，以及 `_run_workflow_runtime` runtime exception 分支的真实/完整链路。 |
+| **当前覆盖** | `9e00a05` 已补充 bridge 非成功终态覆盖；既有 bridge succeeded 主路径、resume 拒绝、stop fake runtime 覆盖；failed final fallback、runtime exception final/error/idle、killed stop final 均已有基础覆盖。 |
+| **剩余内容** | ① timeout 后 bridge event 流；② 真实 API bridge failed/killed/interrupted 路径；③ result.json 缺失/损坏时 fallback payload 的更完整验证；④ runtime exception 后 error event 与 idle 恢复的端到端补强。 |
+| **风险评级** | 中 |
+| **建议优先级** | **P1** |
 
 ### 项目 8：真实 API 返回格式异常 E2E
 
@@ -276,7 +313,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | 维度 | 详情 |
 |---|---|
 | **缺口描述** | 该项原缺口是默认 workflow/child agent 不能退化为 read-only，且真实 Native child 要能使用工具/skills/MCP。当前已补默认 deterministic、Native child 本体、真实 API tool-calling、真实 MCP diagnostic 四层覆盖。 |
-| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；deterministic E2E 覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；`NativeGPTChildAgentRunner` 已接入 `GenericAgentHandler.dispatch`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read`/`load_skill`/stub MCP；`realMcpDiagnostic` 覆盖非 mock 真实 MCP `mcp__fetch__fetch`。 |
+| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；deterministic E2E 覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；`NativeGPTChildAgentRunner` 已接入 `GenericAgentHandler.dispatch`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read`/`load_skill`/stub MCP；`realMcpDiagnostic` 覆盖非 mock 真实 MCP `mcp__fetch__fetch`。真实 native GPT 主套件已通过，说明该链路不只是 deterministic/stub 覆盖，主流程在真实模型调用下也已验证。 |
 | **剩余边界** | ① explicit approval 工作流内审批闭环仍缺失；② Context7 未出现在当前 GenericAgent MCP discovery 中，若本机后续配置 Context7，可补 Context7 专项 diagnostic；③ 真实 MCP diagnostic 是报告型，不纳入主门禁。 |
 | **风险评级** | **低-中** |
 | **建议优先级** | **P3（扩展/专项诊断）** |
@@ -315,82 +352,16 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ## 4. 推荐下一步（按优先级排序）
 
-### Priority P0（立即执行）
+### Priority P0（当前无阻塞项）
 
----
+截至 `9e00a05`、`f8b1850`、`1c8933f`，原 P0 中的 interrupted resume 前缀复用与 bridge 非成功终态核心覆盖已补齐，权限 / MCP / Skills / Tools 继承核心验收也已完成。P8 当前不再存在必须立即阻塞合入的 P0 E2E 缺口。
 
-#### 4.1 Interrupted Source Resume E2E
+保留的高价值工作转入 P1/P2：
 
-**目标：** 验证 interrupted source run 的 resume 行为和最长成功前缀复用。
-
-**前置条件：**
-- Store 层 `project_resume_state()` 已实现并测试（`test_mark_running_jobs_stale_on_resume_projection`）
-- Runtime 层已有 killed source resume 真实 E2E 的实现模式
-- Scheduler 的 cache 前缀匹配逻辑已充分单元测试
-
-**建议实现方式：**
-- 在 `p8_real_api_e2e.py` 中新增 `run_interrupted_source_resume_real_api_case()`
-- 构建 3-agent parallel script，在 agent_2 启动后但未完成前通过外部将 run 置为 kill
-- 验证 `project_resume_state()` 投影后将 running agent 标记为 stale
-- 验证 resume 后只复用 completed agent，stale job 重新执行
-
-**关键验收点：**
-- Source run 中 completed agent 的 artifact 保留，running agent 标记为 cancelled
-- Resumed run 中 completed agent 为 `cached`，stale agent 为 fresh run
-- `workflow_interrupted` 事件出现在 source journal 中
-- Resumed run 最终 `succeeded` 且结果正确
-- `secretScan: []`
-
-**估计工作量：** 1-2 天（可大量复用 killed resume 代码模式）
-
----
-
-#### 4.2 Bridge 层非成功终态事件 E2E
-
-**目标：** 验证 Ink bridge 在 `failed` / `killed` / `interrupted` 结束时向 UI 推送正确的终态事件。
-
-**前置条件：**
-- `ink_bridge.py` 中 `_run_workflow_runtime` 的 try/except/finally 逻辑已完整
-- `_workflow_final_payload` 的 fallback 路径已实现
-- 已有 bridge 单元测试框架（`FakeRuntime` / `BlockingRuntime`）
-
-**建议实现方式：**
-- 在 `test_ink_bridge.py` 中新增 3-4 个测试方法：
-  1. `test_workflow_approve_emits_failed_final` — FakeRuntime 使 run 进入 failed
-  2. `test_workflow_approve_emits_killed_final` — FakeRuntime 使 run 进入 killed
-  3. `test_workflow_approve_emits_interrupted_final` — FakeRuntime 使 run 进入 interrupted
-  4. `test_workflow_approve_handles_runtime_exception` — FakeRuntime.run 抛出异常
-- 在 `p8_real_api_e2e.py` 中扩展 bridge 失败路径 E2E
-
-**关键验收点：**
-- failed 终态：事件流包含 `workflow_failed` + `workflow_final` status=failed
-- killed 终态：事件流包含 `workflow_killed` + `workflow_final` status=killed
-- interrupted 终态：事件流包含 `workflow_interrupted` + `workflow_final` status=interrupted
-- 运行时异常：emit `workflow_run_failed` error event
-- 所有场景下 finally 块执行：activity → None, status → idle
-
-**估计工作量：** 1-2 天
-
----
-
-#### 4.3 权限 / MCP / Skills / Tools 继承 E2E（已完成，保留扩展项）
-
-**状态：** 已由 `fa2954d`、`0eee3ef`、`4f4e04f`、`42b0b6c` 覆盖核心验收点。
-
-已完成：
-- Child agent 默认权限不是 read-only。
-- Native child 本体走 `GenericAgentHandler.dispatch`。
-- Tool events 只写入 child transcript / artifact。
-- Parent backend history 不包含 child tool transcript。
-- Cache key 包含 permission profile 和 policy version。
-- Permission profile/policy version 改动导致 cache miss。
-- 真实 API child 主动调用 `file_read`、`load_skill`、受控 MCP。
-- 真实 MCP 非 mock diagnostic 调用 `mcp__fetch__fetch`。
-
-剩余扩展项：
-- 如当前 GenericAgent MCP 配置后续加入 Context7，可补 Context7 专项 diagnostic。
-- explicit approval 工作流内审批闭环仍未覆盖。
-- 真实 MCP diagnostic 目前是 diagnostic-only，若要变成门禁需另行评估稳定性和成本。
+- timeout 后 bridge final/error 事件真实路径。
+- parallel 部分失败真实/半真实 E2E。
+- mid-call kill/stop 真实 E2E。
+- bridge 非成功终态真实 API 端到端补强。
 
 ---
 
@@ -398,9 +369,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ---
 
-#### 4.4 超时边界真实 E2E
+#### 4.1 Timeout + Bridge Final/Error E2E
 
-**目标：** 验证 `timeout_seconds` 极短值时 workflow 正确进入 failed/killed 终态，子进程被回收，bridge 事件正确。
+**目标：** 验证 `timeout_seconds` 极短值时 workflow 正确终止，child/worker 被回收，bridge emit failed/final/error 事件，activity/status 恢复 idle。
 
 **前置条件：**
 - Runtime 层 timeout 逻辑已实现（`WorkflowRuntime.__init__` 接受 `timeout_seconds`）
@@ -420,7 +391,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ---
 
-#### 4.5 Parallel 部分失败 E2E
+#### 4.2 Parallel 部分失败 E2E
 
 **目标：** 验证 parallel 中部分 child agent 真实失败时其他 job 的状态处理。
 
@@ -441,7 +412,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ---
 
-#### 4.6 Mid-Call Kill / Stop E2E
+#### 4.3 Mid-Call Kill / Stop E2E
 
 **目标：** 验证 workflow 在真实 LLM API 调用进行中被 kill/stop 后的状态和 artifact 处理。
 
@@ -468,9 +439,10 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 项目 | 说明 | 前置条件 |
 |---|---|---|
-| Rate Limit / 429 边界 E2E | 成本高，需 opt-in + 单独 env var | 核心 P0/P1 完成后 |
+| JS Worker 异常脚本 Bridge E2E | pipeline/parallel throw、非法 options、不可序列化返回值等异常脚本桥接收敛 | 现有单元测试模式 |
+| Failed/killed/interrupted resume bridge 真实 API 与变体组合 | runtime/基础 bridge 已覆盖，剩余完整链路与参数矩阵 | P1 稳定后 |
+| Rate Limit / 429 边界 E2E | 成本高，需 opt-in + 单独 env var | 核心 P1 完成后 |
 | 网络抖动 / 稳定性 E2E | 需压力测试基础设施 | 压力测试就绪后 |
-| JS Worker 异常脚本 E2E | 可在异常测试框架搭建后统一补充 | 现有单元测试模式 |
 | 返回格式异常 E2E | 需 semi-real runner/mock 基础设施 | P9/P10 阶段 |
 
 ### Priority P3（低优先级）
@@ -479,6 +451,8 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 |---|---|
 | Cache Key 真实变体 E2E | 单元测试已非常充分，可在其他测试中自然覆盖 |
 | 大 Artifact / Transcript 隔离 | 性能/规模测试，P9/P10 阶段评估 |
+| Context7 专项 diagnostic | 仅在本机 GenericAgent MCP discovery 出现 Context7 后补充 |
+| Explicit approval 审批闭环 | 工作流内审批专项扩展 |
 
 ---
 
@@ -494,30 +468,40 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 - 默认 unittest 和 pytest 不得烧真实 API
 - 压力测试（rate limit / 大并发）必须使用单独的环境变量 `GA_RUN_REAL_API_STRESS=1`
 - 绝不读取、打印、提交真实 API key
+- 文档更新不得读取或打印 `mykey.py`、`mykey.json`、`mcp.json`
+- case 级诊断输出只能包含脱敏摘要、case 名称、状态、耗时和错误类型，不得输出 provider key、完整原始请求或未脱敏响应
 
-### 5.2 脱敏处理
+### 5.2 真实 native GPT 主套件状态
+
+- 最新状态：真实 native GPT 主套件已通过。
+- 执行环境：`GA_RUN_REAL_API_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5`。
+- 结果：6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]`。
+- 该状态只表示 opt-in 环境下主套件通过，不代表压力测试、rate limit、网络抖动、timeout/fallback 等专项场景已覆盖。
+- 文档更新不得读取或打印 `mykey.py`、`mykey.json`、`mcp.json`。
+
+### 5.3 脱敏处理
 
 - 所有 E2E 输出必须经 `sanitize()` 函数脱敏（`SECRET_PATTERNS` 覆盖 bearer token、api_key、sk-*、JWT 等）
 - 脱敏格式：匹配到 secret 的部分替换为 `[REDACTED]`
 
-### 5.3 Secret 扫描
+### 5.4 Secret 扫描
 
 - 所有工作完成时必须调用 `scan_for_secret_material()` 扫描 artifact 目录
 - 发现 secret 时测试必须 FAIL（`secretScan: []` 为必要条件）
 
-### 5.4 不提交 artifact
+### 5.5 不提交 artifact
 
 - 真实 API 调用产生的 artifact 不得提交到 git
 - 测试使用 `tempfile.mkdtemp()` 创建临时目录后自动清理
 - `temp/` 目录已在 `.gitignore` 中
 
-### 5.5 默认权限约束
+### 5.6 默认权限约束
 
 - Child agent 默认 permission profile 必须为 `"inherit-current-permissions"`
 - Permission policy version 默认必须为 `"inherit-current-v1"`
 - 默认权限必须是非 read-only，继承 GenericAgent 当前 agent 的工具/skill/MCP 权限
 
-### 5.6 架构约束提醒
+### 5.7 架构约束提醒
 
 | 项目 | 说明 |
 |---|---|
@@ -525,7 +509,7 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 | `failure_policy` | 运行时只使用 `"continue"`，Scheduler 支持的 `fail_fast` 未被运行时使用 |
 | transcript 复制 | 通过 `shutil.copyfile` 物理复制（非软链接），大量 artifact 场景需关注磁盘使用 |
 
-### 5.7 后续阶段参考（P9 / P10）
+### 5.8 后续阶段参考（P9 / P10）
 
 - **P9（Saved workflow registry）**：需要将 workflow script 的持久化和版本化纳入范围，可能影响 cache key 设计
 - **P10（Planner/trigger integration）**：需要 workflow 与 GenericAgent 的 planner/trigger 机制集成，child agent 的工具继承变得更加关键
@@ -537,11 +521,11 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 
 | 文件 | 说明 |
 |---|---|
-| `tests/p8_real_api_e2e.py` | P8 真实 API E2E 主文件（工作区包含 failed/killed resume 扩展但未提交） |
-| `tests/test_workflow_runtime.py` | Runtime 层单元测试（14 个用例） |
-| `tests/test_workflow_scheduler.py` | Scheduler 层单元测试（14 个用例） |
-| `tests/test_workflow_store.py` | Store 层单元测试（9 个用例） |
-| `tests/test_ink_bridge.py` | Bridge 层单元测试（含 workflow 共 6 个用例） |
+| `tests/p8_real_api_e2e.py` | P8 真实 API E2E 主文件，覆盖正常主路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承等 opt-in 场景 |
+| `tests/test_workflow_runtime.py` | Runtime 层单元测试（14 个用例，按当前实际测试数维护） |
+| `tests/test_workflow_scheduler.py` | Scheduler 层单元测试（14 个用例，按当前实际测试数维护） |
+| `tests/test_workflow_store.py` | Store 层单元测试（9 个用例，按当前实际测试数维护） |
+| `tests/test_ink_bridge.py` | Bridge 层单元/半集成测试，覆盖 workflow succeeded、resume 拒绝、stop、非成功终态事件等 |
 | `frontends/ink_bridge.py` | Ink bridge 实现（`_run_workflow_runtime` 第 518-541 行，`_workflow_final_payload` 第 568-576 行） |
 | `docs/P8-e2e-todo.md` | P8 E2E TODO 文档（本分析起点） |
 | `docs/dynamic-workflows-implementation-roadmap.md` | 完整实施路线图（P1-P10） |
