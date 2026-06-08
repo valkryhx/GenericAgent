@@ -903,6 +903,44 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual({"type": "activity", "label": None}, events[-2])
             self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
+    def test_workflow_approve_timeout_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return await new Promise(() => {})")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=0.2))
+            bridge.wait_for_workflow_idle(run_id, timeout=3)
+
+            thread = bridge._workflow_threads[run_id]
+            self.assertFalse(thread.is_alive())
+
+            run = bridge.workflow_store.load_run(run_id)
+            self.assertEqual("failed", run.status)
+
+            final_path = Path(run.artifact_dir) / "final-result.json"
+            self.assertTrue(final_path.exists())
+            final_payload = json.loads(final_path.read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_payload["status"])
+            self.assertIn("deadline", final_payload["error"])
+
+            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
+            self.assertEqual("failed", terminal_run["run"]["status"])
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertIn("deadline", final_event["result"]["error"])
+
+            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("workflow_failed", workflow_events)
+
+            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
+            self.assertIn("deadline", error_event["message"])
+            self.assertEqual({"type": "activity", "label": None}, events[-2])
+            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
     def test_workflow_resume_runs_new_run_with_resume_source(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"

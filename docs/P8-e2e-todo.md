@@ -378,7 +378,7 @@ awaiting_approval -> running -> interrupted
 
 建议优先补以下 5 类：
 
-1. `P1 timeout / stop / mid-call 边界真实 E2E`：覆盖真实网络慢响应、极短 timeout、stop/kill 后资源回收与 resume 行为。
+1. `P1 timeout / stop / mid-call 边界真实 E2E`：覆盖真实网络慢响应、极短 timeout、stop/kill 后资源回收与 resume 行为。当前核查结论：runtime timeout 单元、bridge 非成功终态基础覆盖、timeout 参数传递和真实 API bridge succeeded 主路径均已存在；仍缺 `workflow_approve(..., timeout_seconds=极短值)` 真正触发 timeout 后的 bridge terminal failed/final/error/idle 事件链。建议先在 `tests/test_ink_bridge.py` 补 deterministic/近真实 bridge timeout 测试，再考虑 `tests/p8_real_api_e2e.py` diagnostic-only 真实 API timeout case。
 2. `P1 parallel 部分失败真实/半真实 E2E`：验证部分 child 失败时成功 job、失败 job、artifact、failure policy 与 bridge 终态一致。
 3. `P2 JS worker 异常脚本 bridge E2E`：覆盖脚本 throw、pipeline/parallel thunk throw、非法 options、不可序列化返回和安全扫描拒绝后的 bridge 事件。
 4. `P2 rate limit/429、网络抖动 diagnostic`：用 opt-in 压力/稳定性诊断暴露真实 API 服务商限流、429、5xx 与高 fan-out 下的收敛问题。
