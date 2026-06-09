@@ -996,6 +996,45 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual({"type": "activity", "label": None}, events[-2])
             self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
+    def assert_workflow_failed_final_error_and_idle(
+        self,
+        *,
+        bridge,
+        events,
+        run_id,
+        marker,
+        expect_workflow_failed_event=True,
+    ):
+        thread = bridge._workflow_threads[run_id]
+        self.assertFalse(thread.is_alive())
+
+        run = bridge.workflow_store.load_run(run_id)
+        self.assertEqual("failed", run.status)
+        self.assertIn(marker, run.error)
+
+        final_path = Path(run.artifact_dir) / "final-result.json"
+        self.assertTrue(final_path.exists())
+        final_payload = json.loads(final_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", final_payload["status"])
+        self.assertIn(marker, final_payload["error"])
+
+        terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
+        self.assertEqual("failed", terminal_run["run"]["status"])
+        self.assertIn(marker, terminal_run["run"]["error"])
+
+        final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+        self.assertEqual("failed", final_event["result"]["status"])
+        self.assertIn(marker, final_event["result"]["error"])
+
+        workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+        if expect_workflow_failed_event:
+            self.assertIn("workflow_failed", workflow_events)
+
+        error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
+        self.assertIn(marker, error_event["message"])
+        self.assertEqual({"type": "activity", "label": None}, events[-2])
+        self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
     def test_workflow_approve_timeout_emits_failed_final_error_and_idle(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
@@ -1007,32 +1046,75 @@ class InkBridgeTest(unittest.TestCase):
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=0.2))
             bridge.wait_for_workflow_idle(run_id, timeout=3)
 
-            thread = bridge._workflow_threads[run_id]
-            self.assertFalse(thread.is_alive())
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="deadline",
+            )
 
-            run = bridge.workflow_store.load_run(run_id)
-            self.assertEqual("failed", run.status)
+    def test_workflow_approve_real_runtime_script_throw_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
 
-            final_path = Path(run.artifact_dir) / "final-result.json"
-            self.assertTrue(final_path.exists())
-            final_payload = json.loads(final_path.read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_payload["status"])
-            self.assertIn("deadline", final_payload["error"])
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("throw new Error('GA_P8_TOP_LEVEL_THROW')")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
 
-            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
-            self.assertEqual("failed", terminal_run["run"]["status"])
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="GA_P8_TOP_LEVEL_THROW",
+            )
 
-            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
-            self.assertEqual("failed", final_event["result"]["status"])
-            self.assertIn("deadline", final_event["result"]["error"])
+    def test_workflow_approve_real_runtime_pipeline_throw_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        script = """
+const values = await pipeline([1, 2], value => {
+  if (value === 2) {
+    throw new Error('GA_P8_PIPELINE_STAGE_THROW')
+  }
+  return value
+})
+return values
+"""
 
-            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
-            self.assertIn("workflow_failed", workflow_events)
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
 
-            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
-            self.assertIn("deadline", error_event["message"])
-            self.assertEqual({"type": "activity", "label": None}, events[-2])
-            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="GA_P8_PIPELINE_STAGE_THROW",
+            )
+
+    def test_workflow_approve_forbidden_script_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return process.env")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="process",
+            )
 
     def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
         agent = FakeAgent()

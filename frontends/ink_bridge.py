@@ -530,6 +530,29 @@ class GenericAgentBridge:
         except Exception as exc:
             try:
                 current = self.workflow_store.load_run(run_id)
+                if current.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                    from workflow_models import WorkflowEvent
+
+                    reason = str(exc)
+                    current.status = "failed"
+                    current.error = reason
+                    self.workflow_store.write_final_result(
+                        current,
+                        {"runId": run_id, "status": "failed", "error": reason},
+                    )
+                    self.workflow_store.save_run(current)
+                    existing_events = self.workflow_store.replay_events(run_id)
+                    self.workflow_store.append_event(
+                        current,
+                        WorkflowEvent(
+                            run_id=current.run_id,
+                            session_id=current.session_id,
+                            event_type="workflow_failed",
+                            sequence=max((event.sequence for event in existing_events), default=0) + 1,
+                            payload={"error": reason},
+                        ),
+                    )
+                    current = self.workflow_store.load_run(run_id)
                 self._emit_workflow_events(run_id)
                 self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
                 self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
