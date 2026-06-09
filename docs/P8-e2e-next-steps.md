@@ -59,7 +59,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
 | **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + parallel partial failure final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 52 |
-| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` | 6 main cases + 5 diagnostics |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + stability diagnostic harness + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` / `p8_real_api_stability_e2e.py` | 6 main cases + 5 diagnostics + 1 stability harness |
 | **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补；real provider mid-call stop diagnostic 已补为观察项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/stop-resume/mid-call diagnostics |
 
 ### 1.4 总体覆盖度估算
@@ -247,9 +247,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 没有任何统计稳定性测试。当前只做单次通过的测试，没有连续多轮的统计分析。 |
-| **当前覆盖** | 无 |
-| **缺失内容** | ① 连续多轮自动化执行与结果聚合；② P50/P95/P99 延迟记录；③ 偶发 5xx/429/空响应的收集与脱敏输出；④ 脱敏稳定性报告 |
+| **缺口描述** | 原缺口是没有任何统计稳定性测试。当前已新增独立 opt-in stability diagnostic harness，可连续多轮执行低成本真实 API workflow 并聚合延迟/失败摘要。 |
+| **当前覆盖** | 新增独立 opt-in diagnostic harness `tests/p8_real_api_stability_e2e.py`，通过 `GA_RUN_REAL_API_E2E=1` + `GA_RUN_REAL_API_STABILITY=1` 二级 opt-in 执行；默认 skip，且不纳入 `tests/p8_real_api_e2e.py` 主门禁。支持 `GA_REAL_API_STABILITY_ROUNDS` 配置轮数并限制 1..10；每轮执行 1 个 single agent + 2 个 parallel agent，真实 child agent 显式 `enable_tools=False`，记录 elapsed/status/jobs/tokenUsage/error，并输出 passedRounds/failedRounds、P50/P95/max/min/avg、observedErrorTypes 和 secretScan。真实 native GPT 3 轮已通过，`passedRounds=3`、`failedRounds=0`、`secretScan=[]`。 |
+| **缺失内容** | ① 单次 10 轮或跨多次运行累计更多轮的稳定性统计；② P99 延迟属于后续扩展指标，需要更多轮次才有意义；③ 偶发 5xx/429/空响应需要长期运行收集；④ 自动生成独立脱敏稳定性报告文件 |
 | **风险评级** | 中 |
 | **建议优先级** | **P2** |
 
@@ -461,7 +461,7 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | JS Worker 异常脚本 Bridge E2E | pipeline/parallel throw、非法 options、不可序列化返回值等异常脚本桥接收敛 | 现有单元测试模式 |
 | Failed/killed/interrupted resume bridge 真实 API 与变体组合 | runtime/基础 bridge 已覆盖，剩余完整链路与参数矩阵 | P1 稳定后 |
 | Rate Limit / 429 边界 E2E | 成本高，需 opt-in + 单独 env var | 核心 P1 完成后 |
-| 网络抖动 / 稳定性 E2E | 需压力测试基础设施 | 压力测试就绪后 |
+| 网络抖动 / 稳定性 E2E | 已有基础 opt-in diagnostic harness；剩余为更多轮次/长期统计/压力专项 | stability harness 已可用，压力专项另行 opt-in |
 | 返回格式异常 E2E | 需 semi-real runner/mock 基础设施 | P9/P10 阶段 |
 
 ### Priority P3（低优先级）

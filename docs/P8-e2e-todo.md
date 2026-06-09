@@ -84,13 +84,13 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 
 目标：更系统地观察真实网络/API 延迟波动。
 
-当前已做：连续 3 轮真实主路径 E2E，全部通过，但耗时波动明显。
+当前已做：新增 `tests/p8_real_api_stability_e2e.py` 独立 stability diagnostic harness。默认 skip，必须同时设置 `GA_RUN_REAL_API_E2E=1` 与 `GA_RUN_REAL_API_STABILITY=1` 才会运行；支持 `GA_REAL_API_STABILITY_ROUNDS` 配置轮数并限制 1..10。每轮执行低成本真实 workflow（1 个 single agent + 2 个 parallel agent），记录 elapsed/status/jobs/tokenUsage/error，并汇总 passedRounds/failedRounds、P50/P95/max/min/avg、observedErrorTypes 与 `secretScan`。已用真实 native GPT 跑 3 轮通过：`passed=true`、`passedRounds=3`、`failedRounds=0`、`secretScan=[]`。
 
-建议补充：
+建议继续观察 / 补充：
 
-- 连续 10 轮或更多轮。
-- 统计 P50 / P95 / P99 延迟。
-- 记录每轮：runtime 耗时、bridge 耗时、source job 数、cached job 数、错误类型。
+- 单次 10 轮或跨多次运行累计更多轮。
+- 基于更多轮次统计 P50 / P95；P99 属于后续扩展指标，需要更多轮次才有意义。
+- 记录每轮：runtime 耗时、source job 数、错误类型、tokenUsage。
 - 检查是否出现偶发 5xx、429、空响应、SDK 异常。
 - 自动生成脱敏稳定性报告。
 
