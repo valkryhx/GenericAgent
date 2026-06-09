@@ -67,6 +67,28 @@ class PartialFailureRunner:
         self.cancelled_job_ids.add(job.job_id)
 
 
+class RateLimitRunner(PartialFailureRunner):
+    error = "HTTP 429 Too Many Requests: provider rate limit exceeded"
+
+    def poll(self, job):
+        if job.job_id == "agent_1" and not self.success_done:
+            self.success_done = True
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "bridge success before 429"},
+                transcript_events=[{"type": "assistant", "text": "bridge success before 429 transcript"}],
+            )
+        if job.job_id == "agent_2" and self.success_done:
+            return AgentResult(
+                job_id=job.job_id,
+                status="failed",
+                payload={"error": self.error, "statusCode": 429, "category": "rate_limit"},
+                transcript_events=[{"type": "error", "error": self.error, "statusCode": 429}],
+            )
+        return None
+
+
 class StopThenResumeRunner:
     def __init__(self):
         self.started_job_ids = []
@@ -1072,6 +1094,77 @@ return results
             self.assertIn("bridge partial failure", final_event["result"]["error"])
             error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
             self.assertIn("bridge partial failure", error_event["message"])
+            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
+            self.assertIn("agent_completed", workflow_events)
+            self.assertIn("agent_failed", workflow_events)
+            self.assertIn("workflow_failed", workflow_events)
+            self.assertEqual({"type": "activity", "label": None}, events[-2])
+            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+
+    def test_workflow_approve_provider_429_rate_limit_emits_failed_final_error_and_preserves_artifacts(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        runner = RateLimitRunner()
+
+        def runtime_factory(*, store, timeout_seconds=10.0):
+            return WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=4),
+                timeout_seconds=timeout_seconds,
+            )
+
+        script = """
+const results = await parallel([() => agent('bridge success before 429'), () => agent('bridge provider 429')])
+return results
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=runtime_factory,
+            )
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            thread = bridge._workflow_threads[run_id]
+            self.assertFalse(thread.is_alive())
+            run = bridge.workflow_store.load_run(run_id)
+            artifact_dir = Path(run.artifact_dir)
+            self.assertEqual("failed", run.status)
+            self.assertIn("429", run.error)
+            self.assertIn("rate limit", run.error.lower())
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual(["succeeded", "failed"], [job.status for job in run.jobs])
+
+            success_result = json.loads((artifact_dir / run.jobs[0].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", success_result["status"])
+            self.assertEqual("bridge success before 429", success_result["payload"]["summary"])
+            self.assertNotIn("transcriptEvents", success_result)
+            self.assertTrue((artifact_dir / run.jobs[0].metadata["transcriptRef"]).exists())
+
+            failed_result = json.loads((artifact_dir / run.jobs[1].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("failed", failed_result["status"])
+            self.assertEqual(429, failed_result["payload"]["statusCode"])
+            self.assertEqual("rate_limit", failed_result["payload"]["category"])
+            self.assertIn("Too Many Requests", failed_result["payload"]["error"])
+            self.assertNotIn("transcriptEvents", failed_result)
+            self.assertTrue((artifact_dir / run.jobs[1].metadata["transcriptRef"]).exists())
+
+            final_payload = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_payload["status"])
+            self.assertIn("429", final_payload["error"])
+
+            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
+            self.assertEqual("failed", terminal_run["run"]["status"])
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertIn("429", final_event["result"]["error"])
+            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
+            self.assertIn("429", error_event["message"])
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)

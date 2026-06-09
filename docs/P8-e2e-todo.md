@@ -104,19 +104,21 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 
 目标：验证并发或连续真实调用触发限流时，workflow 失败处理和 artifact 保留是否正确。
 
-建议覆盖：
+当前已做：已补 deterministic runtime/bridge provider 429 覆盖和独立真实 API stress diagnostic harness。Runtime 覆盖 parallel 中一个 child 成功、另一个 child 返回 `HTTP 429 Too Many Requests`，验证 workflow failed、`agent_failed`/`workflow_failed`、成功/失败 artifact/transcript 保留、failed payload 包含 `statusCode=429` 与 `category=rate_limit`。Bridge 覆盖 429 failed final/error/idle：`workflow_final(status=failed)`、`error(code=workflow_run_failed)`、activity/status idle 以及 artifact 保留。新增 `tests/p8_real_api_stress_e2e.py`，默认 skip，必须同时设置 `GA_RUN_REAL_API_E2E=1` 与 `GA_RUN_REAL_API_STRESS=1` 才会运行；真实 child agent 显式 `enable_tools=False`。已用真实 native GPT 跑 `fanout=8`、`rounds=1`，8 个 child 全部成功，`rateLimitDetected=false`、`secretScan=[]`。stress harness 明确区分 `contractPassedRounds` / `contractFailedRounds`（诊断是否收敛）、`cleanSuccessRounds`（无 rate-limit 的成功轮）和 `rateLimitRounds`（观测到 429/rate-limit 的轮次）；`summary.passed=true` 表示 diagnostic contract 收敛，不等价于没有出现 rate limit。
 
-- 增大 `parallel()` fan-out，例如 8、16、32 个真实 child agent。
-- 连续执行多轮，观察 provider 是否返回 429 / rate limit。
-- 检查 failed job 是否记录 `agent_failed`。
+建议继续观察 / 扩展：
+
+- 增大 `parallel()` fan-out，例如 16、32 个真实 child agent。
+- 连续执行多轮，观察 provider 是否自然返回 429 / rate limit。
+- 如果真实 429 出现，继续检查 failed job 是否记录 `agent_failed`。
 - 检查成功 job artifact 是否保留。
 - 检查 workflow final status 是否符合 failure policy。
 - 检查 bridge 是否能正常收敛，不挂死。
 
-注意：该测试会明显消耗真实 API，并可能触发供应商限流。必须 opt-in，并建议单独环境变量控制，例如：
+注意：真实 stress 测试会明显消耗真实 API，并可能触发供应商限流。必须 opt-in，并使用单独环境变量控制，例如：
 
 ```bash
-GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2e.py
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=8 GA_REAL_API_STRESS_ROUNDS=1 python tests/p8_real_api_stress_e2e.py
 ```
 
 ### 4. parallel 部分失败 E2E

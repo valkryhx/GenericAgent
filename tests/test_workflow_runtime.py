@@ -75,6 +75,28 @@ class SucceedsThenFailsRunner:
         self.cancelled_job_ids.add(job.job_id)
 
 
+class RateLimitAfterFirstSuccessRunner(SucceedsThenFailsRunner):
+    error = "HTTP 429 Too Many Requests: provider rate limit exceeded"
+
+    def poll(self, job):
+        if job.job_id == "agent_1" and not self.completed_success:
+            self.completed_success = True
+            return AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "agent one succeeded before rate limit"},
+                transcript_events=[{"type": "assistant", "text": "agent one transcript before rate limit"}],
+            )
+        if job.job_id == "agent_2" and self.completed_success:
+            return AgentResult(
+                job_id=job.job_id,
+                status="failed",
+                payload={"error": self.error, "statusCode": 429, "category": "rate_limit"},
+                transcript_events=[{"type": "error", "error": self.error, "statusCode": 429}],
+            )
+        return None
+
+
 class CountingRunner(FakeChildAgentRunner):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -744,6 +766,53 @@ return results
             failed_event = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_failed")
             self.assertEqual("agent_2", failed_event.job_id)
             self.assertEqual("agent two failed after one success", failed_event.payload["error"])
+            self.assertEqual("agents/agent_2/result.json", failed_event.payload["resultRef"])
+
+    def test_runtime_provider_429_rate_limit_failure_preserves_artifacts_and_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            runner = RateLimitAfterFirstSuccessRunner()
+            script = """
+const results = await parallel([() => agent('succeeds before 429'), () => agent('hits provider 429')])
+return results
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2), timeout_seconds=2.0)
+
+            with self.assertRaisesRegex(RuntimeError, "429.*rate limit"):
+                runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            self.assertEqual("failed", loaded.status)
+            self.assertIn("429", loaded.error)
+            self.assertIn("rate limit", loaded.error.lower())
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual(["succeeded", "failed"], [job.status for job in loaded.jobs])
+
+            success_result = json.loads((artifact_dir / loaded.jobs[0].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", success_result["status"])
+            self.assertEqual("agent one succeeded before rate limit", success_result["payload"]["summary"])
+            self.assertNotIn("transcriptEvents", success_result)
+            self.assertTrue((artifact_dir / loaded.jobs[0].metadata["transcriptRef"]).exists())
+
+            failed_result = json.loads((artifact_dir / loaded.jobs[1].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("failed", failed_result["status"])
+            self.assertEqual(429, failed_result["payload"]["statusCode"])
+            self.assertEqual("rate_limit", failed_result["payload"]["category"])
+            self.assertIn("Too Many Requests", failed_result["payload"]["error"])
+            self.assertNotIn("transcriptEvents", failed_result)
+            self.assertTrue((artifact_dir / loaded.jobs[1].metadata["transcriptRef"]).exists())
+
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["status"])
+            self.assertIn("429", final_result["error"])
+            event_types = [event.event_type for event in store.replay_events("wf_test")]
+            self.assertLess(event_types.index("agent_completed"), event_types.index("agent_failed"))
+            self.assertEqual("workflow_failed", event_types[-1])
+            failed_event = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_failed")
+            self.assertEqual("agent_2", failed_event.job_id)
+            self.assertIn("429", failed_event.payload["error"])
             self.assertEqual("agents/agent_2/result.json", failed_event.payload["resultRef"])
 
     def test_runtime_observes_external_kill_state(self):
