@@ -152,6 +152,20 @@ return {
 };
 '''
 
+MID_CALL_STOP_DIAGNOSTIC_SCRIPT = r'''
+phase('P8 Real API Mid-Call Stop Diagnostic');
+log('start p8 real api mid-call stop diagnostic');
+const first = await agent('Reply with one concise safe sentence containing token GA_P8_MID_CALL_STOP_PREFIX. Do not call tools, MCP, or skills.', {label:'mid-call-stop-prefix'});
+const second = await agent(`Generate a longer safe response with 80 short numbered lines.
+Do not call tools, MCP, or skills. Do not read mykey.py, mykey.json, or mcp.json.
+Include token GA_P8_MID_CALL_STOP_FRESH if you finish after resume.`, {label:'mid-call-stop-real-provider'});
+return {
+  marker: 'GA_P8_MID_CALL_STOP_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length
+};
+'''
+
 FAILED_SOURCE_SCRIPT = r'''
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
@@ -284,6 +298,41 @@ class GateSecondUntilStoppedRunner(CountingNativeRunner):
         if job.job_id == "agent_2":
             self.second_cancelled_once = True
         return super().cancel(job)
+
+
+class RealProviderMidCallStopRunner(CountingNativeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.second_started = threading.Event()
+        self.cancel_requested_job_ids: list[str] = []
+
+    def start(self, job) -> None:
+        super().start(job)
+        if job.job_id == "agent_2":
+            self.second_started.set()
+
+    def cancel(self, job) -> None:
+        self.cancel_requested_job_ids.append(job.job_id)
+        return super().cancel(job)
+
+    def join_job(self, job_id: str, timeout: float = 0.0) -> bool | None:
+        with self._lock:
+            state = self._states.get(job_id)
+            thread = state.get("thread") if state else None
+        if thread is None:
+            return None
+        thread.join(timeout=timeout)
+        return thread.is_alive()
+
+    def thread_alive_job_ids(self) -> list[str]:
+        alive = []
+        with self._lock:
+            items = list(self._states.items())
+        for job_id, state in items:
+            thread = state.get("thread")
+            if thread is not None and thread.is_alive():
+                alive.append(job_id)
+        return alive
 
 
 class MinimalAgent:
@@ -1111,6 +1160,131 @@ def run_real_api_bridge_stop_resume_diagnostic_case(root: Path) -> dict:
 
 
 
+def run_real_api_mid_call_stop_diagnostic_case(root: Path) -> dict:
+    events: list[dict] = []
+    source_runner = RealProviderMidCallStopRunner(config_name=CONFIG_NAME, max_tokens=768)
+    resume_runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=768)
+    runtime_calls = 0
+
+    def runtime_factory(*, store, timeout_seconds=10.0):
+        nonlocal runtime_calls
+        runtime_calls += 1
+        runner = source_runner if runtime_calls == 1 else resume_runner
+        return WorkflowRuntime(
+            store=store,
+            runner=runner,
+            scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+            timeout_seconds=timeout_seconds,
+        )
+
+    bridge = GenericAgentBridge(
+        agent_factory=MinimalAgent,
+        emit=events.append,
+        workflow_root=root / "mid_call_stop_diagnostic",
+        workflow_runtime_factory=runtime_factory,
+    )
+    source_run_id = None
+    resumed_run_id = None
+    start = time.time()
+    try:
+        source_run_id = bridge.workflow_draft(MID_CALL_STOP_DIAGNOSTIC_SCRIPT)
+        approved = bridge.workflow_approve(source_run_id, args={"suite": "p8-real-api", "case": "mid-call-stop-diagnostic"}, timeout_seconds=300.0)
+        second_started = source_runner.second_started.wait(timeout=240.0)
+        stopped = bridge.workflow_stop(source_run_id, reason="GA_P8_MID_CALL_STOP_DIAGNOSTIC") if second_started else False
+        bridge.wait_for_workflow_idle(source_run_id, timeout=90.0)
+        source_thread = bridge._workflow_threads.get(source_run_id)
+        source_thread_alive = bool(source_thread and source_thread.is_alive())
+        source_agent_2_thread_alive_after_join = source_runner.join_job("agent_2", timeout=45.0)
+        source_child_threads_alive_after_stop = source_runner.thread_alive_job_ids()
+        source = bridge.workflow_store.load_run(source_run_id)
+        source_artifact_dir = Path(source.artifact_dir)
+        source_jobs = summarize_jobs(source, source_artifact_dir)
+        source_event_types = event_types(bridge.workflow_store, source.run_id)
+
+        resumed_run_id = bridge.workflow_resume(source_run_id, args={"suite": "p8-real-api", "case": "mid-call-stop-diagnostic"}, timeout_seconds=360.0) if source.status == "killed" else ""
+        if resumed_run_id:
+            bridge.wait_for_workflow_idle(resumed_run_id, timeout=420.0)
+        resumed_thread = bridge._workflow_threads.get(resumed_run_id) if resumed_run_id else None
+        resumed_thread_alive = bool(resumed_thread and resumed_thread.is_alive())
+        resumed = bridge.workflow_store.load_run(resumed_run_id) if resumed_run_id else None
+        resumed_artifact_dir = Path(resumed.artifact_dir) if resumed and resumed.artifact_dir else None
+        resumed_jobs = summarize_jobs(resumed, resumed_artifact_dir) if resumed and resumed_artifact_dir else []
+        resumed_event_types = event_types(bridge.workflow_store, resumed.run_id) if resumed else []
+        final_events = [event for event in events if event.get("type") == "workflow_final"]
+        source_final = next((event.get("result") for event in final_events if event.get("runId") == source_run_id), {})
+        resumed_final = next((event.get("result") for event in final_events if event.get("runId") == resumed_run_id), {})
+        status_events = [event.get("status") for event in events if event.get("type") == "status"]
+        activity_events = [event.get("label") for event in events if event.get("type") == "activity"]
+        cached_prefix = bool(resumed_jobs and resumed_jobs[0].get("status") == "cached" and resumed_jobs[0].get("cachedFromRunId") == source_run_id)
+        fresh_after_stop = bool(len(resumed_jobs) > 1 and resumed_jobs[1].get("status") == "succeeded")
+        cancel_requested = "agent_2" in source_runner.cancel_requested_job_ids
+        source_statuses = [job.get("status") for job in source_jobs]
+        provider_cancel_observed = bool(
+            source.status == "killed"
+            and "cancelled" in source_statuses
+            and cancel_requested
+        )
+        passed = (
+            approved
+            and second_started
+            and stopped
+            and provider_cancel_observed
+            and not source_thread_alive
+            and not source_child_threads_alive_after_stop
+            and source_final.get("status") == "killed"
+            and resumed is not None
+            and resumed.status == "succeeded"
+            and not resumed_thread_alive
+            and cached_prefix
+            and fresh_after_stop
+            and resumed_final.get("status") == "succeeded"
+            and "agent_cancelled" in source_event_types
+            and "workflow_killed" in source_event_types
+            and "agent_cached" in resumed_event_types
+            and "agent_completed" in resumed_event_types
+            and bool(status_events and status_events[-1] == "idle")
+            and bool(activity_events and activity_events[-1] is None)
+        )
+        return {
+            "passed": passed,
+            "diagnosticOnly": True,
+            "skipped": False,
+            "elapsedSeconds": round(time.time() - start, 2),
+            "sourceRunId": source_run_id,
+            "sourceStatus": source.status,
+            "sourceApproved": approved,
+            "sourceSecondStarted": second_started,
+            "sourceStopped": stopped,
+            "sourceThreadAlive": source_thread_alive,
+            "sourceJobs": source_jobs,
+            "sourceEventCounts": {etype: source_event_types.count(etype) for etype in sorted(set(source_event_types))},
+            "sourceFinalStatus": source_final.get("status"),
+            "cancelRequestedJobIds": source_runner.cancel_requested_job_ids,
+            "sourceAgent2ThreadAliveAfterJoin": source_agent_2_thread_alive_after_join,
+            "sourceChildThreadsAliveAfterStop": source_child_threads_alive_after_stop,
+            "resumeStartedJobIds": resume_runner.started_job_ids,
+            "providerCancelObserved": provider_cancel_observed,
+            "resumedRunId": resumed_run_id,
+            "resumedStatus": resumed.status if resumed else None,
+            "resumedThreadAlive": resumed_thread_alive,
+            "resumedJobs": resumed_jobs,
+            "resumedEventCounts": {etype: resumed_event_types.count(etype) for etype in sorted(set(resumed_event_types))},
+            "resumedFinalStatus": resumed_final.get("status"),
+            "cachedPrefix": cached_prefix,
+            "freshAfterStop": fresh_after_stop,
+            "eventTypes": [event.get("type") for event in events],
+            "idleSeen": bool(status_events and status_events[-1] == "idle"),
+            "activityCleared": bool(activity_events and activity_events[-1] is None),
+            "artifactDir": str(source_artifact_dir),
+            "resumedArtifactDir": str(resumed_artifact_dir) if resumed_artifact_dir else None,
+        }
+    finally:
+        try:
+            bridge.stop()
+        except Exception:
+            pass
+
+
 def run_real_api_parallel_partial_failure_diagnostic_case(root: Path) -> dict:
     store = WorkflowStore(root / "parallel_partial_failure_diagnostic")
     run = store.create_run(WorkflowRun(run_id="wf_p8_parallel_partial_failure_diagnostic", session_id="p8_real_api_parallel_partial_failure", script=PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT, status="running"))
@@ -1346,6 +1520,12 @@ def main() -> int:
             summary["diagnostics"]["realApiBridgeStopResumeDiagnostic"] = run_case_safely(
                 "realApiBridgeStopResumeDiagnostic",
                 run_real_api_bridge_stop_resume_diagnostic_case,
+                root,
+                diagnostic_only=True,
+            )
+            summary["diagnostics"]["realApiMidCallStopDiagnostic"] = run_case_safely(
+                "realApiMidCallStopDiagnostic",
+                run_real_api_mid_call_stop_diagnostic_case,
                 root,
                 diagnostic_only=True,
             )

@@ -12,6 +12,10 @@
 - `f8b1850 test(workflow): 补充 interrupted resume 前缀复用覆盖`
 - `1c8933f test(workflow): 增强真实 API 失败诊断`
 - `d13bde5 test(workflow): 补充 bridge timeout 终态覆盖`
+- `c7616ce test(workflow): 补充真实 API timeout 诊断覆盖`
+- `7aa318b test(workflow): 补充 parallel 部分失败 E2E 覆盖`
+- `394070b test(workflow): 补充 bridge stop resume 诊断覆盖`
+- 待提交：real provider mid-call stop diagnostic-only 覆盖
 
 已完成：
 
@@ -37,6 +41,7 @@
 - 真实 API harness 已支持 case 级 `run_case_safely` 诊断，便于定位单个真实 E2E case 的失败原因；同时补充 `code_run` 缺失 `code_cwd` 的明确 error，以及 `py` alias 清理 `.ai.py`。
 - 真实 API timeout bridge diagnostic 已补充为 diagnostic-only，不纳入主门禁，用于 opt-in 观察真实 native GPT / bridge / runtime timeout 链路。
 - parallel 部分失败已补 runtime deterministic、bridge 半集成和真实 API diagnostic-only 覆盖：成功 job artifact/transcript 保留，失败 job result/transcript 与 `agent_failed` 事件可追踪，workflow final 为 failed，bridge final/error/idle 收敛。
+- bridge stop/resume 与 real provider mid-call stop 已补 diagnostic-only 覆盖：`realApiBridgeStopResumeDiagnostic` 验证受控 running child cancel + prefix resume，`realApiMidCallStopDiagnostic` 验证真实 native provider job mid-call stop 的 cancel 请求、killed/final/idle 收敛、cached prefix 与 fresh rerun。
 
 已提交的 opt-in harness：
 
@@ -201,22 +206,20 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 python tests/p8_real_api_fault_e2
 
 目标：验证 workflow 正在真实 API 调用时被 stop/kill 后状态和 artifact 处理正确。
 
-建议覆盖：
+当前状态：核心 bridge/runtime/真实 API diagnostic 覆盖已完成。`realApiBridgeStopResumeDiagnostic` 覆盖受控 running child cancel + resume prefix；`realApiMidCallStopDiagnostic` 进一步让第二个 job 进入真实 native provider 调用后触发 `workflow_stop`，并作为 diagnostic-only 观察 cancel 请求、killed/final/idle、cached prefix 与 fresh rerun。该项不纳入主门禁，也不强断言底层 SDK 网络流一定即时中断。
 
-- workflow 正在真实 API 调用时执行 `workflow_stop`。
-- run 状态是否为 `killed` / `interrupted`。
-- 已完成 job artifact 是否保留。
-- running job 是否标记 stale/interrupted。
-- stop 后是否允许 resume。
-- resume 后是否只复用已完成 job。
-- bridge/UI 是否恢复 idle。
+建议继续观察 / 扩展：
+
+- 长期观察 provider 真实 streaming/mid-call cancel 的稳定性。
+- UI 层快捷键/面板触发 stop 的完整前端 E2E。
+- 更多 stop reason / permission / args 变体。
 
 验收要点：
 
-- 不挂死。
-- 不遗留 running workflow。
-- 已完成结果可恢复。
-- resume 不重复执行已完成 job。
+- 不挂死：已覆盖。
+- 不遗留 running workflow：已覆盖 bridge idle/thread 收敛。
+- 已完成结果可恢复：已覆盖 prefix artifact/cache。
+- resume 不重复执行已完成 job：已覆盖 cached prefix。
 
 ### 7. bridge 非成功终态 final/error 事件 E2E
 
