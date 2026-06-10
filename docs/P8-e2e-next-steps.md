@@ -57,10 +57,10 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 层 | 当前覆盖 | 文件 | 用例数 |
 |---|---|---|---|
-| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429 | `test_workflow_runtime.py` | 16 |
+| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options 边界 | `test_workflow_runtime.py` | 31 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本 failed/final/error/idle + parallel partial failure/provider 429 final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 56 |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本 failed/final/error/idle + parallel partial failure/provider 429 final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 58 |
 | **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + stability diagnostic harness + stress diagnostic harness + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` / `p8_real_api_stability_e2e.py` / `p8_real_api_stress_e2e.py` | 6 main cases + 5 diagnostics + 1 stability harness + 1 stress harness |
 | **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；provider 429 bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补；real provider mid-call stop diagnostic 已补为观察项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/429/stop-resume/mid-call diagnostics |
 
@@ -518,7 +518,14 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 **共用验收：** bridge thread 退出；run terminal status 为 `failed`；events 包含 `workflow_final(status=failed)` 与 `error(code=workflow_run_failed)`；journal/workflow events 包含 `workflow_failed`；`final-result.json` 存在且 status 为 `failed`；activity 清空；status 回到 idle；错误消息含场景 marker 且不泄露 secret。
 
-**第二批暂缓场景：** `parallel()` thunk throw、invalid agent options、non-serializable return（例如 BigInt 或循环对象）。这些需要先确认 runtime/worker contract，避免测试写死错误语义。
+**第二批场景（已按 contract 审计落地）：**
+
+- `parallel()` thunk sync throw：新增 runtime-only `test_runtime_parallel_thunk_sync_throw_fails_without_agent_jobs` 与 bridge `test_workflow_approve_real_runtime_parallel_thunk_throw_emits_failed_final_error_and_idle`。
+- non-serializable return：新增 runtime-only BigInt / circular return 失败测试，以及 bridge BigInt return failed/final/error/idle 测试。
+- invalid agent options：新增 runtime 当前行为快照，覆盖 falsy options 归一为 `{}`、plain object options 保留 label/options、truthy non-object options 失败且不注册 job。
+- bridge helper reuse：`parallel partial failure` 与 provider `429` bridge 测试复用 `assert_workflow_failed_final_error_and_idle`，保留各自 artifact / payload 专属断言。
+
+**仍暂缓：** 数组键值对 options 可转换但 label 丢失的边界、以及是否在 JS/Python/Scheduler 层显式校验 options plain object 的生产 contract。该问题应作为单独产品语义修复处理，不在 P0 异常收敛测试中保护当前不一致行为。
 
 **验证命令：**
 
@@ -631,11 +638,11 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 第一批 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成 top-level script throw、pipeline stage throw、forbidden token preflight 三个高确定性场景，并修复 preflight 异常后 run 可能停留 `running` 的 bridge 兜底问题。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批和第二批主要可测场景：top-level script throw、pipeline stage throw、forbidden token preflight、parallel thunk sync throw、non-serializable return，以及 invalid agent options 当前行为快照；同时修复 preflight 异常后 run 可能停留 `running` 的 bridge 兜底问题。
 
 后续建议二选一：
 
-1. 若继续完善同一方向，进入 P0 第二批：`parallel()` thunk throw、invalid agent options、non-serializable return。执行前先确认 runtime/worker 对这些异常的 contract。
+1. 若继续完善同一方向，单独制定 options contract 修复：在 JS worker / Python runtime / scheduler 层明确 `agent(prompt, options)` 只接受 plain object，并决定数组键值对 options 是否拒绝；这属于产品语义修复，不建议混入 P0 异常收敛测试。
 2. 若转向下一类缺口，进入 P1：半真实 provider anomaly E2E，先用 deterministic / semi-real runner 固定 empty content、无 text block、usage missing、SDK-like exception 的 workflow 降级与 artifact/transcript 脱敏契约。
 
 ---

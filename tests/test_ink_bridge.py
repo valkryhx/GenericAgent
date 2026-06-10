@@ -1116,6 +1116,49 @@ return values
                 marker="process",
             )
 
+    def test_workflow_approve_real_runtime_parallel_thunk_throw_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        script = """
+const results = await parallel([
+  () => 1,
+  () => { throw new Error('GA_P8_PARALLEL_THUNK_THROW') }
+])
+return results
+"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="GA_P8_PARALLEL_THUNK_THROW",
+            )
+
+    def test_workflow_approve_real_runtime_non_serializable_return_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1n")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="BigInt",
+            )
+
     def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
@@ -1145,11 +1188,8 @@ return results
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
-            thread = bridge._workflow_threads[run_id]
-            self.assertFalse(thread.is_alive())
             run = bridge.workflow_store.load_run(run_id)
             artifact_dir = Path(run.artifact_dir)
-            self.assertEqual("failed", run.status)
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual(["succeeded", "failed"], [job.status for job in run.jobs])
 
@@ -1165,23 +1205,15 @@ return results
             self.assertNotIn("transcriptEvents", failed_result)
             self.assertTrue((artifact_dir / run.jobs[1].metadata["transcriptRef"]).exists())
 
-            final_payload = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_payload["status"])
-            self.assertIn("bridge partial failure", final_payload["error"])
-
-            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
-            self.assertEqual("failed", terminal_run["run"]["status"])
-            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
-            self.assertEqual("failed", final_event["result"]["status"])
-            self.assertIn("bridge partial failure", final_event["result"]["error"])
-            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
-            self.assertIn("bridge partial failure", error_event["message"])
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)
-            self.assertIn("workflow_failed", workflow_events)
-            self.assertEqual({"type": "activity", "label": None}, events[-2])
-            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="bridge partial failure",
+            )
 
     def test_workflow_approve_provider_429_rate_limit_emits_failed_final_error_and_preserves_artifacts(self):
         agent = FakeAgent()
@@ -1212,11 +1244,8 @@ return results
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
-            thread = bridge._workflow_threads[run_id]
-            self.assertFalse(thread.is_alive())
             run = bridge.workflow_store.load_run(run_id)
             artifact_dir = Path(run.artifact_dir)
-            self.assertEqual("failed", run.status)
             self.assertIn("429", run.error)
             self.assertIn("rate limit", run.error.lower())
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
@@ -1236,23 +1265,15 @@ return results
             self.assertNotIn("transcriptEvents", failed_result)
             self.assertTrue((artifact_dir / run.jobs[1].metadata["transcriptRef"]).exists())
 
-            final_payload = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_payload["status"])
-            self.assertIn("429", final_payload["error"])
-
-            terminal_run = [event for event in events if event["type"] == "workflow_run" and event["run"]["runId"] == run_id][-1]
-            self.assertEqual("failed", terminal_run["run"]["status"])
-            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
-            self.assertEqual("failed", final_event["result"]["status"])
-            self.assertIn("429", final_event["result"]["error"])
-            error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
-            self.assertIn("429", error_event["message"])
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)
-            self.assertIn("workflow_failed", workflow_events)
-            self.assertEqual({"type": "activity", "label": None}, events[-2])
-            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="429",
+            )
 
     def test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix(self):
         agent = FakeAgent()

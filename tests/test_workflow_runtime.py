@@ -143,6 +143,20 @@ class FakeProcessForTerminate:
 
 
 class WorkflowRuntimeTest(unittest.TestCase):
+    def assert_runtime_failed_with_marker(self, *, store, run, marker, expected_jobs=0):
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("failed", loaded.status)
+        self.assertIn(marker, loaded.error)
+        self.assertEqual(expected_jobs, len(loaded.jobs))
+        events = store.replay_events(run.run_id)
+        self.assertEqual("workflow_failed", events[-1].event_type)
+        self.assertIn(marker, events[-1].payload["error"])
+        final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", final_result["status"])
+        self.assertIn(marker, final_result["error"])
+        self.assertEqual(expected_jobs, len(final_result["jobs"]))
+        return loaded, final_result
+
     def test_runtime_executes_phase_log_and_agent_script_with_fake_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -190,13 +204,52 @@ return { summary: result.summary, phaseDone: true }
             with self.assertRaises(RuntimeError):
                 runtime.run(run)
 
-            loaded = store.load_run("wf_test")
-            self.assertEqual("failed", loaded.status)
-            self.assertIn("boom", loaded.error)
-            events = store.replay_events("wf_test")
-            self.assertEqual("workflow_failed", events[-1].event_type)
-            final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_result["status"])
+            self.assert_runtime_failed_with_marker(store=store, run=run, marker="boom")
+
+    def test_runtime_parallel_thunk_sync_throw_fails_without_agent_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const results = await parallel([
+  () => 1,
+  () => { throw new Error('GA_P8_PARALLEL_THUNK_THROW') }
+])
+return results
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            with self.assertRaisesRegex(RuntimeError, "GA_P8_PARALLEL_THUNK_THROW"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(store=store, run=run, marker="GA_P8_PARALLEL_THUNK_THROW")
+
+    def test_runtime_marks_bigint_return_as_failed_worker_serialization_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return 1n", status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            with self.assertRaisesRegex(RuntimeError, "BigInt"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(store=store, run=run, marker="BigInt")
+
+    def test_runtime_marks_circular_return_as_failed_worker_serialization_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const value = {}
+value.self = value
+return value
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            with self.assertRaisesRegex(RuntimeError, "circular"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(store=store, run=run, marker="circular")
 
     def test_runtime_parallel_registers_all_agents_before_waiting_for_results(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,6 +355,74 @@ return result.summary
             self.assertEqual("Scout", loaded.jobs[0].metadata["label"])
             registered = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_registered")
             self.assertEqual("Scout", registered.payload["label"])
+
+    def test_runtime_agent_falsy_options_are_treated_as_empty_options(self):
+        scripts = {
+            "omitted": "return await agent('p')",
+            "undefined": "return await agent('p', undefined)",
+            "null": "return await agent('p', null)",
+            "false": "return await agent('p', false)",
+            "zero": "return await agent('p', 0)",
+            "empty-string": "return await agent('p', '')",
+        }
+        for name, script in scripts.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+                runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
+
+                runtime.run(run)
+
+                loaded = store.load_run("wf_test")
+                self.assertEqual("succeeded", loaded.status)
+                self.assertEqual(1, len(loaded.jobs))
+                self.assertEqual({}, loaded.jobs[0].metadata["options"])
+                self.assertIsNone(loaded.jobs[0].metadata["label"])
+
+    def test_runtime_agent_plain_object_options_preserve_label_and_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('p', {label:'Scout', effort:'low'})
+return result.summary
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
+
+            runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual(1, len(loaded.jobs))
+            self.assertEqual("Scout", loaded.jobs[0].metadata["label"])
+            self.assertEqual({"label": "Scout", "effort": "low"}, loaded.jobs[0].metadata["options"])
+            self.assertIn("cacheKey", loaded.jobs[0].metadata)
+
+    def test_runtime_agent_truthy_non_object_options_fail_before_registering_job(self):
+        scripts = {
+            "string": "return await agent('p', 'abc')",
+            "number": "return await agent('p', 1)",
+            "array": "return await agent('p', ['x'])",
+        }
+        for name, script in scripts.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+                runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
+
+                with self.assertRaises(Exception):
+                    runtime.run(run)
+
+                loaded = store.load_run("wf_test")
+                self.assertEqual("failed", loaded.status)
+                self.assertTrue(loaded.error)
+                self.assertEqual(0, len(loaded.jobs))
+                final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+                self.assertEqual("failed", final_result["status"])
+                self.assertTrue(final_result["error"])
+                self.assertEqual(0, len(final_result["jobs"]))
+                events = store.replay_events("wf_test")
+                self.assertEqual("workflow_failed", events[-1].event_type)
 
     def test_runtime_reuses_cached_agent_when_resuming_same_script_and_args(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -818,19 +939,27 @@ return results
     def test_runtime_observes_external_kill_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
-            script = "return await new Promise(() => {})"
+            script = """
+log('ready for external kill')
+return await new Promise(() => {})
+"""
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(store=store, timeout_seconds=5.0)
             errors = []
 
             thread = threading.Thread(target=lambda: self._run_and_capture(runtime, run, errors), daemon=True)
             thread.start()
-            time.sleep(0.2)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")))
             killed = store.load_run("wf_test")
             killed.status = "killed"
             killed.error = "user requested stop"
             store.save_run(killed)
-            thread.join(timeout=2.0)
+            thread.join(timeout=10.0)
 
             self.assertFalse(thread.is_alive())
             self.assertTrue(errors)
