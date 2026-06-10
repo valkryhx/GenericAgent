@@ -655,7 +655,62 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization，覆盖 empty content、no text block、usage missing、SDK-like exception 的 artifact/transcript/final/error contract。
 
-后续建议转入下一类缺口：**P2 Bridge cache hit/miss 半集成矩阵**，先补 same args 命中 cache 与 different args 不命中 cache 两个 bridge 可观测用例；或进入 provider error 全链路脱敏专项。
+#### 建议 A：P2 Bridge cache hit/miss 半集成矩阵（优先推荐）
+
+**为什么优先：** deterministic cache key/hash 已充分覆盖，但 bridge 层还缺“resume 后 UI/bridge 可观察到 cache hit/miss”的半集成验证。该任务范围小、默认不烧真实 API、与 P8 resume/cache replay 主目标直接相关。
+
+**最小切片：**
+
+1. `same args -> cached`：source run succeeded 后通过 `workflow_resume(source_run_id, args=same_args)` 恢复，断言 resumed run 有 `agent_cached`、无 fresh child started、`cachedFromRunId` / `cachedFromJobId` 正确、`transcriptRef` 指向 resumed artifact、bridge final succeeded、activity/status idle。
+2. `different args -> fresh`：同一 source run 使用 `workflow_resume(source_run_id, args=different_args)`，断言无 `agent_cached`、fresh child executed、result marker 来自 fresh run、bridge final succeeded、activity/status idle。
+
+**建议目标文件：** `tests/test_ink_bridge.py`
+
+**建议测试名：**
+
+- `test_workflow_resume_same_args_uses_cached_agent_through_bridge`
+- `test_workflow_resume_different_args_runs_fresh_agent_through_bridge`
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_ink_bridge
+python -m unittest tests.test_workflow_runtime
+python -m py_compile frontends/ink_bridge.py workflow_runtime.py workflow_scheduler.py workflow_store.py
+```
+
+**暂不混入：** prompt 改动 prefix hit/miss、options 改动 miss、permission profile/version 改动 miss、真实 API args variant diagnostic。这些可在最小两例通过后作为扩展。
+
+#### 建议 B：provider error 全链路脱敏专项（安全增强备选）
+
+**为什么重要：** P1 provider anomaly 已固定 SDK-like exception 的 failed artifact/transcript/final/error contract，但当前仍未专门验证 provider error 中的 secret-like 文本会在所有出口脱敏。该项安全价值高，但可能涉及生产脱敏逻辑设计，改动范围大于建议 A。
+
+**建议覆盖出口：**
+
+- `AgentResult.payload.error`
+- child `transcript_events` / `transcript.jsonl`
+- job error 与 workflow journal event payload
+- `final-result.json`
+- bridge `error(code=workflow_run_failed).message`
+
+**建议目标文件：**
+
+- `tests/test_p8_provider_anomaly_e2e.py`
+- 可能新增或复用脱敏 helper 所在生产文件（需先审计现有 `sanitize()` / `SECRET_PATTERNS` 的位置与可复用性）
+
+**建议测试名：**
+
+- `test_runtime_provider_sdk_like_exception_redacts_secret_text_in_all_artifacts`
+- `test_bridge_provider_sdk_like_exception_redacts_secret_text_in_error_event`
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_p8_provider_anomaly_e2e
+python -m unittest tests.test_workflow_runtime tests.test_ink_bridge
+```
+
+**注意：** 该专项不要使用真实 key；只使用 synthetic secret-like marker，例如 `sk-test-...`、`Bearer ...`、`api_key=...`，并确保测试与实现都不读取 `mykey.py`、`mykey.json`、`mcp.json`。
 
 ---
 
