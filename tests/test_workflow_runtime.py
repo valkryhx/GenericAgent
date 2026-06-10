@@ -702,6 +702,159 @@ return result.summary
                     event_types = [event.event_type for event in store.replay_events("wf_resumed")]
                     self.assertNotIn("agent_cached", event_types)
 
+    def test_runtime_does_not_reuse_cached_agent_when_permission_profile_or_policy_version_changes(self):
+        cases = [
+            ("profile", {"permission_profile": "read_only"}),
+            ("policy", {"permission_policy_version": "inherit-current-v2"}),
+        ]
+        for name, overrides in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+                original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+                WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "old"}})).run(
+                    original,
+                    args={"same": True},
+                )
+                resumed = store.create_run(
+                    WorkflowRun(
+                        run_id="wf_resumed",
+                        session_id="session_test",
+                        script=script,
+                        status="running",
+                        **overrides,
+                    )
+                )
+                runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+                outcome = WorkflowRuntime(store=store, runner=runner).run(
+                    resumed,
+                    args={"same": True},
+                    resume_from_run_id="wf_source",
+                )
+
+                self.assertEqual("fresh", outcome.result)
+                self.assertEqual(["agent_1"], runner.started_job_ids)
+                loaded = store.load_run("wf_resumed")
+                self.assertEqual("succeeded", loaded.jobs[0].status)
+                self.assertNotIn("cachedFromRunId", loaded.jobs[0].metadata)
+                self.assertNotIn("cachedFromJobId", loaded.jobs[0].metadata)
+                event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+                self.assertNotIn("agent_cached", event_types)
+                self.assertIn("agent_started", event_types)
+
+    def test_runtime_does_not_reuse_cached_agent_when_tool_or_mcp_context_changes(self):
+        cases = [
+            (
+                "tool-context",
+                {"toolContext": {"allowedTools": ["Read"], "toolSchemaHash": "schema-v1"}},
+                {"toolContext": {"allowedTools": ["Read", "Write"], "toolSchemaHash": "schema-v1"}},
+                "toolContextHash",
+            ),
+            (
+                "mcp-config",
+                {"mcpContext": {"configName": "default", "schemaHash": "schema-v1"}},
+                {"mcpContext": {"configName": "locked-down", "schemaHash": "schema-v1"}},
+                "mcpContextHash",
+            ),
+            (
+                "mcp-schema",
+                {"mcpContext": {"configName": "default", "schemaHash": "schema-a"}},
+                {"mcpContext": {"configName": "default", "schemaHash": "schema-b"}},
+                "mcpContextHash",
+            ),
+        ]
+        for name, source_metadata, resumed_metadata, hash_field in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+                original = store.create_run(
+                    WorkflowRun(
+                        run_id="wf_source",
+                        session_id="session_test",
+                        script=script,
+                        status="running",
+                        metadata=source_metadata,
+                    )
+                )
+                WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "old"}})).run(
+                    original,
+                    args={"same": True},
+                )
+                source_job = store.load_run("wf_source").jobs[0]
+                resumed = store.create_run(
+                    WorkflowRun(
+                        run_id="wf_resumed",
+                        session_id="session_test",
+                        script=script,
+                        status="running",
+                        metadata=resumed_metadata,
+                    )
+                )
+                runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+                outcome = WorkflowRuntime(store=store, runner=runner).run(
+                    resumed,
+                    args={"same": True},
+                    resume_from_run_id="wf_source",
+                )
+
+                self.assertEqual("fresh", outcome.result)
+                self.assertEqual(["agent_1"], runner.started_job_ids)
+                loaded = store.load_run("wf_resumed")
+                self.assertEqual("succeeded", loaded.jobs[0].status)
+                self.assertNotIn("cachedFromRunId", loaded.jobs[0].metadata)
+                self.assertNotIn("cachedFromJobId", loaded.jobs[0].metadata)
+                self.assertNotEqual(source_job.metadata["cacheKey"][hash_field], loaded.jobs[0].metadata["cacheKey"][hash_field])
+                event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+                self.assertNotIn("agent_cached", event_types)
+                self.assertIn("agent_started", event_types)
+
+    def test_runtime_reuses_cached_agent_when_tool_and_mcp_context_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('inspect repo')
+return result.summary
+"""
+            source_metadata = {
+                "toolContext": {"allowedTools": ["Edit", "Read"], "toolSchemaHash": "schema-v1"},
+                "mcpContext": {"configName": "default", "schemaHash": "mcp-schema-v1"},
+            }
+            resumed_metadata = {
+                "toolContext": {"allowedTools": ["Edit", "Read"], "toolSchemaHash": "schema-v1"},
+                "mcpContext": {"configName": "default", "schemaHash": "mcp-schema-v1"},
+            }
+            original = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running", metadata=source_metadata))
+            WorkflowRuntime(store=store, runner=CountingRunner(results={"agent_1": {"summary": "cached ok"}})).run(
+                original,
+                args={"same": True},
+            )
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running", metadata=resumed_metadata))
+            runner = CountingRunner(results={"agent_1": {"summary": "fresh"}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"same": True},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual("cached ok", outcome.result)
+            self.assertEqual([], runner.started_job_ids)
+            loaded = store.load_run("wf_resumed")
+            self.assertEqual("cached", loaded.jobs[0].status)
+            self.assertEqual("wf_source", loaded.jobs[0].metadata["cachedFromRunId"])
+            self.assertEqual("agent_1", loaded.jobs[0].metadata["cachedFromJobId"])
+            event_types = [event.event_type for event in store.replay_events("wf_resumed")]
+            self.assertIn("agent_cached", event_types)
+            self.assertNotIn("agent_started", event_types)
+
     def test_runtime_does_not_reuse_cached_agent_across_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

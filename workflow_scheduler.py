@@ -293,6 +293,7 @@ class AgentScheduler:
 
     def _cache_key(self, job: WorkflowJob) -> dict:
         options = job.metadata.get("options") or {}
+        metadata = self.run.metadata or {}
         return {
             "scriptHash": _stable_hash(self.run.script),
             "argsHash": _stable_hash(self.args),
@@ -301,6 +302,8 @@ class AgentScheduler:
             "optionsHash": _stable_hash(options),
             "permissionProfile": self.run.permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
+            "toolContextHash": _stable_hash(metadata.get("toolContext")),
+            "mcpContextHash": _stable_hash(metadata.get("mcpContext")),
         }
 
     def _append(self, event_type: str, job: WorkflowJob | None = None, payload: dict | None = None) -> None:

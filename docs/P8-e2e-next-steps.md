@@ -653,64 +653,75 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization，覆盖 empty content、no text block、usage missing、SDK-like exception 的 artifact/transcript/final/error contract。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass** 也已完成并提交；后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵或脱敏基础完整性。
 
-#### 建议 A：P2 Bridge cache hit/miss 半集成矩阵（优先推荐）
+#### 当前最高优先级：P8 resume cache permission/tools/MCP context invalidation
 
-**为什么优先：** deterministic cache key/hash 已充分覆盖，但 bridge 层还缺“resume 后 UI/bridge 可观察到 cache hit/miss”的半集成验证。该任务范围小、默认不烧真实 API、与 P8 resume/cache replay 主目标直接相关。
+**结论：** 下一步应补 `resume/cache` 对权限、工具和 MCP 上下文变化的失效覆盖。即使 `script`、`args`、`prompt`、`options`、`session` 都相同，只要权限或工具/MCP 上下文变化，就必须 fresh start，不能复用旧 child artifact，不能发 `agent_cached`。
+
+**为什么优先：**
+
+1. **安全价值最高：** 权限收紧或工具集变化后仍复用旧 artifact，会形成越权复用风险。
+2. **直接命中 P8 核心：** P8 的核心不是只证明 cache 能命中，而是证明 resume/cache replay 在安全边界变化时不会错误命中。
+3. **默认离线可跑：** 可用 deterministic runtime、CountingRunner、bridge fake runner 覆盖，不需要真实 API 或真实 MCP。
+4. **避免重复：** same args cache hit、different args fresh、provider anomaly、JS 异常、redaction completeness 已完成；本切片覆盖新的安全边界。
 
 **最小切片：**
 
-1. `same args -> cached`：source run succeeded 后通过 `workflow_resume(source_run_id, args=same_args)` 恢复，断言 resumed run 有 `agent_cached`、无 fresh child started、`cachedFromRunId` / `cachedFromJobId` 正确、`transcriptRef` 指向 resumed artifact、bridge final succeeded、activity/status idle。
-2. `different args -> fresh`：同一 source run 使用 `workflow_resume(source_run_id, args=different_args)`，断言无 `agent_cached`、fresh child executed、result marker 来自 fresh run、bridge final succeeded、activity/status idle。
-
-**建议目标文件：** `tests/test_ink_bridge.py`
-
-**建议测试名：**
-
-- `test_workflow_resume_same_args_uses_cached_agent_through_bridge`
-- `test_workflow_resume_different_args_runs_fresh_agent_through_bridge`
-
-**验证命令：**
-
-```bash
-python -m unittest tests.test_ink_bridge
-python -m unittest tests.test_workflow_runtime
-python -m py_compile frontends/ink_bridge.py workflow_runtime.py workflow_scheduler.py workflow_store.py
-```
-
-**暂不混入：** prompt 改动 prefix hit/miss、options 改动 miss、permission profile/version 改动 miss、真实 API args variant diagnostic。这些可在最小两例通过后作为扩展。
-
-#### 建议 B：provider error 全链路脱敏专项（安全增强备选）
-
-**为什么重要：** P1 provider anomaly 已固定 SDK-like exception 的 failed artifact/transcript/final/error contract，但当前仍未专门验证 provider error 中的 secret-like 文本会在所有出口脱敏。该项安全价值高，但可能涉及生产脱敏逻辑设计，改动范围大于建议 A。
-
-**建议覆盖出口：**
-
-- `AgentResult.payload.error`
-- child `transcript_events` / `transcript.jsonl`
-- job error 与 workflow journal event payload
-- `final-result.json`
-- bridge `error(code=workflow_run_failed).message`
+1. `permission_profile changed -> fresh`：同 script/same args/same prompt，仅 source/resumed 的 `permission_profile` 不同，断言无 `agent_cached`、fresh child started、无 `cachedFromRunId` / `cachedFromJobId`。
+2. `permission_policy_version changed -> fresh`：同上，仅 `permission_policy_version` 不同，断言 fresh。
+3. `allowedTools changed -> fresh`：通过 `WorkflowRun.metadata["toolContext"]` 注入 allowed tools 摘要，工具集变化时必须 fresh。
+4. `mcp configName changed -> fresh`：通过 `WorkflowRun.metadata["mcpContext"]` 注入 MCP 摘要，configName 变化时必须 fresh。
+5. `mcp schemaHash changed -> fresh`：schemaHash 变化时必须 fresh。
+6. `tool/MCP context unchanged -> cached`：上下文完全相同、allowedTools 仅顺序不同，应规范化后仍 cache hit，防止过度失效。
+7. Bridge 半集成最小用例：`workflow_resume` 后 bridge 可观察到 tool context changed 导致 fresh child，无 `agent_cached`，`workflow_final` succeeded，activity/status idle。
 
 **建议目标文件：**
 
-- `tests/test_p8_provider_anomaly_e2e.py`
-- 可能新增或复用脱敏 helper 所在生产文件（需先审计现有 `sanitize()` / `SECRET_PATTERNS` 的位置与可复用性）
+- `tests/test_workflow_runtime.py`
+- `tests/test_ink_bridge.py`
+- `workflow_scheduler.py`
+- `workflow_runtime.py`
+- 必要时：`frontends/ink_bridge.py`
 
 **建议测试名：**
 
-- `test_runtime_provider_sdk_like_exception_redacts_secret_text_in_all_artifacts`
-- `test_bridge_provider_sdk_like_exception_redacts_secret_text_in_error_event`
+- `test_runtime_does_not_reuse_cached_agent_when_permission_profile_changes`
+- `test_runtime_does_not_reuse_cached_agent_when_permission_policy_version_changes`
+- `test_runtime_does_not_reuse_cached_agent_when_allowed_tools_change`
+- `test_runtime_does_not_reuse_cached_agent_when_mcp_config_name_changes`
+- `test_runtime_does_not_reuse_cached_agent_when_mcp_schema_hash_changes`
+- `test_runtime_reuses_cached_agent_when_tool_and_mcp_context_unchanged`
+- `test_workflow_resume_cache_miss_when_tool_context_changes_starts_fresh_child`
+
+**可能生产修复点：**
+
+- 在 `workflow_scheduler.py` 的 cache key 中纳入规范化摘要，例如 `toolContextHash`、`mcpContextHash`。
+- `allowedTools` 应排序去重，缺失与空结构等价。
+- MCP 上下文只纳入 `configName`、`schemaHash`、`serverToolsHash` 等摘要，不读取真实 `mcp.json`，不把大 schema 正文写入 cache key 或事件。
+- 在 `workflow_runtime.py::_build_resume_plan()` / `_match_cached_agent()` 中比较新增 cache 安全边界字段；任一不一致即截断 prefix 并 fresh start。
 
 **验证命令：**
 
 ```bash
-python -m unittest tests.test_p8_provider_anomaly_e2e
-python -m unittest tests.test_workflow_runtime tests.test_ink_bridge
+python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_permission_profile_changes
+python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_permission_policy_version_changes
+python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_allowed_tools_change
+python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_mcp_config_name_changes tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_mcp_schema_hash_changes
+python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_reuses_cached_agent_when_tool_and_mcp_context_unchanged
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_resume_cache_miss_when_tool_context_changes_starts_fresh_child
+python -m unittest tests.test_workflow_runtime
+python -m unittest tests.test_ink_bridge
+python -m py_compile frontends/ink_bridge.py workflow_runtime.py workflow_scheduler.py workflow_store.py
 ```
 
-**注意：** 该专项不要使用真实 key；只使用 synthetic secret-like marker，例如 `sk-test-...`、`Bearer ...`、`api_key=...`，并确保测试与实现都不读取 `mykey.py`、`mykey.json`、`mcp.json`。
+**非目标：**
+
+- 不重复 Bridge same args/different args cache 主干。
+- 不重复 JS 异常、provider anomaly、429/timeout/parallel partial failure、stop/resume prefix、redaction completeness。
+- 不运行真实 API、真实 MCP、stress/stability、mid-call streaming cancel。
+- 不读取、打印或提交 `mykey.py`、`mykey.json`、`mcp.json`。
+- 不把完整 tool schema、MCP schema 或大 transcript 正文写入 cache key/event；只写稳定摘要/hash。
 
 ---
 

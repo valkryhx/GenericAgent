@@ -1648,6 +1648,97 @@ return { marker: 'GA_ARGS_MISS_DONE', summary: result.summary }
             self.assertEqual("succeeded", final_event["result"]["status"])
             self.assert_bridge_idle_tail(events)
 
+    def test_workflow_resume_cache_miss_when_tool_context_changes_starts_fresh_child(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class ToolContextRunner:
+            def __init__(self):
+                self.started_job_ids = []
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="succeeded",
+                    payload={"summary": "fresh inspect tools"},
+                    transcript_events=[{"type": "assistant", "text": "fresh tool transcript"}],
+                )
+
+            def cancel(self, job):
+                return None
+
+        runner = ToolContextRunner()
+
+        def runtime_factory(*, store, timeout_seconds=10.0):
+            return WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+                timeout_seconds=timeout_seconds,
+            )
+
+        script = """
+const result = await agent('inspect tools')
+return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=runtime_factory,
+            )
+            source_run_id = bridge.workflow_draft(script)
+            source = bridge.workflow_store.load_run(source_run_id)
+            source.metadata["toolContext"] = {"allowedTools": ["Read"], "toolSchemaHash": "schema-v1"}
+            bridge.workflow_store.save_run(source)
+            self.assertTrue(bridge.workflow_approve(source_run_id, args={"same": True}, timeout_seconds=5.0))
+            bridge.wait_for_workflow_idle(source_run_id, timeout=5)
+
+            source = bridge.workflow_store.load_run(source_run_id)
+            self.assertEqual("succeeded", source.status)
+            self.assertEqual(["succeeded"], [job.status for job in source.jobs])
+            self.assertEqual(["agent_1"], runner.started_job_ids)
+
+            with patch("threading.Thread.start", lambda _thread: None):
+                resumed_run_id = bridge.workflow_resume(source_run_id, args={"same": True}, timeout_seconds=5.0)
+            self.assertTrue(resumed_run_id)
+            resumed = bridge.workflow_store.load_run(resumed_run_id)
+            resumed.metadata["toolContext"] = {"allowedTools": ["Read", "Write"], "toolSchemaHash": "schema-v1"}
+            bridge.workflow_store.save_run(resumed)
+            bridge._workflow_threads[resumed_run_id].start()
+            bridge.wait_for_workflow_idle(resumed_run_id, timeout=5)
+            self.assertFalse(bridge._workflow_threads[resumed_run_id].is_alive())
+
+            resumed = bridge.workflow_store.load_run(resumed_run_id)
+            resumed_artifact_dir = Path(resumed.artifact_dir)
+            self.assertEqual("succeeded", resumed.status)
+            self.assertEqual(["succeeded"], [job.status for job in resumed.jobs])
+            self.assertNotIn("cachedFromRunId", resumed.jobs[0].metadata)
+            self.assertNotIn("cachedFromJobId", resumed.jobs[0].metadata)
+            self.assertEqual(["agent_1", "agent_1"], runner.started_job_ids)
+            self.assertNotEqual(source.jobs[0].metadata["cacheKey"]["toolContextHash"], resumed.jobs[0].metadata["cacheKey"]["toolContextHash"])
+
+            resumed_result = json.loads((resumed_artifact_dir / resumed.jobs[0].result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", resumed_result["status"])
+            self.assertEqual("fresh inspect tools", resumed_result["payload"]["summary"])
+            resumed_final = json.loads((resumed_artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", resumed_final["status"])
+            self.assertEqual("GA_TOOL_CONTEXT_MISS_DONE", resumed_final["result"]["marker"])
+            self.assertEqual("fresh inspect tools", resumed_final["result"]["summary"])
+
+            workflow_events_by_run = self.workflow_event_types_by_run(events)
+            self.assertNotIn("agent_cached", workflow_events_by_run[resumed_run_id])
+            self.assertIn("agent_started", workflow_events_by_run[resumed_run_id])
+            self.assertIn("agent_completed", workflow_events_by_run[resumed_run_id])
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == resumed_run_id)
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assert_bridge_idle_tail(events)
+
     def test_workflow_resume_runs_new_run_with_resume_source(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"

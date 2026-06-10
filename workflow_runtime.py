@@ -212,18 +212,23 @@ class WorkflowRuntime:
         if source_run.session_id != run.session_id:
             return []
         plan: list[dict] = []
+        probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args)
         for source_job in source_run.jobs:
             if source_job.status not in {"succeeded", "cached"}:
                 break
             source_key = source_job.metadata.get("cacheKey") or {}
-            if source_key.get("argsHash") != AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args)._cache_key(
+            expected_key = probe_scheduler._cache_key(
                 WorkflowJob(job_id="probe", prompt=source_job.prompt, metadata={"callIndex": source_job.metadata.get("callIndex", len(plan)), "options": source_job.metadata.get("options") or {}})
-            ).get("argsHash"):
-                break
-            if source_key.get("permissionProfile") != run.permission_profile:
-                break
-            if source_key.get("permissionPolicyVersion") != run.permission_policy_version:
-                break
+            )
+            for field in (
+                "argsHash",
+                "permissionProfile",
+                "permissionPolicyVersion",
+                "toolContextHash",
+                "mcpContextHash",
+            ):
+                if source_key.get(field) != expected_key.get(field):
+                    return plan
             try:
                 result = self.store.read_agent_result(source_run, source_job)
             except Exception:
