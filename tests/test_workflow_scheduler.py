@@ -147,6 +147,23 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual(job.job_id, event.job_id)
         self.assertEqual(cache_key, event.payload["cacheKey"])
 
+    def test_register_agent_rejects_non_dict_options_with_clear_error(self):
+        scheduler, _store, _run = self.make_scheduler()
+
+        with self.assertRaisesRegex(TypeError, "agent options must be a plain object"):
+            scheduler.register_agent(prompt="inspect repo", options=[["label", "Scout"]])
+
+        self.assertEqual([], scheduler.jobs)
+
+    def test_register_cached_agent_rejects_non_dict_options_with_clear_error(self):
+        scheduler, _store, _run = self.make_scheduler()
+        result = AgentResult(job_id="agent_1", status="succeeded", payload={"summary": "ok"})
+
+        with self.assertRaisesRegex(TypeError, "agent options must be a plain object"):
+            scheduler.register_cached_agent(prompt="inspect repo", options="bad", result=result)
+
+        self.assertEqual([], scheduler.jobs)
+
     def test_cache_key_changes_when_permission_profile_or_policy_version_changes(self):
         scheduler_a, _store_a, _run_a = self.make_scheduler()
         scheduler_b, _store_b, _run_b = self.make_scheduler(

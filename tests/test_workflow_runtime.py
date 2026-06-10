@@ -403,6 +403,7 @@ return result.summary
             "string": "return await agent('p', 'abc')",
             "number": "return await agent('p', 1)",
             "array": "return await agent('p', ['x'])",
+            "array-pairs": "return await agent('p', [['label', 'Scout'], ['effort', 'low']])",
         }
         for name, script in scripts.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
@@ -410,19 +411,29 @@ return result.summary
                 run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
                 runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
 
-                with self.assertRaises(Exception):
+                with self.assertRaisesRegex(RuntimeError, "agent options must be a plain object"):
                     runtime.run(run)
 
-                loaded = store.load_run("wf_test")
-                self.assertEqual("failed", loaded.status)
-                self.assertTrue(loaded.error)
-                self.assertEqual(0, len(loaded.jobs))
-                final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
-                self.assertEqual("failed", final_result["status"])
-                self.assertTrue(final_result["error"])
-                self.assertEqual(0, len(final_result["jobs"]))
-                events = store.replay_events("wf_test")
-                self.assertEqual("workflow_failed", events[-1].event_type)
+                self.assert_runtime_failed_with_marker(
+                    store=store,
+                    run=run,
+                    marker="agent options must be a plain object",
+                )
+
+    def test_runtime_agent_label_option_must_be_string_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return await agent('p', {label: 123})", status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "ok"}}))
+
+            with self.assertRaisesRegex(Exception, "agent option label must be a string"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(
+                store=store,
+                run=run,
+                marker="agent option label must be a string",
+            )
 
     def test_runtime_reuses_cached_agent_when_resuming_same_script_and_args(self):
         with tempfile.TemporaryDirectory() as tmp:

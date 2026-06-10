@@ -26,6 +26,14 @@ class SchedulerConfig:
             raise ValueError("max_total must be at least 1")
 
 
+def normalize_agent_options(options: dict | None) -> dict:
+    if options is None:
+        return {}
+    if not isinstance(options, dict):
+        raise TypeError("agent options must be a plain object")
+    return dict(options)
+
+
 class AgentScheduler:
     def __init__(
         self,
@@ -66,7 +74,7 @@ class AgentScheduler:
             metadata={
                 "callIndex": call_index,
                 "label": label,
-                "options": dict(options or {}),
+                "options": normalize_agent_options(options),
                 "runId": self.run.run_id,
                 "permissionProfile": self.run.permission_profile,
                 "permissionPolicyVersion": self.run.permission_policy_version,
@@ -90,7 +98,7 @@ class AgentScheduler:
             metadata={
                 "callIndex": call_index,
                 "label": label,
-                "options": dict(options or {}),
+                "options": normalize_agent_options(options),
                 "runId": self.run.run_id,
                 "permissionProfile": self.run.permission_profile,
                 "permissionPolicyVersion": self.run.permission_policy_version,

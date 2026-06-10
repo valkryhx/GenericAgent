@@ -151,7 +151,11 @@ class WorkflowRuntime:
         if method != "agent":
             raise RuntimeError(f"unsupported workflow rpc: {method}")
         options = params.get("options") or {}
-        label = options.get("label") if isinstance(options, dict) else None
+        if not isinstance(options, dict):
+            raise TypeError("agent options must be a plain object")
+        label = options.get("label")
+        if label is not None and not isinstance(label, str):
+            raise TypeError("agent option label must be a string")
         prompt = str(params.get("prompt") or "")
         call_index = len(scheduler.jobs)
         cached = self._match_cached_agent(resume_plan, call_index=call_index, prompt=prompt, options=options, scheduler=scheduler)

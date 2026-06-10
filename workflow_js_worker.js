@@ -27,10 +27,22 @@ function transformScript(script) {
   return String(script || '').replace(/\bexport\s+const\s+meta\s*=/, 'const meta =');
 }
 
+function normalizeAgentOptions(options) {
+  if (!options) return {};
+  if (
+    typeof options !== 'object' ||
+    Array.isArray(options) ||
+    Object.prototype.toString.call(options) !== '[object Object]'
+  ) {
+    throw new TypeError('agent options must be a plain object');
+  }
+  return options;
+}
+
 async function executeScript(script, args, options) {
   const sandbox = {
     args,
-    agent: (prompt, options) => rpc('agent', { prompt, options: options || {} }),
+    agent: (prompt, options) => rpc('agent', { prompt, options: normalizeAgentOptions(options) }),
     phase: (name) => event('phase', { name }),
     log: (message) => event('log', { message }),
     parallel: async (items) => Promise.all((items || []).map((item) => (typeof item === 'function' ? item() : item))),

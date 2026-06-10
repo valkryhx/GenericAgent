@@ -57,10 +57,10 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 层 | 当前覆盖 | 文件 | 用例数 |
 |---|---|---|---|
-| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options 边界 | `test_workflow_runtime.py` | 31 |
-| **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop | `test_workflow_scheduler.py` | 14 |
+| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options 边界 | `test_workflow_runtime.py` | 32 |
+| **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop/options 防御校验 | `test_workflow_scheduler.py` | 18 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本 failed/final/error/idle + parallel partial failure/provider 429 final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 58 |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本/options failed/final/error/idle + parallel partial failure/provider 429 final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 59 |
 | **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + stability diagnostic harness + stress diagnostic harness + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` / `p8_real_api_stability_e2e.py` / `p8_real_api_stress_e2e.py` | 6 main cases + 5 diagnostics + 1 stability harness + 1 stress harness |
 | **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；provider 429 bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补；real provider mid-call stop diagnostic 已补为观察项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/429/stop-resume/mid-call diagnostics |
 
@@ -525,7 +525,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 - invalid agent options：新增 runtime 当前行为快照，覆盖 falsy options 归一为 `{}`、plain object options 保留 label/options、truthy non-object options 失败且不注册 job。
 - bridge helper reuse：`parallel partial failure` 与 provider `429` bridge 测试复用 `assert_workflow_failed_final_error_and_idle`，保留各自 artifact / payload 专属断言。
 
-**仍暂缓：** 数组键值对 options 可转换但 label 丢失的边界、以及是否在 JS/Python/Scheduler 层显式校验 options plain object 的生产 contract。该问题应作为单独产品语义修复处理，不在 P0 异常收敛测试中保护当前不一致行为。
+**options contract 生产修复（已实现）：** JS worker 侧新增 `normalizeAgentOptions()`，`agent(prompt, options)` 现在只接受 plain object；`undefined`/`null`/`false`/`0`/空字符串等 falsy options 归一为 `{}`；数组、字符串、数字和数组键值对 options 均以稳定错误 `agent options must be a plain object` 拒绝。Python runtime 与 Scheduler 侧同步增加防御校验，防止非 JS 入口绕过；runtime 同时要求 `label` 如果存在必须是字符串。新增 bridge invalid options failed/final/error/idle 覆盖，以及 Scheduler 非 dict options 拒绝测试。
+
+**仍暂缓：** 是否支持 class instance / null-prototype object 等非普通对象的扩展语义；当前 contract 明确为用户脚本普通 object。
 
 **验证命令：**
 
@@ -638,12 +640,9 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批和第二批主要可测场景：top-level script throw、pipeline stage throw、forbidden token preflight、parallel thunk sync throw、non-serializable return，以及 invalid agent options 当前行为快照；同时修复 preflight 异常后 run 可能停留 `running` 的 bridge 兜底问题。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复：top-level script throw、pipeline stage throw、forbidden token preflight、parallel thunk sync throw、non-serializable return、invalid agent options、preflight failed 兜底、options JS/Python/Scheduler 三层校验均已覆盖。
 
-后续建议二选一：
-
-1. 若继续完善同一方向，单独制定 options contract 修复：在 JS worker / Python runtime / scheduler 层明确 `agent(prompt, options)` 只接受 plain object，并决定数组键值对 options 是否拒绝；这属于产品语义修复，不建议混入 P0 异常收敛测试。
-2. 若转向下一类缺口，进入 P1：半真实 provider anomaly E2E，先用 deterministic / semi-real runner 固定 empty content、无 text block、usage missing、SDK-like exception 的 workflow 降级与 artifact/transcript 脱敏契约。
+后续建议转入下一类缺口：**P1 半真实 provider anomaly E2E**。先用 deterministic / semi-real runner 固定 empty content、无 text block、usage missing、SDK-like exception 的 workflow 降级与 artifact/transcript 脱敏契约；默认不烧真实 API。
 
 ---
 

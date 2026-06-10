@@ -1159,6 +1159,24 @@ return results
                 marker="BigInt",
             )
 
+    def test_workflow_approve_invalid_agent_options_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return await agent('p', 'bad-options')")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assert_workflow_failed_final_error_and_idle(
+                bridge=bridge,
+                events=events,
+                run_id=run_id,
+                marker="agent options must be a plain object",
+            )
+
     def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
