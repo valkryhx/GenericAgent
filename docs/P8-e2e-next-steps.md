@@ -57,10 +57,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 层 | 当前覆盖 | 文件 | 用例数 |
 |---|---|---|---|
-| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options 边界 | `test_workflow_runtime.py` | 32 |
+| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options/provider anomaly artifact 边界 | `test_workflow_runtime.py` | 34 |
 | **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop/options 防御校验 | `test_workflow_scheduler.py` | 18 |
 | **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
-| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本/options failed/final/error/idle + parallel partial failure/provider 429 final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 59 |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本/options failed/final/error/idle + parallel partial failure/provider 429/provider anomaly final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 59 |
+| **Semi-real P8 E2E** | provider anomaly 半真实 E2E 已覆盖 empty content、usage missing、no text block、SDK-like exception 的 runtime artifact/transcript/final 与 bridge final/error/idle；默认不烧真实 API | `test_p8_provider_anomaly_e2e.py` | 8 |
 | **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + stability diagnostic harness + stress diagnostic harness + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` / `p8_real_api_stability_e2e.py` / `p8_real_api_stress_e2e.py` | 6 main cases + 5 diagnostics + 1 stability harness + 1 stress harness |
 | **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；provider 429 bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补；real provider mid-call stop diagnostic 已补为观察项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/429/stop-resume/mid-call diagnostics |
 
@@ -70,8 +71,8 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 - ✅ 完全或主路径充分覆盖：4 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承、parallel 部分失败 deterministic/diagnostic 覆盖）
 - 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：2 项（bridge 非成功终态事件、cache key 变体）
-- 🔶 部分覆盖：3 项（超时边界、大 artifact 隔离、JS Worker 异常脚本）
-- ❌ 仍基本未覆盖：1 项（真实 API 返回格式异常）；网络抖动/稳定性已有基础 harness，rate limit/429 已补 deterministic + stress diagnostic 基础覆盖
+- 🔶 部分覆盖：4 项（超时边界、大 artifact 隔离、JS Worker 异常脚本、真实 API 返回格式异常的半真实 provider anomaly contract）
+- ❌ 仍基本未覆盖：0 项；网络抖动/稳定性已有基础 harness，rate limit/429 已补 deterministic + stress diagnostic 基础覆盖，真实 API 返回格式异常已补默认可跑的半真实 E2E characterization
 
 **粗估百分比：**
 - 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
@@ -309,11 +310,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 没有任何测试注入 malformed API 响应。 |
-| **当前覆盖** | 完全无覆盖 |
-| **缺失内容** | ① 空 content；② streaming 中断；③ usage 缺失；④ malformed JSON / SDK exception 降级；⑤ transcript artifact 可读性 |
+| **缺口描述** | 原缺口是没有任何测试注入 provider 返回格式异常或 SDK-like exception。当前已补默认可跑、无真实 API 的半真实 provider anomaly E2E，用 fake runner / fake session 固定 runtime、artifact、transcript、bridge final/error/idle contract。 |
+| **当前覆盖** | 新增 `tests/test_p8_provider_anomaly_e2e.py` 覆盖 empty content、usage missing、no text block、SDK-like exception 四类 anomaly 的 runtime artifact/transcript/final-result 与 bridge final/error/idle；`tests/test_workflow_child_agent.py` 补 Native runner empty content / missing usage characterization；`tests/test_workflow_runtime.py` 补 Native runner empty content artifact 与 SDK exception failed artifact contract。 |
+| **剩余内容** | ① 真实 provider 自然 malformed stream / malformed JSON 仍只能作为 opt-in diagnostic 长期观察；② provider error 全链路脱敏（payload.error、transcript、journal、final-result、bridge error）仍需单独安全任务；③ 是否将 empty content 从 succeeded 改为 failed/degraded 需要产品语义决策；④ runner.poll 直接异常是否合成 failed result artifact 仍待单独 contract 设计。 |
 | **风险评级** | 中 |
-| **建议优先级** | **P2**（需要 semi-real runner/mock 基础设施） |
+| **建议优先级** | **基础半真实覆盖已完成 / P2 扩展观察与脱敏专项** |
 
 ### 项目 9：权限 / MCP / Skills / Tools 继承 E2E
 
@@ -538,20 +539,32 @@ python -m unittest tests.test_workflow_runtime
 
 #### P1：半真实 provider anomaly E2E
 
-**为什么不是重复：** 429、timeout、stop/resume、parallel partial failure 都不是 provider 返回格式异常；当前仍缺 empty content、assistant message 无 text block、usage missing、malformed stream / JSON、SDK exception 的 workflow 降级契约。
+**为什么不是重复：** 429、timeout、stop/resume、parallel partial failure 都不是 provider 返回格式异常。本项用默认可跑、无真实 API 的半真实 E2E 固定 empty content、no text block、usage missing、SDK-like exception 的 workflow artifact/transcript/final/error contract。
 
-**目标文件：** 优先新增 `tests/test_p8_provider_anomaly_e2e.py`，必要时配合 `tests/test_workflow_runtime.py`、`tests/test_ink_bridge.py`、`workflow_child_agent.py`。
+**目标文件：** `tests/test_p8_provider_anomaly_e2e.py`、`tests/test_workflow_child_agent.py`、`tests/test_workflow_runtime.py`。
 
-**第一批不打真实 API：** child runner 返回空 summary/content；assistant message 无 text block；usage 缺失或为 `None`；runner 抛 SDK-like exception；transcript artifact 仍为可读 JSONL；`result.json` 不内联 `transcriptEvents`；error payload 脱敏；workflow final status 与当前 contract 一致。
+**已实现覆盖：**
 
-**注意：** 需要先读取当前 `NativeGPTChildAgentRunner` / `AgentResult` contract，不能预设空 content 一定 failed 或 degraded succeeded。
+- `test_runtime_provider_empty_content_preserves_success_artifact_and_readable_transcript`
+- `test_runtime_provider_missing_usage_does_not_fail_and_records_empty_token_usage`
+- `test_runtime_provider_no_text_block_preserves_success_artifact_without_inline_transcript`
+- `test_runtime_provider_sdk_like_exception_preserves_failed_result_transcript_and_final_failure`
+- `test_bridge_provider_empty_content_emits_success_final_and_idle`
+- `test_bridge_provider_missing_usage_emits_success_final_without_workflow_error`
+- `test_bridge_provider_sdk_like_exception_emits_failed_final_error_and_idle`
+- `test_bridge_provider_no_text_block_emits_success_final_and_preserves_readable_transcript`
+- Native runner characterization：empty content 成功、missing usage 不写 token_usage transcript event。
+- Native runner + runtime 半真实链路：empty content artifact 与 SDK exception failed artifact/transcript/final。
+
+**当前 contract：** empty content / no text block / missing usage 保持 succeeded characterization；SDK-like exception 经 failed `AgentResult` 进入 runtime 后落盘 failed result/transcript/final，并在 bridge 层收敛为 failed final/error/idle。`result.json` 不内联 `transcriptEvents`，`transcript.jsonl` 必须逐行 JSON 可读。
+
+**仍暂缓：** provider error 全链路脱敏、runner.poll 直接异常是否合成 failed result artifact、empty content 是否改为 failed/degraded、真实 malformed stream / malformed JSON opt-in diagnostic。
 
 **验证命令：**
 
 ```bash
 python -m unittest tests.test_p8_provider_anomaly_e2e
-python -m unittest tests.test_workflow_runtime
-python -m unittest tests.test_ink_bridge
+python -m unittest tests.test_workflow_child_agent tests.test_workflow_runtime tests.test_ink_bridge
 ```
 
 #### P2：Bridge cache hit/miss 半集成矩阵
@@ -640,9 +653,9 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复：top-level script throw、pipeline stage throw、forbidden token preflight、parallel thunk sync throw、non-serializable return、invalid agent options、preflight failed 兜底、options JS/Python/Scheduler 三层校验均已覆盖。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization，覆盖 empty content、no text block、usage missing、SDK-like exception 的 artifact/transcript/final/error contract。
 
-后续建议转入下一类缺口：**P1 半真实 provider anomaly E2E**。先用 deterministic / semi-real runner 固定 empty content、无 text block、usage missing、SDK-like exception 的 workflow 降级与 artifact/transcript 脱敏契约；默认不烧真实 API。
+后续建议转入下一类缺口：**P2 Bridge cache hit/miss 半集成矩阵**，先补 same args 命中 cache 与 different args 不命中 cache 两个 bridge 可观测用例；或进入 provider error 全链路脱敏专项。
 
 ---
 

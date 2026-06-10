@@ -195,6 +195,33 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual("agents/agent_1/transcript.jsonl", result.transcript_ref)
         self.assertTrue(any(event.get("type") == "error" for event in result.transcript_events))
 
+    def test_native_runner_empty_content_succeeds_with_empty_summary_and_readable_transcript(self):
+        job = WorkflowJob(job_id="agent_1", prompt="empty please", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession(chunks=(), usage={}))
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual("", result.payload["summary"])
+        self.assertEqual("", result.payload["text"])
+        self.assertEqual({}, result.token_usage)
+        self.assertEqual("agents/agent_1/transcript.jsonl", result.transcript_ref)
+        self.assertTrue(any(event.get("type") == "assistant" and event.get("text") == "" for event in result.transcript_events))
+        self.assertFalse(any(event.get("type") == "token_usage" for event in result.transcript_events))
+
+    def test_native_runner_missing_usage_omits_token_usage_but_preserves_text(self):
+        job = WorkflowJob(job_id="agent_1", prompt="usage missing", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession(chunks=("answer",), usage={}))
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual("answer", result.payload["summary"])
+        self.assertEqual({}, result.token_usage)
+        self.assertFalse(any(event.get("type") == "token_usage" for event in result.transcript_events))
+
     def test_cancel_requests_active_session_cancellation(self):
         session = StubSession(delay=0.2)
         job = WorkflowJob(job_id="agent_1", prompt="slow", metadata={"runId": "wf_test"})

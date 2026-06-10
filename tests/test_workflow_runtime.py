@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
-from workflow_child_agent import AgentResult, FakeChildAgentRunner
+from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
 from workflow_models import WorkflowJob, WorkflowRun
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import AgentScheduler, SchedulerConfig
@@ -434,6 +434,69 @@ return result.summary
                 run=run,
                 marker="agent option label must be a string",
             )
+
+    def test_runtime_native_runner_empty_content_preserves_artifacts_and_empty_summary(self):
+        class EmptySession:
+            last_usage_tokens = {}
+
+            def ask(self, message):
+                if False:
+                    yield "unreachable"
+                return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return await agent('empty content')", status="running"))
+            runtime = WorkflowRuntime(store=store, runner=NativeGPTChildAgentRunner(session_factory=lambda _config_name: EmptySession()))
+
+            outcome = runtime.run(run)
+
+            self.assertEqual("", outcome.result["summary"])
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual(1, len(loaded.jobs))
+            job = loaded.jobs[0]
+            artifact_dir = Path(loaded.artifact_dir)
+            result_payload = json.loads((artifact_dir / job.result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", result_payload["status"])
+            self.assertEqual("", result_payload["payload"]["summary"])
+            self.assertEqual("", result_payload["payload"]["text"])
+            self.assertEqual({}, result_payload["tokenUsage"])
+            transcript_path = artifact_dir / job.metadata["transcriptRef"]
+            self.assertTrue(transcript_path.exists())
+            transcript_rows = [json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(row.get("type") == "assistant" and row.get("text") == "" for row in transcript_rows))
+
+    def test_runtime_native_runner_sdk_exception_failed_result_preserves_transcript_artifact(self):
+        class ErrorSession:
+            last_usage_tokens = {}
+
+            def ask(self, message):
+                raise RuntimeError("provider sdk exploded")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return await agent('sdk exception')", status="running"))
+            runtime = WorkflowRuntime(store=store, runner=NativeGPTChildAgentRunner(session_factory=lambda _config_name: ErrorSession()))
+
+            with self.assertRaisesRegex(RuntimeError, "provider sdk exploded"):
+                runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("failed", loaded.status)
+            self.assertEqual(1, len(loaded.jobs))
+            job = loaded.jobs[0]
+            artifact_dir = Path(loaded.artifact_dir)
+            result_payload = json.loads((artifact_dir / job.result_ref).read_text(encoding="utf-8"))
+            self.assertEqual("failed", result_payload["status"])
+            self.assertIn("provider sdk exploded", result_payload["payload"]["error"])
+            transcript_path = artifact_dir / job.metadata["transcriptRef"]
+            self.assertTrue(transcript_path.exists())
+            transcript_rows = [json.loads(line) for line in transcript_path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(row.get("type") == "error" and "provider sdk exploded" in row.get("error", "") for row in transcript_rows))
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["status"])
+            self.assertIn("provider sdk exploded", final_result["error"])
 
     def test_runtime_reuses_cached_agent_when_resuming_same_script_and_args(self):
         with tempfile.TemporaryDirectory() as tmp:
