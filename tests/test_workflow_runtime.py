@@ -184,6 +184,79 @@ return { summary: result.summary, phaseDone: true }
             self.assertEqual("ok", final_result["result"]["summary"])
             self.assertEqual("agent_1", final_result["jobs"][0]["jobId"])
 
+    def test_runtime_redacts_sensitive_workflow_log_in_memory_and_journal(self):
+        secret_values = ["sk-log-secret", "xkey-log-secret", "cookie_secret"]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+log('HTTP 200 Authorization: Bearer sk-log-secret; x-api-key: xkey-log-secret; Cookie: sid=cookie_secret; request_id=req_123')
+return { ok: true }
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            outcome = runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            journal_text = (artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            combined = json.dumps(outcome.logs, ensure_ascii=False) + journal_text
+            self.assertIn("request_id=req_123", combined)
+            self.assertIn("[REDACTED]", combined)
+            for secret in secret_values:
+                self.assertNotIn(secret, combined)
+
+    def test_runtime_redacts_success_final_result_in_memory_state_and_final_artifact(self):
+        secret_values = ["key_secret", "client_secret", "sk-message-secret", "cookie_secret"]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+return {
+  apiKey: 'key_secret',
+  nested: { clientSecret: 'client_secret' },
+  message: 'Bearer sk-message-secret Cookie: sid=cookie_secret request_id=req_123'
+}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            outcome = runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            combined = json.dumps(outcome.result, ensure_ascii=False) + json.dumps(final_result, ensure_ascii=False)
+            self.assertEqual("[REDACTED]", outcome.result["apiKey"])
+            self.assertEqual("[REDACTED]", outcome.result["nested"]["clientSecret"])
+            self.assertIn("request_id=req_123", combined)
+            self.assertIn("[REDACTED]", combined)
+            for secret in secret_values:
+                self.assertNotIn(secret, combined)
+
+    def test_runtime_worker_error_redacts_secrets_across_error_artifacts(self):
+        secret_values = ["sk-worker-secret", "tok_secret", "cookie_secret"]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secret; Cookie: sid=cookie_secret; request_id=req_123')
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store)
+
+            with self.assertRaisesRegex(RuntimeError, "HTTP 500") as raised:
+                runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            journal_text = (artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            combined = str(raised.exception) + (loaded.error or "") + json.dumps(final_result, ensure_ascii=False) + journal_text
+            self.assertIn("HTTP 500", combined)
+            self.assertIn("request_id=req_123", combined)
+            self.assertIn("[REDACTED]", combined)
+            for secret in secret_values:
+                self.assertNotIn(secret, combined)
+
     def test_runtime_rejects_forbidden_script_tokens_before_worker_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

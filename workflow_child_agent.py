@@ -158,6 +158,7 @@ class NativeGPTChildAgentRunner:
                 answer = "".join(str(chunk) for chunk in session.ask(message))
                 usage = copy.deepcopy(getattr(session, "last_usage_tokens", None) or {})
                 tool_summary = {}
+            answer = redact_sensitive_text(answer)
             transcript_events.append({"type": "assistant", "text": answer})
             if usage:
                 transcript_events.append({"type": "token_usage", "tokenUsage": usage})
@@ -169,7 +170,7 @@ class NativeGPTChildAgentRunner:
                 transcript_ref=transcript_ref,
                 token_usage=usage,
                 tool_summary=tool_summary,
-                transcript_events=transcript_events,
+                transcript_events=sanitize(transcript_events),
             )
         except Exception as exc:
             error = redact_sensitive_text(str(exc))
@@ -295,7 +296,7 @@ class NativeGPTChildAgentRunner:
     def _build_prompt(self, job) -> str:
         run_id = job.metadata.get("runId") or job.metadata.get("run_id") or ""
         label = job.metadata.get("label") or ""
-        options = copy.deepcopy(job.metadata.get("options") or {})
+        options = sanitize(copy.deepcopy(job.metadata.get("options") or {}))
         permission_profile = self._permission_profile(job)
         permission_policy_version = self._permission_policy_version(job)
         lines = [

@@ -12,15 +12,19 @@ SENSITIVE_KEY_RE = re.compile(
 
 TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"(?i)\b(Authorization\s*[:=]\s*Bearer\s+)([^\s,;}\]\)]+)"),
+        re.compile(r"(?i)\b(Authorization\s*[:=]\s*Bearer\s+)([^\[\]\s,;}\)]+)"),
         rf"\1{REDACTION}",
     ),
     (
-        re.compile(r"(?i)\b(Bearer\s+)([^\s,;}\]\)]+)"),
+        re.compile(r"(?i)\b(Bearer\s+)([^\[\]\s,;}\)]+)"),
         rf"\1{REDACTION}",
     ),
     (
-        re.compile(r"(?i)\b(x-api-key\s*[:=]\s*['\"]?)([^'\"\s,;}\]\)]+)"),
+        re.compile(r"(?i)\b(x-api-key\s*[:=]\s*['\"]?)([^\[\]'\"\s,;}\)]+)"),
+        rf"\1{REDACTION}",
+    ),
+    (
+        re.compile(r"(?i)\b((?:set-cookie|cookie)\s*[:=]\s*)([^\[\]\s;,}]+)"),
         rf"\1{REDACTION}",
     ),
     (
@@ -28,8 +32,8 @@ TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         rf"\1{REDACTION}",
     ),
     (
-        re.compile(r"(?i)\b(api[_-]?key|token|secret|password|apikey|client[_-]?secret|access[_-]?token|refresh[_-]?token)\s*[:=]\s*['\"]?([^'\"\s,;}\]\)]+)"),
-        rf"\1={REDACTION}",
+        re.compile(r"(?i)(['\"]?(?:api[_-]?key|apikey|password|client[_-]?secret|access[_-]?token|refresh[_-]?token|(?<!forbidden\s)token|secret)['\"]?\s*[:=]\s*['\"]?)([^'\"\s,;}\]\)]+)"),
+        rf"\1{REDACTION}",
     ),
     (
         re.compile(r"(?i)\b(jwt\s*[:=]\s*['\"]?)([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"),

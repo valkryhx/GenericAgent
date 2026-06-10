@@ -301,12 +301,22 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertTrue(first_manager.loop.is_closed())
 
     def test_redacts_sensitive_values_from_mcp_errors(self):
-        msg = _redact_sensitive("https://example.test/mcp?tavilyApiKey=abc123&x=1 token: xyz")
-
-        self.assertIn("tavilyApiKey=[REDACTED]", msg)
-        self.assertIn("token=[REDACTED]", msg)
-        self.assertNotIn("abc123", msg)
-        self.assertNotIn("xyz", msg)
+        cases = [
+            ("https://example.test/mcp?tavilyApiKey=abc123&x=1 token: xyz", ["abc123", "xyz"]),
+            ("Authorization: Bearer sk-mcp-secret", ["sk-mcp-secret"]),
+            ("Bearer bearer-mcp-secret", ["bearer-mcp-secret"]),
+            ("x-api-key: xkey-mcp-secret", ["xkey-mcp-secret"]),
+            ("provider key sk-ant-mcp-secret", ["sk-ant-mcp-secret"]),
+            ("jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature", ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature"]),
+            ("https://example.test/mcp?token=tok-secret&access_token=access-secret&api_key=api-secret&secret=secret-value", ["tok-secret", "access-secret", "api-secret", "secret-value"]),
+            ("Cookie: sid=cookie-secret; Set-Cookie: session=set-cookie-secret", ["cookie-secret", "set-cookie-secret"]),
+        ]
+        for text, leaked_values in cases:
+            with self.subTest(text=text):
+                msg = _redact_sensitive(text)
+                self.assertIn("[REDACTED]", msg)
+                for leaked in leaked_values:
+                    self.assertNotIn(leaked, msg)
 
     def test_discover_and_call_stdio_fastmcp_tool(self):
         with _tempdir() as tmp:

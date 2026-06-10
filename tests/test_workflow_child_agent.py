@@ -222,6 +222,68 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual({}, result.token_usage)
         self.assertFalse(any(event.get("type") == "token_usage" for event in result.transcript_events))
 
+    def test_success_transcript_redacts_sensitive_metadata_options_and_request_prompt(self):
+        secret_values = ["bearer-option-secret", "prompt-secret"]
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="inspect Authorization: Bearer prompt-secret request_id=req_123",
+            metadata={
+                "runId": "wf_test",
+                "options": {
+                    "apiKey": "option-secret",
+                    "note": "Bearer bearer-option-secret request_id=req_123",
+                },
+            },
+        )
+        runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession())
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        serialized = repr(result.transcript_events)
+        self.assertEqual("succeeded", result.status)
+        self.assertIn("request_id=req_123", serialized)
+        self.assertIn("[REDACTED]", serialized)
+        for secret in secret_values:
+            self.assertNotIn(secret, serialized)
+
+    def test_native_tool_runner_redacts_sensitive_tool_call_args_and_results_in_success_transcript(self):
+        from agent_loop import StepOutcome
+        from unittest import mock
+
+        secret_values = ["tool-secret", "bearer-tool-secret", "result-secret", "cookie_secret"]
+        client = StubToolClient([
+            StubToolResponse("<summary>use tool</summary>", [
+                StubToolCall(
+                    "file_read",
+                    {
+                        "path": __file__,
+                        "api_key": "tool-secret",
+                        "note": "Bearer bearer-tool-secret request_id=req_123",
+                    },
+                )
+            ]),
+            StubToolResponse("<summary>done</summary>tool complete"),
+        ])
+        tools = [
+            {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        job = WorkflowJob(job_id="agent_tool_redact", prompt="read safely", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "token=result-secret Cookie: sid=cookie_secret request_id=req_123"})):
+            runner.start(job)
+            result = self.wait_for_result(runner, job)
+
+        serialized = repr(result.transcript_events)
+        self.assertEqual("succeeded", result.status)
+        self.assertIn("request_id=req_123", serialized)
+        self.assertIn("[REDACTED]", serialized)
+        for secret in secret_values:
+            self.assertNotIn(secret, serialized)
+        self.assertTrue(any(event.get("type") == "tool_call" for event in result.transcript_events))
+        self.assertTrue(any(event.get("type") == "tool_result" for event in result.transcript_events))
+
     def test_cancel_requests_active_session_cancellation(self):
         session = StubSession(delay=0.2)
         job = WorkflowJob(job_id="agent_1", prompt="slow", metadata={"runId": "wf_test"})

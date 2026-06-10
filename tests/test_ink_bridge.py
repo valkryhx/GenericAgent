@@ -888,6 +888,97 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("workflow_approval_requested", events[-1]["event"]["type"])
             self.assertEqual(run_id, events[-1]["event"]["runId"])
 
+    def test_bridge_emit_sanitizes_events_before_raw_emitter(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.emit({
+            "type": "probe",
+            "apiKey": "bridge-api-secret",
+            "nested": {"Authorization": "Bearer bridge-bearer-secret"},
+            "text": "token=bridge-token-secret request_id=req_123",
+        })
+
+        serialized = json.dumps(events[-1], ensure_ascii=False)
+        self.assertIn("request_id=req_123", serialized)
+        self.assertIn("[REDACTED]", serialized)
+        for secret in ["bridge-api-secret", "bridge-bearer-secret", "bridge-token-secret"]:
+            self.assertNotIn(secret, serialized)
+
+    def test_workflow_detail_redacts_script_and_event_payloads(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 'Bearer bridge-script-secret request_id=req_123'")
+            from workflow_models import WorkflowEvent
+            run = bridge.workflow_store.load_run(run_id)
+            bridge.workflow_store.append_event(
+                run,
+                WorkflowEvent(
+                    run_id=run_id,
+                    session_id=run.session_id,
+                    event_type="workflow_log",
+                    sequence=99,
+                    payload={"apiKey": "bridge-event-secret", "message": "x-api-key: bridge-xkey-secret request_id=req_123"},
+                ),
+            )
+
+            bridge.workflow_detail(run_id)
+
+            detail = next(event for event in events if event["type"] == "workflow_detail")
+            serialized = json.dumps(detail, ensure_ascii=False)
+            self.assertIn("request_id=req_123", serialized)
+            self.assertIn("[REDACTED]", serialized)
+            for secret in ["bridge-script-secret", "bridge-event-secret", "bridge-xkey-secret"]:
+                self.assertNotIn(secret, serialized)
+
+    def test_workflow_run_event_final_payloads_are_sanitized(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class SecretRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                from workflow_models import WorkflowEvent
+                self.store.append_event(
+                    run,
+                    WorkflowEvent(
+                        run_id=run.run_id,
+                        session_id=run.session_id,
+                        event_type="workflow_log",
+                        sequence=99,
+                        payload={"message": "Authorization: Bearer bridge-event-secret request_id=req_123"},
+                    ),
+                )
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"apiKey": "bridge-final-secret", "message": "Cookie: sid=bridge-cookie-secret request_id=req_123"}}
+                self.store.write_final_result(run, payload)
+                run.status = "succeeded"
+                run.error = "Bearer bridge-run-secret"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: SecretRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            serialized = json.dumps(events, ensure_ascii=False)
+            self.assertIn("request_id=req_123", serialized)
+            self.assertIn("[REDACTED]", serialized)
+            for secret in ["bridge-event-secret", "bridge-final-secret", "bridge-cookie-secret", "bridge-run-secret"]:
+                self.assertNotIn(secret, serialized)
+
     def test_workflow_approve_runs_runtime_and_emits_final_result(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
