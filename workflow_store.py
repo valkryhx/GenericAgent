@@ -4,6 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
+from sensitive_redaction import sanitize
 from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
 
 
@@ -19,8 +20,8 @@ class WorkflowStore:
         artifact_dir = self._artifact_dir(run.session_id, run.run_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = str(artifact_dir)
-        self._write_json(artifact_dir / "run.json", run.to_dict())
-        self._write_json(artifact_dir / "state.json", run.to_dict())
+        self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))
+        self._write_json(artifact_dir / "state.json", sanitize(run.to_dict()))
         (artifact_dir / "script.js").write_text(run.script or "", encoding="utf-8")
         (artifact_dir / "journal.jsonl").touch(exist_ok=True)
         final_result = artifact_dir / "final-result.json"
@@ -33,8 +34,8 @@ class WorkflowStore:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = str(artifact_dir)
         self._preserve_external_kill(run, artifact_dir)
-        self._write_json(artifact_dir / "run.json", run.to_dict())
-        self._write_json(artifact_dir / "state.json", run.to_dict())
+        self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))
+        self._write_json(artifact_dir / "state.json", sanitize(run.to_dict()))
         (artifact_dir / "script.js").write_text(run.script or "", encoding="utf-8")
         return run
 
@@ -54,7 +55,7 @@ class WorkflowStore:
     def append_event(self, run: WorkflowRun | str, event: WorkflowEvent) -> WorkflowEvent:
         artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
         with (artifact_dir / "journal.jsonl").open("a", encoding="utf-8", errors="replace") as fh:
-            fh.write(json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n")
+            fh.write(json.dumps(sanitize(event.to_dict()), ensure_ascii=False, separators=(",", ":")) + "\n")
         return event
 
     def append_permission_event(self, run: WorkflowRun, raw_event: dict) -> WorkflowEvent:
@@ -88,7 +89,7 @@ class WorkflowStore:
         result_ref = f"agents/{job.job_id}/result.json"
         result_path = self._run_dir(run) / result_ref
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json(result_path, result.to_artifact_dict())
+        self._write_json(result_path, sanitize(result.to_artifact_dict()))
         job.result_ref = result_ref
         return result_ref
 
@@ -109,7 +110,7 @@ class WorkflowStore:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         with transcript_path.open("w", encoding="utf-8", errors="replace") as fh:
             for event in events_or_messages:
-                fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+                fh.write(json.dumps(sanitize(event), ensure_ascii=False, separators=(",", ":")) + "\n")
         return transcript_ref
 
     def copy_agent_transcript(self, source_run: WorkflowRun | str, source_ref: str, target_run: WorkflowRun, target_job: WorkflowJob) -> str | None:
@@ -121,12 +122,19 @@ class WorkflowStore:
         target_ref = f"agents/{target_job.job_id}/transcript.jsonl"
         target_path = self._run_dir(target_run) / target_ref
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_path, target_path)
+        rows = []
+        for line in source_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            rows.append(sanitize(json.loads(line)))
+        with target_path.open("w", encoding="utf-8", errors="replace") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return target_ref
 
     def write_final_result(self, run: WorkflowRun, payload: dict) -> str:
         result_ref = "final-result.json"
-        self._write_json(self._run_dir(run) / result_ref, payload)
+        self._write_json(self._run_dir(run) / result_ref, sanitize(payload))
         run.result_ref = result_ref
         return result_ref
 

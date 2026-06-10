@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_store import WorkflowStore
@@ -102,7 +103,7 @@ class AgentScheduler:
                 "runId": self.run.run_id,
                 "permissionProfile": self.run.permission_profile,
                 "permissionPolicyVersion": self.run.permission_policy_version,
-                "result": result.payload,
+                "result": sanitize(result.payload),
                 "cachedFromRunId": source_run_id,
                 "cachedFromJobId": source_job_id,
             },
@@ -146,17 +147,19 @@ class AgentScheduler:
             try:
                 result = self.runner.poll(job)
             except Exception as exc:
-                self._fail_job(job, str(exc))
+                error = redact_sensitive_text(str(exc))
+                self._fail_job(job, error)
                 completed.append(job)
                 if failure_policy == "fail_fast":
-                    self._fail_fast(str(exc))
+                    self._fail_fast(error)
                 continue
             if result is None:
                 continue
             if result.status == "cancelled":
                 self._cancel_job(job, reason="cancelled")
             elif result.status == "failed":
-                self._fail_job(job, str(result.payload.get("error") or "child agent failed"), result=result)
+                error = redact_sensitive_text(str(result.payload.get("error") or "child agent failed"))
+                self._fail_job(job, error, result=result)
                 if failure_policy == "fail_fast":
                     self._fail_fast(job.error or "child agent failed")
             else:
@@ -183,7 +186,7 @@ class AgentScheduler:
     def stop(self, *, reason: str = "") -> None:
         self._stopping = True
         self.run.status = "killed"
-        self.run.error = reason or None
+        self.run.error = redact_sensitive_text(reason) or None
         for job in list(self.jobs):
             if job.status == "queued":
                 self._cancel_job(job, reason=reason or "stopped")
@@ -246,6 +249,7 @@ class AgentScheduler:
 
     def _fail_job(self, job: WorkflowJob, error: str, result: AgentResult | None = None) -> None:
         job.status = "failed"
+        error = redact_sensitive_text(error)
         job.error = error
         payload = {"error": error}
         if result is not None:
@@ -275,11 +279,11 @@ class AgentScheduler:
             return
         job.status = "cancelled"
         job.error = reason or None
-        self._append("agent_cancelled", job, {"reason": reason or ""})
+        self._append("agent_cancelled", job, {"reason": redact_sensitive_text(reason or "")})
 
     def _fail_fast(self, error: str) -> None:
         self.run.status = "failed"
-        self.run.error = error
+        self.run.error = redact_sensitive_text(error)
         for job in list(self.jobs):
             if job.status == "queued":
                 self._cancel_job(job, reason="fail_fast")

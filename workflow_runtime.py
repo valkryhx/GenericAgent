@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_scheduler import AgentScheduler, SchedulerConfig
@@ -108,16 +109,17 @@ class WorkflowRuntime:
                 elif message_type == "event":
                     self._handle_worker_event(run, message)
                 elif message_type == "done":
-                    final_payload = self._final_payload(run, "succeeded", result=message.get("result"))
+                    result = sanitize(message.get("result"))
+                    final_payload = self._final_payload(run, "succeeded", result=result)
                     self.store.write_final_result(run, final_payload)
                     run.status = "succeeded"
                     run.error = None
                     self.store.save_run(run)
-                    return WorkflowRuntimeResult(run=run, result=message.get("result"), logs=list(self._logs), phases=list(self._phases))
+                    return WorkflowRuntimeResult(run=run, result=result, logs=list(self._logs), phases=list(self._phases))
                 elif message_type == "error":
-                    raise RuntimeError(message.get("error") or "workflow worker failed")
+                    raise RuntimeError(redact_sensitive_text(message.get("error") or "workflow worker failed"))
         except Exception as exc:
-            reason = str(exc)
+            reason = redact_sensitive_text(str(exc))
             self._cancel_unfinished_jobs(scheduler, reason=reason)
             current = self._safe_load_current_run(run)
             if current.status == "killed":
@@ -186,7 +188,7 @@ class WorkflowRuntime:
         if job.status == "succeeded":
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": job.metadata.get("result") or {}})
         else:
-            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": job.error or f"workflow agent failed: {job.job_id}"})
+            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": redact_sensitive_text(job.error or f"workflow agent failed: {job.job_id}")})
 
     def _handle_worker_event(self, run: WorkflowRun, message: dict) -> None:
         method = message.get("method")
@@ -196,7 +198,7 @@ class WorkflowRuntime:
             self._phases.append(name)
             self._append(run, "workflow_phase", {"name": name})
         elif method == "log":
-            text = str(params.get("message") or "")
+            text = redact_sensitive_text(str(params.get("message") or ""))
             self._logs.append(text)
             self._append(run, "workflow_log", {"message": text})
 
@@ -312,7 +314,7 @@ class WorkflowRuntime:
         except queue.Empty:
             if process.poll() is not None and done.is_set():
                 stderr = process.stderr.read() if process.stderr else ""
-                raise RuntimeError(f"workflow worker exited unexpectedly: {stderr.strip()}")
+                raise RuntimeError(f"workflow worker exited unexpectedly: {redact_sensitive_text(stderr.strip())}")
             return None
         if not line:
             return None
@@ -382,10 +384,10 @@ class WorkflowRuntime:
             ],
         }
         if result is not None:
-            payload["result"] = result
+            payload["result"] = sanitize(result)
         if error is not None:
-            payload["error"] = error
-        return payload
+            payload["error"] = redact_sensitive_text(error)
+        return sanitize(payload)
 
     def _terminate(self, process: subprocess.Popen) -> None:
         if process.poll() is None:

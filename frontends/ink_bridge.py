@@ -17,6 +17,8 @@ import sys
 import threading
 from typing import Any, Callable, TextIO
 
+from sensitive_redaction import sanitize, redact_sensitive_text
+
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_DIR not in sys.path:
@@ -62,7 +64,7 @@ def make_stdout_emitter(stdout: TextIO) -> EmitFn:
 
     def emit(event: Event) -> None:
         with lock:
-            stdout.write(encode_event(event))
+            stdout.write(encode_event(sanitize(event)))
             stdout.flush()
 
     return emit
@@ -119,7 +121,8 @@ class GenericAgentBridge:
             self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
-        self.emit = emit or make_stdout_emitter(sys.stdout)
+        raw_emit = emit or make_stdout_emitter(sys.stdout)
+        self.emit = lambda event: raw_emit(sanitize(event))
         self._task_seq = 0
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
@@ -533,7 +536,7 @@ class GenericAgentBridge:
                 if current.status not in {"succeeded", "failed", "killed", "interrupted"}:
                     from workflow_models import WorkflowEvent
 
-                    reason = str(exc)
+                    reason = redact_sensitive_text(str(exc))
                     current.status = "failed"
                     current.error = reason
                     self.workflow_store.write_final_result(

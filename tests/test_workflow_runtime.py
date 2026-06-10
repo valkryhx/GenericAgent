@@ -498,6 +498,53 @@ return result.summary
             self.assertEqual("failed", final_result["status"])
             self.assertIn("provider sdk exploded", final_result["error"])
 
+    def test_runtime_native_runner_sdk_exception_redacts_provider_secrets_across_artifacts(self):
+        secret_text = "HTTP 503 upstream; Authorization: Bearer sk-test-secret-1234567890; x-api-key: xkey-test-secret-123; api_key=ga_test_secret_456; request_id=req_123"
+        leaked_values = [
+            "sk-test-secret-1234567890",
+            "xkey-test-secret-123",
+            "ga_test_secret_456",
+        ]
+
+        class ErrorSession:
+            last_usage_tokens = {}
+
+            def ask(self, message):
+                raise RuntimeError(secret_text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return await agent('sdk exception')", status="running"))
+            runtime = WorkflowRuntime(store=store, runner=NativeGPTChildAgentRunner(session_factory=lambda _config_name: ErrorSession()))
+
+            with self.assertRaisesRegex(RuntimeError, "HTTP 503") as raised:
+                runtime.run(run)
+            raised_text = str(raised.exception)
+            self.assertIn("HTTP 503", raised_text)
+            self.assertIn("request_id=req_123", raised_text)
+            self.assertIn("[REDACTED]", raised_text)
+            for leaked in leaked_values:
+                self.assertNotIn(leaked, raised_text)
+
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            job = loaded.jobs[0]
+            result_payload = json.loads((artifact_dir / job.result_ref).read_text(encoding="utf-8"))
+            transcript_path = artifact_dir / job.metadata["transcriptRef"]
+            transcript_text = transcript_path.read_text(encoding="utf-8")
+            final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
+            journal_text = (artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            combined = json.dumps(loaded.to_dict(), ensure_ascii=False) + json.dumps(result_payload, ensure_ascii=False) + transcript_text + json.dumps(final_result, ensure_ascii=False) + journal_text
+
+            self.assertEqual("failed", loaded.status)
+            self.assertIn("HTTP 503", combined)
+            self.assertIn("request_id=req_123", combined)
+            self.assertIn("[REDACTED]", combined)
+            for leaked in leaked_values:
+                self.assertNotIn(leaked, combined)
+            self.assertTrue(any(event.event_type == "agent_failed" for event in store.replay_events(run.run_id)))
+            self.assertEqual("workflow_failed", store.replay_events(run.run_id)[-1].event_type)
+
     def test_runtime_reuses_cached_agent_when_resuming_same_script_and_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

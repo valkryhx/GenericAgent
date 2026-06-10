@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from sensitive_redaction import redact_sensitive_text
+
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 MCP_TOOL_PREFIX = "mcp__"
@@ -858,18 +860,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _redact_sensitive(text: str) -> str:
-    text = str(text)
-    text = re.sub(
-        r"(?i)([?&][^=\s&]*(?:api[_-]?key|token|secret|password|apikey)[^=\s&]*=)[^&\s]+",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)\b(api[_-]?key|token|secret|password|apikey)\s*[:=]\s*['\"]?[^'\"\s,;}]+",
-        r"\1=[REDACTED]",
-        text,
-    )
-    return text
+    return redact_sensitive_text(text)
 
 
 def _run_async(coro):

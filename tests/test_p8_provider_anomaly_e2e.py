@@ -338,6 +338,47 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
             self.assertIn("HTTP 503", error_event["message"])
             self.assert_bridge_idle(events)
 
+    def test_bridge_sdk_like_failed_result_redacts_provider_secrets_across_events_and_artifacts(self):
+        error = "HTTP 503 upstream; Bearer bearer-test-secret-123; api_key=ga_test_secret_456; jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature"
+        leaked_values = [
+            "bearer-test-secret-123",
+            "ga_test_secret_456",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature",
+        ]
+        result = make_result("agent_1", "failed", {"error": error}, transcript_events=transcript_failure(error))
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
+            run_id = bridge.workflow_draft("return await agent('sdk error')")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            run = bridge.workflow_store.load_run(run_id)
+            artifact_dir = Path(run.artifact_dir)
+            result_json = read_json(artifact_dir / run.jobs[0].result_ref)
+            transcript_rows = self.assert_external_transcript(artifact_dir, result_json)
+            final = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            error_event = next(event for event in events if event.get("type") == "error" and event.get("code") == "workflow_run_failed")
+            journal_text = (artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            combined = "\n".join(
+                [
+                    json.dumps(result_json, ensure_ascii=False),
+                    json.dumps(transcript_rows, ensure_ascii=False),
+                    json.dumps(final, ensure_ascii=False),
+                    json.dumps(error_event, ensure_ascii=False),
+                    json.dumps(run.to_dict(), ensure_ascii=False),
+                    journal_text,
+                ]
+            )
+
+            self.assertEqual("failed", final["result"]["status"])
+            self.assertEqual("workflow_run_failed", error_event["code"])
+            self.assertIn("HTTP 503", combined)
+            self.assertIn("[REDACTED]", combined)
+            for leaked in leaked_values:
+                self.assertNotIn(leaked, combined)
+            self.assert_bridge_idle(events)
+
     def test_bridge_provider_no_text_block_emits_success_final_and_preserves_readable_transcript(self):
         result = make_result(
             "agent_1",

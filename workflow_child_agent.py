@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 from typing import Protocol
 
+from sensitive_redaction import sanitize, redact_sensitive_text
 from workflow_models import AgentResult, DEFAULT_PERMISSION_PROFILE, DEFAULT_PERMISSION_POLICY_VERSION
 
 
@@ -171,15 +172,16 @@ class NativeGPTChildAgentRunner:
                 transcript_events=transcript_events,
             )
         except Exception as exc:
-            transcript_events.append({"type": "error", "error": str(exc)})
+            error = redact_sensitive_text(str(exc))
+            transcript_events.append({"type": "error", "error": error})
             result = AgentResult(
                 job_id=job.job_id,
                 status="failed",
-                payload={"error": str(exc)},
+                payload={"error": error},
                 transcript_ref=transcript_ref,
                 token_usage=copy.deepcopy(getattr(executable, "last_usage_tokens", None) or getattr(session, "last_usage_tokens", None) or {}),
                 tool_summary=self._build_tool_summary(transcript_events),
-                transcript_events=transcript_events,
+                transcript_events=sanitize(transcript_events),
             )
         with self._lock:
             state["result"] = result
