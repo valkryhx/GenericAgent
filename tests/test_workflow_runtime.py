@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import threading
@@ -143,6 +144,28 @@ class FakeProcessForTerminate:
 
 
 class WorkflowRuntimeTest(unittest.TestCase):
+    def large_transcript_events(self, marker, count=1001):
+        return [
+            {"type": "assistant", "index": index, "text": f"{marker}-event-{index:04d}"}
+            for index in range(count)
+        ]
+
+    def jsonl_line_count(self, path):
+        return sum(1 for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip())
+
+    def sha256_file(self, path):
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 64), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def assert_json_file_omits_marker(self, path, marker):
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        text = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("transcriptEvents", text)
+        self.assertNotIn(marker, text)
+
     def assert_runtime_failed_with_marker(self, *, store, run, marker, expected_jobs=0):
         loaded = store.load_run(run.run_id)
         self.assertEqual("failed", loaded.status)
@@ -156,6 +179,125 @@ class WorkflowRuntimeTest(unittest.TestCase):
         self.assertIn(marker, final_result["error"])
         self.assertEqual(expected_jobs, len(final_result["jobs"]))
         return loaded, final_result
+
+    def test_runtime_large_child_transcripts_stay_out_of_result_and_journal(self):
+        class LargeTranscriptRunner:
+            def __init__(self, test_case):
+                self.test_case = test_case
+                self.started_job_ids = []
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                marker = f"GA_P8_LARGE_TRANSCRIPT_{job.job_id}"
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="succeeded",
+                    payload={"summary": f"summary {job.job_id}"},
+                    transcript_events=self.test_case.large_transcript_events(marker),
+                )
+
+            def cancel(self, job):
+                return None
+
+        markers = [f"GA_P8_LARGE_TRANSCRIPT_agent_{index}" for index in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const results = await parallel([() => agent('large one'), () => agent('large two'), () => agent('large three')])
+return results.map(result => result.summary)
+"""
+            runner = LargeTranscriptRunner(self)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            outcome = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=3, max_total=3)).run(run)
+
+            self.assertEqual(["summary agent_1", "summary agent_2", "summary agent_3"], outcome.result)
+            self.assertEqual(["agent_1", "agent_2", "agent_3"], runner.started_job_ids)
+            loaded = store.load_run("wf_test")
+            artifact_dir = Path(loaded.artifact_dir)
+            final_path = artifact_dir / "final-result.json"
+            journal_text = (artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            state_text = json.dumps(loaded.to_dict(), ensure_ascii=False)
+            self.assertNotIn("transcriptEvents", journal_text)
+            for marker in markers:
+                self.assertNotIn(marker, json.dumps(outcome.result, ensure_ascii=False))
+                self.assertNotIn(marker, state_text)
+                self.assertNotIn(marker, journal_text)
+                self.assert_json_file_omits_marker(final_path, marker)
+
+            for job in loaded.jobs:
+                marker = f"GA_P8_LARGE_TRANSCRIPT_{job.job_id}"
+                transcript_path = artifact_dir / job.metadata["transcriptRef"]
+                self.assertTrue(transcript_path.exists())
+                self.assertEqual(1001, self.jsonl_line_count(transcript_path))
+                self.assertIn(marker, transcript_path.read_text(encoding="utf-8"))
+                self.assert_json_file_omits_marker(artifact_dir / job.result_ref, marker)
+
+    def test_runtime_resume_copies_large_transcript_to_resumed_artifact(self):
+        marker = "GA_P8_SOURCE_LARGE_TRANSCRIPT_AGENT_1"
+
+        class LargeTranscriptRunner:
+            def __init__(self, test_case):
+                self.test_case = test_case
+                self.started_job_ids = []
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="succeeded",
+                    payload={"summary": "source summary"},
+                    transcript_events=self.test_case.large_transcript_events(marker),
+                )
+
+            def cancel(self, job):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('large cached')
+return result.summary
+"""
+            source = store.create_run(WorkflowRun(run_id="wf_source", session_id="session_test", script=script, status="running"))
+            source_runner = LargeTranscriptRunner(self)
+            WorkflowRuntime(store=store, runner=source_runner).run(source, args={"same": True})
+            source_loaded = store.load_run("wf_source")
+            source_job = source_loaded.jobs[0]
+            source_artifact_dir = Path(source_loaded.artifact_dir)
+            source_transcript_path = source_artifact_dir / source_job.metadata["transcriptRef"]
+            source_hash = self.sha256_file(source_transcript_path)
+
+            resumed = store.create_run(WorkflowRun(run_id="wf_resumed", session_id="session_test", script=script, status="running"))
+            runner = CountingRunner(results={"agent_1": {"summary": "fresh should not start"}})
+            outcome = WorkflowRuntime(store=store, runner=runner).run(
+                resumed,
+                args={"same": True},
+                resume_from_run_id="wf_source",
+            )
+
+            self.assertEqual("source summary", outcome.result)
+            self.assertEqual([], runner.started_job_ids)
+            resumed_loaded = store.load_run("wf_resumed")
+            resumed_artifact_dir = Path(resumed_loaded.artifact_dir)
+            cached_job = resumed_loaded.jobs[0]
+            self.assertEqual("cached", cached_job.status)
+            self.assertEqual("wf_source", cached_job.metadata["cachedFromRunId"])
+            self.assertEqual("agent_1", cached_job.metadata["cachedFromJobId"])
+            resumed_transcript_path = resumed_artifact_dir / cached_job.metadata["transcriptRef"]
+            self.assertTrue(resumed_transcript_path.exists())
+            self.assertNotEqual(source_transcript_path, resumed_transcript_path)
+            self.assertEqual(1001, self.jsonl_line_count(resumed_transcript_path))
+            self.assertEqual(source_hash, self.sha256_file(resumed_transcript_path))
+            self.assertIn(marker, resumed_transcript_path.read_text(encoding="utf-8"))
+            self.assert_json_file_omits_marker(resumed_artifact_dir / cached_job.result_ref, marker)
+            self.assert_json_file_omits_marker(resumed_artifact_dir / "final-result.json", marker)
+            journal_text = (resumed_artifact_dir / "journal.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("transcriptEvents", journal_text)
+            self.assertNotIn(marker, journal_text)
 
     def test_runtime_executes_phase_log_and_agent_script_with_fake_runner(self):
         with tempfile.TemporaryDirectory() as tmp:

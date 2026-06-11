@@ -245,7 +245,25 @@ class AgentScheduler:
         if result.tool_summary is not None:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
-        self._append("agent_completed", job, {"resultRef": job.result_ref, "result": result.to_artifact_dict()})
+        self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
+
+    def _event_result_summary(self, result: AgentResult) -> dict:
+        summary = {
+            "jobId": result.job_id,
+            "status": result.status,
+            "transcriptRef": result.transcript_ref,
+            "tokenUsage": result.token_usage,
+            "toolSummary": result.tool_summary,
+        }
+        payload = result.payload or {}
+        payload_summary = {
+            key: payload[key]
+            for key in ("summary", "error", "statusCode", "category", "providerAnomaly")
+            if key in payload
+        }
+        if payload_summary:
+            summary["payload"] = payload_summary
+        return summary
 
     def _fail_job(self, job: WorkflowJob, error: str, result: AgentResult | None = None) -> None:
         job.status = "failed"
@@ -264,7 +282,7 @@ class AgentScheduler:
             if result.tool_summary is not None:
                 job.metadata["toolSummary"] = result.tool_summary
             payload["resultRef"] = job.result_ref
-            payload["result"] = result.to_artifact_dict()
+            payload["result"] = self._event_result_summary(result)
             self._append_permission_events_from_result(job, result)
         self._append("agent_failed", job, payload)
 

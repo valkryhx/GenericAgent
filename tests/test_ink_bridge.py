@@ -1279,6 +1279,72 @@ return results
                 marker="agent options must be a plain object",
             )
 
+    def test_workflow_final_and_detail_do_not_inline_large_child_transcripts(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class LargeTranscriptRunner:
+            def __init__(self):
+                self.started_job_ids = []
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                marker = f"GA_BRIDGE_LARGE_TRANSCRIPT_{job.job_id}"
+                transcript_events = [
+                    {"type": "assistant", "index": index, "text": f"{marker}-event-{index:04d}"}
+                    for index in range(1001)
+                ]
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="succeeded",
+                    payload={"summary": f"summary {job.job_id}"},
+                    transcript_events=transcript_events,
+                )
+
+            def cancel(self, job):
+                return None
+
+        runner = LargeTranscriptRunner()
+
+        def runtime_factory(*, store, timeout_seconds=10.0):
+            return WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=2),
+                timeout_seconds=timeout_seconds,
+            )
+
+        script = """
+const results = await parallel([() => agent('large one'), () => agent('large two')])
+return results.map(result => result.summary)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=runtime_factory,
+            )
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=5.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            final_text = json.dumps(final_event, ensure_ascii=False)
+            self.assertNotIn("transcriptEvents", final_text)
+            self.assertNotIn("GA_BRIDGE_LARGE_TRANSCRIPT", final_text)
+
+            bridge.workflow_detail(run_id)
+            detail_event = [event for event in events if event["type"] == "workflow_detail" and event["run"]["runId"] == run_id][-1]
+            detail_text = json.dumps(detail_event, ensure_ascii=False)
+            self.assertNotIn("transcriptEvents", detail_text)
+            self.assertNotIn("GA_BRIDGE_LARGE_TRANSCRIPT", detail_text)
+            self.assertIn("resultRef", detail_text)
+            self.assert_bridge_idle_tail(events[:-1])
+
     def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"

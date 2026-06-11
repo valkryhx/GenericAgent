@@ -122,14 +122,13 @@ class WorkflowStore:
         target_ref = f"agents/{target_job.job_id}/transcript.jsonl"
         target_path = self._run_dir(target_run) / target_ref
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for line in source_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            rows.append(sanitize(json.loads(line)))
-        with target_path.open("w", encoding="utf-8", errors="replace") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        with source_path.open("r", encoding="utf-8", errors="replace") as source_fh:
+            with target_path.open("w", encoding="utf-8", errors="replace") as target_fh:
+                for line in source_fh:
+                    if not line.strip():
+                        continue
+                    row = sanitize(json.loads(line))
+                    target_fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return target_ref
 
     def write_final_result(self, run: WorkflowRun, payload: dict) -> str:
