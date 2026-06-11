@@ -52,6 +52,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | `cd662fb` | 补充 real provider mid-call stop diagnostic-only 覆盖 |
 | `1370d08` | 补充真实 API stability 诊断 harness |
 | `cc057a3` | 补充 Rate Limit / 429 deterministic 覆盖与真实 API stress diagnostic harness |
+| `b28c3b8` | 补充 P8 bridge cache hit/miss 半集成覆盖 |
+| `2d6a943` | 增加 provider 错误全链路脱敏 |
+| `c3c0231` | 补齐 P8 脱敏完整性覆盖 |
+| `85f9b2d` | 收紧 resume cache permission/tools/MCP 上下文边界 |
+| `6848a67` | 避免大 transcript 内联到 workflow event，并将 cached transcript copy 改为 streaming |
 
 ### 1.3 按层覆盖总结
 
@@ -67,12 +72,12 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 ### 1.4 总体覆盖度估算
 
-**按 TODO 文档的 12 项评估（更新至 `9e00a05` / `f8b1850` / `1c8933f` / `d13bde5` 及后续 timeout/parallel diagnostic 补强）：**
+**按 TODO 文档的 12 项评估（更新至 `6848a67` 及后续 bridge cache、provider 脱敏、resume cache context、大 transcript 隔离补强）：**
 
-- ✅ 完全或主路径充分覆盖：4 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承、parallel 部分失败 deterministic/diagnostic 覆盖）
-- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：2 项（bridge 非成功终态事件、cache key 变体）
-- 🔶 部分覆盖：4 项（超时边界、大 artifact 隔离、JS Worker 异常脚本、真实 API 返回格式异常的半真实 provider anomaly contract）
-- ❌ 仍基本未覆盖：0 项；网络抖动/稳定性已有基础 harness，rate limit/429 已补 deterministic + stress diagnostic 基础覆盖，真实 API 返回格式异常已补默认可跑的半真实 E2E characterization
+- ✅ 完全或主路径充分覆盖：8 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承、parallel 部分失败 deterministic/diagnostic 覆盖、bridge cache hit/miss 半集成、provider anomaly 半真实 contract、provider error/redaction 完整性、大 transcript 隔离 deterministic/runtime + bridge 核心覆盖）
+- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：2 项（bridge 非成功终态真实 API 变体、cache key 真实 API 成本代理 diagnostic）
+- 🔶 观察/扩展项：2 项（真实 API timeout/stability/stress 长期观察、Bridge final/detail artifact fallback robustness）
+- ❌ 仍基本未覆盖：0 项；网络抖动/稳定性已有基础 harness，rate limit/429 已补 deterministic + stress diagnostic 基础覆盖，真实 API 返回格式异常已补默认可跑的半真实 E2E characterization，resume cache permission/tools/MCP context invalidation 已完成
 
 **粗估百分比：**
 - 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
@@ -312,9 +317,9 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 |---|---|
 | **缺口描述** | 原缺口是没有任何测试注入 provider 返回格式异常或 SDK-like exception。当前已补默认可跑、无真实 API 的半真实 provider anomaly E2E，用 fake runner / fake session 固定 runtime、artifact、transcript、bridge final/error/idle contract。 |
 | **当前覆盖** | 新增 `tests/test_p8_provider_anomaly_e2e.py` 覆盖 empty content、usage missing、no text block、SDK-like exception 四类 anomaly 的 runtime artifact/transcript/final-result 与 bridge final/error/idle；`tests/test_workflow_child_agent.py` 补 Native runner empty content / missing usage characterization；`tests/test_workflow_runtime.py` 补 Native runner empty content artifact 与 SDK exception failed artifact contract。 |
-| **剩余内容** | ① 真实 provider 自然 malformed stream / malformed JSON 仍只能作为 opt-in diagnostic 长期观察；② provider error 全链路脱敏（payload.error、transcript、journal、final-result、bridge error）仍需单独安全任务；③ 是否将 empty content 从 succeeded 改为 failed/degraded 需要产品语义决策；④ runner.poll 直接异常是否合成 failed result artifact 仍待单独 contract 设计。 |
+| **剩余内容** | ① 真实 provider 自然 malformed stream / malformed JSON 仍只能作为 opt-in diagnostic 长期观察；② 是否将 empty content 从 succeeded 改为 failed/degraded 需要产品语义决策；③ runner.poll 直接异常是否合成 failed result artifact 仍待单独 contract 设计。provider error 全链路脱敏与 redaction completeness pass 已完成，不再作为待办安全任务。 |
 | **风险评级** | 中 |
-| **建议优先级** | **基础半真实覆盖已完成 / P2 扩展观察与脱敏专项** |
+| **建议优先级** | **基础半真实覆盖与脱敏完整性已完成 / P2 扩展观察** |
 
 ### 项目 9：权限 / MCP / Skills / Tools 继承 E2E
 
@@ -330,11 +335,11 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 
 | 维度 | 详情 |
 |---|---|
-| **缺口描述** | 核心 artifact/transcript 结构和隔离已验证。但"大量"场景完全未测试。 |
-| **当前覆盖** | 单元测试覆盖了 artifact 写入、transcript ref、JSON 不内联完整 transcriptEvents。真实 API E2E 验证了 artifact 存在且结构正确。 |
-| **缺失内容** | ① 大量 child transcript（1000+ 行）；② 多 job 大 transcript 下 resume copy 性能；③ Parent session transcript 完全不包含 child transcript；④ Bridge/UI detail 查看大 artifact 时不卡顿 |
-| **风险评级** | 中 |
-| **建议优先级** | **P3** |
+| **缺口描述** | 核心 artifact/transcript 结构和隔离已验证，且大量 child transcript（1000+ 行）、多 job 大 transcript、resume copy 与 bridge final/detail 不内联 child transcript 的 deterministic/runtime + bridge 核心覆盖已完成。 |
+| **当前覆盖** | 单元测试覆盖 artifact 写入、transcript ref、JSON 不内联完整 transcriptEvents；真实 API E2E 验证 artifact 存在且结构正确；`6848a67` 进一步补充大 transcript 隔离回归，并将 cached transcript copy 改为 streaming。 |
+| **剩余内容** | ① 更大规模性能/磁盘占用长期观察；② 真实 UI 前端大 artifact 体验；③ 合法超大 `final-result.json` 的 bridge 有界 fallback，已拆分为 Bridge final/detail artifact fallback robustness 专项，而非 child transcript 隔离缺口。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **核心覆盖已完成 / P2 fallback 专项与 P3 性能观察** |
 
 ### 项目 11：Workflow JS Worker 异常脚本 E2E
 
@@ -472,7 +477,8 @@ P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
 | 项目 | 说明 |
 |---|---|
 | Cache Key 真实变体 E2E | 单元测试已非常充分，可在其他测试中自然覆盖 |
-| 大 Artifact / Transcript 隔离 | 性能/规模测试，P9/P10 阶段评估 |
+| 大 Artifact / Transcript 隔离 | 核心覆盖已完成；仅保留更大规模性能/真实 UI 体验观察 |
+| Bridge final/detail artifact fallback robustness | 当前推荐离线 P2：缺失/损坏/过大/越界 final artifact 的有界脱敏 fallback |
 | Context7 专项 diagnostic | 仅在本机 GenericAgent MCP discovery 出现 Context7 后补充 |
 | Explicit approval 审批闭环 | 工作流内审批专项扩展 |
 
@@ -558,7 +564,7 @@ python -m unittest tests.test_workflow_runtime
 
 **当前 contract：** empty content / no text block / missing usage 保持 succeeded characterization；SDK-like exception 经 failed `AgentResult` 进入 runtime 后落盘 failed result/transcript/final，并在 bridge 层收敛为 failed final/error/idle。`result.json` 不内联 `transcriptEvents`，`transcript.jsonl` 必须逐行 JSON 可读。
 
-**仍暂缓：** provider error 全链路脱敏、runner.poll 直接异常是否合成 failed result artifact、empty content 是否改为 failed/degraded、真实 malformed stream / malformed JSON opt-in diagnostic。
+**仍暂缓：** runner.poll 直接异常是否合成 failed result artifact、empty content 是否改为 failed/degraded、真实 malformed stream / malformed JSON opt-in diagnostic。provider error 全链路脱敏与 redaction completeness pass 已完成，不再作为本项待办。
 
 **验证命令：**
 
@@ -567,42 +573,29 @@ python -m unittest tests.test_p8_provider_anomaly_e2e
 python -m unittest tests.test_workflow_child_agent tests.test_workflow_runtime tests.test_ink_bridge
 ```
 
-#### P2：Bridge cache hit/miss 半集成矩阵
+#### P2：Bridge cache hit/miss 半集成矩阵（已完成）
 
-**为什么不是重复：** deterministic cache key 已充分覆盖；缺的是 bridge 层实际 resume 时，UI/bridge 是否可观察到 `agent_cached` vs fresh child 行为。
+Bridge 层 same args cache hit 与 different args cache miss 主干已由 `b28c3b8` 完成，不再作为下一步任务重复实施。
 
-**目标文件：** `tests/test_ink_bridge.py`
+**已补测试：**
 
-**最小两例：**
+- `test_workflow_resume_cache_hit_replays_prefix_without_restarting_cached_child`
+- `test_workflow_resume_cache_miss_when_args_change_starts_fresh_child`
 
-1. same args 命中 cache：source run succeeded 后 `workflow_resume(source_run_id, args=same_args)`，断言 resumed run 有 `agent_cached`、无 fresh child started、`cachedFromRunId`/`cachedFromJobId` 正确、`transcriptRef` 指向 resumed artifact。
-2. different args 不命中 cache：`workflow_resume(source_run_id, args=different_args)`，断言无 `agent_cached`、fresh child executed、result marker 来自 fresh run。
+**后续说明：** permission/tools/MCP context 变体也已由 `85f9b2d` 的上下文失效专项覆盖；真实 API cache key args variant 仍可作为 opt-in diagnostic，而不是默认离线门禁。
 
-**后续扩展：** prompt 改动 prefix hit/miss、options 改动 miss、permission profile/version 改动 miss。
+#### P3：大 artifact / transcript 隔离 deterministic E2E（已完成核心覆盖）
 
-**验证命令：**
+大 child transcript（1000+ 行）、多 job transcript、resume copy 与 bridge final/detail 不内联 child transcript 的 deterministic/runtime + bridge 核心覆盖已由 `6848a67` 完成，不再作为 P3 最小待做重复实施。
 
-```bash
-python -m unittest tests.test_ink_bridge
-```
+**已补测试：**
 
-#### P3：大 artifact / transcript 隔离 deterministic E2E
+- `test_runtime_large_child_transcripts_stay_out_of_result_and_journal`
+- `test_runtime_resume_copies_large_transcript_to_resumed_artifact`
+- `test_workflow_final_and_detail_do_not_inline_large_child_transcripts`
 
-**为什么不是重复：** 基础 artifact/transcript 分离已覆盖，但没有真正制造 1000+ 行、多 job、大 transcript、resume copy 与 bridge 不返回大 body 的规模边界。
+**后续说明：** 合法超大 `final-result.json` 的有界输出不属于 child transcript 隔离本体，已拆分为 Bridge final/detail artifact fallback robustness 专项。
 
-**目标文件：** `tests/test_workflow_runtime.py`、`tests/test_workflow_integration.py`，可选 `tests/test_ink_bridge.py`。
-
-**第一批范围：** source run 生成 2-3 个 completed child jobs；每个 child transcript 写入 1000+ JSONL events；每个 transcript 中放唯一 marker；断言 `result.json` 不包含 `transcriptEvents`、`transcriptRef` 文件存在、行数符合预期、parent session transcript raw 不包含大 marker、resume 后 copied transcript 行数/hash 相同、resumed `transcriptRef` 指向 resumed run artifact 而不是 source artifact 绝对路径。
-
-**可选 bridge 小切片：** bridge approve/resume 大 transcript workflow；bridge emitted events 不包含 1000+ child transcript body；final/error/idle 正常。
-
-**验证命令：**
-
-```bash
-python -m unittest tests.test_workflow_runtime
-python -m unittest tests.test_workflow_integration
-python -m unittest tests.test_ink_bridge
-```
 
 #### P4：真实 API interrupted source resume 独立 diagnostic
 
@@ -653,75 +646,73 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass** 也已完成并提交；后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵或脱敏基础完整性。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass**、**resume cache permission/tools/MCP context invalidation**、**大 transcript 隔离与 cached transcript streaming copy** 均已完成并提交；后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵、脱敏基础完整性、cache context 安全边界或 child transcript 大规模隔离。
 
-#### 当前最高优先级：P8 resume cache permission/tools/MCP context invalidation
+#### 当前推荐离线 P2：Bridge final/detail artifact fallback robustness
 
-**结论：** 下一步应补 `resume/cache` 对权限、工具和 MCP 上下文变化的失效覆盖。即使 `script`、`args`、`prompt`、`options`、`session` 都相同，只要权限或工具/MCP 上下文变化，就必须 fresh start，不能复用旧 child artifact，不能发 `agent_cached`。
+**结论：** 下一步应收敛 Bridge 对 workflow final/detail artifact 异常的 fallback 行为。即使 `final-result.json` 缺失、损坏、过大、包含敏感内容，或 `run.result_ref` 被污染为越界路径，Bridge 也必须稳定 emit 有界、脱敏、可消费的 `workflow_final`，并最终恢复 `activity=None` / `status=idle`。`workflow_detail` 应明确保持只返回 refs，不展开 `agents/*/result.json` 或 child transcript 正文。
 
 **为什么优先：**
 
-1. **安全价值最高：** 权限收紧或工具集变化后仍复用旧 artifact，会形成越权复用风险。
-2. **直接命中 P8 核心：** P8 的核心不是只证明 cache 能命中，而是证明 resume/cache replay 在安全边界变化时不会错误命中。
-3. **默认离线可跑：** 可用 deterministic runtime、CountingRunner、bridge fake runner 覆盖，不需要真实 API 或真实 MCP。
-4. **避免重复：** same args cache hit、different args fresh、provider anomaly、JS 异常、redaction completeness 已完成；本切片覆盖新的安全边界。
+1. **不重复历史任务：** cache、脱敏、大 transcript、JS 异常、provider anomaly 主干都已完成；本切片覆盖新的 artifact fallback 安全边界。
+2. **用户可见性强：** final/detail 是 Ink UI 消费 workflow 结果的关键协议出口，artifact 异常时不能挂死、不能输出大 body、不能泄漏 secret。
+3. **默认离线可跑：** 可用 fake runtime / deterministic bridge 测试，不需要真实 API 或真实 MCP。
+4. **承接最近工作：** `6848a67` 已避免 child transcript 进入事件；本切片继续防止合法超大 final artifact 或损坏 artifact 破坏 bridge 协议。
 
 **最小切片：**
 
-1. `permission_profile changed -> fresh`：同 script/same args/same prompt，仅 source/resumed 的 `permission_profile` 不同，断言无 `agent_cached`、fresh child started、无 `cachedFromRunId` / `cachedFromJobId`。
-2. `permission_policy_version changed -> fresh`：同上，仅 `permission_policy_version` 不同，断言 fresh。
-3. `allowedTools changed -> fresh`：通过 `WorkflowRun.metadata["toolContext"]` 注入 allowed tools 摘要，工具集变化时必须 fresh。
-4. `mcp configName changed -> fresh`：通过 `WorkflowRun.metadata["mcpContext"]` 注入 MCP 摘要，configName 变化时必须 fresh。
-5. `mcp schemaHash changed -> fresh`：schemaHash 变化时必须 fresh。
-6. `tool/MCP context unchanged -> cached`：上下文完全相同、allowedTools 仅顺序不同，应规范化后仍 cache hit，防止过度失效。
-7. Bridge 半集成最小用例：`workflow_resume` 后 bridge 可观察到 tool context changed 导致 fresh child，无 `agent_cached`，`workflow_final` succeeded，activity/status idle。
+1. `final-result.json missing -> bounded fallback`：runtime 设置 `result_ref` 后文件缺失，仍 emit `workflow_final`，payload 包含 `runId/status/resultRef/artifactError=missing`，尾部 idle。
+2. `final-result.json corrupt -> bounded fallback`：非法 JSON 不泄漏 `JSONDecodeError` 堆栈或损坏文件正文，尾部 idle。
+3. `final-result.json too large -> bounded fallback`：超过 bridge 上限时不完整 `json.load` / emit，大 marker 不进入事件，payload 包含 `artifactError=too_large` / `artifactTruncated=true`。
+4. `fallback helper redaction`：fallback 中的 `run.error` 在 helper 层也脱敏，不只依赖最终 emit。
+5. `result_ref path guard`：绝对路径、`../`、跨 drive/UNC 等越界引用不能读取 artifact 目录外文件，返回 `artifactError=invalid_result_ref`。
+6. `workflow_detail refs-only contract`：损坏或巨大 `agents/{job_id}/result.json` 不影响 `workflow_detail`，detail 只含 `resultRef` / `transcriptRef` 等引用，不展开 result body。
 
 **建议目标文件：**
 
-- `tests/test_workflow_runtime.py`
+- `frontends/ink_bridge.py`
 - `tests/test_ink_bridge.py`
-- `workflow_scheduler.py`
-- `workflow_runtime.py`
-- 必要时：`frontends/ink_bridge.py`
+- `docs/P8-e2e-next-steps.md`
 
 **建议测试名：**
 
-- `test_runtime_does_not_reuse_cached_agent_when_permission_profile_changes`
-- `test_runtime_does_not_reuse_cached_agent_when_permission_policy_version_changes`
-- `test_runtime_does_not_reuse_cached_agent_when_allowed_tools_change`
-- `test_runtime_does_not_reuse_cached_agent_when_mcp_config_name_changes`
-- `test_runtime_does_not_reuse_cached_agent_when_mcp_schema_hash_changes`
-- `test_runtime_reuses_cached_agent_when_tool_and_mcp_context_unchanged`
-- `test_workflow_resume_cache_miss_when_tool_context_changes_starts_fresh_child`
+- `test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime`
+- `test_workflow_final_emits_fallback_and_idle_when_final_result_json_is_corrupt`
+- `test_workflow_final_large_result_uses_bounded_sanitized_fallback`
+- `test_workflow_final_corrupt_or_large_payload_does_not_leak_secrets`
+- `test_workflow_final_rejects_result_ref_outside_artifact_dir_with_fallback`
+- `test_workflow_detail_keeps_result_refs_only_and_never_reads_agent_result_artifacts`
 
 **可能生产修复点：**
 
-- 在 `workflow_scheduler.py` 的 cache key 中纳入规范化摘要，例如 `toolContextHash`、`mcpContextHash`。
-- `allowedTools` 应排序去重，缺失与空结构等价。
-- MCP 上下文只纳入 `configName`、`schemaHash`、`serverToolsHash` 等摘要，不读取真实 `mcp.json`，不把大 schema 正文写入 cache key 或事件。
-- 在 `workflow_runtime.py::_build_resume_plan()` / `_match_cached_agent()` 中比较新增 cache 安全边界字段；任一不一致即截断 prefix 并 fresh start。
+- 在 `frontends/ink_bridge.py::_workflow_final_payload()` 中拆出安全 artifact 读取 helper。
+- 校验 `result_ref` 必须是 artifact_dir 内的相对路径。
+- 增加 bridge 局部 final payload 文件大小上限，例如 64 KiB。
+- 对缺失、损坏、过大、越界、非 dict payload 统一返回稳定 fallback：`runId/status/error/resultRef/artifactError`。
+- fallback helper 级别调用 `redact_sensitive_text()` / `sanitize()`，避免未来绕过 emit 时泄漏。
+- `workflow_detail` 先锁定 refs-only 安全语义，不新增无界 artifact 展开。
 
 **验证命令：**
 
 ```bash
-python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_permission_profile_changes
-python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_permission_policy_version_changes
-python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_allowed_tools_change
-python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_mcp_config_name_changes tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_does_not_reuse_cached_agent_when_mcp_schema_hash_changes
-python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_reuses_cached_agent_when_tool_and_mcp_context_unchanged
-python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_resume_cache_miss_when_tool_context_changes_starts_fresh_child
-python -m unittest tests.test_workflow_runtime
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_emits_fallback_and_idle_when_final_result_json_is_corrupt
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_large_result_uses_bounded_sanitized_fallback
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_corrupt_or_large_payload_does_not_leak_secrets
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_rejects_result_ref_outside_artifact_dir_with_fallback
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_keeps_result_refs_only_and_never_reads_agent_result_artifacts
 python -m unittest tests.test_ink_bridge
-python -m py_compile frontends/ink_bridge.py workflow_runtime.py workflow_scheduler.py workflow_store.py
+python -m py_compile frontends/ink_bridge.py
 ```
 
 **非目标：**
 
 - 不重复 Bridge same args/different args cache 主干。
-- 不重复 JS 异常、provider anomaly、429/timeout/parallel partial failure、stop/resume prefix、redaction completeness。
+- 不重复 JS 异常、provider anomaly、429/timeout/parallel partial failure、stop/resume prefix、redaction completeness、cache context invalidation、大 child transcript 隔离。
 - 不运行真实 API、真实 MCP、stress/stability、mid-call streaming cancel。
 - 不读取、打印或提交 `mykey.py`、`mykey.json`、`mcp.json`。
-- 不把完整 tool schema、MCP schema 或大 transcript 正文写入 cache key/event；只写稳定摘要/hash。
+- 不把完整 tool schema、MCP schema、agent result body 或 child transcript 正文写入 final/detail/event。
+- 不改变 workflow runtime 调度、resume cache、permission profile 或 MCP 行为。
 
 ---
 
@@ -776,7 +767,7 @@ GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
 |---|---|
 | `scriptHash` | 由 `_cache_key()` 计算但**不在匹配逻辑中比较** — resume 使用同一 script 时由最长前缀匹配覆盖，这是设计选择 |
 | `failure_policy` | 运行时只使用 `"continue"`，Scheduler 支持的 `fail_fast` 未被运行时使用 |
-| transcript 复制 | 通过 `shutil.copyfile` 物理复制（非软链接），大量 artifact 场景需关注磁盘使用 |
+| transcript 复制 | cached transcript copy 已改为 streaming 物理复制（非软链接），大量 artifact 场景仍需关注磁盘使用 |
 
 ### 6.8 后续阶段参考（P9 / P10）
 

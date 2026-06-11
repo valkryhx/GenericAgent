@@ -41,6 +41,8 @@ Event = dict[str, Any]
 EmitFn = Callable[[Event], None]
 AgentFactory = Callable[[], Any]
 
+_WORKFLOW_FINAL_PAYLOAD_MAX_BYTES = 64 * 1024
+
 
 def _backend_log_path() -> str:
     path = os.path.join(PROJECT_DIR, "temp", "ink_bridge_backend.log")
@@ -593,13 +595,67 @@ class GenericAgentBridge:
 
     def _workflow_final_payload(self, run) -> dict[str, Any]:
         if not run.artifact_dir or not run.result_ref:
-            return {"runId": run.run_id, "status": run.status, "error": run.error}
-        result_path = os.path.join(run.artifact_dir, run.result_ref)
+            return self._workflow_final_fallback(run, "missing_ref")
+        result_path, artifact_error = self._workflow_result_path(run)
+        if artifact_error:
+            return self._workflow_final_fallback(run, artifact_error)
+        try:
+            size = os.path.getsize(result_path)
+        except Exception:
+            return self._workflow_final_fallback(run, "read_failed")
+        if size > _WORKFLOW_FINAL_PAYLOAD_MAX_BYTES:
+            return self._workflow_final_fallback(
+                run,
+                "too_large",
+                artifact_truncated=True,
+                artifact_size=size,
+            )
         try:
             with open(result_path, "r", encoding="utf-8", errors="replace") as fh:
-                return json.load(fh)
+                payload = json.load(fh)
+        except json.JSONDecodeError:
+            return self._workflow_final_fallback(run, "invalid_json")
         except Exception:
-            return {"runId": run.run_id, "status": run.status, "error": run.error}
+            return self._workflow_final_fallback(run, "read_failed")
+        if not isinstance(payload, dict):
+            return self._workflow_final_fallback(run, "invalid_payload")
+        return sanitize(payload)
+
+    def _workflow_result_path(self, run) -> tuple[str | None, str | None]:
+        artifact_dir = os.path.abspath(os.fspath(run.artifact_dir))
+        result_ref = os.fspath(run.result_ref)
+        if os.path.isabs(result_ref):
+            return None, "invalid_result_ref"
+        result_path = os.path.abspath(os.path.join(artifact_dir, result_ref))
+        try:
+            if os.path.commonpath([artifact_dir, result_path]) != artifact_dir:
+                return None, "invalid_result_ref"
+        except ValueError:
+            return None, "invalid_result_ref"
+        if not os.path.isfile(result_path):
+            return result_path, "missing"
+        return result_path, None
+
+    def _workflow_final_fallback(
+        self,
+        run,
+        artifact_error: str,
+        *,
+        artifact_truncated: bool = False,
+        artifact_size: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "runId": run.run_id,
+            "status": run.status,
+            "error": redact_sensitive_text(str(run.error)) if run.error is not None else None,
+            "resultRef": run.result_ref,
+            "artifactError": artifact_error,
+        }
+        if artifact_truncated:
+            payload["artifactTruncated"] = True
+        if artifact_size is not None:
+            payload["artifactSize"] = artifact_size
+        return sanitize(payload)
 
     def _list_workflow_runs(self):
         root = self.workflow_store.root

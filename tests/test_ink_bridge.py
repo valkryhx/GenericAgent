@@ -1048,10 +1048,11 @@ class InkBridgeTest(unittest.TestCase):
             bridge.wait_for_workflow_idle(run_id, timeout=1)
 
             final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
-            self.assertEqual(
-                {"runId": run_id, "status": "failed", "error": "deterministic failure"},
-                final_event["result"],
-            )
+            self.assertEqual(run_id, final_event["result"]["runId"])
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertEqual("deterministic failure", final_event["result"]["error"])
+            self.assertIsNone(final_event["result"]["resultRef"])
+            self.assertEqual("missing_ref", final_event["result"]["artifactError"])
 
     def test_workflow_runtime_exception_emits_error_final_and_idle(self):
         agent = FakeAgent()
@@ -1081,7 +1082,11 @@ class InkBridgeTest(unittest.TestCase):
 
             self.assertTrue(any(event["type"] == "workflow_run" and event["run"]["runId"] == run_id for event in events))
             final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
-            self.assertEqual({"runId": run_id, "status": "failed", "error": "runtime exploded"}, final_event["result"])
+            self.assertEqual(run_id, final_event["result"]["runId"])
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertEqual("runtime exploded", final_event["result"]["error"])
+            self.assertIsNone(final_event["result"]["resultRef"])
+            self.assertEqual("missing_ref", final_event["result"]["artifactError"])
             error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
             self.assertEqual("boom", error_event["message"])
             self.assertEqual({"type": "activity", "label": None}, events[-2])
@@ -2031,13 +2036,230 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
             run.status = "failed"
             run.error = "no result"
             run.result_ref = None
-            self.assertEqual({"runId": run_id, "status": "failed", "error": "no result"}, bridge._workflow_final_payload(run))
+            self.assertEqual(
+                {"runId": run_id, "status": "failed", "error": "no result", "resultRef": None, "artifactError": "missing_ref"},
+                bridge._workflow_final_payload(run),
+            )
 
             run.status = "killed"
             run.error = "bad result"
             run.artifact_dir = tmp
             run.result_ref = "missing-result.json"
-            self.assertEqual({"runId": run_id, "status": "killed", "error": "bad result"}, bridge._workflow_final_payload(run))
+            self.assertEqual(
+                {"runId": run_id, "status": "killed", "error": "bad result", "resultRef": "missing-result.json", "artifactError": "missing"},
+                bridge._workflow_final_payload(run),
+            )
+
+    def test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class MissingFinalRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True}}
+                self.store.write_final_result(run, payload)
+                final_path = Path(run.artifact_dir) / run.result_ref
+                final_path.unlink()
+                run.status = "succeeded"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: MissingFinalRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual(run_id, final_event["result"]["runId"])
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual("final-result.json", final_event["result"]["resultRef"])
+            self.assertEqual("missing", final_event["result"]["artifactError"])
+            serialized = json.dumps(final_event, ensure_ascii=False)
+            self.assertNotIn("Traceback", serialized)
+            self.assertFalse(bridge._workflow_threads[run_id].is_alive())
+            self.assert_bridge_idle_tail(events)
+
+    def test_workflow_final_emits_fallback_and_idle_when_final_result_json_is_corrupt(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        class CorruptFinalRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True}}
+                self.store.write_final_result(run, payload)
+                final_path = Path(run.artifact_dir) / run.result_ref
+                final_path.write_text('{"broken": ', encoding="utf-8")
+                run.status = "succeeded"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: CorruptFinalRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual(run_id, final_event["result"]["runId"])
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual("final-result.json", final_event["result"]["resultRef"])
+            self.assertEqual("invalid_json", final_event["result"]["artifactError"])
+            serialized = json.dumps(events, ensure_ascii=False)
+            self.assertNotIn("JSONDecodeError", serialized)
+            self.assertNotIn('"broken"', serialized)
+            self.assertFalse(bridge._workflow_threads[run_id].is_alive())
+            self.assert_bridge_idle_tail(events)
+
+    def test_workflow_final_large_result_uses_bounded_sanitized_fallback(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        marker = "GA_BRIDGE_HUGE_FINAL_RESULT"
+
+        class LargeFinalRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                payload = {"runId": run.run_id, "status": "succeeded", "result": {"blob": marker * 5000}}
+                self.store.write_final_result(run, payload)
+                run.status = "succeeded"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: LargeFinalRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            final_text = json.dumps(final_event, ensure_ascii=False)
+            self.assertLess(len(final_text), 64 * 1024)
+            self.assertNotIn(marker, final_text)
+            self.assertEqual("too_large", final_event["result"]["artifactError"])
+            self.assertTrue(final_event["result"]["artifactTruncated"])
+            self.assertGreater(final_event["result"]["artifactSize"], 64 * 1024)
+            self.assertEqual("final-result.json", final_event["result"]["resultRef"])
+            self.assert_bridge_idle_tail(events)
+
+    def test_workflow_final_corrupt_or_large_payload_does_not_leak_secrets(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            run = bridge.workflow_store.load_run(run_id)
+            run.status = "failed"
+            run.error = "Authorization: Bearer bridge-final-secret token=bridge-token-secret request_id=req_123"
+            run.result_ref = None
+
+            payload = bridge._workflow_final_payload(run)
+
+            serialized = json.dumps(payload, ensure_ascii=False)
+            self.assertIn("request_id=req_123", serialized)
+            self.assertIn("[REDACTED]", serialized)
+            self.assertNotIn("bridge-final-secret", serialized)
+            self.assertNotIn("bridge-token-secret", serialized)
+
+    def test_workflow_final_rejects_result_ref_outside_artifact_dir_with_fallback(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            outside_path = Path(tmp).parent / "bridge-outside-result.json"
+            outside_path.write_text(json.dumps({"secret": "GA_BRIDGE_OUTSIDE_RESULT"}), encoding="utf-8")
+            try:
+                run = bridge.workflow_store.load_run(run_id)
+                run.status = "succeeded"
+                run.artifact_dir = tmp
+                run.result_ref = os.path.relpath(outside_path, tmp)
+
+                payload = bridge._workflow_final_payload(run)
+
+                serialized = json.dumps(payload, ensure_ascii=False)
+                self.assertEqual("invalid_result_ref", payload["artifactError"])
+                self.assertNotIn("GA_BRIDGE_OUTSIDE_RESULT", serialized)
+            finally:
+                try:
+                    outside_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_workflow_detail_keeps_result_refs_only_and_never_reads_agent_result_artifacts(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        marker = "GA_BRIDGE_CORRUPT_AGENT_RESULT"
+
+        class CorruptAgentResultRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                from workflow_models import WorkflowEvent
+
+                result_ref = "agents/agent_1/result.json"
+                result_path = Path(run.artifact_dir) / result_ref
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text('{"huge":"' + marker * 1000, encoding="utf-8")
+                self.store.append_event(
+                    run,
+                    WorkflowEvent(
+                        run_id=run.run_id,
+                        session_id=run.session_id,
+                        event_type="agent_completed",
+                        sequence=99,
+                        payload={"jobId": "agent_1", "resultRef": result_ref, "result": {"transcriptRef": "agents/agent_1/transcript.jsonl"}},
+                    ),
+                )
+                self.store.write_final_result(run, {"runId": run.run_id, "status": "succeeded", "jobs": [{"jobId": "agent_1", "resultRef": result_ref}]})
+                run.status = "succeeded"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: CorruptAgentResultRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return await agent('detail refs only')")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            events.clear()
+            bridge.workflow_detail(run_id)
+
+            self.assertFalse(any(event.get("code") == "workflow_detail_failed" for event in events))
+            detail_event = next(event for event in events if event["type"] == "workflow_detail" and event["run"]["runId"] == run_id)
+            detail_text = json.dumps(detail_event, ensure_ascii=False)
+            self.assertIn("resultRef", detail_text)
+            self.assertIn("agents/agent_1/result.json", detail_text)
+            self.assertNotIn(marker, detail_text)
+            self.assertNotIn("huge", detail_text)
 
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
