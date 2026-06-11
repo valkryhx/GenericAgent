@@ -597,13 +597,18 @@ Bridge 层 same args cache hit 与 different args cache miss 主干已由 `b28c3
 **后续说明：** 合法超大 `final-result.json` 的有界输出不属于 child transcript 隔离本体，已拆分为 Bridge final/detail artifact fallback robustness 专项。
 
 
-#### P4：真实 API interrupted source resume 独立 diagnostic
+#### P4：真实 API interrupted source resume 独立 diagnostic（已实现，待/可 opt-in 真实运行验证）
 
-**为什么不是重复：** runtime deterministic interrupted prefix/stale/running middle 已覆盖，bridge 允许 interrupted source resume 已覆盖，failed/killed 真实 API E2E 已覆盖；缺的是像 failed/killed 一样可独立审计的真实 API interrupted source resume diagnostic。
+**为什么不是重复：** runtime deterministic interrupted prefix/stale/running middle 已覆盖，bridge 允许 interrupted source resume 已覆盖，failed/killed 真实 API E2E 已覆盖；本项补齐像 failed/killed 一样可独立审计的真实 API interrupted source resume diagnostic。
 
 **目标文件：** `tests/p8_real_api_e2e.py`、`tests/test_p8_real_api_e2e_diagnostic.py`
 
-**范围：** opt-in diagnostic-only。source run 完成 `agent_1`/`agent_2`；source run 被标记 interrupted，`agent_3` stale 或 running；resume 后 `agent_1`/`agent_2` cached、`agent_3` fresh、resumed final succeeded、`agent_cached` 事件数正确、metadata `cachedFromRunId`/`cachedFromJobId` 正确、bridge final/status idle 序列完整、diagnostic summary 脱敏。
+**已实现范围：** opt-in diagnostic-only。source run 完成 `agent_1`/`agent_2` 后让 `agent_3` 进入 interrupted/stale 源状态；resume 后 `agent_1`/`agent_2` cached、`agent_3` fresh、resumed final succeeded；校验 `agent_cached` 事件数、metadata `cachedFromRunId`/`cachedFromJobId`、artifact/transcript 存在、diagnostic summary 脱敏。该 diagnostic 写入 `summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"]`，不进入主 `summary["cases"]`，不影响 required cases 门禁。
+
+**已补测试：**
+
+- `test_interrupted_source_resume_diagnostic_is_non_gating_and_reported`
+- `test_interrupted_source_resume_diagnostic_exception_is_sanitized_and_non_gating`
 
 **验证命令：**
 
@@ -646,11 +651,23 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_R
 
 ### 5.3 推荐下一步
 
-P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass**、**resume cache permission/tools/MCP context invalidation**、**大 transcript 隔离与 cached transcript streaming copy** 均已完成并提交；后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵、脱敏基础完整性、cache context 安全边界或 child transcript 大规模隔离。
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass**、**resume cache permission/tools/MCP context invalidation**、**大 transcript 隔离与 cached transcript streaming copy**、**Bridge final/detail artifact fallback robustness** 均已完成并提交；真实 API interrupted source resume 独立 diagnostic 也已实现为 diagnostic-only，等待/可进行 opt-in 真实运行验证。后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵、脱敏基础完整性、cache context 安全边界、child transcript 大规模隔离或 bridge final artifact fallback 主干。
 
-#### 当前推荐离线 P2：Bridge final/detail artifact fallback robustness
+#### 当前推荐 P1：真实 API interrupted source resume diagnostic opt-in 验证
 
-**结论：** 下一步应收敛 Bridge 对 workflow final/detail artifact 异常的 fallback 行为。即使 `final-result.json` 缺失、损坏、过大、包含敏感内容，或 `run.result_ref` 被污染为越界路径，Bridge 也必须稳定 emit 有界、脱敏、可消费的 `workflow_final`，并最终恢复 `activity=None` / `status=idle`。`workflow_detail` 应明确保持只返回 refs，不展开 `agents/*/result.json` 或 child transcript 正文。
+**结论：** 下一步应在用户明确允许真实 API 的前提下，运行 `tests/p8_real_api_e2e.py`，验证新增 `realApiInterruptedSourceResumeDiagnostic` 在本机 `mykey` profile 下的真实 provider 表现。执行时只通过 profile 名启用本地配置，不读取、不打印、不提交 `mykey.py` / `mykey.json` / `mcp.json`，并保持 `GA_RUN_REAL_MCP_E2E` 关闭。
+
+**建议命令：**
+
+```powershell
+$env:GA_RUN_REAL_API_E2E = '1'; $env:GA_REAL_API_CONFIG = 'native_oai_config'; $env:GA_REAL_API_EXPECTED_NAME = 'gpt-native'; $env:GA_REAL_API_EXPECTED_MODEL = 'gpt-5.5'; Remove-Item Env:\GA_RUN_REAL_MCP_E2E -ErrorAction SilentlyContinue; python "D:\git_codes\GenericAgent\tests\p8_real_api_e2e.py"
+```
+
+**验收重点：** required cases 全部 passed；`summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"]` 存在；该 diagnostic 不进入 `summary["cases"]`；`secretScan=[]`；interrupted source 中 `agent_1`/`agent_2` 可作为 cached prefix，`agent_3` fresh rerun；输出不包含真实 key 或未脱敏 provider 响应。
+
+#### 已完成离线 P2：Bridge final/detail artifact fallback robustness
+
+**结论：** Bridge 对 workflow final/detail artifact 异常的 fallback 行为已收敛。即使 `final-result.json` 缺失、损坏、过大、包含敏感内容，或 `run.result_ref` 被污染为越界路径，Bridge 也会稳定 emit 有界、脱敏、可消费的 `workflow_final`，并最终恢复 `activity=None` / `status=idle`。`workflow_detail` 已明确保持只返回 refs，不展开 `agents/*/result.json` 或 child transcript 正文。
 
 **为什么优先：**
 

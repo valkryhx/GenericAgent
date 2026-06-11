@@ -209,6 +209,20 @@ return {
 };
 '''
 
+INTERRUPTED_SOURCE_RESUME_SCRIPT = r'''
+phase('P8 Interrupted Source Resume Diagnostic');
+log('start p8 interrupted source resume diagnostic');
+const first = await agent('Reply with one concise sentence containing token GA_P8_INTERRUPTED_PREFIX_A. Do not call tools, MCP, or skills.', {label:'interrupted-prefix-a'});
+const second = await agent('Reply with one concise sentence containing token GA_P8_INTERRUPTED_PREFIX_B. Do not call tools, MCP, or skills.', {label:'interrupted-prefix-b'});
+const third = await agent('Reply with one concise sentence containing token GA_P8_INTERRUPTED_FRESH. Do not call tools, MCP, or skills.', {label:'interrupted-fresh'});
+return {
+  marker: 'GA_P8_INTERRUPTED_RESUME_DONE',
+  firstLength: String(first.summary || '').length,
+  secondLength: String(second.summary || '').length,
+  thirdLength: String(third.summary || '').length
+};
+'''
+
 
 class CountingNativeRunner(NativeGPTChildAgentRunner):
     def __init__(self, **kwargs):
@@ -297,6 +311,29 @@ class GateSecondUntilStoppedRunner(CountingNativeRunner):
         self.cancelled_job_ids.append(job.job_id)
         if job.job_id == "agent_2":
             self.second_cancelled_once = True
+        return super().cancel(job)
+
+
+class GateThirdForInterruptedRunner(CountingNativeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.third_started = threading.Event()
+        self.cancelled_job_ids: list[str] = []
+
+    def start(self, job) -> None:
+        if job.job_id == "agent_3":
+            self.started_job_ids.append(job.job_id)
+            self.third_started.set()
+            return
+        return super().start(job)
+
+    def poll(self, job):
+        if job.job_id == "agent_3":
+            return None
+        return super().poll(job)
+
+    def cancel(self, job) -> None:
+        self.cancelled_job_ids.append(job.job_id)
         return super().cancel(job)
 
 
@@ -991,6 +1028,121 @@ def run_killed_source_resume_real_api_case(root: Path) -> dict:
 
 
 
+def run_interrupted_source_resume_real_api_diagnostic_case(root: Path) -> dict:
+    store = WorkflowStore(root / "interrupted_resume_diagnostic")
+    source = store.create_run(WorkflowRun(run_id="wf_p8_interrupted_source", session_id="p8_real_api_interrupted_resume", script=INTERRUPTED_SOURCE_RESUME_SCRIPT, status="running"))
+    source_runner = GateThirdForInterruptedRunner(config_name=CONFIG_NAME, max_tokens=96)
+    source_runtime = WorkflowRuntime(
+        store=store,
+        runner=source_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=5),
+        timeout_seconds=360.0,
+    )
+    errors: list[str] = []
+    start = time.time()
+
+    def run_source():
+        try:
+            source_runtime.run(source, args={"suite": "p8-real-api", "case": "interrupted-resume-diagnostic"})
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    thread = threading.Thread(target=run_source, daemon=True)
+    thread.start()
+    third_seen = source_runner.third_started.wait(timeout=240.0)
+    if third_seen:
+        killed = store.load_run(source.run_id)
+        killed.status = "killed"
+        killed.error = "GA_P8_FORCED_SOURCE_INTERRUPTED"
+        store.save_run(killed)
+    thread.join(timeout=45.0)
+    if third_seen and not thread.is_alive():
+        interrupted = store.load_run(source.run_id)
+        interrupted.status = "interrupted"
+        interrupted.error = "GA_P8_FORCED_SOURCE_INTERRUPTED"
+        for job in interrupted.jobs:
+            if job.job_id == "agent_3":
+                job.status = "stale"
+                job.error = "GA_P8_FORCED_SOURCE_INTERRUPTED"
+        # The runtime is stopped by briefly marking the source as killed so it can
+        # cancel the gated third child and exit. Persist the diagnostic source
+        # projection directly afterward: WorkflowStore.save_run intentionally
+        # preserves external kills and would otherwise keep the source killed.
+        artifact_dir = Path(interrupted.artifact_dir)
+        state = sanitize(interrupted.to_dict())
+        (artifact_dir / "run.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        (artifact_dir / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    elapsed = time.time() - start
+    source_loaded = store.load_run(source.run_id)
+    source_artifact_dir = Path(source_loaded.artifact_dir)
+    source_jobs = summarize_jobs(source_loaded, source_artifact_dir)
+    source_types = event_types(store, source_loaded.run_id)
+
+    resumed = store.create_run(WorkflowRun(run_id="wf_p8_interrupted_resumed", session_id="p8_real_api_interrupted_resume", script=INTERRUPTED_SOURCE_RESUME_SCRIPT, status="running"))
+    resume_runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=96)
+    resume_runtime = WorkflowRuntime(
+        store=store,
+        runner=resume_runner,
+        scheduler_config=SchedulerConfig(max_concurrent=1, max_total=5),
+        timeout_seconds=360.0,
+    )
+    resume_outcome = resume_runtime.run(resumed, args={"suite": "p8-real-api", "case": "interrupted-resume-diagnostic"}, resume_from_run_id=source_loaded.run_id)
+    resumed_loaded = store.load_run(resumed.run_id)
+    resumed_artifact_dir = Path(resumed_loaded.artifact_dir)
+    resumed_jobs = summarize_jobs(resumed_loaded, resumed_artifact_dir)
+    resumed_types = event_types(store, resumed_loaded.run_id)
+
+    source_statuses = [job.get("status") for job in source_jobs]
+    cached_jobs = [job for job in resumed_jobs if job.get("status") == "cached"]
+    fresh_jobs = [job for job in resumed_jobs if job.get("status") == "succeeded"]
+    source_ok = (
+        third_seen
+        and not thread.is_alive()
+        and source_loaded.status == "interrupted"
+        and source_runner.started_job_ids == ["agent_1", "agent_2", "agent_3"]
+        and source_statuses == ["succeeded", "succeeded", "stale"]
+        and all(job.get("resultExists") and job.get("transcriptExists") for job in source_jobs[:2])
+    )
+    resume_ok = (
+        resumed_loaded.status == "succeeded"
+        and resume_runner.started_job_ids == ["agent_3"]
+        and [job.get("status") for job in resumed_jobs] == ["cached", "cached", "succeeded"]
+        and [job.get("cachedFromRunId") for job in cached_jobs] == [source_loaded.run_id, source_loaded.run_id]
+        and [job.get("cachedFromJobId") for job in cached_jobs] == ["agent_1", "agent_2"]
+        and all(job.get("resultExists") and job.get("transcriptExists") for job in resumed_jobs)
+        and resumed_types.count("agent_cached") == 2
+        and resumed_types.count("agent_started") == 1
+        and resumed_types.count("agent_completed") == 1
+        and (resume_outcome.result or {}).get("marker") == "GA_P8_INTERRUPTED_RESUME_DONE"
+        and bool(fresh_jobs and fresh_jobs[0].get("jobId") == "agent_3")
+    )
+    return {
+        "passed": source_ok and resume_ok,
+        "diagnosticOnly": True,
+        "skipped": False,
+        "elapsedSeconds": round(elapsed, 2),
+        "sourceRunId": source_loaded.run_id,
+        "sourceStatus": source_loaded.status,
+        "sourceThirdStarted": third_seen,
+        "sourceThreadAlive": thread.is_alive(),
+        "sourceErrors": sanitize(errors),
+        "sourceStartedJobIds": source_runner.started_job_ids,
+        "sourceEventCounts": {etype: source_types.count(etype) for etype in sorted(set(source_types))},
+        "sourceJobs": source_jobs,
+        "resumedRunId": resumed_loaded.run_id,
+        "resumedStatus": resumed_loaded.status,
+        "resumedStartedJobIds": resume_runner.started_job_ids,
+        "resumedEventCounts": {etype: resumed_types.count(etype) for etype in sorted(set(resumed_types))},
+        "resumedJobs": resumed_jobs,
+        "cachedJobCount": len(cached_jobs),
+        "freshJobIds": [job.get("jobId") for job in fresh_jobs],
+        "resumeResultShape": sanitize(resume_outcome.result),
+        "artifactDir": str(source_artifact_dir),
+        "resumedArtifactDir": str(resumed_artifact_dir),
+    }
+
+
+
 def run_bridge_real_api_case(root: Path) -> dict:
     events: list[dict] = []
     runtime_started_jobs: list[str] = []
@@ -1538,6 +1690,12 @@ def main() -> int:
             summary["diagnostics"]["realApiTimeoutBridgeFinalDiagnostic"] = run_case_safely(
                 "realApiTimeoutBridgeFinalDiagnostic",
                 run_real_api_timeout_bridge_final_diagnostic_case,
+                root,
+                diagnostic_only=True,
+            )
+            summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"] = run_case_safely(
+                "realApiInterruptedSourceResumeDiagnostic",
+                run_interrupted_source_resume_real_api_diagnostic_case,
                 root,
                 diagnostic_only=True,
             )

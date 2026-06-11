@@ -31,6 +31,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value=parallel_diagnostic), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value=timeout_diagnostic), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_mcp_diagnostic_case", return_value=mcp_diagnostic), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
@@ -68,6 +69,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]) as secret_scan, \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -128,6 +130,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value=parallel_diagnostic), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value=timeout_diagnostic), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -158,6 +161,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value=mid_call_diagnostic) as mid_call_case, \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -189,6 +193,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value=parallel_diagnostic) as parallel_case, \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value=timeout_diagnostic), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -221,6 +226,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value=parallel_diagnostic), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value=timeout_diagnostic) as timeout_case, \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -250,6 +256,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", side_effect=RuntimeError("Bearer secret-token-1234567890")), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
             code = p8_real_api_e2e.main()
@@ -264,6 +271,76 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
         self.assertEqual("RuntimeError", diagnostic["exceptionType"])
         self.assertIn("[REDACTED]", diagnostic["error"])
         self.assertNotIn("secret-token-1234567890", diagnostic["error"])
+
+    def test_interrupted_source_resume_diagnostic_is_non_gating_and_reported(self):
+        case_ok = {"passed": True}
+        interrupted_diagnostic = {
+            "passed": False,
+            "diagnosticOnly": True,
+            "sourceStatus": "interrupted",
+            "resumedStatus": "succeeded",
+            "cachedJobCount": 2,
+            "freshJobIds": ["agent_3"],
+        }
+        output = io.StringIO()
+
+        with mock.patch.object(p8_real_api_e2e, "OPT_IN", True), \
+            mock.patch.object(p8_real_api_e2e, "REAL_MCP_OPT_IN", False), \
+            mock.patch.object(p8_real_api_e2e, "check_profile", return_value=True), \
+            mock.patch.object(p8_real_api_e2e, "run_inherit_permission_smoke_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_tool_inheritance_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_runtime_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_failed_source_resume_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_killed_source_resume_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_bridge_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_bridge_stop_resume_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value=interrupted_diagnostic) as interrupted_case, \
+            mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
+            contextlib.redirect_stdout(output):
+            code = p8_real_api_e2e.main()
+
+        summary = json.loads(output.getvalue())
+        self.assertEqual(0, code)
+        self.assertTrue(summary["passed"])
+        self.assertEqual(interrupted_diagnostic, summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"])
+        self.assertNotIn("realApiInterruptedSourceResumeDiagnostic", summary["cases"])
+        interrupted_case.assert_called_once()
+
+    def test_interrupted_source_resume_diagnostic_exception_is_sanitized_and_non_gating(self):
+        case_ok = {"passed": True}
+        output = io.StringIO()
+
+        with mock.patch.object(p8_real_api_e2e, "OPT_IN", True), \
+            mock.patch.object(p8_real_api_e2e, "REAL_MCP_OPT_IN", False), \
+            mock.patch.object(p8_real_api_e2e, "check_profile", return_value=True), \
+            mock.patch.object(p8_real_api_e2e, "run_inherit_permission_smoke_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_tool_inheritance_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_runtime_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_failed_source_resume_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_killed_source_resume_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_bridge_real_api_case", return_value=case_ok), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_bridge_stop_resume_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", side_effect=RuntimeError("Authorization: Bearer interrupted-secret-token-1234567890")), \
+            mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
+            contextlib.redirect_stdout(output):
+            code = p8_real_api_e2e.main()
+
+        summary = json.loads(output.getvalue())
+        self.assertEqual(0, code)
+        self.assertTrue(summary["passed"])
+        diagnostic = summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"]
+        self.assertFalse(diagnostic["passed"])
+        self.assertTrue(diagnostic["diagnosticOnly"])
+        self.assertEqual("RuntimeError", diagnostic["exceptionType"])
+        self.assertIn("[REDACTED]", diagnostic["error"])
+        self.assertNotIn("interrupted-secret-token-1234567890", diagnostic["error"])
+        self.assertNotIn("realApiInterruptedSourceResumeDiagnostic", summary["cases"])
 
     def test_real_mcp_diagnostic_not_run_without_specific_opt_in(self):
         case_ok = {"passed": True}
@@ -282,6 +359,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
             mock.patch.object(p8_real_api_e2e, "run_real_api_mid_call_stop_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_parallel_partial_failure_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_api_timeout_bridge_final_diagnostic_case", return_value={"passed": False, "diagnosticOnly": True}), \
+            mock.patch.object(p8_real_api_e2e, "run_interrupted_source_resume_real_api_diagnostic_case", return_value={"passed": True, "diagnosticOnly": True}), \
             mock.patch.object(p8_real_api_e2e, "run_real_mcp_diagnostic_case") as diagnostic_case, \
             mock.patch.object(p8_real_api_e2e, "scan_for_secret_material", return_value=[]), \
             contextlib.redirect_stdout(output):
