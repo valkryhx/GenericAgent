@@ -731,6 +731,208 @@ python -m py_compile frontends/ink_bridge.py
 - 不把完整 tool schema、MCP schema、agent result body 或 child transcript 正文写入 final/detail/event。
 - 不改变 workflow runtime 调度、resume cache、permission profile 或 MCP 行为。
 
+#### 已完成真实 E2E：单 agent + 真实 MCP 搜集 + 中文报告
+
+**执行目标：** 使用 `native_oai_config / gpt-native / gpt-5.5`，让 GA workflow 真实执行用户级任务：
+
+```text
+听说 openai 会大幅度降价来跟 anthropic 抢市场，请你分析对开源模型的影响和对 AI 发展的影响 你可以使用 mcp 搜集然后撰写报告
+```
+
+**执行方式：** 临时 opt-in 脚本位于 `temp/run_p5_real_workflow_mcp_report_e2e.py`，通过 `WorkflowRuntime + NativeGPTChildAgentRunner` 直接运行，不读取、不打印、不提交 `mykey.py`、`mykey.json`、`mcp.json`；真实配置由现有 `llmcore` / `mcp_runtime` 机制加载。
+
+**真实运行结果：**
+
+- `passed=true`
+- `profileOk=true`
+- `configName=native_oai_config`
+- `name=gpt-native`
+- `model=gpt-5.5`
+- `status=succeeded`
+- `finalStatus=succeeded`
+- `selectedMcpTool=mcp__tavily__tavily_search`
+- `mcpCalled=true`
+- `mcpReturned=true`
+- 实际 MCP 调用 5 次 Tavily search，随后 `no_tool` 输出中文报告
+- `reportLength=6376`
+- `markerFound=true`，包含 `GA_P5_REAL_WORKFLOW_MCP_REPORT_DONE`
+- `secretScan=[]`
+- `issues=[]`
+
+**验证通过的链路：**
+
+- 真实 gpt-5.5 provider 调用
+- 真实 MCP discovery 与 tool schema 注入
+- 真实 MCP tool_call / tool_result
+- workflow `phase()` / `log()` / `agent()` 编排
+- permission profile 选择与 `tool_allowed` 事件
+- child result / transcript artifact 分离
+- final-result 正常落盘
+- 中文结构化报告生成
+- artifact secret scan 通过
+
+**暴露的非阻断问题：**
+
+真实运行中出现一次 provider streaming transient error：
+
+```text
+ChunkedEncodingError: Response ended prematurely
+```
+
+该异常没有导致 workflow 失败：child agent 后续继续 turn，继续 MCP 搜索并最终输出报告。因此本次 E2E 判定为通过。该现象应作为稳定性观察项记录：后续可将 streaming transient error 结构化为 warning/diagnostic，例如 `providerTransientErrorCount`、`streamingErrorWarnings`，避免只混入 transcript/report preview。
+
+#### 推荐下一步：Level 1 真实多 agent sandbox 代码开发 E2E
+
+**结论：** 单 agent + 真实 MCP 长任务已经通过，下一步建议升级为真实 gpt-5.5 的多 agent workflow，但先限制在临时 sandbox 内完成代码开发，不直接修改仓库源码。目标是验证 4-5 个 child agent 的编排、并发/串行组合、文件工具使用、artifact 分离、测试执行和最终聚合能力。
+
+**推荐任务：** 在 sandbox 中实现一个小型 Python 工具包，例如：
+
+```text
+实现一个 URL / Markdown 链接处理 mini package：
+- url_utils.py
+- test_url_utils.py
+- README.md 或 REVIEW.md
+要求支持 URL 规范化、域名提取、查询参数脱敏、Markdown 链接提取。
+```
+
+**推荐 workflow 结构：**
+
+1. `design` agent：分析需求，输出模块设计、函数签名、边界条件。
+2. `implementation` agent：根据设计在 sandbox 写入实现文件。
+3. `tests` agent：根据设计和实现写入 `unittest` 测试。
+4. `review` agent：读取实现和测试，审查 bug/security/edge cases。
+5. `final` agent：汇总设计、实现、测试、审查，输出最终报告。
+
+可先采用 `phase + agent + parallel + agent + agent`：
+
+```js
+phase('Design');
+const design = await agent('分析需求并输出设计', { label: 'design' });
+
+phase('Build');
+const [impl, tests] = await parallel([
+  () => agent('根据设计实现代码，写入 sandbox 文件', { label: 'implementation' }),
+  () => agent('根据设计生成 unittest 测试，写入 sandbox 文件', { label: 'tests' })
+]);
+
+phase('Review');
+const review = await agent('读取 sandbox 代码和测试并审查', { label: 'review' });
+
+phase('Finalize');
+const final = await agent('汇总设计、实现、测试、审查，输出最终报告', { label: 'final' });
+
+return {
+  marker: 'GA_P5_MULTI_AGENT_CODE_E2E_DONE',
+  designLength: String(design.summary || '').length,
+  implementationLength: String(impl.summary || '').length,
+  testsLength: String(tests.summary || '').length,
+  reviewLength: String(review.summary || '').length,
+  finalLength: String(final.summary || '').length
+};
+```
+
+**Level 1 验收标准：**
+
+Workflow 层：
+
+- `workflow_phase >= 4`
+- `workflow_log >= 4`
+- `agent_registered >= 4`
+- `agent_started >= 4`
+- `agent_completed >= 4`
+- final status 为 `succeeded`
+
+Agent / artifact 层：
+
+- `jobs.length >= 4`
+- 所有 jobs `status == succeeded`
+- 所有 jobs `resultExists == true`
+- 所有 jobs `transcriptExists == true`
+- 所有 result JSON 不内联 `transcriptEvents`
+
+工具 / sandbox 层：
+
+- 至少出现 `file_write` 与 `file_read`
+- 不出现 `tool_denied`
+- 只允许写入指定 sandbox，例如 `temp/p5_multi_agent_code_e2e/<run_id>/workspace`
+- 不读取、不写入 `mykey.py`、`mykey.json`、`mcp.json`
+- 不修改仓库源码
+
+产物层：
+
+- sandbox 中存在 `url_utils.py`
+- sandbox 中存在 `test_url_utils.py`
+- sandbox 中存在 README 或 review/final 报告
+- `python -m unittest discover -s <sandbox>` 通过
+
+安全层：
+
+- `secretScan=[]`
+- artifact 不包含真实 API key / Bearer token / sk-* / JWT
+- 真实 API 产物不提交 git
+
+质量层：
+
+- final report 包含 `GA_P5_MULTI_AGENT_CODE_E2E_DONE`
+- 包含设计摘要、实现摘要、测试结果、审查结论、已知问题
+
+**真实执行记录（2026-06-11，Level 1 多 agent sandbox code E2E）：**
+
+临时 opt-in 脚本：`temp/run_p5_multi_agent_code_e2e.py`。执行时使用 `GA_RUN_REAL_WORKFLOW_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5`；不启用真实 MCP，不读取、不打印、不提交 `mykey.py`、`mykey.json`、`mcp.json`。
+
+已完成三轮真实自测：
+
+1. **第一轮：被 workflow 安全预检拒绝。**
+   - `profileOk=true`，真实 profile 为 `gpt-native / gpt-5.5`。
+   - `secretScan=[]`。
+   - 失败原因：workflow 脚本文本含 `WorkflowRuntime.FORBIDDEN_SCRIPT_TOKENS` 中的保留词，触发 `workflow script uses forbidden token`。
+   - 结论：这不是 provider 失败，也不是多 agent 执行失败；暴露的是 workflow prompt/脚本文本需要避开 runtime 安全扫描保留词。
+
+2. **第二轮：workflow 编排成功，但产物验收失败。**
+   - `status=succeeded`，`finalStatus=succeeded`。
+   - `startedJobIds=[agent_1, agent_2, agent_3, agent_4, agent_5]`。
+   - `agent_completed=5`、`agent_registered=5`、`agent_started=5`、`workflow_phase=4`、`workflow_log=4`。
+   - `tool_allowed=22`，`deniedTools=[]`。
+   - 生成 `url_utils.py`、`test_url_utils.py`、`README.md`、`REVIEW.md`。
+   - `markerFound=true`，final result 包含 `GA_P5_MULTI_AGENT_CODE_E2E_DONE`。
+   - 所有 job `status=succeeded`，所有 job 的 `result.json` / `transcript.jsonl` 存在，且 result JSON 不内联 `transcriptEvents`。
+   - 失败原因：`python -m unittest discover -s <workspace>` 失败。implementation agent 与 tests agent 并行工作，契约未锁死：实现返回三字段 `MarkdownLink`，测试期望二元 tuple；实现参数名为 `params_to_redact`，测试调用 `sensitive_keys`；URL normalization 的 query 排序、fragment、trailing slash 预期不一致。
+   - review agent 实际在 `REVIEW.md` 中发现并指出该问题，但 workflow 没有 `review -> repair -> retest` 闭环，final agent 只做汇总。
+   - 另有 `secretScan` 命中 URL 脱敏测试 fixture 中的 `api_key` / `token` 示例，说明 secret scan 对测试样例存在误报风险；真实密钥未泄漏。
+
+3. **第三轮：统一 API contract 后 workflow 仍成功，但仍未达到产物门禁。**
+   - `status=succeeded`，`finalStatus=succeeded`。
+   - `startedJobIds=[agent_1, agent_2, agent_3, agent_4, agent_5]`。
+   - `agent_completed=5`、`agent_registered=5`、`agent_started=5`、`workflow_phase=4`、`workflow_log=4`。
+   - `tool_allowed=17`，`deniedTools=[]`。
+   - `markerFound=true`。
+   - 生成文件齐全：`url_utils.py`、`test_url_utils.py`、`README.md`、`REVIEW.md`。
+   - artifact 隔离继续通过：所有 job result/transcript 存在，result JSON 不内联 `transcriptEvents`。
+   - `unitTest.returncode=1`，剩余 2 个失败：
+     - `extract_domain("Example.COM:8080/path")` 返回空字符串，原因是实现把 `Example.COM:` 误判为 URL scheme，而不是 schemeless `host:port`。
+     - `normalize_url("https://example.com/path//")` 返回 `https://example.com/path`，测试期望只去掉一个尾部 slash 后保留 `https://example.com/path/`。
+   - review agent 再次成功识别 blocking correctness bug，指出 schemeless `host:port` 解析问题，并建议增加 `localhost:8000/path` 等测试。
+   - `secretScan` 仍命中 `workspace/test_url_utils.py` 与 `workspace/url_utils.py` 中的 URL 参数脱敏示例，说明扫描规则需要更精确地区分真实凭据和安全占位 fixture，或让测试 fixture 完全避开 `api_key=...` 形态。
+
+**结论：** Level 1 真实多 agent sandbox code E2E 对 GA workflow runtime 的核心链路验证是正向的：真实 gpt-5.5、多 agent、parallel、工具调用、权限事件、artifact/transcript 分离、final-result 落盘、marker 汇总均按预期工作。当前未通过的是“代码开发 workflow 产品形态”的质量门禁，而非 P8 runtime 基础能力：并行实现/测试后需要强制 repair/retest 闭环，且 secret scan 需要 fixture-aware 规则或更安全的测试样例。
+
+**暴露问题与后续修正建议：**
+
+- **P1：增加 `Review -> Repair -> Retest -> Finalize` 闭环。** review agent 的发现必须驱动 repair agent 修改 sandbox 文件，然后 harness 再运行 unittest；失败时至少允许一次修复迭代，否则 review 只能发现问题不能改变最终验收。
+- **P1：测试 agent 不应与 implementation 完全并行生成最终测试。** 更稳妥形态是 design 后并行生成 implementation draft 与 test plan，implementation 落盘后由 tests agent 读取实际实现再写测试，或由 repair agent 统一收敛 API contract。
+- **P1：将外部 unittest 结果反馈回 workflow。** 当前 harness 在 workflow 结束后才跑 unittest，child agents 无法看到失败结果。建议新增 `test-runner/repair` 阶段，把测试输出作为 args 或 sandbox 文件输入给 repair agent。
+- **P2：优化 secret scan fixture 策略。** 真实 key 扫描仍必须严格，但 URL 脱敏代码/测试天然会出现 `token`、`api_key` 等参数名；建议测试 fixture 使用不触发密钥正则的占位名，或扫描器跳过明确 placeholder/demo 值与 `.pyc`。
+- **P2：将 provider transient warning 结构化。** 此轮未见 provider 终止性失败，但此前单 agent MCP E2E 出现过 streaming transient error；建议继续把这类 provider 5xx/断流统计为 diagnostic warning，而不与 workflow 语义失败混淆。
+- **P3：再升级 Level 2 前先让 Level 1 闭环通过。** 在 Level 1 达到 `workflow succeeded + unittest passed + secretScan=[]` 前，不建议叠加 MCP research，否则问题归因会变复杂。
+
+**分阶段升级建议：**
+
+- **Level 1：多 agent + sandbox file tools**。4-5 个真实 gpt-5.5 child agent，允许 `file_read` / `file_write`，不启用 MCP。优先验证多 agent 编排、代码产物、artifact 和测试执行。
+- **Level 2：多 agent + MCP research + sandbox code**。在 Level 1 通过后，增加 1 个 research agent 使用 MCP 查询 Python URL/Markdown 处理资料，其余 agent 负责实现、测试、审查。
+- **Level 3：多 agent + resume/cache**。制造 source run 部分完成后 resume，验证已完成 agent cache hit，未完成 agent fresh rerun，覆盖复杂 workflow 下的 P8 核心能力。
+
+**推荐下一步执行：** 先做 Level 1。它比单 agent MCP 报告更复杂，但比“多 agent + MCP + 代码写入”风险低；能更清晰暴露 GA workflow 的并发、工具权限、artifact、文件写入和测试执行问题。
+
 ---
 
 ## 6. 执行约束与安全注意事项
