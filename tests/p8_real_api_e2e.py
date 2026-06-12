@@ -574,11 +574,21 @@ def run_inherit_permission_smoke_case(root: Path) -> dict:
 
 
 
-def _minimal_tool_inheritance_schema(mcp_schema: dict) -> list[dict]:
+def _full_tools_with_extra_mcp(*extra_tools: dict) -> list[dict]:
+    """Return the real workflow child tool surface plus deterministic test MCP tools.
+
+    Real workflow E2E must not model child agents as file-only/minimal agents: the
+    workflow child is the worker that needs skills and MCP.  Keep safety in the
+    permission profile and transcript audit, not in schema hiding.
+    """
     tools = json.loads((REPO / "assets" / "tools_schema.json").read_text(encoding="utf-8"))
-    selected = [tool for tool in tools if (tool.get("function") or {}).get("name") in {"file_read", "load_skill"}]
-    selected.append(mcp_schema)
-    return selected
+    existing = {(tool.get("function") or {}).get("name") for tool in tools}
+    for tool in extra_tools:
+        name = (tool.get("function") or {}).get("name")
+        if name and name not in existing:
+            tools.append(tool)
+            existing.add(name)
+    return tools
 
 
 def run_tool_inheritance_real_api_case(root: Path) -> dict:
@@ -597,7 +607,7 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
             },
         },
     }
-    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=512, max_turns=12, tools_schema_factory=lambda: _minimal_tool_inheritance_schema(mcp_schema))
+    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=512, max_turns=12, tools_schema_factory=lambda: _full_tools_with_extra_mcp(mcp_schema))
     runtime = WorkflowRuntime(
         store=store,
         runner=runner,
@@ -623,7 +633,11 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
     tool_summary = result_data.get("toolSummary") or {}
     payload = result_data.get("payload") or {}
     denied_tools = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_denied"]
+    capability_events = [event.get("capabilities") or {} for event in transcript_events if event.get("type") == "capability_snapshot"]
+    capability = capability_events[0] if capability_events else {}
+    advertised_tool_names = set(capability.get("toolNames") or [])
     expected_tools = {"file_read", "load_skill", "mcp__p8_stub__read_marker"}
+    advertised_ok = expected_tools.issubset(advertised_tool_names)
     skill_ok = any(event.get("toolName") == "load_skill" and (event.get("data") or {}).get("status") == "success" and (event.get("data") or {}).get("name") == "p8-real-tool-skill" and "GA_P8_REAL_TOOL_SKILL_MARKER" in str(event.get("data")) for event in tool_results)
     file_ok = any(event.get("toolName") == "file_read" and "GA_P8_REAL_TOOL_FILE_READ_MARKER" in str(event.get("data")) for event in tool_results)
     mcp_ok = any(event.get("toolName") == "mcp__p8_stub__read_marker" and "GA_P8_REAL_TOOL_MCP_MARKER" in str(event.get("data")) for event in tool_results)
@@ -635,6 +649,7 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
         and expected_tools.issubset(set(tool_calls))
         and expected_tools.issubset(set(allowed_tools))
         and expected_tools.issubset(set(tool_summary.get("allowedTools") or []))
+        and advertised_ok
         and tool_summary.get("denied") == 0
         and not denied_tools
         and file_ok
@@ -655,6 +670,10 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
         "allowedTools": allowed_tools,
         "deniedTools": denied_tools,
         "toolSummary": tool_summary,
+        "advertisedToolNamesSample": sorted(advertised_tool_names)[:80],
+        "advertisedMustInclude": sorted(expected_tools),
+        "advertisedCoreToolsOk": advertised_ok,
+        "capabilitySnapshot": sanitize(capability),
         "fileReadOk": file_ok,
         "skillLoadOk": skill_ok,
         "mcpReadOk": mcp_ok,
@@ -702,7 +721,7 @@ def run_real_mcp_diagnostic_case(root: Path) -> dict:
         return {"passed": False, "skipped": True, "reason": "selected real MCP schema is missing", "discovery": sanitize(discovery)}
     store = WorkflowStore(root / "real_mcp_diagnostic")
     run = store.create_run(WorkflowRun(run_id="wf_p8_real_mcp_diagnostic", session_id="p8_real_api_real_mcp", script=REAL_MCP_DIAGNOSTIC_SCRIPT, status="running", permission_profile="read_only", permission_policy_version="read-only-v1"))
-    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=384, max_turns=8, tools_schema_factory=lambda: [selected_schema])
+    runner = CountingNativeRunner(config_name=CONFIG_NAME, max_tokens=384, max_turns=8, tools_schema_factory=lambda: _full_tools_with_extra_mcp(selected_schema))
     runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2), timeout_seconds=360.0)
     start = time.time()
     error = None

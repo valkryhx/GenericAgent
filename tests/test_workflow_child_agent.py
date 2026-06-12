@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest import mock
 
 from workflow_child_agent import NativeGPTChildAgentRunner
 from workflow_models import WorkflowJob
@@ -271,7 +272,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         job = WorkflowJob(job_id="agent_tool_redact", prompt="read safely", metadata={"runId": "wf_test"})
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "token=result-secret Cookie: sid=cookie_secret request_id=req_123"})):
+        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "token=result-secret Cookie: sid=cookie_secret request_id=req_123"})), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             result = self.wait_for_result(runner, job)
 
@@ -313,6 +314,98 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertIsNot(created[0], created[1])
         self.assertEqual(2, sum(len(session.prompts) for session in created))
 
+    def test_default_tool_schema_exposes_full_static_skill_and_discovered_mcp_tools(self):
+        mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
+        runner = NativeGPTChildAgentRunner(enable_tools=True)
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+            tools = runner._load_tools_schema()
+
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
+        self.assertIn("file_read", tool_names)
+        self.assertIn("file_write", tool_names)
+        self.assertIn("load_skill", tool_names)
+        self.assertIn("mcp__deterministic__read_marker", tool_names)
+        self.assertGreater(len(tool_names), 3, "default workflow child tools must not be file-only/minimal")
+
+    def test_default_tool_schema_deduplicates_discovered_mcp_tools(self):
+        duplicate = {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}
+        runner = NativeGPTChildAgentRunner(enable_tools=True)
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[duplicate]):
+            tools = runner._load_tools_schema()
+
+        tool_names = [(tool.get("function") or {}).get("name") for tool in tools]
+        self.assertEqual(1, tool_names.count("file_read"))
+
+    def test_tools_schema_factory_transforms_default_and_discovered_tools_instead_of_replacing_them(self):
+        seen_by_factory = []
+        mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
+
+        def factory(tools):
+            seen_by_factory.extend((tool.get("function") or {}).get("name") for tool in tools)
+            return list(tools)
+
+        runner = NativeGPTChildAgentRunner(enable_tools=True, tools_schema_factory=factory)
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+            tools = runner._load_tools_schema()
+
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
+        self.assertIn("file_read", tool_names)
+        self.assertIn("load_skill", tool_names)
+        self.assertIn("mcp__deterministic__read_marker", tool_names)
+        self.assertIn("file_read", seen_by_factory)
+        self.assertIn("load_skill", seen_by_factory)
+        self.assertIn("mcp__deterministic__read_marker", seen_by_factory)
+
+    def test_zero_arg_tools_schema_factory_keeps_required_skill_and_mcp_capabilities(self):
+        selected_only_tool = {"type": "function", "function": {"name": "custom_selected_tool", "parameters": {"type": "object", "properties": {}}}}
+        mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
+        runner = NativeGPTChildAgentRunner(enable_tools=True, tools_schema_factory=lambda: [selected_only_tool])
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+            tools = runner._load_tools_schema()
+
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
+        self.assertIn("custom_selected_tool", tool_names)
+        self.assertIn("file_read", tool_names)
+        self.assertIn("load_skill", tool_names)
+        self.assertIn("mcp__deterministic__read_marker", tool_names)
+
+    def test_mcp_discovery_failure_records_warning_without_dropping_base_tools(self):
+        runner = NativeGPTChildAgentRunner(enable_tools=True)
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", side_effect=RuntimeError("boom token=secret")):
+            tools = runner._load_tools_schema()
+
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
+        self.assertIn("file_read", tool_names)
+        self.assertIn("load_skill", tool_names)
+        snapshot = runner.last_capability_snapshot
+        self.assertEqual("error", snapshot["mcpDiscovery"]["status"])
+        self.assertEqual(0, snapshot["mcpDiscovery"]["injectedToolCount"])
+        self.assertEqual("RuntimeError", snapshot["mcpDiscovery"]["errorType"])
+        self.assertNotIn("secret", snapshot["mcpDiscovery"].get("error", ""))
+
+    def test_child_agent_result_includes_capability_snapshot_for_advertised_tools(self):
+        mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
+        client = StubToolClient([StubToolResponse("<summary>done</summary>capabilities observed")])
+        job = WorkflowJob(job_id="agent_caps", prompt="finish", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client)
+
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+            runner.start(job)
+            result = self.wait_for_result(runner, job)
+
+        snapshots = [event for event in result.transcript_events if event.get("type") == "capability_snapshot"]
+        self.assertEqual(1, len(snapshots))
+        capabilities = snapshots[0]["capabilities"]
+        self.assertTrue(capabilities["loadSkillAvailable"])
+        self.assertTrue(capabilities["fileReadAvailable"])
+        self.assertIn("mcp__deterministic__read_marker", capabilities["mcpToolNames"])
+        self.assertEqual("ok", capabilities["mcpDiscovery"]["status"])
+
     def test_native_tool_runner_allows_file_read_through_generic_handler_dispatch(self):
         client = StubToolClient([
             StubToolResponse("<summary>need read</summary>", [StubToolCall("file_read", {"path": __file__, "show_linenos": False})]),
@@ -328,13 +421,17 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         ]
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-        runner.start(job)
-        result = self.wait_for_result(runner, job)
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            runner.start(job)
+            result = self.wait_for_result(runner, job)
 
         self.assertEqual("succeeded", result.status)
         self.assertIn("read complete", result.payload["text"])
         self.assertEqual({"input_tokens": 5, "output_tokens": 4}, result.token_usage)
-        self.assertTrue(client.tools_seen and client.tools_seen[0] == tools)
+        self.assertTrue(client.tools_seen)
+        advertised = {(tool.get("function") or {}).get("name") for tool in client.tools_seen[0]}
+        self.assertIn("file_read", advertised)
+        self.assertIn("load_skill", advertised)
         self.assertTrue(any(event.get("type") == "tool_call" and event.get("toolName") == "file_read" for event in result.transcript_events))
         self.assertTrue(any(event.get("type") == "tool_result" and event.get("toolName") == "file_read" for event in result.transcript_events))
         self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
@@ -364,7 +461,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             job = WorkflowJob(job_id="agent_tool_mcp", prompt="load skill and read marker", metadata={"runId": "wf_test"})
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "ok"}) as call_mcp:
+            with mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "ok"}) as call_mcp, mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 
@@ -401,7 +498,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             )
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("mcp_runtime.call_mcp_tool") as call_mcp:
+            with mock.patch("mcp_runtime.call_mcp_tool") as call_mcp, mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 

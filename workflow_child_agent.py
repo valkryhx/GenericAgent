@@ -55,6 +55,57 @@ class FakeChildAgentRunner:
         return AgentResult(job_id=job.job_id, payload=payload)
 
 
+def _tool_name(tool: dict) -> str | None:
+    if not isinstance(tool, dict):
+        return None
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _merge_tools_by_name(base: list[dict], additions: list[dict]) -> list[dict]:
+    merged = copy.deepcopy(base or [])
+    seen = {_tool_name(tool) for tool in merged}
+    for tool in additions or []:
+        name = _tool_name(tool)
+        if name and name not in seen:
+            merged.append(copy.deepcopy(tool))
+            seen.add(name)
+    return merged
+
+
+def _merge_required_capability_tools(candidate: list[dict], baseline: list[dict]) -> list[dict]:
+    """Preserve worker capabilities when legacy factories return a minimal schema.
+
+    Workflow child agents are the actors that perform the work.  A legacy
+    zero-argument tools_schema_factory may still add test-specific tools, but it
+    must not silently remove skill loading or discovered MCP tools from real
+    workflow agents.
+    """
+    required_names: set[str] = set()
+    for tool in baseline or []:
+        name = _tool_name(tool)
+        if name in {"file_read", "load_skill"} or (name and name.startswith("mcp__")):
+            required_names.add(name)
+    selected = [tool for tool in baseline or [] if _tool_name(tool) in required_names]
+    return _merge_tools_by_name(candidate or [], selected)
+
+
+def _build_capability_snapshot(tools: list[dict], mcp_discovery: dict) -> dict:
+    tool_names = sorted(name for name in (_tool_name(tool) for tool in tools or []) if name)
+    mcp_tool_names = [name for name in tool_names if name.startswith("mcp__")]
+    return {
+        "toolSchemaCount": len(tool_names),
+        "toolNames": tool_names,
+        "loadSkillAvailable": "load_skill" in tool_names,
+        "fileReadAvailable": "file_read" in tool_names,
+        "mcpToolNames": mcp_tool_names,
+        "mcpDiscovery": copy.deepcopy(mcp_discovery),
+    }
+
+
 class NativeGPTChildAgentRunner:
     def __init__(
         self,
@@ -76,6 +127,7 @@ class NativeGPTChildAgentRunner:
         self.max_tokens = max_tokens
         self.enable_tools = bool(enable_tools)
         self.max_turns = int(max_turns)
+        self.last_capability_snapshot: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
 
@@ -192,6 +244,12 @@ class NativeGPTChildAgentRunner:
         from agent_loop import agent_runner_loop
         handler = self._build_handler(job, transcript_events, profile, version)
         tools_schema = self._load_tools_schema()
+        transcript_events.append({
+            "type": "capability_snapshot",
+            "runId": job.metadata.get("runId"),
+            "jobId": job.job_id,
+            "capabilities": copy.deepcopy(self.last_capability_snapshot),
+        })
         output = "".join(
             str(chunk)
             for chunk in agent_runner_loop(
@@ -245,22 +303,34 @@ class NativeGPTChildAgentRunner:
         return handler
 
     def _load_tools_schema(self):
-        if self.tools_schema_factory is not None:
-            return copy.deepcopy(self.tools_schema_factory())
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tools_schema.json"), "r", encoding="utf-8") as f:
             tools = json.load(f)
         if os.name != "nt":
             tools = json.loads(json.dumps(tools, ensure_ascii=False).replace("powershell", "bash"))
+        mcp_discovery = {"status": "ok", "injectedToolCount": 0}
         try:
             from mcp_runtime import discover_mcp_tools_cached
-            existing = {tool.get("function", {}).get("name") for tool in tools}
-            for tool in discover_mcp_tools_cached():
-                name = tool.get("function", {}).get("name")
-                if name and name not in existing:
-                    tools.append(copy.deepcopy(tool))
-                    existing.add(name)
-        except Exception:
-            pass
+            discovered = discover_mcp_tools_cached()
+            before = {_tool_name(tool) for tool in tools}
+            tools = _merge_tools_by_name(tools, discovered)
+            after = {_tool_name(tool) for tool in tools}
+            mcp_discovery = {"status": "ok", "injectedToolCount": len([name for name in after - before if name and name.startswith("mcp__")])}
+        except Exception as exc:
+            mcp_discovery = {
+                "status": "error",
+                "errorType": type(exc).__name__,
+                "error": redact_sensitive_text(str(exc))[:300],
+                "injectedToolCount": 0,
+            }
+        baseline = copy.deepcopy(tools)
+        if self.tools_schema_factory is not None:
+            try:
+                transformed = self.tools_schema_factory(copy.deepcopy(tools))
+            except TypeError:
+                transformed = self.tools_schema_factory()
+                transformed = _merge_required_capability_tools(transformed, baseline)
+            tools = copy.deepcopy(transformed or [])
+        self.last_capability_snapshot = _build_capability_snapshot(tools, mcp_discovery)
         return copy.deepcopy(tools)
 
     def _build_system_prompt(self) -> str:
