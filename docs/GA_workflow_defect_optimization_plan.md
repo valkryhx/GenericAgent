@@ -30,13 +30,13 @@ P0：先校正 workflow child agent 工具继承模型，确保真正承担任�
 P0：补齐可观测性和安全边界，避免继续黑盒测试
 P1：把 skill 和 test gate 做成 workflow 一等能力
 P2：实现 TDD / repair loop 模板，修复真实 E2E 暴露的核心方法论缺陷
-P3：完善 artifact、secret scan、schema 降级和 UI 复盘能力
+P3：完善 artifact、Claude Code-style 高置信 secret hygiene、schema 降级和 UI 复盘能力
 P4：沉淀模板库与真实 API 回归矩阵
 ```
 
 ---
 
-## 1. 阶段一：Workflow child agent 工具继承模型校正（P0）
+## 1. 阶段一：Workflow child agent 工具继承模型校正（P0）【已完成：50803dc】
 
 ### 1.1 目标
 
@@ -182,15 +182,86 @@ docs/P8_real_api_e2e_defect.md
 docs/claude_code_dynamic_workflow_reference.md
 ```
 
-### 1.7 验收标准
+### 1.8 完成记录与真实 E2E 验证
 
-- 默认 `NativeGPTChildAgentRunner` 不传 `tools_schema_factory` 时加载完整 static tools + MCP tools；
-- 真实 E2E 不再使用 file-only / selected-only schema 代表真实 workflow；
-- `load_skill` 在真实 workflow child agent 中可见；
-- MCP tools 在真实 workflow child agent 中按当前 MCP discovery 可见；
-- 安全限制通过 `ToolPermissionPolicy` 表达，并产生 `tool_allowed` / `tool_denied` 事件；
-- artifact 可以证明 agent 看到了并使用了所需 skills / MCP 能力；
-- minimal schema 测试仍可存在，但必须只作为局部单元测试。
+本阶段已在提交 `50803dc fix(workflow): 恢复子智能体完整工具继承能力` 中完成首轮实现，并通过后续真实 E2E 验证。
+
+已完成的实现要点：
+
+- `NativeGPTChildAgentRunner._load_tools_schema()` 不再因为 `tools_schema_factory` 存在而直接跳过默认工具；
+- 默认加载完整 `assets/tools_schema.json`；
+- 默认注入 MCP discovery 发现的工具；
+- legacy zero-arg `tools_schema_factory` 仍兼容，但会补回 `file_read`、`load_skill` 和 discovered MCP tools；
+- 新增 `capability_snapshot` transcript event，记录 `toolSchemaCount`、`toolNames`、`loadSkillAvailable`、`mcpToolNames`、`mcpDiscovery`；
+- MCP discovery 异常不再完全静默，而是记录 redacted capability 状态；
+- 真实 E2E harness 不再用 file-only / selected-only schema 代表真实 workflow child agent 能力。
+
+真实多 agent 复杂编码 E2E 验证结果：
+
+```text
+configName=native_oai_config
+profile=gpt-native / gpt-5.5
+passed=true
+status=succeeded
+finalStatus=succeeded
+startedJobIds=[agent_1, agent_2, agent_3, agent_4, agent_5]
+agent_completed=5
+secretScan=[]
+unitTest=Ran 10 tests OK
+markerFound=true
+```
+
+该 E2E 证明：
+
+- 5 个真实 child agent 全部 `loadSkillAvailable=true`；
+- 每个 agent 的 `mcpDiscovery.status=ok`，`mcpToolCount=16`；
+- 所有 agent 均未出现 `tool_denied`；
+- `load_skill` 被实际调用 6 次；
+- role-sensitive skill 选择已经出现：
+
+```text
+agent_1 design         -> using-superpowers, brainstorming
+agent_2 implementation -> test-driven-development
+agent_3 tests          -> test-driven-development
+agent_4 review         -> requesting-code-review
+agent_5 final          -> using-superpowers
+```
+
+这说明修复后 GA workflow child agent 不只是“看得到 skills”，而是可以在真实复杂工程任务中实际加载并使用 skills。
+
+真实 MCP deep research E2E 验证结果：
+
+```text
+任务=传闻美国要限制对海力士和三星的买入导致股票跳水，deep research 找传闻来源
+configName=native_oai_config
+profile=gpt-native / gpt-5.5
+selectedMcpTool=mcp__tavily__tavily_research
+passed=true
+status=succeeded
+finalStatus=succeeded
+mcpCalled=true
+mcpReturned=true
+tavily_research 调用 3 次
+reportFileExists=true
+reportLength=7292
+secretScan=[]
+deniedTools=[]
+```
+
+该 E2E 的 `capability_snapshot` 显示：
+
+```text
+toolSchemaCount=27
+loadSkillAvailable=true
+fileReadAvailable=true
+mcpDiscovery.status=ok
+mcpDiscovery.injectedToolCount=16
+mcpToolCount=16
+```
+
+这说明修复后 GA workflow child agent 不只是“看得到 MCP tools”，而是可以在真实 API 工作流中实际调用 MCP deep research，并把结果用于 Markdown 报告产出。
+
+因此阶段一可视为完成。下一步应进入阶段二：`workflow-progress.json` / progress artifact，把这些能力证据从 transcript 中提取到更易于 UI、验收和复盘使用的结构化 artifact。
 
 ---
 
@@ -795,90 +866,119 @@ docs/P8-tdd-workflow-template.md
 
 ---
 
-## 6. 阶段六：Secret Scan 分级与 Fixture-aware 优化（P2）
+## 6. 阶段六：Claude Code-style 高置信 Secret Hygiene（P2）
 
 ### 5.1 目标
 
-保持真实 secret 检测严格，同时减少 URL 脱敏测试 fixture 造成的误报。
+保持真实 secret 检测严格，同时避免把 workflow transcript、prompt、tool schema、安全说明和测试 fixture 中的普通 `api_key` / `token` / `secret` 词汇误判为密钥。
+
+阶段一后的真实 MCP deep research E2E 暴露了一个重要修正：泛化 keyword-context secret scan 不适合扫 workflow transcript。Claude Code 自身的 team memory secret scanner 使用的是 curated high-confidence rules，并明确省略 generic keyword-context rules，因为这类规则误报率高。
+
+因此 GA workflow E2E 的 secret hygiene 应从“泛化关键词扫描”改为“高置信格式扫描 + artifact hygiene”。
 
 ### 5.2 要解决的问题
 
 对应缺陷：
 
-- DEFECT-08：secret scan 对 URL 脱敏 fixture 误报。
+- DEFECT-08：secret scan 对 URL 脱敏 fixture 误报；
+- 真实 MCP deep research E2E 中，旧 `api_key_field` 规则对 transcript 中的安全说明 / tool schema 字段误报；
+- `api_key:`、`token:`、`secret:`、`password:` 这类 keyword-context 规则不适合作为 blocking E2E gate。
 
 ### 5.3 设计原则
 
-不能为了减少误报而放松真实密钥检测。
-
-应分级：
+参考 Claude Code 源码中的 secret scanner 原则：
 
 ```text
-confirmed_secret     -> 失败
-suspicious_secret    -> 失败或人工确认
-fixture_placeholder  -> 记录 warning，不阻断
-ignored_binary_cache -> 跳过
+只使用高置信、特征前缀明确、低误报的规则；
+省略 generic keyword-context rules；
+不要因为 transcript/prompt/tool schema 中出现 token/api_key/secret 字样而阻断 workflow E2E。
 ```
+
+保留 blocking 的高置信格式示例：
+
+```text
+sk-ant-api... / sk-ant-admin...
+sk-proj... / sk-svcacct... / sk-admin...
+github_pat_...
+ghp_...
+JWT 三段式 token
+长 Bearer token
+其他有明确 provider/token 前缀且长度足够的真实密钥格式
+```
+
+不应作为 blocking 的泛化规则：
+
+```text
+api_key: VALUE
+token: VALUE
+secret: VALUE
+password: VALUE
+x-api-key: VALUE
+```
+
+这些在 prompt、安全说明、tool schema、测试 fixture、Markdown 报告和 transcript 中都可能合法出现。
 
 ### 5.4 主要任务
 
-#### 任务 1：跳过缓存和二进制派生文件
+#### 任务 1：移除 workflow E2E 中的 generic keyword-context blocking 规则
 
-跳过：
-
-```text
-__pycache__/
-*.pyc
-*.pyo
-*.cache
-```
-
-#### 任务 2：识别 placeholder/demo 值
-
-例如：
+删除或降级以下模式：
 
 ```text
-REDACTED
-<redacted>
-example
-placeholder
-dummy
-fake-token
-not-a-real-key
+api_key_field
+x_api_key
+任意 token/secret/password key-value
 ```
 
-但以下仍应失败：
+如果保留，只能作为 warning / diagnostic，不得导致 `passed=false`。
+
+#### 任务 2：只保留高置信 secret 格式
+
+建议规则集对齐 Claude Code 思路：
 
 ```text
-sk-...
-sk-ant-...
-Bearer <长随机串>
-JWT 三段式 token
-高熵长字符串
-真实 provider key pattern
+Anthropic API key
+OpenAI project/service/admin key
+GitHub PAT
+JWT
+长 Bearer token
+常见云厂商强特征 token
 ```
 
-#### 任务 3：输出分级报告
+#### 任务 3：artifact hygiene 优先于 transcript keyword scan
 
-建议：
+E2E 重点检查：
+
+- 不读取 `mykey.py` / `mykey.json` / `mcp.json` 原文；
+- 不打印 provider config；
+- 不提交真实 API artifacts/transcripts/logs；
+- result.json 不内联完整 transcript；
+- transcript 中若出现安全说明文字，不视为 secret 泄漏。
+
+#### 任务 4：输出语义调整
+
+建议输出：
 
 ```json
 {
-  "secretScan": {
+  "secretHygiene": {
     "confirmed": [],
-    "suspicious": [],
-    "fixturePlaceholders": [],
-    "ignored": []
+    "warnings": [],
+    "scannerMode": "high-confidence-only"
   }
 }
 ```
 
+而不是让 broad `secretScan=[]` 成为所有 E2E 的核心能力门禁。
+
 ### 5.5 验收标准
 
 - 真实 key pattern 继续失败；
+- transcript / prompt / tool schema 中的 `api_key`、`token`、`secret` 安全说明不阻断；
 - URL 参数名 `api_key` / `token` 搭配 placeholder 值不阻断；
-- `.pyc` 不参与扫描；
-- E2E 的 `secretScan=[]` 或 `confirmed=[]` 语义明确。
+- `.pyc` / `.pyo` 不参与扫描；
+- E2E 报告中明确 `scannerMode=high-confidence-only` 或等价语义；
+- secret hygiene 不再掩盖 workflow skill/MCP 能力验收结果。
 
 ---
 
@@ -1119,11 +1219,11 @@ marker found
 
 完成后收益：修复真实 E2E 暴露的核心方法论缺陷。
 
-### Milestone F：Secret Scan / Schema Fallback / UI
+### Milestone F：Claude Code-style Secret Hygiene / Schema Fallback / UI
 
 包含：
 
-1. fixture-aware secret scan；
+1. Claude Code-style 高置信 secret hygiene；
 2. schema fallback；
 3. failure classification；
 4. CLI/Ink progress 展示。
