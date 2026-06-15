@@ -484,152 +484,204 @@ Ran 375 tests in 52.452s
 OK (skipped=1)
 ```
 
-因此阶段二可视为完成。下一步应进入阶段三：`Skill-aware Agent Options 一等化（P1）`，即让 workflow DSL 能显式声明 `skills` / `requireSkills` / `role` / `skillMode`，并把 required skill 的加载和缺失情况写入 progress artifact。
+因此阶段二可视为完成。下一步应进入阶段三：`Claude Code 风格的可选 Skill 感知（P1）`，即不新增 required/preload DSL，而是固化 Claude Code dynamic workflow 的真实默认行为：child agent 默认继承完整 skill 能力、在 system prompt 中看到 skill index、按任务语义自主调用 `load_skill`，并把调用情况写入 transcript 与 `workflow-progress.json`。
 
 ---
 
-## 3. 阶段三：Skill-aware Agent Options 一等化（P1）
+## 3. 阶段三：Claude Code 风格的可选 Skill 感知（P1）
 
 ### 2.1 目标
 
-把 skills 从“system prompt 里的可选 listing”升级为 workflow 可声明、runtime 可验证、artifact 可审计的一等能力。
+把 GA workflow 的 skill 行为调整为与 Claude Code dynamic workflow 真实模式一致：
 
-这是 GA 学习 Claude Code workflow 的最关键一步之一。
+```text
+subagent 继承完整 skill 能力；
+system prompt / tool surface 里能看到 skill；
+subagent 根据任务语义自行决定是否调用 Skill；
+调用后 workflowProgress / transcript 能看到使用情况；
+不调用 skill 不视为失败。
+```
+
+该阶段不实现 `skills` / `requireSkills` / `role` / `skillMode` DSL，也不做 host-side preload。重点是把当前已经基本具备的 optional skill 行为固化成稳定、可测试、可复盘的 baseline。
 
 ### 2.2 要解决的问题
 
 对应缺陷：
 
-- DEFECT-05：skills 仅软提示，不是 workflow 约束；
-- DEFECT-06：tools_schema 裁剪会静默禁用 skills；
-- DEFECT-07：skill 使用没有进入验收指标。
+- DEFECT-05：skills 目前主要是 soft prompt，需要明确固化为 Claude Code-style optional 行为；
+- DEFECT-06：tools_schema 裁剪曾静默禁用 skills，阶段一已修复，但需要回归测试继续锁定；
+- DEFECT-07：skill 使用需要进入验收指标和 progress artifact。
 
 ### 2.3 设计原则
 
-优先实现确定性方案：
+采用 **Claude Code-style optional**，而不是 required/preload：
 
 ```text
-required skills 由 runner 预加载 / 注入，而不是完全依赖模型主动调用 load_skill。
+默认可见、默认可用、自主调用、调用可审计、不调用不失败。
 ```
 
-原因：工程 workflow 需要可重复性，不能把“是否调用 skill”完全交给模型自由发挥。
+明确不做：
 
-### 2.4 推荐 DSL
-
-支持：
-
-```js
-await agent('读取 CONTRACT.md，只写测试，不写实现', {
-  label: 'tests',
-  role: 'test-writer',
-  skills: ['using-superpowers', 'test-driven-development'],
-  requireSkills: true
-})
+```text
+不新增 agent({ skills: [...] })；
+不新增 requireSkills；
+不新增 role -> skill 自动映射；
+不新增 skillMode；
+不做 runner 预加载完整 SKILL.md；
+不因 agent 没有调用 skill 而失败。
 ```
 
-字段语义：
+原因：本会话中 Claude Code 自己调用 dynamic workflow 时，subagent 的真实行为并不是 host 强制预加载 skill，而是：
 
-| 字段 | 含义 |
-|---|---|
-| `skills` | 希望该 agent 使用的 skill 列表 |
-| `requireSkills` | true 时缺失 skill 应导致 preflight/job failed |
-| `role` | 可选，用于模板层自动映射默认 skills |
-| `skillMode` | 可选，`preload` / `tool-call` / `optional` |
+1. workflow subagent 默认有 Skill/tool 能力；
+2. system prompt 暴露可用 skill index；
+3. subagent 在规划、综合、debug、review 等任务中主动调用合适 skill；
+4. workflowProgress / transcript 记录其使用情况。
+
+### 2.4 当前 GA 已具备的基础
+
+阶段一和阶段二已经提供了 optional skill baseline 的大部分基础：
+
+- `workflow_child_agent.py` 默认加载完整静态 tools，并保留 `load_skill`；
+- `workflow_child_agent.py` 的 `_build_system_prompt()` 会调用 `skills_runtime.build_skill_prompt()`，把 `[Available Skills]` listing 注入 child system prompt；
+- child transcript 已记录：
+  - `tool_call(toolName=load_skill)`
+  - `tool_result(toolName=load_skill)`
+- `capability_snapshot` 已记录：
+  - `loadSkillAvailable`
+  - `fileReadAvailable`
+  - MCP discovery 摘要
+- `workflow-progress.json` 已记录：
+  - `toolCalls`
+  - `loadedSkills`
+  - `capability` / `capabilities`
+  - `lastToolName`
+  - `lastToolSummary`
 
 ### 2.5 主要任务
 
-#### 任务 1：扩展 workflow `agent()` options schema
+#### 任务 1：锁定 child agent 默认 skill 可见性
 
-在 workflow runtime 中接受：
-
-```text
-skills: string[]
-requireSkills: boolean
-role: string
-skillMode: string
-```
-
-非法输入应 preflight fail，例如：
-
-- `skills` 不是数组；
-- skill 名称为空；
-- `requireSkills=true` 但找不到 skill；
-- skill 名称不在 discovery 列表里。
-
-#### 任务 2：runner 预加载 required skills
-
-建议第一版采用 `preload`：
-
-1. runtime 把 `skills` 写入 job spec；
-2. child runner 调用 `skills_runtime.load_skill_content()`；
-3. 将完整 SKILL.md 内容注入 child system prompt 或首轮上下文；
-4. 记录 `skill_preloaded` 事件；
-5. final artifact 记录 `loadedSkills`。
-
-#### 任务 3：保证 `load_skill` 不会被静默裁掉
-
-如果采用 tool-call 模式，或允许模型主动再加载 skill：
-
-- 当 `skills` / `requireSkills` 存在时，`tools_schema_factory` 必须包含 `load_skill`；
-- 如果不包含，应明确失败：
+新增或强化测试，确保 workflow child agent 默认 system prompt 包含 skill listing 指令：
 
 ```text
-WorkflowPreflightError: required skills need load_skill tool, but load_skill is not available
+[Available Skills]
+When a user task matches one of these skills, call load_skill...
+The listing is only an index; load the full SKILL.md before following it.
 ```
 
-#### 任务 4：记录 skill 事件
+测试应 mock `skills_runtime.build_skill_prompt()`，避免依赖用户本地真实 skill 目录。
 
-每个 job artifact 增加：
+#### 任务 2：锁定 `load_skill` 默认可用且不会被裁掉
+
+继续保留并强化阶段一测试：
+
+- 默认 tools schema 包含 `load_skill`；
+- legacy `tools_schema_factory` 不能静默裁掉 `load_skill`；
+- `capability_snapshot.loadSkillAvailable=true` 可进入 transcript；
+- `workflow-progress.json.capability.loadSkillAvailable=true` 可被读取。
+
+#### 任务 3：增强 progress 的 skill 摘要
+
+在 `workflow-progress.json` 每个 agent entry 中补充：
 
 ```json
 {
-  "requiredSkills": ["test-driven-development"],
-  "loadedSkills": ["using-superpowers", "test-driven-development"],
-  "missingRequiredSkills": [],
-  "skillEvents": [
+  "skillToolCalls": 1,
+  "skillLoadEvents": [
     {
-      "type": "skill_preloaded",
-      "name": "test-driven-development",
+      "name": "using-superpowers",
+      "status": "success",
       "source": "claude",
-      "pathRef": ".../test-driven-development/SKILL.md"
+      "path": ".../using-superpowers/SKILL.md",
+      "baseDir": ".../using-superpowers",
+      "allowedTools": []
     }
   ]
 }
 ```
 
-workflow 汇总增加：
+要求：
+
+- `skillToolCalls` 从 `toolCalls` 中 `load_skill` 的次数派生；
+- `skillLoadEvents` 从 `tool_result(toolName=load_skill)` 派生；
+- 只保留摘要字段；
+- 不复制 `content`；
+- 不复制完整 SKILL.md；
+- 不复制 verbose tool result 正文。
+
+#### 任务 4：明确 optional 行为：不调用 skill 不失败
+
+新增测试覆盖普通 workflow agent：
 
 ```json
 {
-  "skillUsageSummary": {
-    "using-superpowers": 3,
-    "test-driven-development": 2,
-    "systematic-debugging": 1
+  "capability_snapshot": {
+    "loadSkillAvailable": true
   },
-  "requiredSkillFailures": []
+  "toolCalls": [],
+  "loadedSkills": [],
+  "skillToolCalls": 0,
+  "skillLoadEvents": [],
+  "state": "succeeded"
 }
+```
+
+断言：
+
+```text
+loadSkillAvailable=true 但 loadedSkills=[] 时，job 仍然 succeeded。
+```
+
+这点是本阶段与 required skill 方案的核心区别。
+
+#### 任务 5：文档和真实 E2E 复盘口径调整
+
+后续真实 E2E 不应检查“每个 agent 必须调用 skill”，而应检查：
+
+```text
+1. 每个 agent 都能看到 load_skill；
+2. 适合使用 skill 的 agent 会自然调用 skill；
+3. workflow-progress.json 能记录调用结果；
+4. 未调用 skill 的 agent 不视为失败。
 ```
 
 ### 2.6 涉及文件
 
+优先改动：
+
 ```text
-workflow_runtime.py
-workflow_child_agent.py
-skills_runtime.py
-ga.py
-assets/tools_schema.json
-tests/test_workflow*.py
-tests/test_skills*.py
+workflow_store.py
+tests/test_workflow_store.py
+tests/test_workflow_child_agent.py
+docs/GA_workflow_defect_optimization_plan.md
 ```
+
+通常不需要改：
+
+```text
+workflow_js_worker.js
+workflow_runtime.py
+workflow_scheduler.py
+workflow_models.py
+```
+
+除非测试发现 progress 写入链路还缺少字段传递。
 
 ### 2.7 验收标准
 
-- `agent(..., { skills: [...], requireSkills: true })` 可执行；
-- required skill 缺失时 workflow 失败且错误明确；
-- required skill 存在时 job artifact 记录 `loadedSkills`；
-- `tools_schema_factory` 裁掉 `load_skill` 时不会静默通过；
-- 不读取、不打印、不提交真实密钥；
-- 新增单元测试覆盖 preload、missing、schema-cropped 三类场景。
+- workflow child agent 默认 system prompt 包含 skill listing；
+- workflow child agent 默认 tools schema 包含 `load_skill`；
+- `capability_snapshot` 和 `workflow-progress.json` 能体现 `loadSkillAvailable=true`；
+- agent 调用 `load_skill` 后，progress 记录：
+  - `loadedSkills`
+  - `skillToolCalls`
+  - `skillLoadEvents`
+- `skillLoadEvents` 不包含完整 skill content；
+- agent 不调用 `load_skill` 时 job 不失败；
+- 单元测试通过；
+- 不读取、不打印、不提交真实密钥。
+
 
 ---
 
@@ -800,19 +852,13 @@ Contract
 
 ```js
 phase('Contract')
-await agent('写 CONTRACT.md，明确 API、边界和验收标准', {
-  label: 'contract',
-  role: 'contract',
-  skills: ['using-superpowers', 'writing-plans'],
-  requireSkills: true
+await agent('写 CONTRACT.md，明确 API、边界和验收标准。若可用且适合，请先调用 load_skill 使用 planning / methodology 相关 skill。', {
+  label: 'contract'
 })
 
 phase('Tests')
-await agent('读取 CONTRACT.md，只写失败测试，不写实现', {
-  label: 'tests',
-  role: 'test-writer',
-  skills: ['using-superpowers', 'test-driven-development'],
-  requireSkills: true
+await agent('读取 CONTRACT.md，只写失败测试，不写实现。若可用且适合，请先调用 load_skill 使用 TDD / testing 相关 skill。', {
+  label: 'tests'
 })
 
 phase('Red Gate')
@@ -820,11 +866,8 @@ const red = await runPythonUnittest(args.workspace)
 if (red.passed) throw new Error('Red gate failed: tests unexpectedly passed')
 
 phase('Implementation')
-await agent('读取 CONTRACT.md 和失败测试，写最小实现', {
-  label: 'implementation',
-  role: 'implementation',
-  skills: ['using-superpowers', 'test-driven-development'],
-  requireSkills: true
+await agent('读取 CONTRACT.md 和失败测试，写最小实现。若可用且适合，请先调用 load_skill 使用 TDD / implementation 相关 skill。', {
+  label: 'implementation'
 })
 
 phase('Green Gate')
@@ -834,11 +877,8 @@ phase('Repair Loop')
 let rounds = 0
 while (!green.passed && rounds < 2) {
   await writeWorkflowArtifact('TEST_FAILURES.txt', green.stderr || green.stdout)
-  await agent('读取 TEST_FAILURES.txt、源码和测试，修复失败', {
-    label: `repair-${rounds + 1}`,
-    role: 'repair',
-    skills: ['using-superpowers', 'systematic-debugging'],
-    requireSkills: true
+  await agent('读取 TEST_FAILURES.txt、源码和测试，修复失败。若可用且适合，请先调用 load_skill 使用 debugging / repair 相关 skill。', {
+    label: `repair-${rounds + 1}`
   })
   green = await runPythonUnittest(args.workspace)
   rounds++
@@ -846,11 +886,8 @@ while (!green.passed && rounds < 2) {
 if (!green.passed) throw new Error('Green gate failed after repair loop')
 
 phase('Review')
-await agent('审查实现、测试和 CONTRACT.md，输出 REVIEW.md', {
-  label: 'review',
-  role: 'review',
-  skills: ['using-superpowers', 'requesting-code-review', 'verification-before-completion'],
-  requireSkills: true
+await agent('审查实现、测试和 CONTRACT.md，输出 REVIEW.md。若可用且适合，请先调用 load_skill 使用 review / verification 相关 skill。', {
+  label: 'review'
 })
 
 phase('Final Verification')
@@ -906,18 +943,20 @@ contractPrompt
 maxRepairRounds
 ```
 
-#### 任务 3：模板内置 role -> skill 映射
+#### 任务 3：模板 prompt 建议使用相关 skill
 
-默认映射：
+模板不通过 DSL 强制 role -> skill 映射，而是在对应 agent prompt 中自然提示：
 
-| role | skills |
+| 阶段 | 建议 skill 方向 |
 |---|---|
-| `contract` | `using-superpowers`, `writing-plans` |
-| `test-writer` | `using-superpowers`, `test-driven-development` |
-| `implementation` | `using-superpowers`, `test-driven-development` |
-| `repair` | `using-superpowers`, `systematic-debugging` |
-| `review` | `using-superpowers`, `requesting-code-review`, `verification-before-completion` |
-| `final-verification` | `verification-before-completion` |
+| `Contract` | methodology / planning |
+| `Tests` | TDD / testing |
+| `Implementation` | TDD / implementation |
+| `Repair` | debugging / repair |
+| `Review` | review / verification |
+| `Final Verification` | verification |
+
+这些建议依赖 child agent 默认可见 `[Available Skills]` listing 和 `load_skill` tool。是否调用由 subagent 根据任务语义自主决定；调用情况由 `workflow-progress.json.loadedSkills`、`skillToolCalls`、`skillLoadEvents` 复盘。
 
 #### 任务 4：新增真实 E2E diagnostic
 
@@ -937,7 +976,7 @@ GA_REAL_API_EXPECTED_MODEL=gpt-5.5
 - Red gate 失败；
 - implementation 后 Green；
 - repair loop 至少在一个带缺陷 fixture 中能修复；
-- required skills 被记录；
+- skill 调用情况可在 `workflow-progress.json` 中复盘，但未调用 skill 不视为失败；
 - final unittest passed；
 - `secretScan=[]`；
 - artifacts/transcripts 不被内联提交。
@@ -1290,16 +1329,16 @@ marker found
 
 完成后收益：所有后续改造都有可复盘证据。
 
-### Milestone C：Skill-aware runner
+### Milestone C：Claude Code 风格的可选 Skill 感知
 
 包含：
 
-1. `agent({ skills, requireSkills, role })`；
-2. required skill preload；
-3. skill artifact / summary；
-4. tools_schema 裁剪保护。
+1. child agent 默认可见 `load_skill` 与 `[Available Skills]` listing；
+2. subagent 按任务语义自主调用 skill，不调用不失败；
+3. `workflow-progress.json` 记录 `loadedSkills`、`skillToolCalls`、`skillLoadEvents`；
+4. 回归测试锁定 `load_skill` 不会被 tools schema 裁剪静默禁用。
 
-完成后收益：GA 能真正使用 Claude/Codex/Superpowers skills，而不是只把它们列出来。
+完成后收益：GA workflow agent 的 skill 使用方式与 Claude Code dynamic workflow 的真实默认模式一致：默认可用、自主调用、调用可审计。
 
 ### Milestone D：Test Gate
 
@@ -1318,7 +1357,7 @@ marker found
 
 1. `tdd-python-package`；
 2. Red/Green/Repair/Final Verification；
-3. role -> skill 默认映射；
+3. optional skill usage baseline；
 4. L1.1 sandbox E2E。
 
 完成后收益：修复真实 E2E 暴露的核心方法论缺陷。
@@ -1373,7 +1412,7 @@ marker found
 
 ```text
 1. workflow child agent 默认继承完整工具能力，不再被真实 E2E 降级成 file_read/file_write-only
-2. agent({ skills, requireSkills }) + required skill preload
+2. Claude Code-style optional skill awareness：默认可见、按需调用、调用可审计
 3. runPythonUnittest(workspace)
 4. tdd-python-package template
 5. repair loop 最多 2 轮
@@ -1392,7 +1431,7 @@ GA 可以用真实 gpt-5.5 子智能体，在 sandbox 中按 TDD 顺序：
 确认绿灯，
 必要时 repair，
 最后 review / final verification，
-并且 artifact 能证明 required skills 与 MCP/tool 能力真实参与了流程。
+并且 artifact 能证明 optional skill 使用情况与 MCP/tool 能力真实参与了流程。
 ```
 
 ---
