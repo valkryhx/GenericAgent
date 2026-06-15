@@ -85,6 +85,7 @@ class AgentScheduler:
         self.jobs.append(job)
         self.store.save_run(self.run)
         self._append("agent_registered", job, {"cacheKey": job.metadata["cacheKey"], "label": label})
+        self.store.write_workflow_progress(self.run)
         return job
 
     def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None) -> WorkflowJob:
@@ -136,6 +137,7 @@ class AgentScheduler:
                 "resultRef": job.result_ref,
             },
         )
+        self.store.write_workflow_progress(self.run)
         return job
 
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
@@ -168,6 +170,7 @@ class AgentScheduler:
         if self.manage_run_completion:
             self._update_run_completion_state()
         self.store.save_run(self.run)
+        self.store.write_workflow_progress(self.run)
         return completed
 
     def run_all(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
@@ -219,6 +222,7 @@ class AgentScheduler:
                 {
                     "runId": self.run.run_id,
                     "status": self.run.status,
+                    "workflowProgressRef": "workflow-progress.json",
                     "jobs": [
                         {
                             "jobId": job.job_id,

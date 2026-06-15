@@ -110,11 +110,12 @@ class WorkflowRuntime:
                     self._handle_worker_event(run, message)
                 elif message_type == "done":
                     result = sanitize(message.get("result"))
-                    final_payload = self._final_payload(run, "succeeded", result=result)
-                    self.store.write_final_result(run, final_payload)
                     run.status = "succeeded"
                     run.error = None
                     self.store.save_run(run)
+                    self.store.write_workflow_progress(run)
+                    final_payload = self._final_payload(run, "succeeded", result=result)
+                    self.store.write_final_result(run, final_payload)
                     return WorkflowRuntimeResult(run=run, result=result, logs=list(self._logs), phases=list(self._phases))
                 elif message_type == "error":
                     raise RuntimeError(redact_sensitive_text(message.get("error") or "workflow worker failed"))
@@ -125,14 +126,16 @@ class WorkflowRuntime:
             if current.status == "killed":
                 run.status = "killed"
                 run.error = current.error or reason
-                self.store.write_final_result(run, self._final_payload(run, "killed", error=run.error))
                 self.store.save_run(run)
+                self.store.write_workflow_progress(run)
+                self.store.write_final_result(run, self._final_payload(run, "killed", error=run.error))
                 self._append(run, "workflow_killed", {"error": run.error})
             else:
                 run.status = "failed"
                 run.error = reason
-                self.store.write_final_result(run, self._final_payload(run, "failed", error=reason))
                 self.store.save_run(run)
+                self.store.write_workflow_progress(run)
+                self.store.write_final_result(run, self._final_payload(run, "failed", error=reason))
                 self._append(run, "workflow_failed", {"error": reason})
             raise
         finally:
@@ -378,6 +381,7 @@ class WorkflowRuntime:
         payload: dict[str, Any] = {
             "runId": run.run_id,
             "status": status,
+            "workflowProgressRef": "workflow-progress.json",
             "jobs": [
                 {
                     "jobId": job.job_id,

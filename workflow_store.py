@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 from pathlib import Path
 
 from sensitive_redaction import sanitize
 from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
+
+
+def copy_tool_summary(value) -> dict:
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+
+def copy_token_usage(value) -> dict:
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -137,6 +146,144 @@ class WorkflowStore:
         run.result_ref = result_ref
         return result_ref
 
+    def write_workflow_progress(self, run: WorkflowRun) -> str:
+        progress_ref = "workflow-progress.json"
+        progress = {
+            "runId": run.run_id,
+            "sessionId": run.session_id,
+            "status": run.status,
+            "workflowProgress": [self._build_job_progress(run, job, index) for index, job in enumerate(run.jobs, start=1)],
+        }
+        self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
+        return progress_ref
+
+    def _build_job_progress(self, run: WorkflowRun, job: WorkflowJob, index: int) -> dict:
+        result = None
+        if job.result_ref:
+            try:
+                result = self.read_agent_result(run, job)
+            except FileNotFoundError:
+                result = None
+        transcript_ref = job.metadata.get("transcriptRef") or (result.transcript_ref if result else None)
+        transcript_events = self._read_agent_transcript_events(run, transcript_ref) if transcript_ref else []
+        tool_calls = self._extract_tool_calls(transcript_events)
+        loaded_skills = self._extract_loaded_skills(transcript_events)
+        capabilities = self._extract_capability_summary(transcript_events)
+        tool_summary = copy_tool_summary(result.tool_summary if result else job.metadata.get("toolSummary") or {})
+        allowed_tools = list(tool_summary.get("allowedTools") or self._extract_permission_tools(transcript_events, "tool_allowed"))
+        denied_tools = list(tool_summary.get("deniedTools") or self._extract_permission_tools(transcript_events, "tool_denied"))
+        payload = result.payload if result else {}
+        progress = {
+            "type": "workflow_agent",
+            "index": index,
+            "agentId": job.job_id,
+            "jobId": job.job_id,
+            "label": job.metadata.get("label"),
+            "phase": job.phase,
+            "phaseTitle": job.phase,
+            "state": job.status,
+            "resultRef": job.result_ref,
+            "transcriptRef": transcript_ref,
+            "lastToolName": tool_calls[-1] if tool_calls else None,
+            "lastToolSummary": self._last_tool_summary(transcript_events),
+            "toolCalls": tool_calls,
+            "allowedTools": allowed_tools,
+            "deniedTools": denied_tools,
+            "loadedSkills": loaded_skills,
+            "missingRequiredSkills": [],
+            "capability": copy.deepcopy(capabilities),
+            "capabilities": capabilities,
+            "tokenUsage": copy_token_usage(result.token_usage if result else job.metadata.get("tokenUsage") or {}),
+            "promptPreview": self._preview(job.prompt),
+            "resultPreview": self._preview(payload.get("summary") if isinstance(payload, dict) and payload.get("summary") is not None else payload),
+            "error": job.error,
+        }
+        return progress
+
+    def _read_agent_transcript_events(self, run: WorkflowRun, transcript_ref: str | None) -> list[dict]:
+        if not transcript_ref:
+            return []
+        transcript_path = self._run_dir(run) / transcript_ref
+        if not transcript_path.exists():
+            return []
+        events: list[dict] = []
+        for line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+    @staticmethod
+    def _extract_tool_calls(events: list[dict]) -> list[str]:
+        return [event.get("toolName") for event in events if event.get("type") == "tool_call" and event.get("toolName")]
+
+    @staticmethod
+    def _extract_permission_tools(events: list[dict], event_type: str) -> list[str]:
+        return [event.get("toolName") for event in events if event.get("type") == event_type and event.get("toolName")]
+
+    @staticmethod
+    def _extract_loaded_skills(events: list[dict]) -> list[str]:
+        loaded: list[str] = []
+        for event in events:
+            if event.get("type") != "tool_call" or event.get("toolName") != "load_skill":
+                continue
+            args = event.get("args") or {}
+            skill = args.get("skill") or args.get("name") or args.get("skill_name")
+            if isinstance(skill, str) and skill and skill not in loaded:
+                loaded.append(skill)
+        for event in events:
+            if event.get("type") != "tool_result" or event.get("toolName") != "load_skill":
+                continue
+            data = event.get("data") or {}
+            skill = data.get("name") if isinstance(data, dict) else None
+            if isinstance(skill, str) and skill and skill not in loaded:
+                loaded.append(skill)
+        return loaded
+
+    @staticmethod
+    def _extract_capability_summary(events: list[dict]) -> dict:
+        capabilities = {}
+        for event in events:
+            if event.get("type") == "capability_snapshot" and isinstance(event.get("capabilities"), dict):
+                capabilities = event.get("capabilities") or {}
+        mcp_discovery = capabilities.get("mcpDiscovery") if isinstance(capabilities.get("mcpDiscovery"), dict) else {}
+        mcp_tool_names = capabilities.get("mcpToolNames") if isinstance(capabilities.get("mcpToolNames"), list) else []
+        return {
+            "loadSkillAvailable": bool(capabilities.get("loadSkillAvailable")),
+            "fileReadAvailable": bool(capabilities.get("fileReadAvailable")),
+            "mcpDiscoveryStatus": mcp_discovery.get("status"),
+            "mcpDiscoveryInjectedToolCount": mcp_discovery.get("injectedToolCount"),
+            "mcpToolCount": len(mcp_tool_names),
+        }
+
+    @staticmethod
+    def _last_tool_summary(events: list[dict]) -> str | None:
+        for event in reversed(events):
+            if event.get("type") != "tool_result" or not event.get("toolName"):
+                continue
+            data = event.get("data")
+            if isinstance(data, dict):
+                for key in ("path", "file", "name", "status", "error"):
+                    if data.get(key):
+                        return str(data.get(key))[:160]
+        return None
+
+    @staticmethod
+    def _preview(value, limit: int = 240) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        text = " ".join(text.split())
+        return text[:limit]
+
     def replay_events(self, run_id: str) -> list[WorkflowEvent]:
         artifact_dir = self._find_run_dir(run_id)
         journal_path = artifact_dir / "journal.jsonl"
@@ -180,6 +327,7 @@ class WorkflowStore:
                 ),
             )
             self.save_run(run)
+            self.write_workflow_progress(run)
         return run
 
     def _artifact_dir(self, session_id: str, run_id: str) -> Path:

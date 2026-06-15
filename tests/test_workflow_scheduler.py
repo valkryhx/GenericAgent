@@ -146,6 +146,13 @@ class WorkflowSchedulerTest(unittest.TestCase):
         event = store.replay_events(run.run_id)[0]
         self.assertEqual(job.job_id, event.job_id)
         self.assertEqual(cache_key, event.payload["cacheKey"])
+        progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+        entry = progress["workflowProgress"][0]
+        self.assertEqual("queued", entry["state"])
+        self.assertEqual("Scout", entry["label"])
+        self.assertEqual("agent_1", entry["agentId"])
+        self.assertEqual("agent_1", entry["jobId"])
+        self.assertIn("inspect repo", entry["promptPreview"])
 
     def test_register_agent_rejects_non_dict_options_with_clear_error(self):
         scheduler, _store, _run = self.make_scheduler()

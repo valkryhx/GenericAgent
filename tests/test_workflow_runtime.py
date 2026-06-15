@@ -178,6 +178,8 @@ class WorkflowRuntimeTest(unittest.TestCase):
         self.assertEqual("failed", final_result["status"])
         self.assertIn(marker, final_result["error"])
         self.assertEqual(expected_jobs, len(final_result["jobs"]))
+        self.assertEqual("workflow-progress.json", final_result["workflowProgressRef"])
+        self.assertTrue((Path(run.artifact_dir) / "workflow-progress.json").exists())
         return loaded, final_result
 
     def test_runtime_large_child_transcripts_stay_out_of_result_and_journal(self):
@@ -323,6 +325,8 @@ return { summary: result.summary, phaseDone: true }
             )
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("succeeded", final_result["status"])
+            self.assertEqual("workflow-progress.json", final_result["workflowProgressRef"])
+            self.assertTrue((Path(run.artifact_dir) / "workflow-progress.json").exists())
             self.assertEqual("ok", final_result["result"]["summary"])
             self.assertEqual("agent_1", final_result["jobs"][0]["jobId"])
 
