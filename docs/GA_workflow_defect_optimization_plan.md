@@ -265,7 +265,7 @@ mcpToolCount=16
 
 ---
 
-## 2. 阶段二：Workflow 可观测性与缺陷基线固化（P0）
+## 2. 阶段二：Workflow 可观测性与缺陷基线固化（P0）【已完成：07ce3dd】
 
 ### 1.1 目标
 
@@ -381,6 +381,110 @@ frontends/ink-ui/src/*
 - progress 不内联完整 transcript，只保留 preview；
 - 可以从 final artifact 直接看出：每个 agent 在哪个 phase、用过什么工具、最终状态是什么；
 - 不改变真实 API 行为，不引入额外 provider 调用。
+
+实际实现于提交 `07ce3dd feat(workflow): 生成工作流进度快照`。
+
+实现选择：采用独立 artifact `workflow-progress.json`，并在 `final-result.json` 中写入：
+
+```json
+{
+  "workflowProgressRef": "workflow-progress.json"
+}
+```
+
+这样 UI、E2E harness 和人工复盘可以稳定读取结构化进度，而不需要解析完整 child transcript，也不会让 final result 内联大块 transcript 内容。
+
+当前 `workflow-progress.json` 顶层结构为：
+
+```json
+{
+  "runId": "wf_test",
+  "sessionId": "session_test",
+  "status": "succeeded",
+  "workflowProgress": [
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "agentId": "agent_1",
+      "jobId": "agent_1",
+      "label": "research",
+      "phase": "Research",
+      "phaseTitle": "Research",
+      "state": "succeeded",
+      "resultRef": "agents/agent_1/result.json",
+      "transcriptRef": "agents/agent_1/transcript.jsonl",
+      "lastToolName": "mcp__tavily__tavily_research",
+      "lastToolSummary": "success",
+      "toolCalls": ["load_skill", "mcp__tavily__tavily_research"],
+      "allowedTools": ["mcp__tavily__tavily_research"],
+      "deniedTools": [],
+      "loadedSkills": ["using-superpowers"],
+      "missingRequiredSkills": [],
+      "capability": {
+        "loadSkillAvailable": true,
+        "fileReadAvailable": true,
+        "mcpDiscoveryStatus": "ok",
+        "mcpDiscoveryInjectedToolCount": 16,
+        "mcpToolCount": 16
+      },
+      "capabilities": {
+        "loadSkillAvailable": true,
+        "fileReadAvailable": true,
+        "mcpDiscoveryStatus": "ok",
+        "mcpDiscoveryInjectedToolCount": 16,
+        "mcpToolCount": 16
+      },
+      "tokenUsage": {
+        "input_tokens": 10,
+        "output_tokens": 20
+      },
+      "promptPreview": "...",
+      "resultPreview": "...",
+      "error": null
+    }
+  ]
+}
+```
+
+阶段二实现要点：
+
+- `WorkflowStore.write_workflow_progress(run)` 生成 `workflow-progress.json`；
+- 从 `agents/<job_id>/transcript.jsonl` 提取：
+  - `toolCalls`
+  - `loadedSkills`
+  - `capability_snapshot` 摘要
+  - `allowedTools` / `deniedTools`
+  - `lastToolName` / `lastToolSummary`
+- progress 不内联完整 `transcriptEvents`；
+- progress 不复制 verbose assistant transcript；
+- progress 不复制 `load_skill` 返回的 skill content；
+- progress 不复制纯字符串 `tool_result` 正文，避免把大块工具输出或敏感内容带入进度 artifact；
+- `project_resume_state()` 会把 interrupted/stale 状态同步写入 progress；
+- `AgentScheduler.register_agent()` / `register_cached_agent()` 后会立即写 queued/cached progress；
+- scheduler `tick()` 后写最新 progress；
+- runtime done/error/killed 路径会兜底写 progress，并在 final result 中写 `workflowProgressRef`。
+
+新增/更新测试覆盖：
+
+```text
+tests/test_workflow_store.py
+tests/test_workflow_scheduler.py
+tests/test_workflow_runtime.py
+```
+
+验证结果：
+
+```text
+python -m unittest tests.test_workflow_store tests.test_workflow_scheduler tests.test_workflow_runtime tests.test_workflow_child_agent
+Ran 92 tests
+OK
+
+python -m unittest discover -s tests
+Ran 375 tests in 52.452s
+OK (skipped=1)
+```
+
+因此阶段二可视为完成。下一步应进入阶段三：`Skill-aware Agent Options 一等化（P1）`，即让 workflow DSL 能显式声明 `skills` / `requireSkills` / `role` / `skillMode`，并把 required skill 的加载和缺失情况写入 progress artifact。
 
 ---
 
