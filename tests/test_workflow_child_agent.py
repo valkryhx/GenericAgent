@@ -101,6 +101,17 @@ class StubToolClient:
 
 
 class NativeGPTChildAgentRunnerTest(unittest.TestCase):
+    def test_child_agent_system_prompt_includes_optional_skill_listing(self):
+        runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
+
+        with mock.patch("skills_runtime.build_skill_prompt", return_value="\n[Available Skills]\nWhen matched, call load_skill.\n- using-superpowers\n"):
+            prompt = runner._build_system_prompt()
+
+        self.assertIn("base prompt", prompt)
+        self.assertIn("[Available Skills]", prompt)
+        self.assertIn("call load_skill", prompt)
+        self.assertIn("using-superpowers", prompt)
+
     def wait_for_result(self, runner, job, timeout=2.0):
         deadline = time.time() + timeout
         while time.time() < deadline:

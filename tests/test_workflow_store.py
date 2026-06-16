@@ -307,6 +307,98 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertEqual("api down", item["error"])
             self.assertEqual("broken", item["label"])
             self.assertEqual([], item["toolCalls"])
+    def test_workflow_progress_records_skill_load_events_without_skill_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="plan", status="succeeded")],
+            )
+            run = store.create_run(run)
+            job = run.jobs[0]
+            transcript_ref = store.write_agent_transcript(
+                run,
+                job,
+                [
+                    {"type": "tool_call", "toolName": "load_skill", "args": {"skill": "using-superpowers"}},
+                    {
+                        "type": "tool_result",
+                        "toolName": "load_skill",
+                        "data": {
+                            "status": "success",
+                            "name": "using-superpowers",
+                            "source": "claude",
+                            "path": "C:/skills/using-superpowers/SKILL.md",
+                            "base_dir": "C:/skills/using-superpowers",
+                            "allowed_tools": ["Read"],
+                            "content": "FULL SKILL BODY MUST NOT BE COPIED",
+                        },
+                    },
+                ],
+            )
+            store.write_agent_result(run, job, AgentResult(job_id="agent_1", payload={"summary": "ok"}, transcript_ref=transcript_ref))
+
+            store.write_workflow_progress(run)
+
+            data = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            entry = data["workflowProgress"][0]
+            self.assertEqual(1, entry["skillToolCalls"])
+            self.assertEqual(
+                [
+                    {
+                        "name": "using-superpowers",
+                        "status": "success",
+                        "source": "claude",
+                        "path": "C:/skills/using-superpowers/SKILL.md",
+                        "baseDir": "C:/skills/using-superpowers",
+                        "allowedTools": ["Read"],
+                    }
+                ],
+                entry["skillLoadEvents"],
+            )
+            self.assertNotIn("FULL SKILL BODY MUST NOT BE COPIED", json.dumps(data, ensure_ascii=False))
+
+    def test_workflow_progress_allows_no_skill_calls_in_optional_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="",
+                jobs=[WorkflowJob(job_id="agent_1", prompt="simple summary", status="succeeded")],
+            )
+            run = store.create_run(run)
+            job = run.jobs[0]
+            transcript_ref = store.write_agent_transcript(
+                run,
+                job,
+                [
+                    {
+                        "type": "capability_snapshot",
+                        "capabilities": {
+                            "loadSkillAvailable": True,
+                            "fileReadAvailable": True,
+                            "mcpToolNames": [],
+                            "mcpDiscovery": {"status": "ok", "injectedToolCount": 0},
+                        },
+                    },
+                    {"type": "assistant", "text": "done without skill"},
+                ],
+            )
+            store.write_agent_result(run, job, AgentResult(job_id="agent_1", payload={"summary": "ok"}, transcript_ref=transcript_ref))
+
+            store.write_workflow_progress(run)
+
+            data = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            entry = data["workflowProgress"][0]
+            self.assertEqual("succeeded", entry["state"])
+            self.assertTrue(entry["capability"]["loadSkillAvailable"])
+            self.assertEqual([], entry["loadedSkills"])
+            self.assertEqual(0, entry["skillToolCalls"])
+            self.assertEqual([], entry["skillLoadEvents"])
+
     def test_write_workflow_progress_does_not_copy_string_tool_result_content_into_last_tool_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

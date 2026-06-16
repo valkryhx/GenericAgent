@@ -488,7 +488,7 @@ OK (skipped=1)
 
 ---
 
-## 3. 阶段三：Claude Code 风格的可选 Skill 感知（P1）
+## 3. 阶段三：Claude Code 风格的可选 Skill 感知（P1）【已完成】
 
 ### 2.1 目标
 
@@ -681,6 +681,53 @@ workflow_models.py
 - agent 不调用 `load_skill` 时 job 不失败；
 - 单元测试通过；
 - 不读取、不打印、不提交真实密钥。
+
+### 2.8 完成记录与验证结果
+
+本阶段按 TDD 小步实现，保持 Claude Code-style optional 模式，没有新增 `skills` / `requireSkills` / `role` / `skillMode` DSL，也没有实现 host-side skill preload。
+
+实现内容：
+
+- `workflow-progress.json` 每个 agent entry 新增：
+  - `skillToolCalls`
+  - `skillLoadEvents`
+- `skillToolCalls` 由 `toolCalls` 中的 `load_skill` 调用次数派生；
+- `skillLoadEvents` 从 `tool_result(toolName=load_skill)` 派生，只记录摘要字段：
+  - `name`
+  - `status`
+  - `source`
+  - `path`
+  - `baseDir`
+  - `allowedTools`
+- progress 明确不复制 `load_skill` 返回的完整 `content` / SKILL.md 正文；
+- 新增测试锁定 optional 行为：`loadSkillAvailable=true` 但 agent 未调用 `load_skill` 时，job 仍然可以 `succeeded`；
+- 新增测试锁定 child agent system prompt 会包含 optional skill listing。
+
+TDD 红灯记录：
+
+```text
+python -m unittest tests.test_workflow_store.WorkflowStoreTest.test_workflow_progress_records_skill_load_events_without_skill_content
+
+KeyError: 'skillToolCalls'
+```
+
+绿灯与回归验证：
+
+```text
+python -m unittest tests.test_workflow_store tests.test_workflow_child_agent
+Ran 34 tests
+OK
+
+python -m unittest tests.test_workflow_store tests.test_workflow_child_agent tests.test_workflow_scheduler tests.test_workflow_runtime
+Ran 95 tests
+OK
+
+python -m unittest discover -s tests
+Ran 378 tests in 54.715s
+OK (skipped=1)
+```
+
+因此阶段三可视为完成。下一步应进入阶段四：`受控 Test Gate 一等化（P1）`，即让测试执行成为 workflow 内部受控 gate，而不是只依赖外部 harness 或 agent 自述。
 
 
 ---

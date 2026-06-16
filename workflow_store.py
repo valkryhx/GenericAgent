@@ -172,6 +172,7 @@ class WorkflowStore:
         tool_summary = copy_tool_summary(result.tool_summary if result else job.metadata.get("toolSummary") or {})
         allowed_tools = list(tool_summary.get("allowedTools") or self._extract_permission_tools(transcript_events, "tool_allowed"))
         denied_tools = list(tool_summary.get("deniedTools") or self._extract_permission_tools(transcript_events, "tool_denied"))
+        skill_load_events = self._extract_skill_load_events(transcript_events)
         payload = result.payload if result else {}
         progress = {
             "type": "workflow_agent",
@@ -187,6 +188,8 @@ class WorkflowStore:
             "lastToolName": tool_calls[-1] if tool_calls else None,
             "lastToolSummary": self._last_tool_summary(transcript_events),
             "toolCalls": tool_calls,
+            "skillToolCalls": tool_calls.count("load_skill"),
+            "skillLoadEvents": skill_load_events,
             "allowedTools": allowed_tools,
             "deniedTools": denied_tools,
             "loadedSkills": loaded_skills,
@@ -225,6 +228,29 @@ class WorkflowStore:
     @staticmethod
     def _extract_permission_tools(events: list[dict], event_type: str) -> list[str]:
         return [event.get("toolName") for event in events if event.get("type") == event_type and event.get("toolName")]
+
+    @staticmethod
+    def _extract_skill_load_events(events: list[dict]) -> list[dict]:
+        skill_events: list[dict] = []
+        for event in events:
+            if event.get("type") != "tool_result" or event.get("toolName") != "load_skill":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            item = {
+                "name": data.get("name"),
+                "status": data.get("status"),
+                "source": data.get("source"),
+                "path": data.get("path"),
+                "baseDir": data.get("base_dir"),
+                "allowedTools": data.get("allowed_tools") or [],
+            }
+            cleaned = {key: value for key, value in item.items() if value not in (None, "", [])}
+            if cleaned:
+                skill_events.append(cleaned)
+        return skill_events
+
 
     @staticmethod
     def _extract_loaded_skills(events: list[dict]) -> list[str]:
