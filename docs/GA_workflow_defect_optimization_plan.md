@@ -727,6 +727,38 @@ Ran 378 tests in 54.715s
 OK (skipped=1)
 ```
 
+真实 `gpt-5.4` E2E 验证：
+
+```text
+脚本：tests/optional_skill_real_e2e.py
+命令环境：
+  GA_RUN_REAL_WORKFLOW_E2E=1
+  GA_REAL_API_CONFIG=native_oai_config
+  GA_REAL_API_EXPECTED_NAME=gpt-native
+  GA_REAL_API_EXPECTED_MODEL=gpt-5.4
+
+结果：
+  passed=true
+  profileOk=true
+  model=gpt-5.4
+  status=succeeded
+  elapsedSeconds=26.06
+  finalWorkflowProgressRef=workflow-progress.json
+  progressExists=true
+  jobStatus=succeeded
+  jobLabel=optional-skill-real-agent
+  toolCalls=[load_skill, no_tool]
+  loadedSkills=[test-driven-development]
+  skillToolCalls=1
+  skillLoadEvents[0].name=test-driven-development
+  skillLoadEvents[0].status=success
+  loadSkillAvailable=true
+  progressContainsSkillContent=false
+  markerFound=true
+```
+
+该 E2E 证明真实 child agent 会按 optional 模式自主调用 `load_skill`，并且 `workflow-progress.json` 能稳定记录 skill 使用摘要，同时不泄露完整 SKILL.md content。
+
 因此阶段三可视为完成。下一步应进入阶段四：`受控 Test Gate 一等化（P1）`，即让测试执行成为 workflow 内部受控 gate，而不是只依赖外部 harness 或 agent 自述。
 
 
