@@ -224,6 +224,29 @@ class WorkflowStoreTest(unittest.TestCase):
                     self.assertEqual("stale", projected.jobs[0].status)
                     events = store.replay_events("wf_test")
                     self.assertEqual("workflow_interrupted", events[-1].event_type)
+    def test_write_workflow_draft_persists_planner_compiler_artifact(self):
+        class Draft:
+            def to_dict(self):
+                return {
+                    "taskText": "调研 workflow",
+                    "classification": {"taskType": "research"},
+                    "plan": {"meta": {"name": "research"}},
+                    "validation": {"ok": True, "issues": []},
+                    "script": "export const meta = {}",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=""))
+
+            draft_ref = store.write_workflow_draft(run, Draft())
+
+            self.assertEqual("workflow-draft.json", draft_ref)
+            data = json.loads((Path(run.artifact_dir) / draft_ref).read_text(encoding="utf-8"))
+            self.assertEqual("research", data["classification"]["taskType"])
+            self.assertEqual({"ok": True, "issues": []}, data["validation"])
+            self.assertIn("export const meta", data["script"])
+
     def test_write_workflow_progress_summarizes_agent_tools_skills_and_capabilities_without_transcript_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

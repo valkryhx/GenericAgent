@@ -146,6 +146,12 @@ class WorkflowStore:
         run.result_ref = result_ref
         return result_ref
 
+    def write_workflow_draft(self, run: WorkflowRun, draft) -> str:
+        draft_ref = "workflow-draft.json"
+        payload = draft.to_dict() if hasattr(draft, "to_dict") else copy.deepcopy(draft)
+        self._write_json(self._run_dir(run) / draft_ref, sanitize(payload))
+        return draft_ref
+
     def write_workflow_progress(self, run: WorkflowRun) -> str:
         progress_ref = "workflow-progress.json"
         progress = {
