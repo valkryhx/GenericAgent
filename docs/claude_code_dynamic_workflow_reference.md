@@ -653,6 +653,34 @@ Claude Code dynamic workflow 的关键不是固定模板库，而是运行时生
 
 因此 GA 下一步应实现 planner/compiler，而不是让用户选择预置模板。
 
+更进一步，Claude Code-style 的动态性很可能主要来自 **prompt-guided orchestration**，而不是代码中穷举所有任务模板。较旧的本地 Claude Code coordinator 源码仍提供旁证：其系统提示把 Claude 定位为 coordinator，要求它调度 workers 完成 research / implementation / verification，并显式写入并行、worker prompt、验证和失败处理策略，例如：
+
+```text
+Parallelism is your superpower.
+Launch independent workers concurrently whenever possible.
+When doing research, cover multiple angles.
+Workers can't see your conversation. Every prompt must be self-contained.
+Always synthesize findings before directing follow-up work.
+```
+
+这说明 Claude Code 的灵活编排能力来自三者结合：
+
+```text
+prompt-level orchestration policy
++ Agent/Workflow primitives
++ runtime / permission / transcript / progress 约束
+```
+
+对 GA 来说，正确方向不是继续堆 deterministic `if taskType then template`，而是：
+
+```text
+Prompt-guided LLMWorkflowPlanner
+→ 输出 WorkflowPlan JSON
+→ validator / repair loop
+→ deterministic renderer
+→ restricted workflow runtime
+```
+
 推荐架构：
 
 ```text
@@ -794,6 +822,38 @@ WorkflowPlan JSON
 ```text
 任务类型 -> phase 形状 -> agent label/prompt -> schema -> failure mode -> 修正建议
 ```
+
+#### 8.4.5 Prompt-guided planner 的下一阶段 TDD 切片
+
+当前 deterministic planner 只应视为 MVP / fallback。下一阶段应测试一个 prompt-guided planner 能根据不同任务生成不同 topology，而不是把所有任务套进固定模板。
+
+必须覆盖四类任务：
+
+1. **Research**
+   - 输入可信度 / 风险调研任务；
+   - 期望生成 Source Discovery、Credibility / Evidence Check、Synthesis；
+   - source discovery 可并行多来源；
+   - synthesis 必须依赖上游结果。
+2. **Review**
+   - 输入安全、性能、测试缺口、回归风险审查任务；
+   - 期望按维度 fan out：security、performance、test-gap、regression；
+   - 后续 verifier / adversarial check 依赖 review findings；
+   - final report 依赖 verified findings。
+3. **Coding**
+   - 输入实现类任务；
+   - 期望生成 `Understand -> Tests -> Implementation -> Verification -> Summary`；
+   - `write-failing-tests` 必须先于 `implement-minimal-code`；
+   - implementation 必须依赖 tests；
+   - tests 与 implementation 不能在同一 independent parallel group；
+   - prompt 必须明确先红灯后绿灯、不提交、运行相关测试；
+   - validator 必须拒绝 `coding_tests_parallel_implementation`；
+   - repair loop 必须能把错误并行结构修成顺序依赖。
+4. **Planning / mixed**
+   - 输入跨多个子系统的规划任务；
+   - 期望生成 Context Discovery、Design Alternatives、Risk Review、Implementation Plan；
+   - 不应直接生成写代码 workflow。
+
+还必须覆盖 repair loop：fake planner 第一次输出未定义依赖、未定义 schema 或 coding 错误并行；validator 返回 issues；repair prompt 带入 issues；第二次输出修复后的 `WorkflowPlan JSON`；超过最大轮次则保存 rejected draft。
 
 ### 8.5 非目标修正
 

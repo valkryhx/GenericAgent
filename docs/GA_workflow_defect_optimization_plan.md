@@ -1330,6 +1330,46 @@ return { scouts, synthesis }
 
 ### 7.3 Planner / Compiler 架构
 
+#### 7.3.0 Prompt-guided planner 是动态性的核心
+
+阶段八的核心不是继续扩充 deterministic 模板，也不是把 `research` / `coding` / `review` 写成更多 `if/else`。Claude Code-style dynamic workflow 更接近：通过强系统提示 / workflow 指令把模型定位为 **planner / orchestrator**，让模型基于当前任务、仓库上下文、可用工具、MCP、skills、风险边界和历史经验，现场生成 task-specific workflow topology。
+
+本地较旧 Claude Code coordinator 源码仍能作为旁证：`coordinatorMode.ts` 中系统提示把 Claude 定义为协调者，明确要求其调度 worker 完成 research / implementation / verification，并写入如下策略：
+
+```text
+Parallelism is your superpower.
+Launch independent workers concurrently whenever possible.
+When doing research, cover multiple angles.
+Workers can't see your conversation. Every prompt must be self-contained.
+Always synthesize findings before directing follow-up work.
+```
+
+这类设计说明“动态性”主要来自 prompt-level orchestration policy：模型被告知可用 primitives、并行边界、验证要求、worker prompt 质量要求和安全限制，然后根据任务语义现场决定拆分方式。GA 不应照搬旧源码的 coordinator 形态，但应复刻这个原则：**提示词驱动动态规划，确定性代码负责验证和编译**。
+
+因此阶段八最终目标应拆成两层：
+
+```text
+Prompt-guided LLMWorkflowPlanner
+→ 输出 WorkflowPlan JSON，不输出 JS
+→ validator / repair loop
+→ deterministic renderer
+→ restricted workflow runtime
+```
+
+当前已实现的 deterministic `WorkflowPlanner` 是最小 MVP / fallback：它证明了 `WorkflowPlan JSON -> validate -> render -> run` 闭环，但还不是最终核心 planner。后续应将其降级为 `FallbackDeterministicPlanner` 或安全默认形状来源；真正核心应是 prompt-guided planner。
+
+prompt-guided planner 的系统提示必须明确：
+
+- 不选择用户可见固定模板；pattern 只能作为 few-shot 示例或 fallback；
+- 根据任务语义决定 phase 数量、agent role、依赖、并行、pipeline、schema、artifacts；
+- read-only research 可并行多视角，但 synthesis 必须消费上游结果；
+- review 应按风险维度 fan out，并对 findings 做验证/反驳；
+- coding 必须遵守 TDD 顺序，不得并行 tests 与 implementation；
+- planning / mixed 任务应先 context discovery 和 design alternatives，不应直接写代码；
+- prompt 必须带入安全边界：不读 `mykey.py` / `mykey.json` / `mcp.json`，不提交，除非用户明确授权；
+- 高风险、external_io、 destructive、真实提交/发布类动作需要 approval gate；
+- validator 报错后最多进行有限轮 repair，仍失败则保存 rejected draft 供复盘。
+
 #### 7.3.1 Classifier
 
 输入：
@@ -1447,7 +1487,7 @@ WorkflowPlan JSON -> export const meta -> phase() -> agent() -> parallel()/pipel
 
 ### 7.4 最小实现切片
 
-第一版不要追求任意任务全自动编排，先实现 deterministic MVP：
+第一版已完成 deterministic MVP，用于证明闭环：
 
 1. `WorkflowPlanner.plan(task_text, context) -> WorkflowDraft`；
 2. 支持少量任务类型分类：
@@ -1459,7 +1499,50 @@ WorkflowPlan JSON -> export const meta -> phase() -> agent() -> parallel()/pipel
 4. validator 检查安全边界和 DAG 形状；
 5. deterministic renderer 生成 workflow script；
 6. 用 fake child runner 验证生成脚本能被 `WorkflowRuntime` 执行；
-7. 生成过程写入 artifact，便于复盘。
+7. 生成过程写入 artifact，便于复盘；
+8. opt-in GLM-5.1 真实 E2E 验证 `planner -> draft -> runtime -> progress` 链路。
+
+下一阶段必须实现 prompt-guided dynamic planner，而不是只把 deterministic planner 接到 UI。推荐 TDD 切片：
+
+1. **LLMWorkflowPlanner contract**
+   - fake planner client 输入 task/context/tool/skill/risk 摘要；
+   - 输出 `WorkflowPlan JSON`；
+   - 不允许输出 JS；
+   - deterministic planner 仅作为 fallback。
+2. **Research 动态拓扑**
+   - 输入可信度/风险调研任务；
+   - 期望生成 `Source Discovery -> Credibility / Evidence Check -> Synthesis`；
+   - discovery 可按来源方向 fan out；
+   - synthesis 依赖上游并使用 `JSON.stringify(...)` 消费结果。
+3. **Review 动态 fan-out + verification**
+   - 输入“全面审查 PR 的安全、性能、测试缺口和回归风险”；
+   - 期望生成 security / performance / test-gap / regression 等并行 review agent；
+   - 后续 verifier / adversarial check 依赖 review；
+   - final report 依赖 verified findings。
+4. **Coding TDD 顺序红线**
+   - 输入实现类任务；
+   - 期望生成 `Understand -> Tests -> Implementation -> Verification -> Summary`；
+   - `write-failing-tests` 必须先于 `implement-minimal-code`；
+   - implementation 必须依赖 tests；
+   - tests 与 implementation 不能在同一 independent parallel group；
+   - prompt 必须明确先红灯后绿灯、不提交、运行相关测试；
+   - validator 必须拒绝 `coding_tests_parallel_implementation`；
+   - repair loop 必须能把错误并行结构改成顺序依赖。
+5. **Planning / mixed 动态拆分**
+   - 输入跨前端/后端/运行时的规划任务；
+   - 期望生成 `Context Discovery -> Design Alternatives -> Risk Review -> Implementation Plan`；
+   - 不应误判成 coding 并直接生成写代码 workflow。
+6. **Validator-guided repair loop**
+   - fake LLM 第一次返回未定义依赖 / 未定义 schema / coding 错误并行；
+   - validator 返回结构化 issues；
+   - repair prompt 带入 issues；
+   - 第二次输出修复后的 plan；
+   - 最多 2-3 轮，失败保存 rejected draft。
+7. **Artifact / replay evidence**
+   - 保存原始 planner prompt 摘要、LLM plan、validator issues、repair attempts、rendered script；
+   - 供后续 replay/learn 从 `journal.jsonl`、agent prompt、tool calls、result summary 中抽取经验。
+
+这一步的目标不是让 planner 一次性支持任意任务，而是证明：同一 prompt-guided planner 能根据 research / review / coding / planning 的任务语义生成不同拓扑，并用 validator/repair 保证安全边界。
 
 ### 7.5 非目标
 
