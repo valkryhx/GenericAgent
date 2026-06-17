@@ -634,7 +634,192 @@ GA 当前 `NativeGPTChildAgentRunner._build_system_prompt()` 会拼接 `build_sk
 
 ---
 
-## 7. 初步结论
+## 7. 最新补充：动态 Workflow Script 生成器设计结论
+
+> 日期：2026-06-17
+> 背景：基于本会话 `workflows/scripts` 与 `subagents/workflows` 的再次只读分析，目标从“模板库”修正为“根据任务语义动态生成 workflow script”。
+
+### 8.1 核心判断
+
+Claude Code dynamic workflow 的关键不是固定模板库，而是运行时生成受限 workflow DSL：
+
+```text
+用户任务
+→ 任务语义理解
+→ 生成 phase/agent/parallel/schema 结构
+→ 渲染为受限 JS workflow script
+→ 运行并记录 progress / transcript / journal
+```
+
+因此 GA 下一步应实现 planner/compiler，而不是让用户选择预置模板。
+
+推荐架构：
+
+```text
+classify
+→ WorkflowPlan JSON
+→ validate
+→ render
+→ execute
+→ replay / learn
+```
+
+### 8.2 本会话脚本证据
+
+再次分析的脚本包括：
+
+```text
+C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\workflows\scripts\claude-code-dynamic-workflow-generation-research-wf_26b3a892-03a.js
+C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\workflows\scripts\ga-dynamic-workflow-feat-plan-wf_f03e5c8d-944.js
+C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\workflows\scripts\p8-parallel-partial-failure-plan-wf_f57e07a1-8fb.js
+C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\workflows\scripts\p8-next-task-discovery-wf_49d884bc-f40.js
+```
+
+共同模式：
+
+- `export const meta` 声明 name / description / phases；
+- `phase()` 表达顺序栅栏；
+- `agent(prompt, { label, phase, schema })` 是最小工作单元；
+- `parallel()` 只用于同一 phase 内互不依赖的分支；
+- `pipeline()` 用于同质列表的逐项处理；
+- schema 作为脚本内常量靠近使用点定义；
+- 后续 phase 经常通过 `JSON.stringify(previousResults)` 消费上游结构化结果；
+- prompt 中显式写入任务边界：只读、不提交、不读敏感配置、不运行真实 API、输出测试入口、返回风险和建议。
+
+### 8.3 subagent 记录证据
+
+再次分析的 subagent 目录：
+
+```text
+C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\subagents\workflows
+```
+
+观察：
+
+- 约 92 个 `wf_*` workflow run；
+- 约 435 个 `agent-*.jsonl`；
+- 约 435 个 `agent-*.meta.json`；
+- 约 92 个 `journal.jsonl`；
+- workflow agent 数量通常为 3-6，最大样本约 15；
+- `journal.jsonl` 通常只记录 `started` / `result`，适合作为轻量 run 索引；
+- `agent-*.jsonl` 才包含完整 prompt、tool_use、tool_result、Skill 调用和 StructuredOutput；
+- `agent-*.meta.json` 当前信息量很少，不能作为主要复盘源。
+
+因此 GA 的 replay/learn 不应只读 meta，而应优先：
+
+```text
+journal.jsonl
+→ agent 首条 user prompt
+→ StructuredOutput / result
+→ tool_use / tool_result / Skill 调用
+```
+
+### 8.4 对 GA 的实现建议
+
+#### 8.4.1 WorkflowPlan JSON 中间表示
+
+不要让模型直接输出可执行 JS。先生成可验证计划：
+
+```json
+{
+  "taskType": "research | coding | review | debugging | planning | mixed",
+  "meta": {
+    "name": "...",
+    "description": "..."
+  },
+  "phases": [
+    {
+      "title": "Collect",
+      "agents": [
+        {
+          "label": "source-search",
+          "prompt": "...",
+          "schemaRef": "SOURCE_SCHEMA",
+          "dependsOn": []
+        }
+      ]
+    }
+  ],
+  "schemas": {},
+  "constraints": ["no_secret_files", "no_git_commit"],
+  "artifacts": []
+}
+```
+
+#### 8.4.2 Validator
+
+渲染前检查：
+
+- phase 顺序；
+- 并行分支独立性；
+- 未定义依赖；
+- 未定义 schema；
+- 禁止 token / forbidden helper；
+- prompt 是否包含必要安全边界；
+- coding 任务是否错误并行 tests 与 implementation；
+- 是否尝试内联 secret 或 transcript；
+- schema failure 是否有 fallback / issue 记录。
+
+#### 8.4.3 Deterministic Renderer
+
+由确定性代码渲染：
+
+```text
+WorkflowPlan JSON
+→ export const meta
+→ phase(...)
+→ agent(...)
+→ parallel(...) / pipeline(...)
+→ return {...}
+```
+
+模型不直接拼接任意 JS，降低安全和可复盘风险。
+
+#### 8.4.4 Replay / Learn
+
+生成和运行过程都应保存：
+
+- 原始任务；
+- classifier 输出；
+- WorkflowPlan JSON；
+- rendered script；
+- validator 结果；
+- workflow-progress.json；
+- journal.jsonl；
+- agents/<job>/transcript.jsonl；
+- fallback / partial failure issue。
+
+后续可从历史 run 抽取：
+
+```text
+任务类型 -> phase 形状 -> agent label/prompt -> schema -> failure mode -> 修正建议
+```
+
+### 8.5 非目标修正
+
+以下不应作为动态 workflow 的核心方向：
+
+- 固定模板库作为主入口；
+- 用户选择 `tdd-python-package` / `deep-research-template`；
+- 模型直接生成自由 JS 并执行；
+- 把 schema / skill / approval 全局硬门禁化；
+- workflow script 直接获得 fs / shell / network / env 能力。
+
+模板或 pattern 可以作为 planner 的安全默认形状和 fallback，但不是产品核心。
+
+### 8.6 与前文旧结论的关系
+
+前文 `role -> skill` / `requiredSkillFailures` 等建议反映的是当时对工程 workflow 可重复性的设想。根据后续决策，当前 GA 阶段三已改为 Claude Code-style optional skill awareness：
+
+```text
+默认可见、默认可用、自主调用、调用可审计、不调用不失败。
+```
+
+因此后续 planner/compiler 应沿用 optional skill 模式：在 prompt 中建议相关 skill，通过 `workflow-progress.json` 复盘实际使用情况，而不是引入 required/preload 作为默认门禁。
+
+---
+
+## 8. 初步结论
 
 Claude Code dynamic workflow 的原始设计中，最值得 GA 借鉴的是：
 

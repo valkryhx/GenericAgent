@@ -28,10 +28,10 @@ GA workflow runtime 底座基本可用；主要缺陷在 workflow 产品层、�
 ```text
 P0：先校正 workflow child agent 工具继承模型，确保真正承担任务的 agent 不被人为降级
 P0：补齐可观测性和安全边界，避免继续黑盒测试
-P1：把 skill 和 test gate 做成 workflow 一等能力
-P2：实现 TDD / repair loop 模板，修复真实 E2E 暴露的核心方法论缺陷
-P3：完善 artifact、Claude Code-style 高置信 secret hygiene、schema 降级和 UI 复盘能力
-P4：沉淀模板库与真实 API 回归矩阵
+P1：固化 Claude Code-style optional skill awareness，并把 skill 使用写入 progress
+P2：完善 artifact、Claude Code-style 高置信 secret hygiene、schema 降级和错误恢复
+P3：实现动态 Workflow Planner / Compiler，让 GA 根据任务语义生成受限 workflow script
+P4：建立真实 API 回归矩阵，并把常见 pattern 作为 planner 的可选兜底形状沉淀
 ```
 
 ---
@@ -1267,66 +1267,262 @@ schemaFallback=true
 
 ---
 
-## 8. 阶段八：工程 Workflow 模板库与 UI 复盘（P3）
+## 8. 阶段八：动态 Workflow Planner / Compiler（P3）
 
 ### 7.1 目标
 
-把底层 DSL 封装成用户真正会用、且默认正确的工程 workflow 模板。
+实现从自然语言任务动态生成 workflow script 的 planner/compiler，而不是让用户选择固定模板或手写裸 JS。
 
-### 7.2 模板优先级
-
-第一批模板建议：
-
-| 优先级 | 模板 | 目的 |
-|---|---|---|
-| P1 | `tdd-python-package` | 修复当前真实 E2E 暴露的核心问题 |
-| P1 | `bugfix-with-regression-test` | 真实维护场景最常见 |
-| P2 | `review-repair-retest` | 将 review 变成闭环 |
-| P2 | `research-then-implement` | 防止没调研就写代码 |
-| P3 | `multi-agent-code-review` | 多视角审查并综合 |
-
-### 7.3 UI / CLI 展示
-
-在 CLI / Ink UI 中展示：
+核心链路：
 
 ```text
-Phase: Tests
-  agent_2 tests succeeded
-  skills: using-superpowers, test-driven-development
-  last tool: file_write test_url_utils.py
-
-Gate: Red
-  passed=false expected=false duration=1.2s
-
-Phase: Repair Loop
-  repair-1 succeeded
-  gate passed=true
+用户任务
+→ task classify
+→ WorkflowPlan JSON
+→ validate
+→ render 受限 workflow script
+→ approval / draft
+→ execute
+→ replay / learn
 ```
 
-### 7.4 主要任务
+这才是 GA workflow 接近 Claude Code dynamic workflow 的关键能力：workflow 不是预置模板，而是由任务语义和上下文动态生成。
 
-- workflow 模板列表命令；
-- 模板参数说明；
-- workflow progress UI；
-- skill usage summary UI；
-- test gate result UI；
-- failure classification UI。
+### 7.2 Claude Code 本会话证据
 
-### 7.5 验收标准
+本会话 `C:\Users\drago\.claude\projects\D--git-codes-GenericAgent\e7319f01-e60a-4cd0-83cd-d4b15df2de82\workflows\scripts` 下的脚本显示：Claude Code dynamic workflow 是“运行时脚本 DSL”，不是静态配置。
 
-- 用户能选择模板而不是手写裸 JS workflow；
-- UI 能看出每个 agent 的 role、skill、gate 结果；
-- workflow 失败时能快速定位是 skill 缺失、test gate、provider anomaly 还是 agent 失败。
+典型结构：
+
+```js
+export const meta = {
+  name: '...',
+  description: '...',
+  phases: [{ title: 'Collect' }, { title: 'Synthesize' }]
+}
+
+phase('Collect')
+const scouts = await parallel([
+  () => agent('...', { label: 'docs', phase: 'Collect', schema: DOC_SCHEMA }),
+  () => agent('...', { label: 'code', phase: 'Collect', schema: CODE_SCHEMA })
+])
+
+phase('Synthesize')
+const synthesis = await agent(`基于上游结果：${JSON.stringify(scouts)}`, {
+  label: 'synthesis',
+  phase: 'Synthesize',
+  schema: SYNTHESIS_SCHEMA
+})
+
+return { scouts, synthesis }
+```
+
+观察到的关键模式：
+
+- `export const meta` 提供 UI/approval 可展示的 workflow 名称、描述和阶段；
+- `phase()` 是顺序执行的阶段栅栏；
+- `agent()` 是最小执行单元，必须带 `label`，复杂任务带 `schema`；
+- `parallel()` 只用于同 phase 内互不依赖的子任务；
+- `pipeline()` 用于同质列表逐项处理；
+- 上游结果通过 `JSON.stringify(...)` 显式传给后续综合/验证 agent；
+- prompt 中会编译进任务边界，例如只读、不提交、不读 `mykey.py` / `mykey.json` / `mcp.json`、是否允许真实 API、输出格式和风险要求；
+- 子智能体 transcript 和 `journal.jsonl` 是后续 replay/learn 的证据来源。
+
+### 7.3 Planner / Compiler 架构
+
+#### 7.3.1 Classifier
+
+输入：
+
+```text
+用户任务
+当前仓库上下文
+git 状态
+可用 tools / MCP / skills
+用户安全约束
+历史 workflow run 摘要
+```
+
+输出：
+
+```json
+{
+  "taskType": "research | coding | review | debugging | planning | mixed",
+  "readWriteMode": "read_only | may_write | external_io",
+  "needsMcp": true,
+  "needsCodeChange": false,
+  "needsVerification": true,
+  "riskLevel": "low | medium | high",
+  "clarifyingQuestions": [],
+  "constraints": ["不要读取 mykey.py", "不要提交"]
+}
+```
+
+#### 7.3.2 WorkflowPlan JSON
+
+Planner 不直接输出自由 JS，而是先输出结构化中间表示：
+
+```json
+{
+  "meta": {
+    "name": "research-chip-rumor",
+    "description": "Research semiconductor market rumor"
+  },
+  "phases": [
+    {
+      "title": "Source Discovery",
+      "agents": [
+        {
+          "label": "source-search",
+          "prompt": "搜索并列出最早和最可信公开来源...",
+          "schemaRef": "SOURCE_SCHEMA"
+        }
+      ]
+    },
+    {
+      "title": "Synthesis",
+      "agents": [
+        {
+          "label": "report-writer",
+          "prompt": "基于上游 sources 写结构化中文报告...",
+          "dependsOn": ["source-search"]
+        }
+      ]
+    }
+  ],
+  "schemas": {
+    "SOURCE_SCHEMA": {
+      "type": "object",
+      "required": ["sources", "claims", "risks"]
+    }
+  },
+  "artifacts": ["sources", "synthesis"],
+  "constraints": ["no_secret_files", "no_git_commit"]
+}
+```
+
+#### 7.3.3 Validator
+
+渲染前必须静态检查：
+
+- phase 是否有序；
+- `parallel` 是否只包含互不依赖节点；
+- 是否存在未定义依赖；
+- 是否引用未定义 schema；
+- 是否试图使用禁止 helper；
+- prompt 是否带入必要安全边界；
+- coding 任务是否错误并行 tests / implementation；
+- 是否尝试把 secret / transcript 全量写入 artifact；
+- schema 失败是否有 fallback / issue 记录。
+
+#### 7.3.4 Renderer
+
+Renderer 由确定性代码把 `WorkflowPlan JSON` 转成受限 workflow script：
+
+```text
+WorkflowPlan JSON -> export const meta -> phase() -> agent() -> parallel()/pipeline() -> return {...}
+```
+
+模型不直接拼接任意可执行 JS。这样可以让 GA 在执行前审计 plan，并把风险收敛在 renderer 和 validator。
+
+#### 7.3.5 Execute / Replay / Learn
+
+执行后保留：
+
+- 原始任务；
+- classifier 输出；
+- WorkflowPlan JSON；
+- rendered script；
+- validator 结果；
+- `workflow-progress.json`；
+- `journal.jsonl`；
+- `agents/<job>/transcript.jsonl`；
+- schema/fallback/partial failure issue。
+
+后续 planner 可以从历史 run 中学习：
+
+```text
+任务类型 -> phase 形状 -> agent label/prompt -> schema -> failure mode -> 修正建议
+```
+
+### 7.4 最小实现切片
+
+第一版不要追求任意任务全自动编排，先实现 deterministic MVP：
+
+1. `WorkflowPlanner.plan(task_text, context) -> WorkflowDraft`；
+2. 支持少量任务类型分类：
+   - research
+   - coding
+   - review
+   - planning
+3. 生成 `WorkflowPlan JSON`；
+4. validator 检查安全边界和 DAG 形状；
+5. deterministic renderer 生成 workflow script；
+6. 用 fake child runner 验证生成脚本能被 `WorkflowRuntime` 执行；
+7. 生成过程写入 artifact，便于复盘。
+
+### 7.5 非目标
+
+第一版不做：
+
+- 不做固定模板库作为主入口；
+- 不让用户选择 `tdd-python-package` / `deep-research-template` 之类模板；
+- 不让模型直接输出自由 JS 并执行；
+- 不在 Test Gate 完成前大规模开放 coding workflow 自动执行；
+- 不把 schema / skill / approval 全局硬门禁化；
+- 不让 workflow script 直接访问 fs / shell / network / env / import / require / process。
+
+模板或 pattern 只能作为 planner 的安全默认形状或 fallback，而不是产品核心。
+
+### 7.6 涉及文件
+
+可能新增：
+
+```text
+workflow_planner.py
+workflow_plan_models.py
+workflow_plan_renderer.py
+workflow_plan_validator.py
+tests/test_workflow_planner.py
+tests/test_workflow_plan_renderer.py
+tests/test_workflow_plan_validator.py
+```
+
+可能改动：
+
+```text
+workflow_controller.py
+workflow_runtime.py
+frontends/ink_bridge.py
+frontends/ink-ui/src/*
+docs/GA_workflow_defect_optimization_plan.md
+```
+
+### 7.7 验收标准
+
+- 输入 research 类任务能生成包含 Source Discovery / Synthesis 等阶段的 workflow draft；
+- 输入 coding 类任务能生成理解 / 修改 / 验证顺序正确的 workflow draft，且不会并行 tests 与 implementation；
+- 生成 script 含 `export const meta`、`phase()`、`agent()`、`label`；
+- validator 能拒绝未定义依赖、非法 helper、禁止 token、明显错误并行结构；
+- rendered script 可由 `WorkflowRuntime` + fake runner 执行；
+- draft / plan / script / validator result 可被保存和复盘；
+- 生成过程不读取、不打印、不提交真实密钥。
 
 ---
 
 ## 9. 阶段九：真实 API 回归矩阵与质量门禁（P3/P4）
 
-### 8.1 目标
+### 9.1 目标
 
 建立稳定的 opt-in 真实 API 回归体系，持续验证 GA workflow 是否真的能完成工程任务。
 
-### 8.2 回归层级
+### 9.1 执行顺序建议
+
+1. 先实现 `WorkflowPlanner` / `WorkflowPlan` / renderer / validator 的动态生成闭环；
+2. 再把现有受控 gate（例如 unittest、review、research 产物校验）作为 planner 可用的 primitives；
+3. 最后才考虑把常见 pattern 包装成可复用入口或 UI 快捷方式，但它们始终只是 planner 的输出形状，不是主入口。
+
+### 9.2 回归层级
 
 | Level | 名称 | Provider | MCP | 目标 |
 |---|---|---|---|---|
@@ -1336,7 +1532,7 @@ Phase: Repair Loop
 | L2 | real gpt-5.5 + MCP research report | 是 | 是 | 验证 MCP + report workflow |
 | L3 | real bugfix workflow | 是 | 可选 | 验证真实 repair/retest 闭环 |
 
-### 8.3 真实 API 执行约束
+### 9.3 真实 API 执行约束
 
 必须继续保持：
 
@@ -1354,7 +1550,7 @@ GA_RUN_REAL_MCP_E2E=1  # 仅 MCP 测试需要
 - 不把 secret 放入命令行参数；
 - `secretScan.confirmed=[]` 才能通过。
 
-### 8.4 质量门禁
+### 9.4 质量门禁
 
 真实 E2E 通过标准：
 
@@ -1374,7 +1570,7 @@ transcript not inlined in final result
 marker found
 ```
 
-### 8.5 验收标准
+### 9.5 验收标准
 
 - 真实 E2E 可以按 opt-in 手动运行；
 - 失败报告能区分 runtime / provider / workflow-methodology / generated-code-quality；
@@ -1382,7 +1578,7 @@ marker found
 
 ---
 
-## 9. 推荐实施顺序
+## 10. 推荐实施顺序
 
 ### Milestone A：工具继承模型校正
 
@@ -1452,20 +1648,20 @@ marker found
 
 完成后收益：真实工作流更稳、更适合长期使用。
 
-### Milestone G：模板库与真实回归矩阵
+### Milestone G：动态 Planner / Compiler 与真实回归矩阵
 
 包含：
 
-1. `bugfix-with-regression-test`；
-2. `review-repair-retest`；
-3. `research-then-implement`；
+1. `WorkflowPlanner.plan(task_text, context) -> WorkflowDraft`；
+2. `WorkflowPlan JSON` 中间表示；
+3. deterministic renderer + validator；
 4. opt-in real API regression matrix。
 
-完成后收益：GA workflow 从单个实验能力升级为工程产品能力。
+完成后收益：GA workflow 从“能执行手写 workflow script”升级为“能根据任务语义动态生成、审计并执行 workflow”。
 
 ---
 
-## 10. 不建议优先做的事
+## 11. 不建议优先做的事
 
 ### 10.1 不建议先扩展更多底层 DSL 语法
 
@@ -1485,37 +1681,34 @@ marker found
 
 ---
 
-## 11. 最小可行版本（MVP）定义
+## 12. 最小可行版本（MVP）定义
 
 如果只做最小闭环，建议 MVP 包含：
 
 ```text
 1. workflow child agent 默认继承完整工具能力，不再被真实 E2E 降级成 file_read/file_write-only
-2. Claude Code-style optional skill awareness：默认可见、按需调用、调用可审计
-3. runPythonUnittest(workspace)
-4. tdd-python-package template
-5. repair loop 最多 2 轮
-6. workflowProgress + skillUsageSummary
-7. L1.1 真实 gpt-5.5 TDD sandbox E2E
+2. workflowProgress + optional skill usage summary 可复盘
+3. WorkflowPlanner 能根据自然语言任务生成 WorkflowPlan JSON
+4. renderer 能把 WorkflowPlan JSON 转成受限 workflow script
+5. validator 能拒绝非法 helper、未定义依赖和明显错误并行结构
+6. 生成脚本可由 WorkflowRuntime + fake runner 执行
+7. 至少一个真实 gpt workflow E2E 验证动态生成链路
 ```
 
 MVP 完成的判断标准：
 
 ```text
-GA 可以用真实 gpt-5.5 子智能体，在 sandbox 中按 TDD 顺序：
-先写 contract，
-再写测试，
-确认红灯，
-再写实现，
-确认绿灯，
-必要时 repair，
-最后 review / final verification，
-并且 artifact 能证明 optional skill 使用情况与 MCP/tool 能力真实参与了流程。
+GA 可以根据用户自然语言任务动态生成受限 workflow script，并在批准后运行：
+先分类任务，
+再生成 WorkflowPlan JSON，
+再通过 validator 检查安全与依赖，
+再由 renderer 输出 `export const meta` / `phase()` / `agent()` / `parallel()` / `pipeline()` 组成的脚本，
+执行后 artifact 能证明 progress、optional skill 使用情况、MCP/tool 能力和中间 agent 结果真实参与了流程。
 ```
 
 ---
 
-## 12. 最终目标状态
+## 13. 最终目标状态
 
 完成上述阶段后，GA workflow 应具备以下特征：
 
