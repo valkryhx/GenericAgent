@@ -1684,7 +1684,157 @@ python tests/prompt_guided_planner_real_child_e2e.py
 
 注意：真实 provider 过程中出现 HTTP 503 / ReadTimeout retry，但最终成功。该类高成本测试耗时约 21 分钟，应保持 opt-in，不进入默认 unittest。
 
-### 7.5 非目标
+### 7.4.4 下一步：Planner control-plane integration / auto-approved planned run
+
+当前 prompt-guided planner 已经证明三层能力：
+
+1. `LLMWorkflowPlanner` 能生成、修复、拒绝或 fallback `WorkflowPlan JSON`；
+2. 真实 GLM-5.1 planner 能按 research / review / coding / planning/mixed 任务生成不同 topology；
+3. 真实 GLM-5.1 child agents 能继承工具能力并执行 workflow steps。
+
+下一步不应优先做 Ink UI，也不应继续只增加脚本式 E2E，而应把 planner 收进正式 control-plane：
+
+```text
+WorkflowController.create_planned_run(...)
+```
+
+推荐 API：
+
+```python
+WorkflowController.create_planned_run(
+    *,
+    session_id: str,
+    task_text: str,
+    planner,
+    context: dict | None = None,
+    auto_approve: bool = True,
+) -> WorkflowRun
+```
+
+默认应 `auto_approve=True`：当用户已经明确要求使用 workflow 执行任务时，planner 生成的 draft 不应再要求二次人工审批。但 draft artifact 仍必须保存，因为它是审计 / replay / learn 的证据。
+
+目标流程：
+
+```text
+task_text
+→ planner.plan(task_text, context)
+→ WorkflowRun(script=draft.script)
+→ WorkflowStore.write_workflow_draft(run, draft)
+→ run.metadata.workflowDraftRef = "workflow-draft.json"
+→ run.metadata.plannerMode = draft.context.plannerMode
+→ if draft.validation.ok and auto_approve:
+      run.status = "running"
+      journal: workflow_planned, workflow_started
+  elif draft.validation.ok and not auto_approve:
+      run.status = "awaiting_approval"
+      journal: workflow_planned, workflow_approval_requested
+  else:
+      run.status = "failed"
+      journal: workflow_planned, workflow_plan_rejected
+```
+
+TDD 切片：
+
+1. `test_create_planned_run_auto_approves_valid_draft`
+   - fake planner 返回 valid draft；
+   - run.status == `running`；
+   - `workflow-draft.json` 存在；
+   - metadata 包含 `workflowDraftRef` / `plannerMode`；
+   - journal 包含 `workflow_planned` / `workflow_started`。
+2. `test_create_planned_run_can_request_approval_when_auto_approve_false`
+   - run.status == `awaiting_approval`；
+   - journal 包含 `workflow_planned` / `workflow_approval_requested`；
+   - 不启动 runtime。
+3. `test_create_planned_run_records_rejected_draft_without_running`
+   - planner 返回 validation ok false；
+   - run.status == `failed`；
+   - `workflow-draft.json` 仍存在；
+   - run.script 为空或不可运行；
+   - journal 包含 `workflow_plan_rejected`。
+4. `test_create_planned_run_records_fallback_mode`
+   - planner 返回 fallback draft；
+   - metadata / draft validation 记录 `fallback_deterministic`。
+5. `test_create_planned_run_script_executes_with_fake_runtime`
+   - controller 生成 running run；
+   - `WorkflowRuntime + FakeChildAgentRunner` 能执行该 run。
+
+后续顺序：
+
+```text
+1. Controller planned run API
+2. Controller + runtime fake integration
+3. Ink bridge experimental command
+4. Ink UI 展示 generated draft / plannerMode / validation issues
+5. 风险 gating：high risk / external_io / destructive / git commit / deploy 时 auto_approve=False
+```
+
+### 7.4.5 已完成：Controller planned run API 与 GLM-5.1 真实自测
+
+本切片已按 TDD 完成 `WorkflowController.create_planned_run(...)` 最小实现，并通过真实 GLM-5.1 自测。
+
+实现行为：
+
+```text
+task_text
+→ planner.plan(task_text, context)
+→ create WorkflowRun(script=draft.script)
+→ write workflow-draft.json
+→ metadata.workflowDraftRef = "workflow-draft.json"
+→ metadata.plannerMode = prompt_guided / fallback_deterministic / deterministic
+→ metadata.workflowTaskType = draft.classification.taskType
+→ journal: workflow_planned
+→ valid + auto_approve=True:
+      status = running
+      journal: workflow_started
+→ valid + auto_approve=False:
+      status = awaiting_approval
+      journal: workflow_approval_requested
+→ invalid/rejected:
+      status = failed
+      error = workflow_plan_rejected
+      journal: workflow_plan_rejected
+```
+
+新增测试：
+
+```text
+tests/test_workflow_controller.py::test_create_planned_run_auto_approves_valid_draft
+tests/test_workflow_controller.py::test_create_planned_run_can_request_approval_when_auto_approve_false
+tests/test_workflow_controller.py::test_create_planned_run_records_rejected_draft_without_running
+tests/test_workflow_controller.py::test_create_planned_run_records_fallback_mode
+tests/test_workflow_controller.py::test_create_planned_run_script_executes_with_fake_runtime
+```
+
+验证命令：
+
+```bash
+python -m unittest tests.test_workflow_controller
+python -m unittest tests.test_workflow_controller tests.test_workflow_planner_compiler tests.test_workflow_prompt_guided_planner tests.test_workflow_plan_validator tests.test_workflow_store tests.test_workflow_integration tests.test_workflow_runtime tests.test_workflow_scheduler
+```
+
+结果：
+
+```text
+Ran 11 tests ... OK
+Ran 102 tests ... OK
+```
+
+真实 GLM-5.1 自测结果：
+
+1. `tests/prompt_guided_planner_real_e2e.py`
+   - `configName`: `native_oai_config`
+   - `model`: `z.ai/glm-5.1`
+   - `passed`: true
+   - `issues`: []
+   - 覆盖 research / review / coding / planning-mixed / fallback。
+2. Controller planned run E2E
+   - 真实 GLM-5.1 生成 coding planned run：`Understand -> Write Failing Tests -> Implementation -> Verification`，4 jobs succeeded；
+   - 真实 GLM-5.1 生成 review planned run：状态流 / journal / draft artifact / rejected plan 分维度 fan-out，再 synthesis，5 jobs succeeded；
+   - 两个场景均自动进入 `running`，journal 前缀均为 `workflow_planned`, `workflow_started`；
+   - metadata 均包含 `plannerMode=prompt_guided`、`workflowDraftRef=workflow-draft.json`、`workflowTaskType`。
+
+注意：真实 API 测试仍保持 opt-in，不进入默认 unittest；测试过程不读取、不打印、不提交真实密钥文件或真实 API artifacts。
+
 
 第一版不做：
 

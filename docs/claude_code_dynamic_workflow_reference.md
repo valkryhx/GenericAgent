@@ -925,7 +925,67 @@ GLM-5.1 opt-in 真实矩阵 E2E 已通过：
 
 合计 8 个真实 GLM-5.1 child jobs、41 次工具调用，`workflow-progress.json` 记录了每个 agent 的 `toolCalls`、状态和 `resultPreview`。这证明 GA 已经跑通：真实 prompt-guided planner 生成 topology，真实 child agents 继承工具能力并分步骤执行 workflow。
 
-### 8.5 非目标修正
+#### 8.4.7 下一步：control-plane 接入，而不是先做 UI
+
+在 planner 与真实 child agents 均通过 E2E 后，下一步应把 planner 从测试脚本接入正式控制面：
+
+```text
+WorkflowController.create_planned_run(...)
+```
+
+而不是优先接 Ink UI。原因是：controller 是 workflow 的生命周期和 journal/artifact 所有者；Ink 只是前端入口。若先接 UI，容易把 planner/run/draft 持久化逻辑复制到 bridge 层。
+
+建议行为：
+
+```text
+planner.plan(task_text, context)
+→ create WorkflowRun(script=draft.script)
+→ write workflow-draft.json
+→ metadata.workflowDraftRef / plannerMode
+→ auto_approve=True 时直接 running + workflow_started
+→ auto_approve=False 时 awaiting_approval
+→ invalid/rejected draft 时 failed + workflow_plan_rejected
+```
+
+默认应 auto-approved：用户明确要求 workflow 执行时，不应再二次审批；但 draft artifact 必须保留，作为审计、replay 和后续 learn 的证据。后续再为 high-risk / external_io / destructive / git commit / deploy 等场景引入 approval gate。
+
+#### 8.4.8 已完成：control-plane planned run 切片
+
+已实现 `WorkflowController.create_planned_run(...)`，使 prompt-guided planner 不再只停留在测试脚本中，而是进入正式 workflow control-plane。
+
+已落地行为：
+
+```text
+planner.plan(task_text, context)
+→ WorkflowRun(script=draft.script)
+→ write workflow-draft.json
+→ metadata.workflowDraftRef / plannerMode / workflowTaskType
+→ workflow_planned
+→ auto_approve=True: running + workflow_started
+→ auto_approve=False: awaiting_approval + workflow_approval_requested
+→ invalid/rejected draft: failed + workflow_plan_rejected
+```
+
+这与 Claude Code-style dynamic workflow 的关键点一致：planner 产生的 draft/run/topology 是可审计 artifact，但默认执行路径不应被额外 UI 审批阻断；是否需要人工 gate 应由风险策略决定，而不是所有 generated draft 默认卡住。
+
+TDD 与回归：
+
+```text
+python -m unittest tests.test_workflow_controller
+Ran 11 tests ... OK
+
+python -m unittest tests.test_workflow_controller tests.test_workflow_planner_compiler tests.test_workflow_prompt_guided_planner tests.test_workflow_plan_validator tests.test_workflow_store tests.test_workflow_integration tests.test_workflow_runtime tests.test_workflow_scheduler
+Ran 102 tests ... OK
+```
+
+真实 GLM-5.1 自测显示：
+
+- Prompt-guided planner 仍能按 research / review / coding / planning-mixed 生成不同 topology；
+- `create_planned_run(...)` 能接住真实 GLM-5.1 draft；
+- coding planned run 自动进入 `running`，并生成 `Understand -> Write Failing Tests -> Implementation -> Verification`；
+- review planned run 自动进入 `running`，并按状态流、journal、draft artifact、rejected plan 分维度 fan-out；
+- 两类 planned run 均保留 `workflow-draft.json`，metadata 记录 `plannerMode=prompt_guided`。
+
 
 以下不应作为动态 workflow 的核心方向：
 
