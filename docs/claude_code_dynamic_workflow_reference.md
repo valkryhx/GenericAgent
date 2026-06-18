@@ -905,6 +905,26 @@ GLM-5.1 opt-in 真实矩阵 E2E 已通过：
 
 这次 E2E 的重点是验证“真实 LLM planner + 真实 GA workflow runtime”，child agent 端使用 `FakeChildAgentRunner` 控制成本。结论是：prompt-level orchestration policy 已能驱动 GLM-5.1 按任务现场生成不同计划，且 GA 能验证、编译并分阶段调度多个 agent job。
 
+补充真实 child agents E2E：随后用同一 `z.ai/glm-5.1` 同时作为 planner 和 child agent 后端，运行 `tests/prompt_guided_planner_real_child_e2e.py`，验证真实 subagent 使用工具执行 workflow steps：
+
+```json
+{
+  "passed": true,
+  "issues": [],
+  "model": "z.ai/glm-5.1",
+  "plannerCallCount": 2
+}
+```
+
+该测试使用 `NativeGPTChildAgentRunner(config_name="native_oai_config", enable_tools=True)`，允许 child agents 使用安全只读工具读取指定代码/文档，不允许读取 `mykey.py` / `mykey.json` / `mcp.json`、修改文件或提交。
+
+| 场景 | 生成 phases | 真实 child agents | 工具调用 | runtime 结果 |
+|---|---|---|---|---|
+| prompt planner code review | `Dimension Fan-Out: Correctness / TDD Sequence / Secret Hygiene` -> `Synthesis: Consolidate Cross-Dimension Findings` | `correctness-reviewer`, `tdd-sequence-reviewer`, `secret-hygiene-reviewer`, `findings-synthesizer` | 23 次，含 `file_read`, `code_run`, `no_tool` | 4 jobs succeeded |
+| docs/code consistency research | `Parallel Document & Code Reading` -> `Synthesis and Gap Analysis` | `read-defect-optimization-doc`, `read-dynamic-workflow-reference-doc`, `read-workflow-planner-code`, `doc-code-gap-analyzer` | 18 次，含 `file_read`, `code_run`, `no_tool` | 4 jobs succeeded |
+
+合计 8 个真实 GLM-5.1 child jobs、41 次工具调用，`workflow-progress.json` 记录了每个 agent 的 `toolCalls`、状态和 `resultPreview`。这证明 GA 已经跑通：真实 prompt-guided planner 生成 topology，真实 child agents 继承工具能力并分步骤执行 workflow。
+
 ### 8.5 非目标修正
 
 以下不应作为动态 workflow 的核心方向：

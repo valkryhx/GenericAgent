@@ -1640,6 +1640,50 @@ python tests/prompt_guided_planner_real_e2e.py
 
 结论：prompt-level orchestration policy 已能让真实 GLM-5.1 根据不同任务现场生成不同 workflow topology；GA 能将其验证、编译并通过 workflow runtime 分阶段、多 agent 执行。这证明 prompt-guided planner 是 GA workflow 的可行核心方向。
 
+### 7.4.3 GLM-5.1 真实 planner + 真实 child agents + 工具调用 E2E（2026-06-18）
+
+进一步使用真实 GLM-5.1 同时作为 planner 和 workflow child agent 后端，验证端到端执行能力：
+
+```powershell
+$env:GA_RUN_REAL_PROMPT_PLANNER_REAL_CHILD_E2E = '1'
+$env:GA_REAL_API_CONFIG = 'native_oai_config'
+$env:GA_REAL_API_EXPECTED_NAME = ''
+$env:GA_REAL_API_EXPECTED_MODEL = 'z.ai/glm-5.1'
+python tests/prompt_guided_planner_real_child_e2e.py
+```
+
+结果：
+
+```json
+{
+  "passed": true,
+  "issues": [],
+  "model": "z.ai/glm-5.1",
+  "plannerCallCount": 2
+}
+```
+
+该 E2E 与 7.4.2 的区别是：child agent 端不再使用 fake runner，而是使用真实 `NativeGPTChildAgentRunner(config_name="native_oai_config", enable_tools=True)`。测试允许 child agents 使用安全只读工具读取任务指定文件，禁止读取 `mykey.py` / `mykey.json` / `mcp.json`、禁止修改文件和提交。
+
+两个真实仓库场景通过：
+
+1. **Prompt planner 代码 review**
+   - 任务：审查 `workflow_planner.py`、`tests/test_workflow_prompt_guided_planner.py`、`tests/prompt_guided_planner_real_e2e.py`；
+   - phases：`Dimension Fan-Out: Correctness / TDD Sequence / Secret Hygiene -> Synthesis: Consolidate Cross-Dimension Findings`；
+   - agents：`correctness-reviewer`、`tdd-sequence-reviewer`、`secret-hygiene-reviewer`、`findings-synthesizer`；
+   - runtime jobs：4 个真实 GLM-5.1 child jobs，全部 succeeded；
+   - tool calls：23 次，包含 `file_read`、`code_run`、`no_tool`。
+2. **文档/代码一致性 research**
+   - 任务：读取 `docs/GA_workflow_defect_optimization_plan.md`、`docs/claude_code_dynamic_workflow_reference.md`、`workflow_planner.py`，分析 Prompt-guided planner 文档与代码是否一致；
+   - phases：`Parallel Document & Code Reading -> Synthesis and Gap Analysis`；
+   - agents：`read-defect-optimization-doc`、`read-dynamic-workflow-reference-doc`、`read-workflow-planner-code`、`doc-code-gap-analyzer`；
+   - runtime jobs：4 个真实 GLM-5.1 child jobs，全部 succeeded；
+   - tool calls：18 次，包含 `file_read`、`code_run`、`no_tool`。
+
+合计：8 个真实 child jobs、41 次工具调用，均由 `workflow-progress.json` 记录 `toolCalls` 和 `resultPreview`。这证明 GA 的 prompt-guided dynamic workflow 不仅能让真实 LLM 生成 workflow topology，也能让真实 child agents 继承工具能力并执行具体 workflow steps。
+
+注意：真实 provider 过程中出现 HTTP 503 / ReadTimeout retry，但最终成功。该类高成本测试耗时约 21 分钟，应保持 opt-in，不进入默认 unittest。
+
 ### 7.5 非目标
 
 第一版不做：
