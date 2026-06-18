@@ -1544,6 +1544,102 @@ WorkflowPlan JSON -> export const meta -> phase() -> agent() -> parallel()/pipel
 
 这一步的目标不是让 planner 一次性支持任意任务，而是证明：同一 prompt-guided planner 能根据 research / review / coding / planning 的任务语义生成不同拓扑，并用 validator/repair 保证安全边界。
 
+### 7.4.1 Prompt-guided planner 实现进度（2026-06-18）
+
+本阶段已按 TDD 完成 prompt-guided planner 的最小可运行切片：
+
+1. 新增 `LLMWorkflowPlanner(client=..., fallback=..., max_repair_attempts=...)`；
+2. planner client contract 固定为 `complete(messages) -> WorkflowPlan dict | JSON string`；
+3. planner prompt 明确要求：
+   - 只输出 `WorkflowPlan JSON`；
+   - 不输出 JS；
+   - `phases` 必须非空；
+   - 使用 `classificationHint` 辅助区分 research / review / coding / planning / mixed；
+   - review 按安全、性能、测试缺口、回归风险等维度 fan out；
+   - coding 遵守 `Understand -> Tests -> Implementation -> Verification`，禁止 tests 与 implementation 并行；
+   - research 可多来源并行，并包含 credibility / evidence 检查；
+   - planning / mixed 先做 context discovery / design alternatives / risk review，不直接写代码；
+   - agent prompt 必须包含不读 `mykey.py` / `mykey.json` / `mcp.json`、不提交等安全边界。
+4. validator 失败时会把 `validatorIssues` 和 `previousPlan` 注入 repair prompt；
+5. repair 成功后渲染为受限 workflow script；
+6. planner client 异常时 fallback 到 deterministic `WorkflowPlanner`，并在 draft 中记录 `plannerMode=fallback_deterministic`；
+7. repair 超限仍失败时返回 `prompt_guided_rejected` draft，`script=""`，保留 invalid plan 与 validation issues 供复盘，不再静默 fallback 掩盖坏计划；
+8. rejected draft 可通过 `WorkflowStore.write_workflow_draft()` 持久化 validation evidence。
+
+新增测试：
+
+```text
+tests/test_workflow_prompt_guided_planner.py
+tests/prompt_guided_planner_real_e2e.py
+```
+
+单元/集成测试覆盖：
+
+- review 多维 fan-out + validation + synthesis；
+- coding 错误并行经 repair 修正；
+- client 故障 fallback；
+- planning / mixed 不直接写代码；
+- research 多来源 + credibility topology；
+- generated script 可由 `WorkflowRuntime + FakeChildAgentRunner` 执行；
+- rejected draft 持久化 validation evidence。
+
+相关测试通过：
+
+```text
+python -m unittest tests.test_workflow_prompt_guided_planner tests.test_workflow_planner_compiler tests.test_workflow_plan_validator tests.test_workflow_store
+# Ran 29 tests ... OK
+```
+
+### 7.4.2 GLM-5.1 真实 Prompt-guided planner 矩阵 E2E（2026-06-18）
+
+使用 `mykey.py` 中 `native_oai_config` 指向的 `z.ai/glm-5.1` 进行了 opt-in 真实 planner E2E：
+
+```powershell
+$env:GA_RUN_REAL_PROMPT_PLANNER_E2E = '1'
+$env:GA_REAL_API_CONFIG = 'native_oai_config'
+$env:GA_REAL_API_EXPECTED_NAME = ''
+$env:GA_REAL_API_EXPECTED_MODEL = 'z.ai/glm-5.1'
+python tests/prompt_guided_planner_real_e2e.py
+```
+
+结果：
+
+```json
+{
+  "passed": true,
+  "issues": [],
+  "model": "z.ai/glm-5.1",
+  "plannerCallCount": 6
+}
+```
+
+该 E2E 验证的是：planner 端真实 GLM-5.1 生成 `WorkflowPlan JSON`，GA validator / renderer / runtime 真实执行；child agent 端使用 `FakeChildAgentRunner`，避免一次矩阵测试消耗大量真实 child agent API。
+
+四类任务生成了不同 topology，并全部通过 `WorkflowRuntime + FakeChildAgentRunner`：
+
+1. **Research**
+   - phases：`Parallel Multi-Source Investigation -> Synthesis and Evaluation`；
+   - agents：`credibility-evidence-investigator`、`contradiction-analyst`、`landing-risk-assessor`、`research-synthesizer`；
+   - runtime jobs：4 个，全部 succeeded。
+2. **Review**
+   - phases：`Dimension Fan-out Analysis -> Finding Validation -> Review Synthesis`；
+   - agents：`security-reviewer`、`performance-reviewer`、`test-gap-analyzer`、`regression-risk-analyzer`、`finding-validator`、`review-synthesizer`；
+   - runtime jobs：6 个，全部 succeeded。
+3. **Coding**
+   - phases：`Understand Planned Run Requirements -> Write Failing Tests -> Implement Planned Run Entry -> Verify Implementation`；
+   - agents：`understand-planned-run-specs`、`write-failing-tests`、`implement-planned-run`、`verify-planned-run-implementation`；
+   - tests 明确先于 implementation；
+   - runtime jobs：4 个，全部 succeeded。
+4. **Planning / Mixed**
+   - taskType：`mixed`（符合 planning/mixed 允许范围）；
+   - phases：`Context Research and Information Gathering -> Approach Synthesis and Comparison -> Risk Review and Assessment -> Implementation Planning`；
+   - agents：`frontend-context-researcher`、`backend-context-researcher`、`runtime-context-researcher`、`approach-synthesizer`、`security-risk-reviewer`、`performance-and-test-reviewer`、`regression-risk-reviewer`、`implementation-planner`；
+   - runtime jobs：8 个，全部 succeeded。
+
+同时验证 fallback：真实 planner client 故障时，`LLMWorkflowPlanner` 回退到 deterministic planner，`validationMode=fallback_deterministic` 且 `ok=true`。
+
+结论：prompt-level orchestration policy 已能让真实 GLM-5.1 根据不同任务现场生成不同 workflow topology；GA 能将其验证、编译并通过 workflow runtime 分阶段、多 agent 执行。这证明 prompt-guided planner 是 GA workflow 的可行核心方向。
+
 ### 7.5 非目标
 
 第一版不做：

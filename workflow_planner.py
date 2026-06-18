@@ -195,6 +195,125 @@ class WorkflowPlanner:
         }
 
 
+class LLMWorkflowPlanner:
+    def __init__(self, *, client, fallback: WorkflowPlanner | None = None, max_repair_attempts: int = 2):
+        self.client = client
+        self.fallback = fallback or WorkflowPlanner()
+        self.max_repair_attempts = max(0, int(max_repair_attempts))
+
+    def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
+        context = copy.deepcopy(context or {})
+        try:
+            plan = self._request_plan(task_text, context, issues=[])
+            repair_attempts: list[dict[str, Any]] = []
+            for _ in range(self.max_repair_attempts + 1):
+                validation = validate_workflow_plan(plan)
+                if validation["ok"]:
+                    classification = self.fallback.classify(task_text, context)
+                    classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
+                    script = render_workflow_plan(plan)
+                    context["plannerMode"] = "prompt_guided"
+                    if repair_attempts:
+                        context["repairAttempts"] = repair_attempts
+                    return WorkflowDraft(task_text=task_text, context=context, classification=classification, plan=plan, validation=validation, script=script)
+                if len(repair_attempts) >= self.max_repair_attempts:
+                    break
+                repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
+                plan = self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
+        except Exception as exc:
+            return self._fallback_draft(task_text, context, reason=str(exc))
+        return self._rejected_draft(task_text, context, plan=plan, validation=validation, repair_attempts=repair_attempts)
+
+    def _request_plan(
+        self,
+        task_text: str,
+        context: dict[str, Any],
+        *,
+        issues: list[dict[str, Any]],
+        previous_plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = self.client.complete([{"role": "system", "content": self._planner_prompt(task_text, context, issues=issues, previous_plan=previous_plan)}])
+        if isinstance(response, dict):
+            return copy.deepcopy(response)
+        if isinstance(response, str):
+            return json.loads(response)
+        raise TypeError("planner client must return WorkflowPlan JSON as dict or JSON string")
+
+    def _planner_prompt(
+        self,
+        task_text: str,
+        context: dict[str, Any],
+        *,
+        issues: list[dict[str, Any]],
+        previous_plan: dict[str, Any] | None,
+    ) -> str:
+        classification_hint = self.fallback.classify(task_text, context)
+        prompt = {
+            "role": "GA Workflow Planner",
+            "task": task_text,
+            "context": context,
+            "classificationHint": classification_hint["taskType"],
+            "contract": "Return WorkflowPlan JSON only. 不要输出 JS. Do not wrap in markdown. phases must be a non-empty array.",
+            "orchestrationPolicy": [
+                "根据任务语义和 classificationHint 决定 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts。",
+                "如果任务要求审查安全/性能/测试缺口/回归风险，taskType 必须是 review，不要误判为 research。",
+                "如果任务要求规划设计方案或实施计划且明确不要直接写代码，taskType 应为 planning 或 mixed。",
+                "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
+                "coding 任务必须遵守 Understand -> Tests -> Implementation -> Verification，禁止 tests 与 implementation 并行。",
+                "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。",
+                "prompt 必须包含不要读取 mykey.py/mykey.json/mcp.json、不要提交等安全边界。",
+                "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
+                "agent label 使用清晰英文短语，避免无意义缩写。",
+            ],
+            "requiredShape": {
+                "taskType": "research | coding | review | debugging | planning | mixed",
+                "meta": {"name": "...", "description": "..."},
+                "phases": [{"title": "...", "agents": [{"label": "...", "prompt": "...", "dependsOn": []}]}],
+                "schemas": {},
+                "artifacts": [],
+                "constraints": ["no_secret_files", "no_git_commit"],
+            },
+        }
+        if issues:
+            prompt["repair"] = {"validatorIssues": issues, "previousPlan": previous_plan}
+        return json.dumps(prompt, ensure_ascii=False, indent=2)
+
+    def _fallback_draft(self, task_text: str, context: dict[str, Any], *, reason: str) -> WorkflowDraft:
+        draft = self.fallback.plan(task_text, context)
+        draft.context["plannerMode"] = "fallback_deterministic"
+        draft.context["fallbackReason"] = reason
+        draft.validation = copy.deepcopy(draft.validation)
+        draft.validation["mode"] = "fallback_deterministic"
+        draft.validation["fallbackReason"] = reason
+        return draft
+
+    def _rejected_draft(
+        self,
+        task_text: str,
+        context: dict[str, Any],
+        *,
+        plan: dict[str, Any],
+        validation: dict[str, Any],
+        repair_attempts: list[dict[str, Any]],
+    ) -> WorkflowDraft:
+        classification = self.fallback.classify(task_text, context)
+        classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
+        rejected_context = copy.deepcopy(context)
+        rejected_context["plannerMode"] = "prompt_guided_rejected"
+        if repair_attempts:
+            rejected_context["repairAttempts"] = copy.deepcopy(repair_attempts)
+        rejected_validation = copy.deepcopy(validation)
+        rejected_validation["mode"] = "rejected"
+        return WorkflowDraft(
+            task_text=task_text,
+            context=rejected_context,
+            classification=classification,
+            plan=copy.deepcopy(plan),
+            validation=rejected_validation,
+            script="",
+        )
+
+
 def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
     labels: set[str] = set()

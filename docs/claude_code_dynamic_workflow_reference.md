@@ -855,6 +855,56 @@ WorkflowPlan JSON
 
 还必须覆盖 repair loop：fake planner 第一次输出未定义依赖、未定义 schema 或 coding 错误并行；validator 返回 issues；repair prompt 带入 issues；第二次输出修复后的 `WorkflowPlan JSON`；超过最大轮次则保存 rejected draft。
 
+#### 8.4.6 Prompt-guided planner 实现与真实 E2E 结果（2026-06-18）
+
+GA 已完成 prompt-guided planner 的最小实现，核心类型为 `LLMWorkflowPlanner`：
+
+```text
+client.complete(messages)
+→ WorkflowPlan JSON
+→ validate_workflow_plan
+→ repair prompt with validator issues
+→ render_workflow_plan
+→ WorkflowRuntime
+```
+
+当前实现保留 deterministic `WorkflowPlanner` 作为 fallback，而不是继续扩展为主 planner。关键行为：
+
+- planner prompt 包含 `classificationHint`、非空 `phases` 要求、review/coding/research/planning 的 orchestration policy；
+- 模型只允许输出 `WorkflowPlan JSON`，不允许输出 JS；
+- validator issues 会进入 repair prompt；
+- repair 超限返回 rejected draft，保留 invalid plan 和 validation issues；
+- provider/client 异常才 fallback 到 deterministic planner。
+
+新增测试文件：
+
+```text
+tests/test_workflow_prompt_guided_planner.py
+tests/prompt_guided_planner_real_e2e.py
+```
+
+GLM-5.1 opt-in 真实矩阵 E2E 已通过：
+
+```json
+{
+  "passed": true,
+  "issues": [],
+  "model": "z.ai/glm-5.1",
+  "plannerCallCount": 6
+}
+```
+
+真实 GLM-5.1 生成的 workflow topology 展示了任务语义驱动能力：
+
+| 场景 | 生成 phases | 生成 agents | runtime 结果 |
+|---|---|---|---|
+| research | `Parallel Multi-Source Investigation` -> `Synthesis and Evaluation` | `credibility-evidence-investigator`, `contradiction-analyst`, `landing-risk-assessor`, `research-synthesizer` | 4 jobs succeeded |
+| review | `Dimension Fan-out Analysis` -> `Finding Validation` -> `Review Synthesis` | `security-reviewer`, `performance-reviewer`, `test-gap-analyzer`, `regression-risk-analyzer`, `finding-validator`, `review-synthesizer` | 6 jobs succeeded |
+| coding | `Understand Planned Run Requirements` -> `Write Failing Tests` -> `Implement Planned Run Entry` -> `Verify Implementation` | `understand-planned-run-specs`, `write-failing-tests`, `implement-planned-run`, `verify-planned-run-implementation` | 4 jobs succeeded |
+| planning/mixed | `Context Research and Information Gathering` -> `Approach Synthesis and Comparison` -> `Risk Review and Assessment` -> `Implementation Planning` | frontend/backend/runtime context researchers, approach synthesizer, risk reviewers, implementation planner | 8 jobs succeeded |
+
+这次 E2E 的重点是验证“真实 LLM planner + 真实 GA workflow runtime”，child agent 端使用 `FakeChildAgentRunner` 控制成本。结论是：prompt-level orchestration policy 已能驱动 GLM-5.1 按任务现场生成不同计划，且 GA 能验证、编译并分阶段调度多个 agent job。
+
 ### 8.5 非目标修正
 
 以下不应作为动态 workflow 的核心方向：
