@@ -986,8 +986,157 @@ Ran 102 tests ... OK
 - review planned run 自动进入 `running`，并按状态流、journal、draft artifact、rejected plan 分维度 fan-out；
 - 两类 planned run 均保留 `workflow-draft.json`，metadata 记录 `plannerMode=prompt_guided`。
 
+#### 8.4.9 下一步：Ink bridge experimental `workflow_plan` command
 
-以下不应作为动态 workflow 的核心方向：
+下一步应接 Ink bridge，但不是完整 UI，而是先做最小 JSONL experimental command。原因是当前旧 bridge 路径仍是：
+
+```text
+workflow_draft(script) → workflow_approve(run_id)
+```
+
+它要求调用方传入手写 JS script，不能触发 prompt-guided planner，也不能复用 `create_planned_run(...)`。因此需要新增自然语言任务入口：
+
+```json
+{
+  "type": "workflow_plan",
+  "taskText": "...",
+  "context": {},
+  "autoApprove": true,
+  "args": {},
+  "timeoutSeconds": 120
+}
+```
+
+目标行为：
+
+```text
+workflow_plan command
+→ GenericAgentBridge.workflow_plan(...)
+→ workflow_planner_factory()
+→ WorkflowController.create_planned_run(...)
+→ emit workflow_run + workflow_event
+→ running: 启动 _run_workflow_runtime(...)
+→ awaiting_approval: 等待现有 workflow_approve
+→ failed/rejected: 只 emit，不启动 runtime
+```
+
+这个切片应保持四个约束：
+
+1. 只做 bridge method + JSONL dispatch，不做完整 Ink React UI；
+2. planner 通过 `workflow_planner_factory` 注入，测试先用 fake planner，不在 bridge 中硬编码 GLM-5.1；
+3. `autoApprove` 默认 true，但保留 `autoApprove=false` 进入 `awaiting_approval` 的路径；
+4. rejected draft 必须可见、可审计，但不能运行 runtime。
+
+建议 TDD：
+
+```text
+test_workflow_plan_creates_auto_approved_run_and_starts_runtime
+test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false
+test_workflow_plan_emits_rejected_plan_without_runtime
+test_jsonl_loop_dispatches_workflow_plan_command
+```
+
+此切片完成后，再做真实 planner factory 配置接入、Ink UI 展示 generated draft / plannerMode / validation issues，以及 high-risk / destructive / deploy 等风险 gating。
+
+#### 8.4.10 已完成：Ink bridge experimental `workflow_plan` command
+
+已实现 bridge-level planned workflow 入口。新的 JSONL command 允许前端用自然语言任务触发 workflow planner，而不是传入手写 JS script：
+
+```json
+{
+  "type": "workflow_plan",
+  "taskText": "...",
+  "context": {},
+  "autoApprove": true,
+  "args": {},
+  "timeoutSeconds": 120
+}
+```
+
+落地链路：
+
+```text
+GenericAgentBridge.workflow_plan(...)
+→ workflow_planner_factory()
+→ WorkflowController.create_planned_run(...)
+→ workflow_run / workflow_event
+→ running 时启动 runtime thread
+```
+
+TDD 覆盖：
+
+```text
+test_workflow_plan_creates_auto_approved_run_and_starts_runtime
+test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false
+test_workflow_plan_emits_rejected_plan_without_runtime
+test_jsonl_loop_dispatches_workflow_plan_command
+```
+
+回归结果：
+
+```text
+python -m unittest tests.test_ink_bridge
+Ran 74 tests ... OK
+
+python -m unittest tests.test_workflow_controller tests.test_workflow_planner_compiler tests.test_workflow_prompt_guided_planner tests.test_workflow_plan_validator tests.test_workflow_store tests.test_workflow_integration tests.test_workflow_runtime tests.test_workflow_scheduler
+Ran 102 tests ... OK
+```
+
+当前仍保持一个重要边界：bridge 不硬编码真实 GLM-5.1 planner，默认 planner 仍是 deterministic `WorkflowPlanner`。真实 prompt-guided planner 应通过后续配置/factory 接入，以避免 bridge 直接耦合 provider secret 配置。
+
+#### 8.4.11 已完成：真实 prompt-guided planner factory 配置接入
+
+已新增环境变量驱动的 planner factory，使 `workflow_plan` 默认路径可以在 deterministic planner 与真实 prompt-guided planner 之间切换。
+
+新增入口：
+
+```text
+workflow_planner.build_workflow_planner_from_env()
+```
+
+环境变量：
+
+```text
+GA_WORKFLOW_PLANNER_MODE=deterministic | prompt_guided | llm | real
+GA_WORKFLOW_PLANNER_CONFIG=native_oai_config
+GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=1
+```
+
+行为：
+
+```text
+默认 / deterministic
+→ WorkflowPlanner()
+
+prompt_guided / llm / real
+→ LLMWorkflowPlanner(client=NativeWorkflowPlannerClient(config_name), ...)
+```
+
+`NativeWorkflowPlannerClient` 通过 `llmcore.resolve_session(config_name)` 调用已有 provider 配置，并要求模型只返回 `WorkflowPlan JSON`。它不会读取或打印 `mykey.py` / `mykey.json`，也不会把 provider secret 写入 bridge event。
+
+Ink bridge 的 `_make_workflow_planner()` 现在默认调用 `build_workflow_planner_from_env()`，同时保留显式 `workflow_planner_factory` 注入，便于测试、嵌入和未来 UI 配置覆写。
+
+TDD 覆盖：
+
+```text
+test_native_client_uses_resolve_session_and_parses_json_without_markdown
+test_build_workflow_planner_from_env_defaults_to_deterministic
+test_build_workflow_planner_from_env_returns_prompt_guided_planner
+test_build_workflow_planner_from_env_accepts_real_api_alias
+test_default_workflow_planner_factory_uses_env_builder
+```
+
+验证结果：
+
+```text
+python -m unittest tests.test_workflow_prompt_guided_planner.NativeWorkflowPlannerClientTest tests.test_ink_bridge.InkBridgeTest.test_default_workflow_planner_factory_uses_env_builder
+Ran 5 tests ... OK
+
+python -m unittest tests.test_ink_bridge tests.test_workflow_prompt_guided_planner
+Ran 89 tests ... OK
+```
+
+
 
 - 固定模板库作为主入口；
 - 用户选择 `tdd-python-package` / `deep-research-template`；

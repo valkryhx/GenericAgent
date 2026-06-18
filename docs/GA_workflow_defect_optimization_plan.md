@@ -1835,8 +1835,304 @@ Ran 102 tests ... OK
 
 注意：真实 API 测试仍保持 opt-in，不进入默认 unittest；测试过程不读取、不打印、不提交真实密钥文件或真实 API artifacts。
 
+### 7.4.6 下一步：Ink bridge experimental `workflow_plan` command
 
-第一版不做：
+在 `WorkflowController.create_planned_run(...)` 已进入正式 control-plane 后，下一步应做 **Ink bridge experimental command**，但范围必须严格限制在 JSONL bridge 层，不直接做完整 Ink React UI。
+
+#### 为什么下一步是 bridge command
+
+当前链路已经完成：
+
+```text
+LLMWorkflowPlanner / WorkflowPlanner
+→ WorkflowDraft
+→ WorkflowController.create_planned_run(...)
+→ WorkflowRun + workflow-draft.json + journal
+→ WorkflowRuntime 可执行
+```
+
+剩余缺口不是 planner/compiler，也不是 runtime，而是前端入口还只能走旧的手写 JS draft：
+
+```text
+workflow_draft(script) → awaiting_approval → workflow_approve(run_id)
+```
+
+这条旧路径要求调用方自己提供 script，不会触发 prompt-guided planner，也绕过了新建的 `create_planned_run(...)`。因此下一步应新增一个实验 JSONL command，把自然语言任务接入 planned run：
+
+```json
+{
+  "type": "workflow_plan",
+  "taskText": "...",
+  "context": {},
+  "autoApprove": true,
+  "args": {},
+  "timeoutSeconds": 120
+}
+```
+
+#### 最小产品行为
+
+```text
+Ink JSONL command: workflow_plan
+→ GenericAgentBridge.workflow_plan(...)
+→ planner = workflow_planner_factory()
+→ workflow_controller.create_planned_run(
+      session_id=current_session,
+      task_text=taskText,
+      planner=planner,
+      context=context,
+      auto_approve=autoApprove,
+  )
+→ emit workflow_run
+→ emit workflow_event 序列
+→ if run.status == running:
+      start _run_workflow_runtime(run_id, args, timeout_seconds)
+→ elif run.status == awaiting_approval:
+      不启动 runtime，等待现有 workflow_approve
+→ elif run.status == failed:
+      不启动 runtime，emit failed run / rejected event
+```
+
+#### 关键设计约束
+
+1. **实验入口，不做完整 UI**
+   - 只新增 JSONL command 和 bridge method；
+   - React/Ink UI 可先不增加按钮、不增加完整可视化；
+   - 后续 UI 只消费已有 `workflow_run` / `workflow_event` / `workflow_final`。
+
+2. **planner 可注入，先不强绑真实 API**
+   - `GenericAgentBridge(..., workflow_planner_factory=None)`；
+   - 单元测试使用 fake planner；
+   - 默认真实 planner 的配置接入可作为后续小切片，避免把 bridge command 与 provider 配置耦合。
+
+3. **默认 auto-approved，但保留 manual path**
+   - `autoApprove` 默认 true；
+   - `autoApprove=false` 时 run 进入 `awaiting_approval`，复用现有 `workflow_approve`；
+   - 这保持“用户显式要求 workflow 执行时不二次卡住”的原则，同时保留人工审批路径。
+
+4. **rejected draft 不运行**
+   - `draft.validation.ok == false` 时 controller 已产生 failed run；
+   - bridge 只 emit，不启动 runtime；
+   - UI/调用方通过 `workflow_plan_rejected` event 查看 validator issues。
+
+5. **busy 语义沿用现有 workflow_draft / workflow_approve**
+   - agent 正在运行或 bridge 正在消费时拒绝；
+   - 避免普通 chat turn 与 workflow plan 同时争用 session。
+
+6. **安全边界**
+   - bridge 不读取 `mykey.py` / `mykey.json` / `mcp.json`；
+   - 不打印 provider 配置和 API key；
+   - emitted event 继续走现有 `sanitize(...)`；
+   - `workflow_plan` command 不允许直接提交代码或执行外部 deploy，风险 gating 后续再做。
+
+#### TDD 切片
+
+建议新增测试：
+
+```text
+tests/test_ink_bridge.py::test_workflow_plan_creates_auto_approved_run_and_starts_runtime
+tests/test_ink_bridge.py::test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false
+tests/test_ink_bridge.py::test_workflow_plan_emits_rejected_plan_without_runtime
+tests/test_ink_bridge.py::test_jsonl_loop_dispatches_workflow_plan_command
+```
+
+测试要点：
+
+1. `test_workflow_plan_creates_auto_approved_run_and_starts_runtime`
+   - fake planner 返回 valid draft；
+   - bridge emit `workflow_run`，run.status 初始为 `running`；
+   - journal 包含 `workflow_planned` / `workflow_started`；
+   - runtime thread 被启动，最终 emit `workflow_final`；
+   - metadata 包含 `workflowDraftRef` / `plannerMode` / `workflowTaskType`。
+
+2. `test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false`
+   - `autoApprove=False`；
+   - run.status == `awaiting_approval`；
+   - emit `workflow_approval_requested`；
+   - 不启动 runtime；
+   - 后续仍可用既有 `workflow_approve(run_id)` 执行。
+
+3. `test_workflow_plan_emits_rejected_plan_without_runtime`
+   - fake planner 返回 `validation.ok == false`；
+   - run.status == `failed`；
+   - run.error == `workflow_plan_rejected`；
+   - emit `workflow_plan_rejected`；
+   - 不启动 runtime。
+
+4. `test_jsonl_loop_dispatches_workflow_plan_command`
+   - JSONL 输入 `{"type":"workflow_plan",...}`；
+   - 断言调用 `bridge.workflow_plan(...)`；
+   - 参数覆盖 `taskText` / `context` / `autoApprove` / `args` / `timeoutSeconds`。
+
+#### 建议代码改动
+
+```text
+frontends/ink_bridge.py
+- GenericAgentBridge.__init__(..., workflow_planner_factory=None)
+- GenericAgentBridge.workflow_plan(...)
+- run_jsonl_loop 分发 cmd_type == "workflow_plan"
+
+tests/test_ink_bridge.py
+- fake planner / fake runtime 覆盖 planned run bridge path
+```
+
+#### 非目标
+
+本切片不做：
+
+- 不做完整 Ink React UI；
+- 不做风险 gating；
+- 不把真实 GLM-5.1 planner 硬编码进 bridge；
+- 不让模型直接输出自由 JS；
+- 不改变既有 `workflow_draft(script)` / `workflow_approve(run_id)` 兼容路径。
+
+#### 完成后的下一步
+
+完成 bridge command 后，再进入：
+
+```text
+1. 默认真实 planner factory 配置接入
+2. Ink UI 展示 generated draft / plannerMode / validation issues
+3. 风险 gating：high risk / external_io / destructive / git commit / deploy → autoApprove=False
+```
+
+### 7.4.7 已完成：Ink bridge experimental `workflow_plan` command
+
+本切片已按 TDD 实现 bridge-level planned workflow 入口。它不要求调用方手写 JS script，而是从自然语言 `taskText` 进入 planner/control-plane/runtime 链路：
+
+```text
+workflow_plan JSONL command
+→ GenericAgentBridge.workflow_plan(...)
+→ workflow_planner_factory()
+→ WorkflowController.create_planned_run(...)
+→ emit workflow_run / workflow_event
+→ auto-approved running run 启动 _run_workflow_runtime(...)
+```
+
+实现内容：
+
+```text
+frontends/ink_bridge.py
+- GenericAgentBridge.__init__(..., workflow_planner_factory=None)
+- GenericAgentBridge.workflow_plan(...)
+- GenericAgentBridge._make_workflow_planner()
+- run_jsonl_loop 分发 cmd_type == "workflow_plan"
+
+tests/test_ink_bridge.py
+- test_workflow_plan_creates_auto_approved_run_and_starts_runtime
+- test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false
+- test_workflow_plan_emits_rejected_plan_without_runtime
+- test_jsonl_loop_dispatches_workflow_plan_command
+```
+
+已验证行为：
+
+1. `auto_approve=True`
+   - fake planner 返回 valid draft；
+   - bridge 调用 `create_planned_run(...)`；
+   - run 初始 emit 为 `running`；
+   - metadata 包含 `workflowDraftRef` / `plannerMode` / `workflowTaskType`；
+   - journal 包含 `workflow_planned` / `workflow_started`；
+   - runtime thread 启动并 emit `workflow_final`。
+2. `auto_approve=False`
+   - run.status == `awaiting_approval`；
+   - journal 包含 `workflow_planned` / `workflow_approval_requested`；
+   - 不启动 runtime。
+3. rejected draft
+   - run.status == `failed`；
+   - run.error == `workflow_plan_rejected`；
+   - journal 包含 `workflow_plan_rejected`；
+   - 不启动 runtime。
+4. JSONL dispatch
+   - `{"type":"workflow_plan",...}` 正确路由到 `bridge.workflow_plan(...)`；
+   - 参数覆盖 `taskText` / `context` / `autoApprove` / `args` / `timeoutSeconds`。
+
+验证命令：
+
+```bash
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_creates_auto_approved_run_and_starts_runtime tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_emits_rejected_plan_without_runtime tests.test_ink_bridge.InkBridgeTest.test_jsonl_loop_dispatches_workflow_plan_command
+python -m unittest tests.test_ink_bridge
+python -m unittest tests.test_workflow_controller tests.test_workflow_planner_compiler tests.test_workflow_prompt_guided_planner tests.test_workflow_plan_validator tests.test_workflow_store tests.test_workflow_integration tests.test_workflow_runtime tests.test_workflow_scheduler
+```
+
+结果：
+
+```text
+Ran 4 tests ... OK
+Ran 74 tests ... OK
+Ran 102 tests ... OK
+```
+
+注意：本切片仍未把真实 GLM-5.1 planner 硬编码进 bridge。默认 `_make_workflow_planner()` 暂用 deterministic `WorkflowPlanner`，真实 prompt-guided planner 应在下一小切片通过配置/factory 注入，以避免 bridge 与 provider secret 配置耦合。
+
+### 7.4.8 已完成：真实 prompt-guided planner factory 配置接入
+
+本切片继续推进 `workflow_plan` 的默认 planner 配置接入：bridge 不再只能默认 deterministic planner，而是通过环境配置选择 deterministic 或 prompt-guided planner。
+
+新增能力：
+
+```text
+workflow_planner.py
+- NativeWorkflowPlannerClient
+- parse_json_object(...)
+- resolve_session(...) wrapper
+- build_workflow_planner_from_env()
+
+frontends/ink_bridge.py
+- GenericAgentBridge._make_workflow_planner() 默认调用 build_workflow_planner_from_env()
+```
+
+环境变量：
+
+```text
+GA_WORKFLOW_PLANNER_MODE=deterministic | prompt_guided | llm | real
+GA_WORKFLOW_PLANNER_CONFIG=native_oai_config
+GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=1
+```
+
+行为：
+
+```text
+GA_WORKFLOW_PLANNER_MODE 未设置或非 prompt_guided/llm/real
+→ WorkflowPlanner()
+
+GA_WORKFLOW_PLANNER_MODE=prompt_guided / llm / real
+→ LLMWorkflowPlanner(
+      client=NativeWorkflowPlannerClient(config_name),
+      fallback=WorkflowPlanner(),
+      max_repair_attempts=GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS,
+  )
+```
+
+`NativeWorkflowPlannerClient` 通过 `llmcore.resolve_session(config_name)` 调用现有 LLM 配置，但不读取、不打印 `mykey.py` / `mykey.json`。它要求模型只输出 `WorkflowPlan JSON`，并自动解析 Markdown code fence 包裹的 JSON。
+
+新增测试：
+
+```text
+tests/test_workflow_prompt_guided_planner.py::NativeWorkflowPlannerClientTest::test_native_client_uses_resolve_session_and_parses_json_without_markdown
+tests/test_workflow_prompt_guided_planner.py::NativeWorkflowPlannerClientTest::test_build_workflow_planner_from_env_defaults_to_deterministic
+tests/test_workflow_prompt_guided_planner.py::NativeWorkflowPlannerClientTest::test_build_workflow_planner_from_env_returns_prompt_guided_planner
+tests/test_workflow_prompt_guided_planner.py::NativeWorkflowPlannerClientTest::test_build_workflow_planner_from_env_accepts_real_api_alias
+tests/test_ink_bridge.py::InkBridgeTest::test_default_workflow_planner_factory_uses_env_builder
+```
+
+验证命令：
+
+```bash
+python -m unittest tests.test_workflow_prompt_guided_planner.NativeWorkflowPlannerClientTest tests.test_ink_bridge.InkBridgeTest.test_default_workflow_planner_factory_uses_env_builder
+python -m unittest tests.test_ink_bridge tests.test_workflow_prompt_guided_planner
+```
+
+结果：
+
+```text
+Ran 5 tests ... OK
+Ran 89 tests ... OK
+```
+
+当前 bridge 仍支持显式 `workflow_planner_factory` 注入，便于测试和未来 UI/配置层覆写。默认路径则可通过环境变量启用真实 prompt-guided planner。
+
+
 
 - 不做固定模板库作为主入口；
 - 不让用户选择 `tdd-python-package` / `deep-research-template` 之类模板；

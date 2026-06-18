@@ -1,11 +1,13 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import LLMWorkflowPlanner
+from workflow_planner import LLMWorkflowPlanner, NativeWorkflowPlannerClient, WorkflowPlanner, build_workflow_planner_from_env
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
@@ -269,6 +271,61 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
             self.assertEqual("prompt_guided_rejected", data["context"]["plannerMode"])
             self.assertEqual("bad-coding", data["plan"]["meta"]["name"])
             self.assertIn("coding_tests_parallel_implementation", {issue["code"] for issue in data["validation"]["issues"]})
+
+class NativeWorkflowPlannerClientTest(unittest.TestCase):
+    def test_native_client_uses_resolve_session_and_parses_json_without_markdown(self):
+        class FakeSession:
+            def __init__(self):
+                self.messages = []
+
+            def ask(self, message):
+                self.messages.append(message)
+                return ['```json\n', json.dumps(review_plan(), ensure_ascii=False), '\n```']
+
+        fake_session = FakeSession()
+        with patch("workflow_planner.resolve_session", return_value=fake_session) as resolve:
+            client = NativeWorkflowPlannerClient(config_name="planner_config")
+            response = client.complete([{"role": "system", "content": "planner prompt"}])
+
+        self.assertEqual(review_plan()["taskType"], response["taskType"])
+        resolve.assert_called_once_with("planner_config")
+        self.assertEqual("user", fake_session.messages[0]["role"])
+        text = fake_session.messages[0]["content"][0]["text"]
+        self.assertIn("planner prompt", text)
+        self.assertIn("只输出一个 JSON object", text)
+        self.assertIn("不要读取 mykey.py", text)
+        self.assertIn("不要输出 JavaScript", text)
+
+    def test_build_workflow_planner_from_env_defaults_to_deterministic(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GA_WORKFLOW_PLANNER_MODE", None)
+            planner = build_workflow_planner_from_env()
+
+        self.assertIsInstance(planner, WorkflowPlanner)
+
+    def test_build_workflow_planner_from_env_returns_prompt_guided_planner(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GA_WORKFLOW_PLANNER_MODE": "prompt_guided",
+                "GA_WORKFLOW_PLANNER_CONFIG": "planner_config",
+                "GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS": "1",
+            },
+            clear=False,
+        ):
+            planner = build_workflow_planner_from_env()
+
+        self.assertIsInstance(planner, LLMWorkflowPlanner)
+        self.assertIsInstance(planner.client, NativeWorkflowPlannerClient)
+        self.assertEqual("planner_config", planner.client.config_name)
+        self.assertEqual(1, planner.max_repair_attempts)
+
+    def test_build_workflow_planner_from_env_accepts_real_api_alias(self):
+        with patch.dict(os.environ, {"GA_WORKFLOW_PLANNER_MODE": "real", "GA_REAL_API_CONFIG": "native_oai_config"}, clear=False):
+            planner = build_workflow_planner_from_env()
+
+        self.assertIsInstance(planner, LLMWorkflowPlanner)
+        self.assertEqual("native_oai_config", planner.client.config_name)
 
 
 if __name__ == "__main__":

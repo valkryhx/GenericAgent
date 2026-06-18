@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -193,6 +194,68 @@ class WorkflowPlanner:
             "artifacts": ["plan"],
             "constraints": ["no_secret_files", "no_git_commit"],
         }
+
+
+class NativeWorkflowPlannerClient:
+    def __init__(self, config_name: str = "native_oai_config"):
+        self.config_name = str(config_name or "native_oai_config")
+        self.raw_outputs: list[str] = []
+
+    def complete(self, messages: list[dict]) -> dict:
+        session = resolve_session(self.config_name)
+        prompt = str((messages or [{}])[0].get("content") or "") + """
+
+硬性输出要求：
+- 只输出一个 JSON object。
+- 不要 Markdown。
+- 不要解释。
+- 所有 agent.prompt 必须包含：不要读取 mykey.py、mykey.json、mcp.json；不要提交。
+- 不要输出 JavaScript；只输出 WorkflowPlan JSON。
+"""
+        raw = "".join(str(chunk) for chunk in session.ask({"role": "user", "content": [{"type": "text", "text": prompt}]}))
+        self.raw_outputs.append(raw)
+        return parse_json_object(raw)
+
+
+def parse_json_object(raw: str) -> dict:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def resolve_session(config_name: str):
+    from llmcore import resolve_session as _resolve_session
+
+    return _resolve_session(config_name)
+
+
+def build_workflow_planner_from_env() -> WorkflowPlanner | LLMWorkflowPlanner:
+    mode = str(os.environ.get("GA_WORKFLOW_PLANNER_MODE") or "deterministic").strip().lower()
+    if mode not in {"prompt_guided", "llm", "real"}:
+        return WorkflowPlanner()
+    config_name = (
+        os.environ.get("GA_WORKFLOW_PLANNER_CONFIG")
+        or os.environ.get("GA_REAL_API_CONFIG")
+        or "native_oai_config"
+    )
+    try:
+        repair_attempts = int(os.environ.get("GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS") or "1")
+    except ValueError:
+        repair_attempts = 1
+    return LLMWorkflowPlanner(
+        client=NativeWorkflowPlannerClient(config_name=config_name),
+        fallback=WorkflowPlanner(),
+        max_repair_attempts=repair_attempts,
+    )
 
 
 class LLMWorkflowPlanner:

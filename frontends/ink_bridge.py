@@ -117,6 +117,7 @@ class GenericAgentBridge:
         emit: EmitFn | None = None,
         workflow_root: str | os.PathLike[str] | None = None,
         workflow_runtime_factory: Callable[..., Any] | None = None,
+        workflow_planner_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.agent_factory = agent_factory
         with backend_output_redirect():
@@ -131,6 +132,7 @@ class GenericAgentBridge:
         self._workflow_threads: dict[str, threading.Thread] = {}
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
         self.workflow_runtime_factory = workflow_runtime_factory
+        self.workflow_planner_factory = workflow_planner_factory
         with backend_output_redirect():
             from workflow_controller import WorkflowController
             from workflow_store import WorkflowStore
@@ -377,6 +379,50 @@ class GenericAgentBridge:
             self.emit({"type": "activity", "label": None})
             self.emit({"type": "status", "status": "idle"})
 
+    def workflow_plan(
+        self,
+        task_text: str,
+        *,
+        context: dict | None = None,
+        auto_approve: bool = True,
+        args: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        task_text = str(task_text or "")
+        if not task_text.strip():
+            self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
+            return ""
+        try:
+            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+            with backend_output_redirect():
+                planner = self._make_workflow_planner()
+                run = self.workflow_controller.create_planned_run(
+                    session_id=session_id,
+                    task_text=task_text,
+                    planner=planner,
+                    context=context if isinstance(context, dict) else {},
+                    auto_approve=bool(auto_approve),
+                )
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
+            return ""
+        if run.status != "running":
+            return run.run_id
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, timeout_seconds, None),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        return run.run_id
+
     def workflow_draft(self, script: str) -> str:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
@@ -567,6 +613,13 @@ class GenericAgentBridge:
         finally:
             self.emit({"type": "activity", "label": None})
             self.emit({"type": "status", "status": "idle"})
+
+    def _make_workflow_planner(self):
+        if self.workflow_planner_factory is not None:
+            return self.workflow_planner_factory()
+        with backend_output_redirect():
+            from workflow_planner import build_workflow_planner_from_env
+        return build_workflow_planner_from_env()
 
     def _make_workflow_runtime(self, *, timeout_seconds: float | None):
         kwargs = {"store": self.workflow_store}
@@ -983,6 +1036,21 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
         elif cmd_type == "compact":
             bridge.compact(str(command.get("instructions") or ""))
+        elif cmd_type == "workflow_plan":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            auto_approve = command.get("autoApprove")
+            if auto_approve is None:
+                auto_approve = command.get("auto_approve")
+            if auto_approve is None:
+                auto_approve = True
+            bridge.workflow_plan(
+                str(command.get("taskText") or command.get("task_text") or ""),
+                context=command.get("context") if isinstance(command.get("context"), dict) else {},
+                auto_approve=bool(auto_approve),
+                args=command.get("args"),
+                timeout_seconds=timeout_seconds,
+            )
         elif cmd_type == "workflow_draft":
             bridge.workflow_draft(str(command.get("script") or ""))
         elif cmd_type == "workflow_approve":
