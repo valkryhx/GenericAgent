@@ -135,6 +135,29 @@ def research_credibility_plan():
     }
 
 
+def interpolation_literal_plan():
+    boundary = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。"
+    return {
+        "taskType": "review",
+        "meta": {"name": "interpolation-literal", "description": "Prompt literal interpolation regression"},
+        "phases": [
+            {
+                "title": "Review",
+                "agents": [
+                    {
+                        "label": "literal-review",
+                        "prompt": f"{boundary} 审查代码片段 `${{log('INJECTED')}}` 和 `${{1+2}}`，必须按字面量处理。",
+                        "dependsOn": [],
+                    }
+                ],
+            }
+        ],
+        "schemas": {},
+        "artifacts": ["review"],
+        "constraints": ["no_secret_files", "no_git_commit"],
+    }
+
+
 class LLMWorkflowPlannerTest(unittest.TestCase):
     def test_prompt_guided_planner_uses_llm_plan_json_for_dynamic_review_topology(self):
         client = FakePlannerClient(responses=[review_plan()])
@@ -227,6 +250,33 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
             self.assertEqual(["Review", "Verify", "Synthesis"], outcome.phases)
             loaded = store.load_run(run.run_id)
             self.assertEqual(["security-review", "performance-review", "test-gap-review", "verify-findings", "review-report"], [job.metadata.get("label") for job in loaded.jobs])
+
+    def test_prompt_guided_planner_preserves_template_expressions_in_agent_prompt(self):
+        client = FakePlannerClient(responses=[interpolation_literal_plan()])
+        planner = LLMWorkflowPlanner(client=client)
+        draft = planner.plan("审查包含 JS template literal 的代码", context={"constraints": ["不要读取 mykey.py", "不要提交"]})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertIn("\\${log('INJECTED')}", draft.script)
+        self.assertIn("\\${1+2}", draft.script)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_prompt_guided_literal", session_id="session_prompt_literal", script=draft.script, status="running"))
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=FakeChildAgentRunner(),
+                scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2),
+                timeout_seconds=5.0,
+            ).run(run)
+            loaded = store.load_run(run.run_id)
+
+        self.assertEqual("succeeded", outcome.run.status)
+        self.assertEqual(["Review"], outcome.phases)
+        self.assertEqual([], outcome.logs)
+        self.assertEqual(1, len(loaded.jobs))
+        self.assertIn("${log('INJECTED')}", loaded.jobs[0].prompt)
+        self.assertIn("${1+2}", loaded.jobs[0].prompt)
 
     def test_prompt_guided_planner_uses_research_credibility_topology(self):
         client = FakePlannerClient(responses=[research_credibility_plan()])

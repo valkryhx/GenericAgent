@@ -1,6 +1,12 @@
+import tempfile
 import unittest
 
+from workflow_child_agent import FakeChildAgentRunner
+from workflow_models import WorkflowRun
 from workflow_planner import render_workflow_plan, validate_workflow_plan
+from workflow_runtime import WorkflowRuntime
+from workflow_scheduler import SchedulerConfig
+from workflow_store import WorkflowStore
 
 
 class WorkflowPlanValidatorTest(unittest.TestCase):
@@ -97,6 +103,102 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertIn("label: 'collector'", script)
         self.assertIn("label: 'repo-scout'", script)
         self.assertIn("JSON.stringify", script)
+
+    def test_renderer_treats_prompt_template_expressions_as_literal_text(self):
+        plan = self.valid_plan()
+        literal_prompt = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交；解释 ${log('INJECTED')} 和 ${1+2}，必须按字面量处理。"
+        plan["phases"] = [
+            {
+                "title": "Literal Prompt",
+                "agents": [
+                    {
+                        "label": "literal-check",
+                        "prompt": literal_prompt,
+                        "dependsOn": [],
+                    }
+                ],
+            }
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+        script = render_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+        self.assertIn("\\${log('INJECTED')}", script)
+        self.assertIn("\\${1+2}", script)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_literal_prompt", session_id="session_literal", script=script, status="running"))
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=FakeChildAgentRunner(),
+                scheduler_config=SchedulerConfig(max_concurrent=1, max_total=2),
+                timeout_seconds=5.0,
+            ).run(run)
+            loaded = store.load_run(run.run_id)
+
+        self.assertEqual("succeeded", outcome.run.status)
+        self.assertEqual(["Literal Prompt"], outcome.phases)
+        self.assertEqual([], outcome.logs)
+        self.assertEqual(1, len(loaded.jobs))
+        self.assertEqual(literal_prompt, loaded.jobs[0].prompt)
+
+    def test_renderer_preserves_dependency_injection_while_escaping_prompt_literals(self):
+        plan = self.valid_plan()
+        downstream_prompt = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交；汇总上游，保留 ${notInterpolation} 字面量。"
+        plan["phases"] = [
+            {
+                "title": "Collect",
+                "agents": [
+                    {
+                        "label": "collector",
+                        "prompt": "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交；收集资料。",
+                        "dependsOn": [],
+                    }
+                ],
+            },
+            {
+                "title": "Synthesize",
+                "agents": [
+                    {
+                        "label": "writer",
+                        "prompt": downstream_prompt,
+                        "dependsOn": ["collector"],
+                    }
+                ],
+            },
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+        script = render_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+        self.assertIn("\\${notInterpolation}", script)
+        self.assertIn("${JSON.stringify({collector})}", script)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_dependency_prompt", session_id="session_dependency", script=script, status="running"))
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=FakeChildAgentRunner(),
+                scheduler_config=SchedulerConfig(max_concurrent=1, max_total=3),
+                timeout_seconds=5.0,
+            ).run(run)
+            loaded = store.load_run(run.run_id)
+
+        self.assertEqual("succeeded", outcome.run.status)
+        self.assertEqual(["Collect", "Synthesize"], outcome.phases)
+        self.assertEqual([], outcome.logs)
+        self.assertEqual(2, len(loaded.jobs))
+        self.assertEqual("collector", loaded.jobs[0].metadata.get("label"))
+        self.assertEqual("writer", loaded.jobs[1].metadata.get("label"))
+        self.assertIn("${notInterpolation}", loaded.jobs[1].prompt)
+        self.assertIn("上游结果：", loaded.jobs[1].prompt)
+        self.assertIn("completed agent_1", loaded.jobs[1].prompt)
 
 
 if __name__ == "__main__":

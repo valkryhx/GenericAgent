@@ -452,12 +452,13 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
             var_name = _js_identifier(label)
             prompt = str(agent.get("prompt") or "")
             dependencies = [rendered_labels[item] for item in agent.get("dependsOn") or [] if item in rendered_labels]
+            rendered_prompt = _template_string(prompt)
             if dependencies:
-                prompt = prompt + "\n\n上游结果：${JSON.stringify({" + ", ".join(dependencies) + "})}"
+                rendered_prompt += "\n\n上游结果：${JSON.stringify({" + ", ".join(dependencies) + "})}"
             options = {"label": label, "phase": title}
             if agent.get("schemaRef"):
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
-            lines.append(f"const {var_name} = await agent(`{_template_string(prompt)}`, {_render_options(options)})")
+            lines.append(f"const {var_name} = await agent(`{rendered_prompt}`, {_render_options(options)})")
             phase_vars.append(var_name)
             rendered_labels[label] = var_name
         result_names.extend(phase_vars)
@@ -487,7 +488,7 @@ def _js_string(value: str) -> str:
 
 
 def _template_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("`", "\\`")
+    return value.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
 
 def _render_options(options: dict[str, Any]) -> str:
