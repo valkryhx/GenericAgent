@@ -20,6 +20,7 @@ if str(FRONTENDS) not in sys.path:
 
 from ink_bridge import GenericAgentBridge, encode_event, make_stdout_emitter, run_jsonl_loop  # noqa: E402
 from workflow_child_agent import AgentResult  # noqa: E402
+from workflow_models import WorkflowJob  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
@@ -1030,6 +1031,64 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("workflow_plan_rejected", run_event["run"]["error"])
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertEqual(["workflow_planned", "workflow_plan_rejected"], workflow_events)
+
+    def test_workflow_detail_includes_workflow_progress_and_draft_when_available(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        draft = make_workflow_plan_draft(task_text="规划 detail 数据契约")
+        planner = FakeWorkflowPlanner(draft)
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_planner_factory=lambda: planner,
+            )
+            run_id = bridge.workflow_plan("规划 detail 数据契约", auto_approve=False)
+            run = bridge.workflow_store.load_run(run_id)
+            run.jobs.append(
+                WorkflowJob(
+                    job_id="agent_1",
+                    prompt="不要读取 mykey.py、mykey.json、mcp.json；不要提交。制定计划。",
+                    status="succeeded",
+                    phase="Plan",
+                    metadata={"label": "planner"},
+                )
+            )
+            bridge.workflow_store.save_run(run)
+            bridge.workflow_store.write_workflow_progress(run)
+            events.clear()
+
+            bridge.workflow_detail(run_id)
+
+            detail = next(event for event in events if event["type"] == "workflow_detail")
+            self.assertEqual("workflow-draft.json", detail["run"]["metadata"]["workflowDraftRef"])
+            self.assertEqual("规划 detail 数据契约", detail["draft"]["taskText"])
+            self.assertEqual("planned-bridge-demo", detail["draft"]["plan"]["meta"]["name"])
+            self.assertTrue(detail["draft"]["validation"]["ok"])
+            self.assertEqual(run_id, detail["progress"]["runId"])
+            self.assertEqual("session_workflow", detail["progress"]["sessionId"])
+            self.assertEqual("planner", detail["progress"]["workflowProgress"][0]["label"])
+            self.assertEqual("Plan", detail["progress"]["workflowProgress"][0]["phaseTitle"])
+            self.assertNotIn("transcriptEvents", json.dumps(detail, ensure_ascii=False))
+
+    def test_workflow_detail_allows_missing_workflow_progress_and_draft(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            events.clear()
+
+            bridge.workflow_detail(run_id)
+
+            detail = next(event for event in events if event["type"] == "workflow_detail")
+            self.assertEqual(run_id, detail["run"]["runId"])
+            self.assertIsNone(detail["draft"])
+            self.assertIsNone(detail["progress"])
+            self.assertEqual("return 1", detail["script"])
 
     def test_workflow_draft_creates_run_and_emits_approval_event(self):
         agent = FakeAgent()

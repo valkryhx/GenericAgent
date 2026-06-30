@@ -16,6 +16,7 @@ export type BridgeCommand =
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
   | { type: 'workflow_draft'; script: string }
+  | { type: 'workflow_plan'; taskText: string; context?: Record<string, unknown>; autoApprove?: boolean; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_resume'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_deny'; runId: string; reason?: string }
@@ -133,6 +134,75 @@ export type WorkflowEvent = {
   payload?: Record<string, unknown>
 }
 
+export type WorkflowPlanAgent = {
+  label?: string
+  prompt?: string
+  dependsOn?: string[]
+  role?: string
+  schemaRef?: string
+  [key: string]: unknown
+}
+
+export type WorkflowPlanPhase = {
+  title?: string
+  agents?: WorkflowPlanAgent[]
+  [key: string]: unknown
+}
+
+export type WorkflowPlanPayload = {
+  taskType?: string
+  meta?: { name?: string; description?: string; [key: string]: unknown }
+  phases?: WorkflowPlanPhase[]
+  schemas?: Record<string, unknown>
+  artifacts?: unknown[]
+  constraints?: string[]
+  [key: string]: unknown
+}
+
+export type WorkflowDraftPayload = {
+  taskText: string
+  classification: Record<string, unknown>
+  plan: WorkflowPlanPayload
+  validation: Record<string, unknown>
+  script?: string
+  context?: Record<string, unknown>
+}
+
+export type WorkflowProgressEntry = {
+  type?: string
+  index?: number
+  agentId?: string
+  jobId?: string
+  label?: string | null
+  phase?: string | null
+  phaseTitle?: string | null
+  state?: WorkflowJobStatus
+  resultRef?: string | null
+  transcriptRef?: string | null
+  lastToolName?: string | null
+  lastToolSummary?: string | null
+  toolCalls?: string[]
+  skillToolCalls?: number
+  skillLoadEvents?: unknown[]
+  allowedTools?: string[]
+  deniedTools?: string[]
+  loadedSkills?: string[]
+  missingRequiredSkills?: string[]
+  capability?: Record<string, unknown>
+  capabilities?: Record<string, unknown>
+  tokenUsage?: Record<string, unknown>
+  promptPreview?: string | null
+  resultPreview?: string | null
+  error?: string | null
+}
+
+export type WorkflowProgressPayload = {
+  runId: string
+  sessionId?: string | null
+  status: WorkflowRunStatus
+  workflowProgress: WorkflowProgressEntry[]
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -155,7 +225,7 @@ export type BridgeEvent =
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }
   | { type: 'workflow_runs'; runs: WorkflowRun[] }
-  | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[] }
+  | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
   | { type: 'workflow_event'; event: WorkflowEvent }
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'error'; code: string; message: string; taskId?: number }

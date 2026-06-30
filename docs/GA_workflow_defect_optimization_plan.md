@@ -2132,6 +2132,568 @@ Ran 89 tests ... OK
 
 当前 bridge 仍支持显式 `workflow_planner_factory` 注入，便于测试和未来 UI/配置层覆写。默认路径则可通过环境变量启用真实 prompt-guided planner。
 
+### 7.4.9 下一步：从 bridge planned run 入口推进到 Ink Workflow UI
+
+提交 `168c2622018ad8a5c987941f4cc33c1dc9809441 feat(workflow): 接入 Ink bridge planned workflow 入口` 已完成的是 **JSONL bridge / control-plane 入口**，不是完整 Ink React UI。该提交让自然语言任务可以通过 `workflow_plan` command 进入：
+
+```text
+workflow_plan JSONL command
+→ GenericAgentBridge.workflow_plan(...)
+→ build_workflow_planner_from_env() / injected workflow_planner_factory
+→ WorkflowController.create_planned_run(...)
+→ workflow_run / workflow_event / workflow_final events
+→ WorkflowRuntime
+```
+
+因此当前目标已经从“能不能把自然语言任务送进 planner/runtime”转为：
+
+```text
+如何把 workflow run 的状态、draft、progress、phase/agent 层级和 agent detail 以 Claude Code-style UI 展示给用户。
+```
+
+#### 当前已具备能力
+
+```text
+Python bridge / backend:
+- frontends/ink_bridge.py 已有 workflow_plan / workflow_draft / workflow_approve / workflow_resume / workflow_deny / workflow_stop / workflow_list / workflow_detail。
+- workflow_plan 已能自动创建 planned run，并在 running 时启动 runtime thread。
+- workflow_run payload 会移除 script，但保留 WorkflowRun.to_dict() 中的 metadata / jobs / resultRef / error。
+- workflow_detail 当前返回 run、script、events。
+- workflow_final 当前读取 final-result.json 或返回 fallback。
+
+Workflow artifact:
+- workflow-progress.json 已记录 workflowProgress entries，包括 label、phase、state、toolCalls、loadedSkills、tokenUsage、promptPreview、resultPreview、transcriptRef、resultRef 等字段。
+- final-result.json 带 workflowProgressRef。
+
+Ink UI:
+- frontends/ink-ui/src/protocol.ts 已有 workflow_draft / workflow_approve / workflow_resume / workflow_deny / workflow_stop / workflow_list / workflow_detail command 类型。
+- frontends/ink-ui/src/state.ts 已能接收 workflow_run / workflow_runs / workflow_detail / workflow_event / workflow_final。
+- frontends/ink-ui/src/workflowPanel.ts 当前只是审批/脚本面板：显示 runId、status、permission、jobs、raw script 和 approve/deny/stop/resume 快捷键。
+- /workflows 当前会发 workflow_list，但 App.tsx 收到 workflow_runs 后会自动打开第一个 run 的 workflow_detail，而不是停留在 Claude Code-style 的 workflow 汇总列表页。
+```
+
+#### 主要缺口
+
+1. **TypeScript 协议还没有声明 `workflow_plan` command**  
+   Python bridge 已支持 `cmd_type == "workflow_plan"`，但 `frontends/ink-ui/src/protocol.ts` 的 `BridgeCommand` union 尚未包含：
+
+   ```ts
+   { type: 'workflow_plan'; taskText: string; context?: Record<string, unknown>; autoApprove?: boolean; args?: unknown; timeoutSeconds?: number }
+   ```
+
+   因此 Ink UI 还不能类型安全地直接发起 planned workflow。
+
+2. **`/workflows` UI 仍是旧审批面板行为**  
+   当前 `/workflows` 更像“列出后自动打开某个 workflow 的 raw script detail”。Claude Code-style UI 要求它先显示汇总列表：
+
+   ```text
+   Dynamic workflows
+   97 completed
+
+   › ✓ prompt-guided-planner-real-e2e-design  4 agents · 133k tok · 5m 40s
+     ✓ ...
+   ```
+
+3. **workflow_detail 缺少 progress / draft artifact 数据**  
+   图 3/4 所需的 phase/agent overview 和 agent detail 不应从 raw script 或 journal 里猜，而应优先消费 `workflow-progress.json`。计划审阅页还需要 `workflow-draft.json` 中的 `plan.meta`、`phases`、`agents`、`validation issues`、`constraints` 等原始计划结构。当前 bridge `workflow_detail` 没有直接返回这些 artifact。
+
+4. **phase attribution 尚未完全可靠**  
+   后端已有 `phase(...)` journal 事件、`WorkflowJob.phase` 字段以及 `workflow-progress.json` 的 `phase/phaseTitle` 输出位置，但仍需要补测试确认普通脚本路径 `phase('X')` 后 `agent(...)` 注册的 job 会带上 phase。UI 第一版必须支持 `phase` 为空时的“未分阶段”fallback。
+
+5. **UI 层缺少 Workflow List / Overview / Agent Detail 三层 view model**  
+   现有 `workflowPanelRows()` 只有 raw script rows，无法表达：
+
+   ```text
+   Workflow List
+   → Phases × Agents overview
+   → Agents × Agent detail
+   ```
+
+6. **底部 live workflow status bar 尚未实现**  
+   图 1 里的底部固定区域：
+
+   ```text
+   Enter to view · x to stop
+   › ◌ read-recent-git-commits ... 3/4 agents done · 6m 0s · ↓ 119.5k tokens
+   ```
+
+   当前 Ink UI 只在 panel 中显示 workflow，尚未在主会话底部常驻显示运行中 workflow 摘要。
+
+7. **缺少从自然语言发起 planned workflow 的用户入口**  
+   bridge 已有 `workflow_plan` JSONL command，但 Ink UI 尚无 slash command，例如：
+
+   ```text
+   /workflow plan <task text>
+   /workflow plan --manual <task text>
+   ```
+
+   更高级的自然语言自动识别“使用 workflow”可以后置，第一版应先做显式 slash command。
+
+#### 推荐实施顺序
+
+##### Slice 1：补齐 bridge/UI 数据契约（最小阻塞）
+
+目标：让 Ink UI 能拿到 list/detail/progress 所需数据，但不先做复杂布局。
+
+改动建议：
+
+```text
+frontends/ink_bridge.py
+- workflow_detail 增加 progress 字段：读取 artifactDir/workflow-progress.json，如果不存在则为 null。
+- workflow_detail 增加 draft 字段：读取 run.metadata.workflowDraftRef 指向的 workflow-draft.json，如果不存在则为 null；只返回 plan / validation / classification / context 等结构化 JSON，不让 UI 从 script 反推计划。
+- workflow_final 可继续保持现状，不内联大 transcript。
+- _list_workflow_runs 排序建议从 run_id 字典序改为最近更新时间/创建时间优先；若模型缺少 createdAt/updatedAt，可先保持现状并在 UI 明确不承诺排序。
+
+frontends/ink-ui/src/protocol.ts
+- BridgeCommand 增加 workflow_plan。
+- BridgeEvent.workflow_detail 增加 draft?: WorkflowDraftPayload | null 和 progress?: WorkflowProgressPayload | null。
+- 新增 WorkflowDraftPayload / WorkflowProgressEntry / WorkflowProgressPayload 类型。
+
+frontends/ink-ui/src/state.ts
+- workflowDetails 存储 draft / progress。
+```
+
+TDD：
+
+```text
+Python:
+- tests/test_ink_bridge.py::test_workflow_detail_includes_workflow_progress_when_available
+- tests/test_ink_bridge.py::test_workflow_detail_includes_workflow_draft_when_available
+- tests/test_ink_bridge.py::test_workflow_detail_allows_missing_workflow_progress_and_draft
+
+TypeScript:
+- frontends/ink-ui/src/state.test.ts 增加 workflow_detail draft/progress 存储测试
+- frontends/ink-ui/src/bridgeClient.test.ts 或 protocol 相关测试覆盖 workflow_plan command JSON 序列化
+```
+
+##### Slice 2：实现 `/workflows` 汇总列表页
+
+目标：使 `/workflows` 显示 workflow run 汇总列表，而不是自动打开第一个详情。
+
+改动建议：
+
+```text
+frontends/ink-ui/src/workflowPanel.ts
+- 引入 WorkflowPanelState union：
+  - { mode: 'list', runs, selected }
+  - { mode: 'overview', detail, selectedPhase }
+  - { mode: 'agent', detail, selectedAgent, scrollOffset }
+- 新增 workflowListRows(...)，输出 Dynamic workflows + completed count + run rows。
+- 新增 workflowListCommandForKey(...): Up/Down 移动，Enter 请求 workflow_detail，Esc 关闭。
+
+frontends/ink-ui/src/App.tsx
+- event.type === 'workflow_runs' 时 setWorkflowPanel(list)，不要自动 workflow_detail。
+- workflowPanel key handling 支持 list mode Up/Down/Enter。
+```
+
+验收 UI 形态对齐 `workflow_ui.md` 图 2：
+
+```text
+Dynamic workflows
+97 completed
+
+› ✓ name  4 agents · 133k tok · 5m 40s
+  ✓ name  4 agents · 145.4k tok · 3m 26s
+```
+
+TDD：
+
+```text
+frontends/ink-ui/src/workflowPanel.test.ts
+- workflowListRows_renders_completed_summary_and_selected_prefix
+- workflowPanelCommandForKey_list_moves_selection
+- workflowPanelCommandForKey_list_enter_requests_detail
+
+frontends/ink-ui/src/App.test.tsx 或 state/app-level test
+- /workflows 收到 workflow_runs 后显示 list，不自动请求 detail
+```
+
+##### Slice 3：实现 Workflow Overview：Phases × Agents
+
+目标：打开某个 workflow 后显示图 3 的两列概览，不再默认显示 raw script。
+
+数据来源：
+
+```text
+workflow_detail.run.jobs
+workflow_detail.events
+workflow_detail.progress.workflowProgress
+workflow_detail.draft.plan.meta / phases / agents / validation / constraints
+workflow_detail.run.metadata.workflowDraftRef / plannerMode / workflowTaskType
+workflow_detail.script 仅作为调试/approval fallback，不作为主 UI。
+```
+
+改动建议：
+
+```text
+frontends/ink-ui/src/workflowPanel.ts
+- buildWorkflowOverview(detail): group progress entries by phaseTitle/phase。
+- workflowOverviewRows(...) 输出顶部 title/description/summary + 左 Phases + 右 selected phase agents。
+- Up/Down 在 phase 列移动；Enter 进入 agent detail；Esc 返回 list。
+```
+
+注意：`WorkflowRun` 目前未必有完整 meta name/description。可以按优先级推导：
+
+```text
+name = run.metadata.workflowName || draft.plan.meta.name || run.runId
+summary/description = run.metadata.workflowDescription || draft.plan.meta.description || run.metadata.workflowTaskType || ''
+```
+
+如果 progress 中的 phase/phaseTitle 为空，先按 `draft.plan.phases[].agents[].label` 与 job metadata label 对齐；仍无法对齐时归入“未分阶段”。后端应另补 phase attribution 测试和修复，但 UI MVP 不应因此阻塞。
+
+TDD：
+
+```text
+workflowPanel.test.ts
+- overview groups agents by phaseTitle
+- overview falls back to draft.plan phase/agent labels when progress phase is missing
+- selected phase controls right-side agents
+- agent rows include label/model/token/tool/duration fallback fields where available
+```
+
+##### Slice 4：实现 Agent Detail：Prompt / Activity / Outcome
+
+目标：打开某个 agent 后显示图 4 的详情页。
+
+第一版数据来源：
+
+```text
+Prompt: job.prompt 或 progress.promptPreview
+Activity: progress.toolCalls 最后 N 个
+Outcome: progress.resultPreview；如果需要全文，后续再增加 bridge artifact read command
+Status header: progress.state + job.metadata.model/config + tokenUsage + toolCalls.length
+```
+
+改动建议：
+
+```text
+workflowPanel.ts
+- workflowAgentDetailRows(...)
+- j/k 控制 detail scrollOffset
+- Up/Down 切换左侧 agent
+- Esc 返回 overview
+- s save 第一版可先提示 unsupported 或保存 resultPreview；完整 artifact save 后续再做
+```
+
+TDD：
+
+```text
+workflowPanel.test.ts
+- agent detail renders Prompt / Activity / Outcome sections
+- j/k changes scroll range
+- Esc returns overview preserving selected phase/agent
+```
+
+##### Slice 5：实现底部运行中 workflow status bar
+
+目标：主会话不打开 `/workflows` 时，也能看到类似图 1 的运行中 workflow 摘要。
+
+改动建议：
+
+```text
+state.ts
+- 从 workflows 中派生 runningWorkflows。
+- workflow_event / workflow_run 更新后保持 run list 最新。
+
+App.tsx
+- 在 BottomChrome 中 input 之上或 panel/hint 区附近增加 WorkflowStatusBar。
+- Enter 打开当前 running workflow detail 或 list。
+- x 发送 workflow_stop。
+```
+
+TDD：
+
+```text
+workflowPanel.test.ts 或新增 workflowStatus.test.ts
+- formats running workflow summary as N/M agents done · duration · tokens
+- x maps to workflow_stop
+- Enter maps to workflow_detail/list
+```
+
+##### Slice 6：显式 `/workflow plan <task>` 入口
+
+目标：用户可以从 Ink UI 发起 planned workflow，而不只是外部 JSONL 测试能调用 `workflow_plan`。
+
+改动建议：
+
+```text
+frontends/ink-ui/src/protocol.ts
+- BridgeCommand 加 workflow_plan。
+
+frontends/ink-ui/src/inputController.ts
+- parse /workflow plan <task>
+- parse /workflow plan --manual <task> → autoApprove=false
+- 可选 parse /workflow plan --timeout 120 <task>
+
+frontends/ink-ui/src/slashCommands.ts
+- /workflow description 更新，或新增说明。
+```
+
+TDD：
+
+```text
+inputController.test.ts
+- /workflow plan 调用 workflow_plan command
+- /workflow plan --manual 设置 autoApprove=false
+- 空 task 不发 command 或由 bridge 返回 workflow_empty_task
+```
+
+#### 风险与非目标
+
+当前阶段不要一次性做：
+
+```text
+- 不做自然语言自动识别“使用 workflow”并隐式触发 workflow_plan。
+- 不把 raw script 作为主 UI；raw script 只用于 approval/debug fallback。
+- 不从 raw events、raw script 或完整 transcript 反推 UI 主结构；主结构优先来自 workflow_detail.draft 和 workflow_detail.progress。
+- 不让 UI 读取 mykey.py / mykey.json / mcp.json。
+- 不在 UI 层实现风险 gating；high risk gating 应在 planner/controller 层完成。
+- 不把完整 transcript 内联到 workflow_detail；agent detail 第一版使用 progress preview。
+```
+
+#### 建议更新进度判断
+
+`168c262` 后，GA workflow UI 接入的进度应记录为：
+
+```text
+已完成：natural language task → workflow_plan JSONL command → planner/control-plane/runtime。
+未完成：Ink React UI 的 Claude Code-style /workflows list、phase/agent overview、agent detail、bottom live status bar、/workflow plan 用户入口。
+下一步：先补 bridge detail progress contract，再做 /workflows list view。
+```
+
+这能保证后续 UI 是消费结构化事实，而不是从日志、script 或 transcript 中猜测 workflow 状态。
+
+#### Slice 1 进度记录（2026-06-30）
+
+状态：**已实现并通过自测**。
+
+本 slice 已补齐 bridge/detail 与 Ink UI 状态层的最小数据契约：
+
+```text
+Python bridge:
+- workflow_detail 现在返回 draft 字段：安全读取 run.metadata.workflowDraftRef 指向的 workflow-draft.json；缺失、非法路径、非法 JSON 或非 object 时返回 null。
+- workflow_detail 现在返回 progress 字段：安全读取 artifactDir/workflow-progress.json；缺失、非法路径、非法 JSON 或非 object 时返回 null。
+- 仍然不内联 child transcript；detail payload 继续经过 sanitize/redaction。
+
+Ink UI protocol/state:
+- BridgeCommand 增加 workflow_plan：taskText/context/autoApprove/args/timeoutSeconds。
+- BridgeEvent.workflow_detail 增加 draft?: WorkflowDraftPayload | null 和 progress?: WorkflowProgressPayload | null。
+- 新增 WorkflowDraftPayload / WorkflowPlanPayload / WorkflowPlanPhase / WorkflowPlanAgent / WorkflowProgressPayload / WorkflowProgressEntry 类型。
+- AppState.workflowDetails 现在保存 draft/progress，供后续 list/overview/agent detail view model 消费。
+```
+
+TDD 与自测记录：
+
+```text
+红灯：
+- python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_includes_workflow_progress_and_draft_when_available tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_allows_missing_workflow_progress_and_draft
+  - 初次失败：workflow_detail 缺少 draft/progress 字段。
+
+绿灯 / 回归：
+- python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_includes_workflow_progress_and_draft_when_available tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_allows_missing_workflow_progress_and_draft
+  - Ran 2 tests ... OK
+- python -m unittest tests.test_ink_bridge
+  - Ran 79 tests ... OK
+- cd frontends/ink-ui && npm exec -- tsx --test src/state.test.ts src/bridgeClient.test.ts
+  - 13 tests pass
+- cd frontends/ink-ui && npm run test && npm run typecheck
+  - 185 tests pass；tsc --noEmit 无错误。
+```
+
+真实 gpt-5.5 smoke：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_WORKFLOW_PLANNER_MODE=prompt_guided GA_WORKFLOW_PLANNER_CONFIG=native_oai_config GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2 python tests/real_ink_bridge_workflow_detail_smoke.py
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+status: awaiting_approval
+plannerMode: prompt_guided
+workflowTaskType: review
+draftPresent: true
+validationOk: true
+progressPresent: false
+progressIsNullForAwaitingApproval: true
+```
+
+说明：`autoApprove=false` 的 planned run 尚未注册 agent jobs，因此通常还没有 `workflow-progress.json`；此时 `workflow_detail.progress === null` 是预期行为。progress artifact 存在时的读取路径已由 Python 单元测试覆盖。
+
+下一步进入 **Slice 2：实现 `/workflows` 汇总列表页**，目标是对齐 `workflow_ui.md` 图 2：`/workflows` 先展示 `Dynamic workflows` 列表，不再自动打开第一个 workflow 的 raw script detail。
+
+#### Slice 2 进度记录（2026-06-30）
+
+状态：**已实现并通过自测**。
+
+本 slice 已把 `/workflows` 从旧的 detail-first / raw-script 面板入口改为 list-first 信息架构，对齐 `workflow_ui.md` 图 2：
+
+```text
+Dynamic workflows
+N completed
+
+› ✓ workflow-name  4 agents
+  ◌ running-workflow  2 agents
+```
+
+实现内容：
+
+```text
+frontends/ink-ui/src/workflowPanel.ts
+- WorkflowPanelState 增加 list mode：{ mode: 'list', runs, selected }。
+- 新增 workflowListPanelFromRuns(...)。
+- 新增 workflowListRows(...)：渲染 Dynamic workflows、completed 统计、选中前缀 `›`、状态图标和 agent 数。
+- 新增 workflowListCommandForKey(...)：Up/Down 移动 selection，Enter 生成 workflow_detail command。
+- workflowPanelRows(...) 兼容 list/detail 两种模式。
+- workflowPanelCommandForKey(...) 对 list mode 委托到 workflowListCommandForKey(...)。
+
+frontends/ink-ui/src/App.tsx
+- 收到 workflow_runs 后 setWorkflowPanel(workflowListPanelFromRuns(event.runs))。
+- 不再自动选择 awaiting_approval 或第一条 run 并发送 workflow_detail。
+- workflow_run 到达时可刷新打开中的 list mode run 列表。
+- workflowPanel 键盘处理支持 list mode Up/Down/Enter。
+
+frontends/ink-ui/src/workflowList.app.test.ts
+- 增加 App 层事件渲染测试：workflow_runs 到达后显示 Dynamic workflows 列表，且不会自动发送 workflow_detail。
+```
+
+TDD 与自测记录：
+
+```text
+红灯：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts src/workflowList.app.test.ts
+  - 初次失败：workflowListRows/workflowListCommandForKey 尚不存在；App 收到 workflow_runs 后仍无法显示 list-first UI。
+
+绿灯 / 回归：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts src/workflowList.app.test.ts
+  - 6 tests pass
+- cd frontends/ink-ui && npm run test && npm run typecheck
+  - 188 tests pass；tsc --noEmit 无错误。
+- python -m unittest tests.test_ink_bridge
+  - Ran 79 tests ... OK
+```
+
+UI 自测说明：
+
+```text
+- 纯函数测试覆盖 workflow_ui.md 图 2 的核心文本契约：Dynamic workflows、completed count、`› ✓ name` 顺序、agent count、Up/Down/Enter command。
+- App 层测试不伪造实现：直接通过 fake bridge 推送真实 BridgeEvent.workflow_runs，验证 React/Ink 渲染层显示 list，且不再 auto-open detail。
+- 当前 Ink test harness 对 stdin 注入组合键不稳定，因此 Enter 导航由 workflowListCommandForKey 纯函数测试覆盖；后续如抽出 App 键盘状态机，可再做更细 App integration。
+```
+
+真实 gpt-5.5 smoke：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_WORKFLOW_PLANNER_MODE=prompt_guided GA_WORKFLOW_PLANNER_CONFIG=native_oai_config GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2 python tests/real_ink_workflows_list_smoke.py
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+runListed: true
+listedStatus: awaiting_approval
+listedPlannerMode: prompt_guided
+listedTaskType: planning
+```
+
+下一步进入 **Slice 4：实现 Agent Detail：Prompt / Activity / Outcome**。目标是从 overview 进入 agent detail，右侧显示状态头、Prompt、Activity、Outcome，并支持 `workflow_ui.md` 图 4 的左侧 agent 列表 / 右侧内容结构。
+
+#### Slice 3 进度记录（2026-06-30）
+
+状态：**已实现并通过自测**。
+
+本 slice 已把 workflow detail 从 raw script 主视图推进为 Workflow Overview view model，对齐 `workflow_ui.md` 图 3 的 Phases × Agents 信息架构雏形。
+
+实现内容：
+
+```text
+frontends/ink-ui/src/workflowPanel.ts
+- 新增 WorkflowDetailPayload / WorkflowOverview / WorkflowOverviewPhase / WorkflowOverviewAgent 类型。
+- 新增 workflowOverviewFromDetail(detail)：基于 workflow_detail.draft + workflow_detail.progress + run.jobs 构造 overview。
+- 新增 workflowOverviewRows(overview)：输出 title/description/summary、Phases 列、所选 phase 的 Agents 列。
+- workflowPanelFromDetail(...) 现在默认返回 mode='overview'，不再把 raw script 作为主 UI。
+- 保留 workflowRawDetailPanelFromDetail(...)，作为 approval/debug fallback 的 raw script 面板。
+- phase/agent 派生优先级：
+  1. progress.workflowProgress[].phaseTitle / phase；
+  2. run.jobs[].phase；
+  3. draft.plan.phases[].agents[].label fallback；
+  4. 仍无法对齐时归入“未分阶段”。
+- 对 awaiting_approval planned run 的真实数据形态（run.jobs=[] 且 progress=null）增加 draft-only fallback：直接从 draft.plan.phases[].agents[] 生成未完成 agent rows。
+
+frontends/ink-ui/src/App.tsx
+- workflow_detail 到达后打开 overview panel。
+- workflow_run 到达时可刷新打开中的 overview.run。
+```
+
+系统调试记录：
+
+```text
+真实 gpt-5.5 overview smoke 首次失败：
+- 真实 awaiting_approval planned run 的 workflow_detail 有 draft.plan.phases[].agents[]，但 run.jobs=[] 且 progress=null。
+- 原 workflowOverviewFromDetail 只从 progress 或 jobs 派生 agents，导致 phaseCount=0 / totalAgents=0。
+
+根因：
+- planned run 在 approval 前尚未执行 workflow script，也就没有 scheduler jobs/progress；此时 draft.plan 是唯一真实、结构化、可审阅的 phase/agent 数据源。
+
+修复：
+- 增加 draft-only fallback：当 progress 和 jobs 都为空时，从 draft.plan.phases[].agents[] 派生 registered agent rows。
+```
+
+TDD 与自测记录：
+
+```text
+红灯：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts
+  - workflowOverviewFromDetail derives awaiting approval agents from draft when jobs and progress are empty 失败：overview.phases=[]。
+
+绿灯 / 回归：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts
+  - 9 tests pass
+- cd frontends/ink-ui && npm run typecheck
+  - tsc --noEmit 无错误
+- cd frontends/ink-ui && npm run test
+  - 192 tests pass
+- python -m unittest tests.test_ink_bridge
+  - Ran 79 tests ... OK
+```
+
+真实 gpt-5.5 smoke：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_WORKFLOW_PLANNER_MODE=prompt_guided GA_WORKFLOW_PLANNER_CONFIG=native_oai_config GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2 GA_REAL_OVERVIEW_DETAIL_OUT=temp/real-overview-detail.json python tests/real_workflow_overview_detail_export.py
+frontends/ink-ui/node_modules/.bin/tsx tests/real_workflow_overview_from_detail_smoke.ts temp/real-overview-detail.json
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+Python export:
+passed: true
+profile: gpt-native / gpt-5.5
+status: awaiting_approval
+phaseCount: 2
+
+TS overview smoke:
+passed: true
+name: Workflow Overview UI Data Contract Read-Only Review
+phaseCount: 2
+totalAgents: 2
+completedAgents: 0
+rows include:
+- Workflow Overview UI Data Contract Read-Only Review  0/2 agents · awaiting_approval
+- Phases | Data Contract Review · 1 agent
+- › ✓ Data Contract Review 0/1 | · Workflow Overview UI Data Contract Reviewer
+```
+
+说明：该 smoke 证明真实 gpt-5.5 prompt-guided planner 产生的 draft/detail 可被 TS overview selector 消费；UI 没有依赖 raw script 作为主结构。
+
+
+
+
 
 
 - 不做固定模板库作为主入口；

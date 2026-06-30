@@ -141,6 +141,48 @@ test('applyBridgeEvent tracks workflow run events and final results', () => {
   assert.deepEqual(state.workflowResults.wf_1, { status: 'succeeded', result: { ok: true } })
 })
 
+test('applyBridgeEvent stores workflow detail draft and progress payloads', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_detail',
+    run: { runId: 'wf_progress', sessionId: 's1', status: 'succeeded' },
+    script: 'return 1',
+    events: [],
+    draft: {
+      taskText: '规划 UI',
+      classification: { taskType: 'planning' },
+      plan: { meta: { name: 'planned-ui' }, phases: [] },
+      validation: { ok: true, issues: [] },
+      context: { plannerMode: 'prompt_guided' },
+    },
+    progress: {
+      runId: 'wf_progress',
+      sessionId: 's1',
+      status: 'succeeded',
+      workflowProgress: [
+        {
+          type: 'workflow_agent',
+          index: 1,
+          agentId: 'agent_1',
+          jobId: 'agent_1',
+          label: 'planner',
+          phase: 'Plan',
+          phaseTitle: 'Plan',
+          state: 'succeeded',
+          toolCalls: ['Read'],
+          tokenUsage: { totalTokens: 12 },
+          promptPreview: 'prompt',
+          resultPreview: 'done',
+        },
+      ],
+    },
+  })
+
+  assert.equal(state.workflowDetails.wf_progress.draft?.taskText, '规划 UI')
+  assert.equal(state.workflowDetails.wf_progress.draft?.plan.meta?.name, 'planned-ui')
+  assert.equal(state.workflowDetails.wf_progress.progress?.workflowProgress[0].label, 'planner')
+  assert.equal(state.workflowDetails.wf_progress.progress?.workflowProgress[0].tokenUsage?.totalTokens, 12)
+})
 test('applyBridgeEvent stores workflow list and detail payloads', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, {

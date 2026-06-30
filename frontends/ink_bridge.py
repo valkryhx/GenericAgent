@@ -520,7 +520,18 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 run = self.workflow_store.load_run(str(run_id or ""))
                 events = self.workflow_store.replay_events(run.run_id)
-            self.emit({"type": "workflow_detail", "run": self._workflow_run_payload(run), "script": run.script, "events": [event.to_dict() for event in events]})
+                draft = self._workflow_artifact_payload(run, run.metadata.get("workflowDraftRef"))
+                progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            self.emit(
+                {
+                    "type": "workflow_detail",
+                    "run": self._workflow_run_payload(run),
+                    "script": run.script,
+                    "events": [event.to_dict() for event in events],
+                    "draft": draft,
+                    "progress": progress,
+                }
+            )
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
 
@@ -645,6 +656,30 @@ class GenericAgentBridge:
         data = run.to_dict()
         data.pop("script", None)
         return data
+
+    def _workflow_artifact_payload(self, run, artifact_ref: Any) -> dict[str, Any] | None:
+        if not run.artifact_dir or not artifact_ref:
+            return None
+        artifact_dir = os.path.abspath(os.fspath(run.artifact_dir))
+        ref = os.fspath(artifact_ref)
+        if os.path.isabs(ref):
+            return None
+        path = os.path.abspath(os.path.join(artifact_dir, ref))
+        try:
+            if os.path.commonpath([artifact_dir, path]) != artifact_dir:
+                return None
+        except ValueError:
+            return None
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return sanitize(payload)
 
     def _workflow_final_payload(self, run) -> dict[str, Any]:
         if not run.artifact_dir or not run.result_ref:

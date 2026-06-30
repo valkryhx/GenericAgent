@@ -1,4 +1,4 @@
-import type { BridgeEvent, ChatMessage, TokenUsage, WorkflowEvent, WorkflowRun } from './protocol.js'
+import type { BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
@@ -8,7 +8,7 @@ export type AppState = {
   error: string | null
   workflows: WorkflowRun[]
   workflowEvents: WorkflowEvent[]
-  workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[] }>
+  workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }>
   workflowResults: Record<string, Record<string, unknown>>
 }
 
@@ -55,7 +55,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       workflows: [...existing, event.run],
       workflowDetails: {
         ...state.workflowDetails,
-        [event.run.runId]: { run: event.run, script: event.script, events: event.events },
+        [event.run.runId]: { run: event.run, script: event.script, events: event.events, draft: event.draft ?? null, progress: event.progress ?? null },
       },
       error: null,
     }
