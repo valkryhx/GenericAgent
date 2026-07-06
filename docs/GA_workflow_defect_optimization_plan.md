@@ -2691,6 +2691,87 @@ rows include:
 
 说明：该 smoke 证明真实 gpt-5.5 prompt-guided planner 产生的 draft/detail 可被 TS overview selector 消费；UI 没有依赖 raw script 作为主结构。
 
+#### Slice 4 进度记录（2026-07-06）
+
+状态：**已实现并通过自测**。
+
+本 slice 已把 Workflow Overview 推进到 Agent Detail：用户可从 overview 进入当前 phase 的 agent 详情页，左列展示当前 phase 的 agents，右列展示所选 agent 的状态头、Prompt、Activity、Outcome，对齐 `workflow_ui.md` 图 4 的第一版信息架构。
+
+实现内容：
+
+```text
+frontends/ink-ui/src/workflowPanel.ts
+- 新增 WorkflowAgentDetail / WorkflowAgentDetailPanelState / WorkflowPanelDecision 类型。
+- workflowPanelFromDetail(detail) 返回 overview panel 时保留 detailSource，供 agent detail 派生 Prompt / Activity / Outcome。
+- 新增 workflowAgentDetailPanelFromOverview(...)：从 overview 进入当前 phase 的 agent detail。
+- 新增 agent detail rows：
+  - 左列：当前 phase 的 agent 列表与状态图标；
+  - 右列：状态头、Prompt、Activity、Outcome；
+  - Activity 显示最近 3 条 toolCalls，并保留总数文案；
+  - draft-only / awaiting_approval 场景下显示 pending、draft prompt、no recent activity、no outcome yet。
+- workflowPanelCommandForKey(...) 改为返回 decision：{ panel?, command? }。
+  - overview + Enter：进入 agent_detail；
+  - agent_detail + Up/Down：切换当前 phase 内 agent；
+  - agent_detail + j/k：滚动右侧 detail；
+  - agent_detail + Esc：返回 overview；
+  - raw detail approval/deny/stop/resume 仍返回原 bridge command。
+
+frontends/ink-ui/src/App.tsx
+- workflowPanel 键盘分支统一消费 WorkflowPanelDecision。
+- Esc 先交给 workflowPanelCommandForKey 处理，使 agent_detail 能返回 overview；其他 panel 仍保持 Esc close。
+- workflow_run 更新时兼容 agent_detail 面板中的 overview.run 刷新。
+
+tests/real_workflow_overview_from_detail_smoke.ts
+- 从真实 sanitized workflow_detail export 进入 agent detail selector。
+- 验证真实 draft-only planned run 也能产出 Prompt / Activity / Outcome sections。
+- 继续验证 overview / agent detail 都不把 raw script 作为主 UI。
+```
+
+TDD 记录：
+
+```text
+红灯：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts
+  - 首次有效红灯：SyntaxError: requested module './workflowPanel.js' does not provide an export named 'workflowAgentDetailPanelFromOverview'。
+  - 说明 Slice 4 的 agent detail 构造函数和状态机尚未实现。
+
+绿灯 / 回归：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts
+  - 12 tests pass
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowPanel.test.ts src/workflowList.app.test.ts src/state.test.ts
+  - 24 tests pass
+- cd frontends/ink-ui && npm run typecheck
+  - tsc --noEmit 无错误
+- cd frontends/ink-ui && npm run test
+  - 195 tests pass
+```
+
+真实 detail smoke：
+
+```text
+cmd /c "cd /d D:\\git_codes\\GenericAgent && npx tsx tests/real_workflow_overview_from_detail_smoke.ts temp/real-overview-detail.json"
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+passed: true
+name: Workflow Overview UI Data Contract Read-Only Review
+phaseCount: 2
+totalAgents: 2
+completedAgents: 0
+agentRows include:
+- Data Contract Review · 1 agent | Workflow Overview UI Data Contract Reviewer
+- › · Workflow Overview UI Data Contract Reviewer | · Pending
+- Prompt
+- Activity
+- Outcome
+```
+
+说明：本次真实验证消费的是前一轮由真实 gpt-5.5 prompt-guided planner 导出的 `temp/real-overview-detail.json`。本轮未重新调用真实 API，因为独立 dynamic workflow 的 verify agent 遇到上游网关 `502 请求转发失败`；主线实现未依赖该失败结果，而是在当前目录重新按 TDD 落地并完成本地与真实导出数据验证。
+
+下一步进入 **Slice 5：bottom live workflow status bar** 或继续细化 Slice 4 的 App 级键盘集成测试。Slice 4 当前第一版尚未实现 `s save`，因为现有 bridge/protocol 没有 workflow save command；后续若要支持保存 agent detail/transcript，应先设计明确 bridge command 与 artifact 语义。
+
 
 
 

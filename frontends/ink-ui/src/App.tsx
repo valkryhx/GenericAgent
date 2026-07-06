@@ -7,7 +7,7 @@ import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
-import { workflowListCommandForKey, workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, type WorkflowPanelState } from './workflowPanel.js'
+import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, type WorkflowPanelState } from './workflowPanel.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
   transcriptLines,
@@ -620,6 +620,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
           if (panel.mode === 'overview') {
             return panel.overview.run.runId === event.run.runId ? { ...panel, overview: { ...panel.overview, run: event.run } } : panel
           }
+          if (panel.mode === 'agent_detail') {
+            return panel.overview.run.runId === event.run.runId ? { ...panel, overview: { ...panel.overview, run: event.run } } : panel
+          }
           return panel.run.runId === event.run.runId ? { ...panel, run: event.run } : panel
         })
         if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
@@ -756,25 +759,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       }
     }
     if (workflowPanel) {
+      const decision = workflowPanelCommandForKey(workflowPanel, key, rawInput)
+      if (decision?.panel) {
+        setWorkflowPanel(decision.panel)
+        return
+      }
+      if (decision?.command) {
+        bridgeRef.current?.send(decision.command)
+        return
+      }
       if (key.escape) {
         setWorkflowPanel(null)
         dismissPendingLocalCommand()
-        return
-      }
-      if (workflowPanel.mode === 'list') {
-        const decision = workflowListCommandForKey(workflowPanel, key, rawInput)
-        if (decision?.panel) {
-          setWorkflowPanel(decision.panel)
-          return
-        }
-        if (decision?.command) {
-          bridgeRef.current?.send(decision.command)
-          return
-        }
-      }
-      const command = workflowPanelCommandForKey(workflowPanel, key, rawInput)
-      if (command) {
-        bridgeRef.current?.send(command)
         return
       }
     }

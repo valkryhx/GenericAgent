@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows } from './workflowPanel.js'
+import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows, workflowAgentDetailPanelFromOverview } from './workflowPanel.js'
 import type { WorkflowRun } from './protocol.js'
 
 const workflowRuns: WorkflowRun[] = [
@@ -201,6 +201,115 @@ test('workflowPanelFromDetail defaults to overview rows instead of raw script', 
   ])
   assert.equal(workflowPanelRows(panel).some(row => row.includes('raw script')), false)
 })
+test('workflowAgentDetailRows renders selected agent Prompt Activity Outcome sections', () => {
+  const panel = workflowPanelFromDetail({
+    run: {
+      runId: 'wf_agent_detail',
+      sessionId: 'session',
+      status: 'succeeded',
+      jobs: [
+        { jobId: 'agent_1', prompt: 'Inspect workflow_planner.py', status: 'succeeded', metadata: { label: 'planner-api', model: 'Opus 4.8 (1M context)' } },
+        { jobId: 'agent_2', prompt: 'Inspect real E2E tests', status: 'succeeded', metadata: { label: 'real-e2e-patterns', model: 'Opus 4.8 (1M context)' } },
+      ],
+    },
+    script: 'return 1',
+    events: [],
+    draft: null,
+    progress: {
+      runId: 'wf_agent_detail',
+      sessionId: 'session',
+      status: 'succeeded',
+      workflowProgress: [
+        {
+          jobId: 'agent_1',
+          label: 'planner-api',
+          phaseTitle: 'Inspect',
+          state: 'succeeded',
+          toolCalls: ['Read 1', 'Read 2', 'Grep workflow symbols', 'Read final notes'],
+          tokenUsage: { totalTokens: 24900 },
+          promptPreview: 'Inspect workflow_planner.py preview',
+          resultPreview: '已检查 workflow planner public API。',
+          lastToolName: 'Grep',
+          lastToolSummary: 'searched workflow symbols',
+        },
+        {
+          jobId: 'agent_2',
+          label: 'real-e2e-patterns',
+          phaseTitle: 'Inspect',
+          state: 'succeeded',
+          toolCalls: ['Read real smoke tests'],
+          tokenUsage: { totalTokens: 45000 },
+          promptPreview: 'Inspect real E2E tests preview',
+          resultPreview: '已检查 real E2E patterns。',
+        },
+      ],
+    },
+  })
+  const detailPanel = workflowAgentDetailPanelFromOverview(panel, 0, 0)
+
+  assert.deepEqual(workflowPanelRows(detailPanel).slice(0, 14), [
+    'Inspect · 2 agents | planner-api',
+    '› ✓ planner-api | ✓ Completed · Opus 4.8 (1M context) · 24.9k tok · 4 tool calls',
+    '  ✓ real-e2e-patterns | Prompt',
+    '                   |   Inspect workflow_planner.py',
+    '                   | Activity · last 3 of 4 tool calls',
+    '                   |   Read 2',
+    '                   |   Grep workflow symbols',
+    '                   |   Read final notes',
+    '                   | Outcome',
+    '                   |   已检查 workflow planner public API。',
+    '↑↓ agent · j/k scroll · esc back',
+  ])
+})
+
+test('workflowPanelCommandForKey opens agent detail and navigates within it', () => {
+  const overviewPanel = workflowPanelFromDetail({
+    run: {
+      runId: 'wf_agent_keys',
+      sessionId: 'session',
+      status: 'succeeded',
+      jobs: [
+        { jobId: 'agent_1', status: 'succeeded', metadata: { label: 'first' } },
+        { jobId: 'agent_2', status: 'running', metadata: { label: 'second' } },
+      ],
+    },
+    script: 'return 1',
+    events: [],
+    draft: { taskText: 'x', classification: {}, plan: { meta: { name: 'x' }, phases: [{ title: 'P', agents: [{ label: 'first' }, { label: 'second' }] }] }, validation: { ok: true } },
+    progress: null,
+  })
+
+  const opened = workflowPanelCommandForKey(overviewPanel, { return: true }, '')?.panel
+  assert.equal(opened?.mode, 'agent_detail')
+  assert.equal(opened?.agentIndex, 0)
+
+  const moved = opened ? workflowPanelCommandForKey(opened, { downArrow: true }, '')?.panel : null
+  assert.equal(moved?.mode, 'agent_detail')
+  if (moved?.mode !== 'agent_detail') throw new Error('expected agent detail panel')
+  assert.equal(moved.agentIndex, 1)
+  assert.equal(workflowPanelRows(moved).some(row => row.includes('second')), true)
+
+  assert.equal(workflowPanelCommandForKey(moved, {}, 'j')?.panel?.mode, 'agent_detail')
+  const scrolled = workflowPanelCommandForKey(moved, {}, 'j')?.panel
+  if (scrolled?.mode !== 'agent_detail') throw new Error('expected scrolled agent detail panel')
+  assert.equal(scrolled.scrollOffset, 1)
+  const unscrolled = workflowPanelCommandForKey({ ...moved, scrollOffset: 1 }, {}, 'k')?.panel
+  if (unscrolled?.mode !== 'agent_detail') throw new Error('expected unscrolled agent detail panel')
+  assert.equal(unscrolled.scrollOffset, 0)
+  assert.equal(workflowPanelCommandForKey(moved, { escape: true }, '')?.panel?.mode, 'overview')
+})
+
+test('workflowPanelCommandForKey leaves overview unchanged when selected phase has no agents', () => {
+  const panel = workflowPanelFromDetail({
+    run: { runId: 'wf_empty_phase', sessionId: 'session', status: 'succeeded', jobs: [] },
+    script: 'return 1',
+    events: [],
+    draft: { taskText: 'x', classification: {}, plan: { meta: { name: 'x' }, phases: [] }, validation: { ok: true } },
+    progress: null,
+  })
+
+  assert.equal(workflowPanelCommandForKey(panel, { return: true }, ''), null)
+})
 test('workflowRawDetailPanelFromDetail exposes raw script and approval metadata rows', () => {
   const panel = workflowRawDetailPanelFromDetail({
     run: awaitingRun,
@@ -222,16 +331,16 @@ test('workflowRawDetailPanelFromDetail exposes raw script and approval metadata 
 test('workflowPanelCommandForKey maps approval keyboard shortcuts', () => {
   const panel = workflowRawDetailPanelFromDetail({ run: awaitingRun, script: 'return 1', events: [] })
 
-  assert.deepEqual(workflowPanelCommandForKey(panel, { return: true }, ''), {
+  assert.deepEqual(workflowPanelCommandForKey(panel, { return: true }, '')?.command, {
     type: 'workflow_approve',
     runId: 'wf_demo',
   })
-  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'd'), {
+  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'd')?.command, {
     type: 'workflow_deny',
     runId: 'wf_demo',
     reason: 'denied from Ink UI',
   })
-  assert.deepEqual(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 's'), {
+  assert.deepEqual(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 's')?.command, {
     type: 'workflow_stop',
     runId: 'wf_demo',
     reason: 'stopped from Ink UI',
@@ -241,7 +350,7 @@ test('workflowPanelCommandForKey maps approval keyboard shortcuts', () => {
 test('workflowPanelCommandForKey maps resume shortcut for completed or interrupted runs', () => {
   const panel = workflowRawDetailPanelFromDetail({ run: { ...awaitingRun, status: 'interrupted' }, script: 'return 1', events: [] })
 
-  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'r'), {
+  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'r')?.command, {
     type: 'workflow_resume',
     runId: 'wf_demo',
   })
