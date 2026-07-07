@@ -540,3 +540,97 @@ wf_1234567890abcdef awaiting_approval
 - 结束后状态为 `succeeded`，或失败时能看到明确错误原因。
 
 如果以上都成立，说明 GA Ink UI 中的 workflow 入口和基本 UI 链路是可用的。
+
+---
+
+## 15. 真实回归验证记录（2026-07-07）
+
+本节记录一次按本文命令从 slash 入口出发的真实回归验证。验证使用用户现有配置中的真实 `gpt-5.5`，未读取、打印或提交 `mykey.py` / `mykey.json` / `mcp.json`。
+
+### 15.1 覆盖的 slash 命令
+
+通过 `handleInput()` 从用户输入文本生成真实 `BridgeCommand`，再喂给 `frontends/ink_bridge.py` JSONL 协议，覆盖：
+
+```text
+/workflows
+/workflow
+/workflow list
+/workflow plan --manual --timeout 120 <生活场景任务>
+/workflow detail <runId>
+/workflow deny <runId> <reason>
+/workflow plan --timeout 180 <生活场景任务>
+/workflow stop <runId> <reason>
+/workflow resume <runId>
+```
+
+结果摘要：
+
+```text
+passed: true
+api: real gpt-5.5 via native_oai_config
+method: slash text -> handleInput -> BridgeCommand -> ink_bridge.py JSONL -> GA workflow
+/workflows, /workflow, /workflow list: 均返回 workflow_runs
+manual plan: status=awaiting_approval, draftValidationOk=true
+detail: 返回 workflow_detail 和 draft validation ok
+deny: 可把等待审批 run 取消
+auto plan: 能创建并启动真实 workflow；测试脚本 shutdown 会终止该 run，因此不作为成功执行结论
+stop: 命令可通过 bridge 分发并产生结构化状态事件
+resume: 对 cancelled run 返回结构化 workflow_resume_failed，而不是崩溃
+```
+
+### 15.2 持久 bridge 审批执行验证
+
+为了验证 approve 后 workflow 确实能在同一个 bridge 进程中真实执行，额外运行持久 JSONL bridge 测试：
+
+```text
+/workflow plan --manual --timeout 240 <健康晚餐生活场景>
+/workflow detail <runId>
+/workflow approve <runId>
+# 等待真实 runtime 到 terminal
+/workflow detail <runId>
+/workflows
+```
+
+结果摘要：
+
+```text
+passed: true
+api: real gpt-5.5 via native_oai_config
+method: slash text -> handleInput -> persistent ink_bridge JSONL -> approve -> real workflow runtime
+runId: wf_e6d99536ae304fa1afb4f81b721fb10e
+draftValidationOk: true
+terminalStatus: succeeded
+progressEntryCount: 2
+```
+
+这证明 `--manual` 创建的 run 可以通过 `/workflow approve <runId>` 在同一 bridge 会话中真实运行完成，并且最终 detail 中有 progress。
+
+### 15.3 MCP + skill 复杂真实 E2E
+
+另运行复杂真实 E2E，覆盖真实 `gpt-5.5` planner、真实 MCP、真实 skill、临时编码写读和 progress：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_REAL_API_CONFIG=native_oai_config GA_REAL_API_EXPECTED_MODEL=gpt-5.5 GA_REAL_API_EXPECTED_NAME=gpt-native GA_COMPLEX_WORKFLOW_DETAIL_OUT=temp/ga-workflow-user-guide-complex-detail.json python tests/real_complex_workflow_mcp_skill_coding_e2e.py
+```
+
+结果摘要：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+mcpDiscovery.selectedTool: mcp__tavily__tavily_search
+status: succeeded
+runtimeStatus: succeeded
+jobCount: 3
+jobStatuses: succeeded, succeeded, succeeded
+toolCalls: mcp__tavily__tavily_search, load_skill, file_write, file_read
+mcpCalled: true
+mcpReturned: true
+usingSuperpowersLoaded: true
+codingFileWritten: true
+codingFileOk: true
+progressEntryCount: 3
+deniedTools: []
+```
+
+结论：按本指南操作的 workflow slash 入口链路可以在真实 `gpt-5.5` 下创建、查看、审批、执行、停止/恢复错误处理，并且 GA workflow runtime 在复杂场景下可以真实调用 MCP、加载 skill、写读临时编码文件并生成 progress。
