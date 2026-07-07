@@ -258,6 +258,39 @@ test('handleInput parses workflow list and control slash commands', () => {
   })
 })
 
+test('handleInput parses workflow plan slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  assert.deepEqual(handleInput('/workflow plan --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false },
+  })
+  assert.deepEqual(handleInput('/workflow plan --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow plan --manual --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow plan --timeout 120 --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store, new Set(['workflow'])), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  assert.deepEqual(handleInput('/workflow plan', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '', autoApprove: true },
+  })
+})
+
 test('handleInput folds multiline pasted text and expands on submit', () => {
   const store = createPasteStore()
   const pasted = handleInput('', '\u001b[200~a\r\nb\nc\u001b[201~', {}, 'idle', store)

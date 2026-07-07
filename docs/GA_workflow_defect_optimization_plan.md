@@ -2936,6 +2936,81 @@ TDD 红灯 / 绿灯：
 
 本轮修复后仍保留后续增强建议：App 级 non-empty input Enter/x 不被 status bar 截获、active panel/slash/footer 时隐藏 status bar、real smoke 区分 progress/jobs structured-path 与 awaiting_approval zero-agent smoke，可作为后续覆盖率增强项处理。
 
+#### Slice 6 进度记录（2026-07-07）
+
+状态：**已实现并通过自测**。
+
+本 slice 补齐了 Ink React UI 中显式 `/workflow plan <task>` planned workflow 用户入口，使用户不再只能通过外部 JSONL 脚本调用 `workflow_plan`。入口保持显式触发，不做自然语言隐式识别；UI 不读取 `mykey.py` / `mykey.json` / `mcp.json`，也不在前端实现高风险 gating。
+
+实现内容：
+
+```text
+frontends/ink-ui/src/inputController.ts
+- 在 /workflow list/control 分支之间新增 /workflow plan 解析。
+- 支持 /workflow plan <task> -> workflow_plan command，autoApprove 默认 true。
+- 支持 /workflow plan --manual <task> -> autoApprove=false。
+- 支持 /workflow plan --timeout 120 <task>，并兼容 --manual / --timeout 顺序互换。
+- 当 skillNames 中存在 workflow skill 时，/workflow plan 仍优先解析为内置 workflow_plan command，避免被 skill slash command 截获。
+
+frontends/ink-ui/src/slashCommands.ts
+- 新增 /workflow plan 建议项。
+- 新增 requiresArgs 标记，确保 Enter/Tab 只补全 `/workflow plan `，不会在没有 task text 时直接执行。
+
+frontends/ink-ui/src/localCommandTranscript.ts
+- local command transcript 可把 workflow_plan command 还原为 `/workflow plan ...` 文本。
+- autoApprove=false 时显示 --manual；timeoutSeconds 存在时显示 --timeout。
+
+frontends/ink-ui/src/App.tsx
+- helpText 中加入 `/workflow plan [--manual] [--timeout SECONDS] TASK` 说明。
+- 导出 helpText 以便对用户可见帮助内容做稳定单测。
+
+既有后端闭环
+- protocol.ts 已包含 workflow_plan BridgeCommand 类型。
+- frontends/ink_bridge.py 已支持 workflow_plan JSONL dispatch，并调用 GenericAgentBridge.workflow_plan。
+- GenericAgentBridge.workflow_plan 已校验空 task、调用 planner/controller，autoApprove=true 时启动 runtime，autoApprove=false 时进入 awaiting_approval。
+```
+
+TDD 与自测记录：
+
+```text
+红灯：
+- cd frontends/ink-ui && npm exec -- tsx --test src/App.test.ts
+  - 新增 App 级 stdin 驱动测试最初失败：测试 harness 的 stdin.emit('data') 未触发 Ink internal_eventEmitter；该红灯被判定为测试方式不可靠，而非实现缺陷。
+  - 调整为稳定验证 helpText 用户可见命令说明，并保留 inputController/bridgeClient/ink_bridge 三层对命令链的覆盖。
+
+绿灯 / 回归：
+- cd frontends/ink-ui && npm exec -- tsx --test src/App.test.ts src/inputController.test.ts src/slashCommands.test.ts src/bridgeClient.test.ts src/localCommandTranscript.test.ts
+  - 相关前端测试通过。
+- cd frontends/ink-ui && npm run typecheck
+  - tsc --noEmit 无错误。
+- cd frontends/ink-ui && npm run test
+  - 206 tests pass。
+- python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_creates_auto_approved_run_and_starts_runtime tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false tests.test_ink_bridge.InkBridgeTest.test_workflow_plan_emits_rejected_plan_without_runtime tests.test_ink_bridge.InkBridgeTest.test_jsonl_loop_dispatches_workflow_plan_command
+  - Ran 4 tests ... OK。
+```
+
+真实 gpt-5.5 E2E：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_WORKFLOW_PLANNER_MODE=prompt_guided GA_WORKFLOW_PLANNER_CONFIG=native_oai_config GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2 python tests/real_ink_bridge_workflow_detail_smoke.py
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+runId: wf_e3ac8ad0e3114c87aa62a8a78d20521c
+status: awaiting_approval
+plannerMode: prompt_guided
+workflowTaskType: review
+draftPresent: true
+validationOk: true
+progressIsNullForAwaitingApproval: true
+```
+
+验收结论：Slice 6 的显式 planned workflow 入口已经具备用户可发现性（slash suggestions/help）、输入解析、local transcript、bridge serialization、JSONL dispatch、controller/runtime 闭环覆盖，并已通过真实 `gpt-5.5` planned workflow smoke。后续如果需要真正端到端键盘交互测试，应先抽象 Ink stdin 测试 harness 或增加受控 input dispatcher，而不是依赖 `stdin.emit('data')` 触发 Ink 私有 internal event。
+
 复杂真实 E2E 维护提醒：后续涉及 workflow planner/runtime/child agent/MCP/skills/progress 或 Slice 4/5 UI 的关键改动后，优先运行 `tests/real_complex_workflow_mcp_skill_coding_e2e.py`。该脚本覆盖真实 `gpt-5.5` planner、真实 Tavily MCP 搜索、真实 `using-superpowers` skill 加载、临时编码写读、多 agent runtime 和 Slice 4/5 selector 消费。详细命令与验收证据见 `docs/GA_workflow_complex_e2e_verification.md`。
 
 

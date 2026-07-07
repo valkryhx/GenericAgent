@@ -18,6 +18,8 @@ test('commandTextForLocalDecision returns display text for local actions and com
   assert.equal(commandTextForLocalDecision({ command: { type: 'compact', instructions: 'keep decisions' } }), '/compact keep decisions')
   assert.equal(commandTextForLocalDecision({ command: { type: 'compact', instructions: '' } }), '/compact')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_list' } }), '/workflows')
+  assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true } }), '/workflow plan 调研 workflow UI')
+  assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false, timeoutSeconds: 120 } }), '/workflow plan --manual --timeout 120 调研 workflow UI')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_detail', runId: 'wf_demo' } }), '/workflow detail wf_demo')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_resume', runId: 'wf_demo' } }), '/workflow resume wf_demo')
   assert.equal(commandTextForLocalDecision({ command: { type: 'workflow_deny', runId: 'wf_demo', reason: 'no' } }), '/workflow deny wf_demo no')

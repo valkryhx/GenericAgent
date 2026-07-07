@@ -93,6 +93,8 @@ function parseSlashSubmit(
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
+  const workflowPlan = parseWorkflowPlanCommand(trimmed)
+  if (workflowPlan) return { command: workflowPlan }
   const workflowAction = /^\/workflow\s+(detail|approve|resume|deny|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (workflowAction) {
     const action = workflowAction[1]
@@ -114,6 +116,35 @@ function parseSlashSubmit(
     if (skillNames.has(skill)) return { command: { type: 'skill_invoke', skill, args: skillMatch[2] ?? '' } }
   }
   return null
+}
+
+function parseWorkflowPlanCommand(trimmed: string): BridgeCommand | null {
+  const prefix = '/workflow plan'
+  if (trimmed !== prefix && !trimmed.startsWith(`${prefix} `)) return null
+  const tokens = trimmed.slice(prefix.length).trim().split(/\s+/).filter(Boolean)
+  let autoApprove = true
+  let timeoutSeconds: number | undefined
+  const taskParts: string[] = []
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]
+    if (token === '--manual') {
+      autoApprove = false
+      continue
+    }
+    if (token === '--timeout') {
+      const rawTimeout = tokens[index + 1]
+      const parsed = rawTimeout ? Number(rawTimeout) : NaN
+      if (Number.isFinite(parsed) && parsed > 0) {
+        timeoutSeconds = parsed
+        index += 1
+        continue
+      }
+    }
+    taskParts.push(token)
+  }
+  const command: BridgeCommand = { type: 'workflow_plan', taskText: taskParts.join(' '), autoApprove }
+  if (timeoutSeconds !== undefined) command.timeoutSeconds = timeoutSeconds
+  return command
 }
 
 export function handleInput(

@@ -5,6 +5,7 @@ export type SlashCommand = {
   description: string
   kind?: 'builtin' | 'skill'
   source?: string
+  requiresArgs?: boolean
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -21,6 +22,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/workflows', description: 'Show workflow runs and approval controls' },
   { name: '/workflow', description: 'Show or control workflow runs' },
+  { name: '/workflow plan', description: 'Plan and run a dynamic workflow from task text', requiresArgs: true },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },
   { name: '/continue', description: 'Alias for /resume' },
@@ -71,7 +73,7 @@ export function slashSelectionAction(
   command: SlashCommand,
   trigger: 'enter' | 'tab',
 ): { type: 'complete' | 'execute'; value: string } {
-  if (trigger === 'enter' && command.kind !== 'skill') {
+  if (trigger === 'enter' && command.kind !== 'skill' && !command.requiresArgs) {
     return { type: 'execute', value: command.name }
   }
   return { type: 'complete', value: completeSlashCommand(command) }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import React from 'react'
 import { render } from 'ink'
-import { App } from './App.js'
+import { App, helpText } from './App.js'
 import type { BridgeClient } from './bridgeClient.js'
 import type { BridgeEvent } from './protocol.js'
 
@@ -39,6 +39,14 @@ class FakeReadStream extends EventEmitter {
 
   read(): null {
     return null
+  }
+
+  resume(): this {
+    return this
+  }
+
+  pause(): this {
+    return this
   }
 }
 
@@ -114,7 +122,7 @@ test('App scrolls a resumed history replacement to its first user message even w
   })
 
   try {
-    const finalFrame = await waitForFrame(stdout, frame => /> 介绍美国/.test(frame))
+    const finalFrame = await waitForFrame(stdout, frame => /> 介绍美国/.test(frame) && /恢复完成：12 轮历史 · session\.json/.test(frame))
 
     assert.match(finalFrame, /> 介绍美国/)
     assert.match(finalFrame, /恢复完成：12 轮历史 · session\.json/)
@@ -260,4 +268,8 @@ test('App enters the alternate screen before the first Ink frame is written', as
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
   }
+})
+
+test('App help documents workflow plan slash command entry', () => {
+  assert.match(helpText(), /\/workflow plan \[--manual\] \[--timeout SECONDS\] TASK - plan and run a dynamic workflow/)
 })

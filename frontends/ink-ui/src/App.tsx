@@ -355,7 +355,7 @@ function ActivityPlaceholder() {
   )
 }
 
-function helpText(): string {
+export function helpText(): string {
   return [
     'Commands:',
     '/resume, /continue - pick a previous conversation',
@@ -363,6 +363,7 @@ function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
     '/workflows - inspect workflow runs and approval controls',
+    '/workflow plan [--manual] [--timeout SECONDS] TASK - plan and run a dynamic workflow',
     '/workflow detail|approve|resume|deny|stop RUN_ID - control workflows',
     '/clear - clear display only',
     '/status - show current frontend status',

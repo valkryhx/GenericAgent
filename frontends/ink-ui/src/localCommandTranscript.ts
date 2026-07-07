@@ -16,6 +16,10 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'model_switch') return `/model ${command.selector}`
   if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
   if (command.type === 'workflow_list') return '/workflows'
+  if (command.type === 'workflow_plan') {
+    const flags = [command.autoApprove === false ? '--manual' : null, command.timeoutSeconds ? `--timeout ${command.timeoutSeconds}` : null].filter(Boolean).join(' ')
+    return `/workflow plan ${flags ? `${flags} ` : ''}${command.taskText}`.trimEnd()
+  }
   if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
   if (command.type === 'workflow_approve') return `/workflow approve ${command.runId}`
   if (command.type === 'workflow_resume') return `/workflow resume ${command.runId}`
