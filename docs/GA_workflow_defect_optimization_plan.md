@@ -2936,6 +2936,8 @@ TDD 红灯 / 绿灯：
 
 本轮修复后仍保留后续增强建议：App 级 non-empty input Enter/x 不被 status bar 截获、active panel/slash/footer 时隐藏 status bar、real smoke 区分 progress/jobs structured-path 与 awaiting_approval zero-agent smoke，可作为后续覆盖率增强项处理。
 
+复杂真实 E2E 维护提醒：后续涉及 workflow planner/runtime/child agent/MCP/skills/progress 或 Slice 4/5 UI 的关键改动后，优先运行 `tests/real_complex_workflow_mcp_skill_coding_e2e.py`。该脚本覆盖真实 `gpt-5.5` planner、真实 Tavily MCP 搜索、真实 `using-superpowers` skill 加载、临时编码写读、多 agent runtime 和 Slice 4/5 selector 消费。详细命令与验收证据见 `docs/GA_workflow_complex_e2e_verification.md`。
+
 
 
 
