@@ -111,6 +111,23 @@ export function workflowRawDetailPanelFromDetail(detail: { run: WorkflowRun; scr
   }
 }
 
+export function workflowPanelWithRunUpdate(panel: WorkflowPanelState, run: WorkflowRun): WorkflowPanelState {
+  if (panel.mode === 'list') {
+    const existing = panel.runs.filter(item => item.runId !== run.runId)
+    return { ...panel, runs: [...existing, run] }
+  }
+  if (panel.mode === 'overview') {
+    if (panel.overview.run.runId !== run.runId) return panel
+    return workflowPanelFromDetail({ ...panel.detailSource, run })
+  }
+  if (panel.mode === 'agent_detail') {
+    if (panel.overview.run.runId !== run.runId) return panel
+    const overviewPanel = workflowPanelFromDetail({ ...panel.detailSource, run })
+    return workflowAgentDetailPanelFromOverview(overviewPanel, panel.phaseIndex, panel.agentIndex, panel.scrollOffset)
+  }
+  return panel.run.runId === run.runId ? { ...panel, run } : panel
+}
+
 export function workflowListPanelFromRuns(runs: WorkflowRun[]): WorkflowListPanelState {
   return { mode: 'list', runs, selected: 0 }
 }

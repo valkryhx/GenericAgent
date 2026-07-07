@@ -87,6 +87,32 @@ test('workflowStatusBarRows formats running workflow controls and summary', () =
   ])
 })
 
+test('workflowStatusBarFromState shows active label from jobs-only fallback', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [{
+      runId: 'wf_jobs_only',
+      sessionId: 'session',
+      status: 'running',
+      metadata: { workflowName: 'jobs-only-workflow' },
+      jobs: [
+        { jobId: 'agent_1', status: 'succeeded', metadata: { label: 'planner' } },
+        { jobId: 'agent_2', status: 'running', metadata: { label: 'implementation' } },
+      ],
+    }],
+  }))
+
+  assert.deepEqual(bar, {
+    runId: 'wf_jobs_only',
+    status: 'running',
+    name: 'jobs-only-workflow',
+    completedAgents: 1,
+    totalAgents: 2,
+    activeAgent: 'implementation',
+    lastActivity: undefined,
+    tokenText: undefined,
+  })
+})
+
 test('workflowStatusBarRows formats awaiting approval without stop shortcut', () => {
   const bar = workflowStatusBarFromState(stateWithWorkflows({
     workflows: [{ runId: 'wf_review', sessionId: 'session', status: 'awaiting_approval', metadata: { workflowName: 'review-workflow' }, jobs: [] }],
@@ -108,6 +134,9 @@ test('workflowStatusBarCommandForKey maps Enter and running-only x controls', ()
 
   assert.deepEqual(workflowStatusBarCommandForKey(running, { return: true }, ''), { type: 'workflow_detail', runId: 'wf_live' })
   assert.deepEqual(workflowStatusBarCommandForKey(running, {}, 'x'), { type: 'workflow_stop', runId: 'wf_live', reason: 'stopped from Ink UI status bar' })
+  assert.equal(workflowStatusBarCommandForKey(running, { ctrl: true }, 'x'), null)
+  assert.equal(workflowStatusBarCommandForKey(running, { meta: true }, 'x'), null)
+  assert.equal(workflowStatusBarCommandForKey(running, { shift: true }, 'x'), null)
   assert.deepEqual(workflowStatusBarCommandForKey(awaiting, { return: true }, ''), { type: 'workflow_detail', runId: 'wf_review' })
   assert.equal(workflowStatusBarCommandForKey(awaiting, {}, 'x'), null)
 })

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows, workflowAgentDetailPanelFromOverview } from './workflowPanel.js'
+import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows, workflowAgentDetailPanelFromOverview, workflowPanelWithRunUpdate } from './workflowPanel.js'
 import type { WorkflowRun } from './protocol.js'
 
 const workflowRuns: WorkflowRun[] = [
@@ -296,7 +296,41 @@ test('workflowPanelCommandForKey opens agent detail and navigates within it', ()
   const unscrolled = workflowPanelCommandForKey({ ...moved, scrollOffset: 1 }, {}, 'k')?.panel
   if (unscrolled?.mode !== 'agent_detail') throw new Error('expected unscrolled agent detail panel')
   assert.equal(unscrolled.scrollOffset, 0)
-  assert.equal(workflowPanelCommandForKey(moved, { escape: true }, '')?.panel?.mode, 'overview')
+  const escaped = workflowPanelCommandForKey(moved, { escape: true }, '')?.panel
+  assert.equal(escaped?.mode, 'overview')
+  if (escaped?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(escaped.overview.selectedPhase, 0)
+})
+
+test('workflowPanelWithRunUpdate refreshes visible agent detail status and outcome', () => {
+  const overviewPanel = workflowPanelFromDetail({
+    run: {
+      runId: 'wf_agent_update',
+      sessionId: 'session',
+      status: 'running',
+      jobs: [{ jobId: 'agent_1', status: 'running', metadata: { label: 'builder' } }],
+    },
+    script: 'return 1',
+    events: [],
+    draft: { taskText: 'x', classification: {}, plan: { meta: { name: 'x' }, phases: [{ title: 'Build', agents: [{ label: 'builder', prompt: 'Build workflow UI' }] }] }, validation: { ok: true } },
+    progress: null,
+  })
+  const detailPanel = workflowAgentDetailPanelFromOverview(overviewPanel, 0, 0, 2)
+
+  const refreshed = workflowPanelWithRunUpdate(detailPanel, {
+    runId: 'wf_agent_update',
+    sessionId: 'session',
+    status: 'succeeded',
+    jobs: [{ jobId: 'agent_1', status: 'succeeded', metadata: { label: 'builder' } }],
+  })
+
+  assert.equal(refreshed.mode, 'agent_detail')
+  if (refreshed.mode !== 'agent_detail') throw new Error('expected agent detail panel')
+  assert.equal(refreshed.scrollOffset, 2)
+  assert.equal(refreshed.detail.status, 'succeeded')
+  assert.equal(refreshed.detail.statusText, 'Completed')
+  assert.equal(refreshed.detail.outcome, '(agent did not produce an outcome)')
+  assert.equal(workflowPanelRows({ ...refreshed, scrollOffset: 0 }).some(row => row.includes('✓ Completed')), true)
 })
 
 test('workflowPanelCommandForKey leaves overview unchanged when selected phase has no agents', () => {

@@ -2879,6 +2879,63 @@ rows:
 
 说明：本 slice 未新增后端 `workflow_progress` event；如果后续发现运行中 agent 完成数无法随 bridge 事件实时更新，应单独开后端/协议 slice，而不是在 status bar UI 中从 raw events 或 transcript 猜测进度。
 
+#### Slice 4/5 验证修复记录（2026-07-07）
+
+状态：**multi-agent 复验发现 3 个确认缺陷，已按 TDD 修复并验证**。
+
+本轮通过 dynamic workflow 重新复验 Slice 4/5，并使用用户现有 `mykey` 配置中的真实 `gpt-5.5` 完成 E2E smoke。复验过程中严格未读取、打印或暴露 `mykey.py` / `mykey.json` / `mcp.json` / API key / token / credential。
+
+确认问题与修复：
+
+```text
+frontends/ink-ui/src/workflowStatusBar.ts
+- 修复 status bar 的 destructive stop 快捷键误触发：rawInput 为 x 时，只有 plain key（无 ctrl/meta/shift）才发送 workflow_stop。
+- 修复 jobs-only fallback 下 active agent label 丢失：active agent 统一从最终 agents 数组选择，因此仅有 workflow_run.run.jobs、尚无 workflow_detail/progress 时也能显示 metadata.label。
+- 同时避免无 label 的 jobs-only fallback 把内部 jobId 当作用户可见 active label。
+
+frontends/ink-ui/src/workflowPanel.ts
+- 新增 workflowPanelWithRunUpdate(panel, run)：集中处理 workflow_run 对 list/overview/agent_detail/raw detail 的刷新。
+- 修复 agent_detail 打开时同 run workflow_run 更新导致可见 detail stale 的问题：用保留的 detailSource + 新 run 重建 overview，再保留 phaseIndex/agentIndex/scrollOffset 重建 agent detail。
+
+frontends/ink-ui/src/App.tsx
+- workflow_run 分支改为复用 workflowPanelWithRunUpdate，避免 App 内重复维护 panel 刷新逻辑。
+
+frontends/ink-ui/src/workflowStatusBar.test.ts
+- 增加 jobs-only running label 覆盖。
+- 增加 Ctrl/Meta/Shift + x 不触发 workflow_stop 覆盖。
+
+frontends/ink-ui/src/workflowPanel.test.ts
+- 增加 workflowPanelWithRunUpdate refreshes visible agent detail status and outcome。
+- 补强 Esc 返回 overview 时 selectedPhase 保留断言。
+```
+
+TDD 红灯 / 绿灯：
+
+```text
+红灯：
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowStatusBar.test.ts
+  - jobs-only fallback activeAgent: undefined !== implementation。
+  - Ctrl+X/Meta+X 仍返回 workflow_stop。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowPanel.test.ts
+  - requested module './workflowPanel.js' does not provide an export named 'workflowPanelWithRunUpdate'。
+
+绿灯：
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowStatusBar.test.ts
+  - 6 tests pass。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowPanel.test.ts
+  - 13 tests pass。
+- npm --prefix frontends/ink-ui run typecheck
+  - tsc --noEmit 无错误。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowList.app.test.ts
+  - 2 tests pass。
+- npx tsx tests/real_workflow_overview_from_detail_smoke.ts temp/real-overview-detail.json
+  - passed: true；真实导出 detail 可生成 overview 与 agent detail rows。
+- npx tsx tests/real_workflow_status_bar_from_detail_smoke.ts temp/real-overview-detail.json
+  - passed: true；awaiting_approval status bar 不暴露 x stop 且不泄露 raw script。
+```
+
+本轮修复后仍保留后续增强建议：App 级 non-empty input Enter/x 不被 status bar 截获、active panel/slash/footer 时隐藏 status bar、real smoke 区分 progress/jobs structured-path 与 awaiting_approval zero-agent smoke，可作为后续覆盖率增强项处理。
+
 
 
 

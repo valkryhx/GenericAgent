@@ -7,7 +7,7 @@ import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
-import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, type WorkflowPanelState } from './workflowPanel.js'
+import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, workflowPanelWithRunUpdate, type WorkflowPanelState } from './workflowPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
@@ -620,20 +620,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       }
       if (event.type === 'workflow_run') {
         dispatch(event)
-        setWorkflowPanel(panel => {
-          if (!panel) return panel
-          if (panel.mode === 'list') {
-            const existing = panel.runs.filter(run => run.runId !== event.run.runId)
-            return { ...panel, runs: [...existing, event.run] }
-          }
-          if (panel.mode === 'overview') {
-            return panel.overview.run.runId === event.run.runId ? { ...panel, overview: { ...panel.overview, run: event.run } } : panel
-          }
-          if (panel.mode === 'agent_detail') {
-            return panel.overview.run.runId === event.run.runId ? { ...panel, overview: { ...panel.overview, run: event.run } } : panel
-          }
-          return panel.run.runId === event.run.runId ? { ...panel, run: event.run } : panel
-        })
+        setWorkflowPanel(panel => panel ? workflowPanelWithRunUpdate(panel, event.run) : panel)
         if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
         return
       }

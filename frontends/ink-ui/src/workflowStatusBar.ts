@@ -30,7 +30,7 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState): WorkflowSt
   const agents = progressEntries.length > 0 ? progressEntries : progressFromJobs(run.jobs ?? [])
   const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached').length
   const totalAgents = agents.length
-  const active = progressEntries.find(agent => agent.state === 'running') ?? progressEntries.find(agent => agent.state === 'queued' || agent.state === 'registered')
+  const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
   return {
     runId: run.runId,
     status: run.status,
@@ -45,8 +45,7 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState): WorkflowSt
 
 function progressFromJobs(jobs: WorkflowJob[]): WorkflowProgressEntry[] {
   return jobs.map(job => ({
-    jobId: job.jobId,
-    label: labelForJob(job),
+    label: stringValue(job.metadata?.label),
     state: job.status,
     tokenUsage: recordValue(job.metadata?.tokenUsage),
   }))
@@ -68,10 +67,14 @@ export function workflowStatusBarCommandForKey(
   rawInput: string,
 ): BridgeCommand | null {
   if (key.return) return { type: 'workflow_detail', runId: bar.runId }
-  if (rawInput.toLowerCase() === 'x' && bar.status === 'running') {
+  if (rawInput.toLowerCase() === 'x' && bar.status === 'running' && isPlainKey(key)) {
     return { type: 'workflow_stop', runId: bar.runId, reason: 'stopped from Ink UI status bar' }
   }
   return null
+}
+
+function isPlainKey(key: InputKey): boolean {
+  return !key.ctrl && !key.meta && !key.shift
 }
 
 function workflowDisplayName(run: WorkflowRun): string {
