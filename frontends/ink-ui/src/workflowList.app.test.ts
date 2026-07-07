@@ -128,3 +128,62 @@ test('App shows workflow_runs as a list first without auto-opening detail', asyn
     timers.forEach(timer => clearTimeout(timer))
   }
 })
+
+test('App shows live workflow status bar without opening workflow panel', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const sent: BridgeCommand[] = []
+  const stdin = new FakeReadStream()
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0))
+    timers.push(setTimeout(() => onEvent({
+      type: 'workflow_run',
+      run: {
+        runId: 'wf_live_status',
+        sessionId: 'session',
+        status: 'running',
+        metadata: { workflowName: 'read-recent-git-commits' },
+        jobs: [
+          { jobId: 'agent_1', status: 'succeeded' },
+          { jobId: 'agent_2', status: 'running' },
+        ],
+      },
+    }), 20))
+    return {
+      send(command: BridgeCommand) {
+        sent.push(command)
+      },
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    const frame = await waitForFrame(stdout, current => current.includes('read-recent-git-commits') && current.includes('1/2 agents done'))
+
+    assert.match(frame, /Enter view · x stop/)
+    assert.match(frame, /read-recent-git-commits/)
+    assert.match(frame, /1\/2 agents done/)
+    assert.equal(frame.includes('Dynamic workflows'), false)
+    assert.equal(sent.some(command => command.type === 'workflow_detail'), false)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})

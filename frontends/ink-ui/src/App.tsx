@@ -8,6 +8,7 @@ import { createPasteStore } from './paste.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
 import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, type WorkflowPanelState } from './workflowPanel.js'
+import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
   transcriptLines,
@@ -311,6 +312,14 @@ function ActivityView({ seconds, label, tokenUsage, theme }: { seconds: number; 
   return (
     <Box>
       <Text color={theme.warning}>{formatRunningStatus(seconds, label, tokenUsage)}</Text>
+    </Box>
+  )
+}
+
+function WorkflowStatusBarView({ rows, theme }: { rows: string[]; theme: InkTheme }) {
+  return (
+    <Box paddingX={1}>
+      <Text color={theme.warning} wrap="truncate-end">{rows.join(' · ')}</Text>
     </Box>
   )
 }
@@ -870,6 +879,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         return
       }
     }
+    if (showWorkflowStatusBar && workflowStatusBar && input.trim() === '') {
+      const command = workflowStatusBarCommandForKey(workflowStatusBar, key, rawInput)
+      if (command) {
+        bridgeRef.current?.send(command)
+        return
+      }
+    }
     if (key.upArrow) {
       const result = previousInput(inputHistory, input)
       setInputHistory(result.history)
@@ -910,8 +926,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = Math.max(1, stdout.columns || 80)
   const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
+  const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
+  const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
+  const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
   const inputRows = inputVisibleRowCount(input)
-  const hasActivity = shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
+  const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const panelRows = modelPanel
     ? modelPanelRows(modelPanel)
     : mcpPanel
@@ -1029,7 +1048,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         theme={theme}
       />
       <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
-        {hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}
+        {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}
         {inputSections.map(renderInputSection)}
       </BottomChrome>
     </Box>

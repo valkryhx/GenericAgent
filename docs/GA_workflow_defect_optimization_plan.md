@@ -2386,28 +2386,61 @@ workflowPanel.test.ts
 
 ##### Slice 5：实现底部运行中 workflow status bar
 
-目标：主会话不打开 `/workflows` 时，也能看到类似图 1 的运行中 workflow 摘要。
+目标：主会话不打开 `/workflows` 时，也能看到类似图 1 的运行中 workflow 摘要，并能从空输入状态快速进入当前 workflow detail 或停止正在运行的 workflow。
+
+实现原则：
+
+```text
+- 不把 live workflow status bar 塞进 footerPanel；footerPanel 仍用于显式 help/status/model 等临时面板。
+- 不自动请求 workflow_detail；第一版只消费 state.workflows 与已有 workflowDetails/progress。
+- 不从 raw script、raw event text 或 transcript 反推状态；只消费结构化 WorkflowRun / WorkflowProgressPayload。
+- 不拦截用户正在输入的 Enter/x；只有 input.trim()==='' 且没有 active panel 时才响应。
+- awaiting_approval 只显示 Enter review，不显示 x stop；x stop 只对 running workflow 生效。
+```
 
 改动建议：
 
 ```text
-state.ts
-- 从 workflows 中派生 runningWorkflows。
-- workflow_event / workflow_run 更新后保持 run list 最新。
+新增 frontends/ink-ui/src/workflowStatusBar.ts
+- workflowStatusBarFromState(state)：从 AppState 派生当前 live workflow summary。
+- workflowStatusBarRows(summary)：格式化底部两行文本。
+- workflowStatusBarCommandForKey(summary, key, rawInput)：Enter -> workflow_detail；x -> workflow_stop（仅 running）。
+- live workflow 定义：running / awaiting_approval；terminal succeeded/failed/killed/cancelled 不显示。
+- 数据优先级：workflowDetails[runId].progress.workflowProgress -> run.jobs -> run.metadata/runId fallback。
 
-App.tsx
-- 在 BottomChrome 中 input 之上或 panel/hint 区附近增加 WorkflowStatusBar。
-- Enter 打开当前 running workflow detail 或 list。
-- x 发送 workflow_stop。
+frontends/ink-ui/src/App.tsx
+- 用 useMemo 从 state 派生 workflowStatusBar。
+- 只在无 workflowPanel / selector / mcpPanel / modelPanel / themePanel / footerPanel / slash suggestions 时显示。
+- status bar 为 ambient row，不作为 blocking panel。
+- 键盘处理低于已有 panel/selector/slash，高于普通空输入提交。
+- 若新增行影响底部高度，必须同步检查 computeLayoutMetrics / inputChromeSections / cursorPosition 相关预算。
+
+测试与验证
+- 先做纯函数 TDD，再接 App；不要先写 React 布局代码。
+- App 层第一版优先测渲染，键盘映射由纯函数测，因为 Ink stdin harness 对组合输入曾不稳定。
 ```
 
 TDD：
 
 ```text
-workflowPanel.test.ts 或新增 workflowStatus.test.ts
-- formats running workflow summary as N/M agents done · duration · tokens
-- x maps to workflow_stop
-- Enter maps to workflow_detail/list
+新增 workflowStatusBar.test.ts
+- workflowStatusBarFromState returns null when no live workflow。
+- workflowStatusBarFromState selects latest running workflow and ignores terminal workflows。
+- workflowStatusBarRows formats N/M agents done and token text from progress/jobs。
+- awaiting_approval rows say Enter review and do not include x stop。
+- workflowStatusBarCommandForKey maps Enter to workflow_detail when status bar is visible。
+- workflowStatusBarCommandForKey maps x to workflow_stop only for running workflow。
+
+新增或扩展 App test
+- fake bridge 推送 workflow_run running 后，App frame 显示 workflow status bar。
+- 打开 workflowPanel / slash suggestions / footer panel 时，status bar 不抢占面板。
+```
+
+真实/集成验证：
+
+```text
+- 复用真实 gpt-5.5 planned run 导出的 workflow_detail JSON，验证 awaiting_approval 可显示 Enter review summary。
+- 对运行中 workflow 的 live 更新，第一版如果无法从现有 bridge event 获得实时 progress，不在本 slice 扩展后端协议；后续单独评估 workflow_progress BridgeEvent。
 ```
 
 ##### Slice 6：显式 `/workflow plan <task>` 入口
@@ -2770,7 +2803,81 @@ agentRows include:
 
 说明：本次真实验证消费的是前一轮由真实 gpt-5.5 prompt-guided planner 导出的 `temp/real-overview-detail.json`。本轮未重新调用真实 API，因为独立 dynamic workflow 的 verify agent 遇到上游网关 `502 请求转发失败`；主线实现未依赖该失败结果，而是在当前目录重新按 TDD 落地并完成本地与真实导出数据验证。
 
-下一步进入 **Slice 5：bottom live workflow status bar** 或继续细化 Slice 4 的 App 级键盘集成测试。Slice 4 当前第一版尚未实现 `s save`，因为现有 bridge/protocol 没有 workflow save command；后续若要支持保存 agent detail/transcript，应先设计明确 bridge command 与 artifact 语义。
+下一步进入 **Slice 6：显式 `/workflow plan <task>` 入口**。Slice 5 第一版已经完成 ambient live workflow status bar；后续如果需要真正 per-agent live progress，应单独评估新增 `workflow_progress` BridgeEvent。
+
+#### Slice 5 进度记录（2026-07-06）
+
+状态：**已实现并通过自测**。
+
+本 slice 已实现主会话底部 ambient live workflow status bar 第一版：当没有打开 `/workflows` panel、selector、MCP/model/theme/footer panel 或 slash suggestions 时，App 会在原 activity row 位置显示当前 live workflow 摘要。该实现没有新增底部高度，因此不改变 `computeLayoutMetrics` 的行预算。
+
+实现内容：
+
+```text
+frontends/ink-ui/src/workflowStatusBar.ts
+- 新增 workflowStatusBarFromState(state)：从 AppState 派生当前 live workflow summary。
+- live workflow 第一版定义：running / awaiting_approval；terminal succeeded/failed/killed/cancelled 不显示。
+- 多 workflow 时倒序选择最近更新/追加的 live run。
+- 数据优先级：workflowDetails[runId].progress.workflowProgress -> run.jobs -> metadata/runId fallback。
+- token 汇总从 progress/job tokenUsage 聚合，格式沿用 k tok。
+- workflowStatusBarRows(summary)：
+  - running: Enter view · x stop + N/M agents done / active agent / last tool / tokens；
+  - awaiting_approval: Enter review，不暴露 x stop。
+- workflowStatusBarCommandForKey(summary, key, rawInput)：
+  - Enter -> workflow_detail；
+  - x -> workflow_stop，仅 running 生效。
+
+frontends/ink-ui/src/App.tsx
+- useMemo 派生 workflowStatusBar。
+- 仅在无 active panel、无 slash suggestions 时显示。
+- status bar 作为 ambient row 复用 Activity 行，不进入 footerPanel，不作为 blocking panel。
+- 空输入状态下 Enter/x 可触发 workflow detail/stop；不会拦截用户已有输入。
+
+frontends/ink-ui/src/workflowStatusBar.test.ts
+- 覆盖无 live workflow、最近 running 选择、terminal 忽略、rows 格式、awaiting approval 无 stop、Enter/x command mapping。
+
+frontends/ink-ui/src/workflowList.app.test.ts
+- 增加 App 渲染测试：fake bridge 推送 workflow_run running 后显示 live workflow status bar，且不自动打开 workflow detail/panel。
+
+tests/real_workflow_status_bar_from_detail_smoke.ts
+- 复用真实 gpt-5.5 planned run 导出的 sanitized workflow_detail JSON，验证 awaiting_approval 可生成 Enter review status bar，且不泄露 raw script。
+```
+
+TDD 与自测记录：
+
+```text
+红灯：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowStatusBar.test.ts
+  - ERR_MODULE_NOT_FOUND: workflowStatusBar.js 不存在。
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowList.app.test.ts
+  - App shows live workflow status bar without opening workflow panel 失败：frame 未包含 Enter view · x stop。
+
+绿灯 / 回归：
+- cd frontends/ink-ui && npm exec -- tsx --test src/workflowStatusBar.test.ts src/workflowList.app.test.ts
+  - 7 tests pass
+- cd frontends/ink-ui && npm run typecheck
+  - tsc --noEmit 无错误
+- cd frontends/ink-ui && npm run test
+  - 201 tests pass
+```
+
+真实 detail smoke：
+
+```text
+cmd /c "cd /d D:\\git_codes\\GenericAgent && npx tsx tests/real_workflow_status_bar_from_detail_smoke.ts temp/real-overview-detail.json"
+```
+
+结果摘要（已 sanitize，未打印密钥）：
+
+```text
+passed: true
+status: awaiting_approval
+rows:
+- Enter review
+- › ◌ review  awaiting approval
+```
+
+说明：本 slice 未新增后端 `workflow_progress` event；如果后续发现运行中 agent 完成数无法随 bridge 事件实时更新，应单独开后端/协议 slice，而不是在 status bar UI 中从 raw events 或 transcript 猜测进度。
 
 
 
