@@ -3011,6 +3011,48 @@ progressIsNullForAwaitingApproval: true
 
 验收结论：Slice 6 的显式 planned workflow 入口已经具备用户可发现性（slash suggestions/help）、输入解析、local transcript、bridge serialization、JSONL dispatch、controller/runtime 闭环覆盖，并已通过真实 `gpt-5.5` planned workflow smoke。后续如果需要真正端到端键盘交互测试，应先抽象 Ink stdin 测试 harness 或增加受控 input dispatcher，而不是依赖 `stdin.emit('data')` 触发 Ink 私有 internal event。
 
+复杂任务入口复验（2026-07-07）：
+
+```text
+# 复杂基准 E2E
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_REAL_API_CONFIG=native_oai_config GA_REAL_API_EXPECTED_MODEL=gpt-5.5 GA_REAL_API_EXPECTED_NAME=gpt-native GA_COMPLEX_WORKFLOW_DETAIL_OUT=temp/slice6-complex-baseline-detail.json python tests/real_complex_workflow_mcp_skill_coding_e2e.py
+
+# Slice 6 入口 + 复杂任务 + 真实 gpt-5.5 planner + UI detail/status 消费 smoke
+npx tsx temp/slice6_complex_entry_real_gpt55_smoke.ts
+```
+
+结果摘要（已 sanitize，未读取或打印 `mykey.py` / `mykey.json` / `mcp.json`）：
+
+```text
+复杂基准 E2E：
+- passed: true
+- profile: gpt-native / gpt-5.5
+- mcpDiscovery.selectedTool: mcp__tavily__tavily_search
+- status/runtimeStatus: succeeded / succeeded
+- jobCount: 3，jobStatuses: succeeded, succeeded, succeeded
+- toolCalls 包含 mcp__tavily__tavily_search、load_skill、file_write、file_read
+- usingSuperpowersLoaded: true
+- codingFileOk: true
+- progressEntryCount: 3
+
+Slice 6 入口复杂 smoke：
+- entry: /workflow plan --manual --timeout 180 <complex task>
+- 入口产物 command: workflow_plan，autoApprove=false，timeoutSeconds=180
+- status: awaiting_approval
+- plannerMode: prompt_guided
+- taskType: mixed
+- validationOk: true
+- phaseTitles 包含 Parallel Research and Coding Understanding / Coding Tests / Coding Implementation / Coding Verification / Synthesis and Evidence Review
+- labels 包含 World Cup MCP Research Agent / Temporary Coding ... / Credibility Synthesis Agent
+- hasMcpResearch: true
+- hasSkillCoding: true
+- hasSynthesis: true
+- workflowPanelFromDetail(panel).mode: overview
+- workflowStatusBarRows: Enter review / awaiting approval
+```
+
+结论：复杂基准证明 GA workflow runtime 可真实调用 gpt-5.5、真实 MCP、真实 using-superpowers skill、临时编码写读和 progress 生成；Slice 6 入口复杂 smoke 进一步证明 `/workflow plan` UI 入口生成的 `workflow_plan` command 能进入 bridge，用真实 gpt-5.5 planner 生成复杂 mixed workflow draft，并被 workflow overview/status bar 消费。因此 Slice 6 不是只在内部 planner 可用，而是 UI 显式入口可用。
+
 复杂真实 E2E 维护提醒：后续涉及 workflow planner/runtime/child agent/MCP/skills/progress 或 Slice 4/5 UI 的关键改动后，优先运行 `tests/real_complex_workflow_mcp_skill_coding_e2e.py`。该脚本覆盖真实 `gpt-5.5` planner、真实 Tavily MCP 搜索、真实 `using-superpowers` skill 加载、临时编码写读、多 agent runtime 和 Slice 4/5 selector 消费。详细命令与验收证据见 `docs/GA_workflow_complex_e2e_verification.md`。
 
 
