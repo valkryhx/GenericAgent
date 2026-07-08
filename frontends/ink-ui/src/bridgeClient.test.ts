@@ -39,3 +39,25 @@ test('writeBridgeCommand serializes workflow_plan as one JSON line', () => {
     timeoutSeconds: 30,
   })
 })
+
+test('writeBridgeCommand serializes workflow_draft as one JSON line', () => {
+  const lines: string[] = []
+  const stdin = {
+    write(chunk: string) {
+      lines.push(chunk)
+      return true
+    },
+  }
+
+  writeBridgeCommand(stdin, {
+    type: 'workflow_draft',
+    script: 'export const meta = { name: "demo" }\nreturn { ok: true }',
+  })
+
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0].endsWith('\n'), true)
+  assert.deepEqual(JSON.parse(lines[0]), {
+    type: 'workflow_draft',
+    script: 'export const meta = { name: "demo" }\nreturn { ok: true }',
+  })
+})
