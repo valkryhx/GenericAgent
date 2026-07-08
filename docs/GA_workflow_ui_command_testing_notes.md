@@ -6,7 +6,7 @@
 
 > 用户在 GA Ink UI 中输入 `/workflow plan ...` 后，我们如何确认它真的触发了 GA workflow，而不是只在内部函数或 mock 中看起来可用？
 
-答案是：不要只测 planner，也不要依赖不稳定的终端按键模拟；应该从 Ink UI 的真实输入解析层开始，生成真实 `BridgeCommand`，再通过 JSONL 协议喂给真实 Python bridge，最后让真实 workflow controller/runtime 调用真实 `gpt-5.5`、MCP 和 skill。
+答案要分层理解：第一层只验证 Ink UI 是否把 slash 文本解析成正确的 `BridgeCommand`，不调用模型；后续层再把 command 通过 JSONL 协议喂给真实 Python bridge，让真实 workflow controller/runtime 调用真实模型、MCP 和 skill。只有把这些层串起来，才能证明 `/workflow plan ...` 不只是“内部函数看起来可用”。
 
 ---
 
@@ -30,7 +30,7 @@
 → frontends/ink_bridge.py
 → GenericAgentBridge.workflow_plan()
 → WorkflowController / planner / runtime
-→ 真实 gpt-5.5 / MCP / skill / child agents
+→ 真实模型（本轮验证使用 gpt-5.5）/ MCP / skill / child agents
 ```
 
 因此，如果要测试“UI 命令是否真的可用”，至少要覆盖：
@@ -44,6 +44,8 @@
 ---
 
 ## 2. 第一层：从 slash 文本生成 BridgeCommand
+
+这一层只验证 **UI 输入解析**：slash 文本是否被转换为正确的 `BridgeCommand`。它不调用模型，不访问 MCP，不加载 skill，也不会启动 workflow runtime。
 
 Ink UI 的关键入口是：
 
@@ -69,7 +71,23 @@ const decision = handleInput(
 )
 ```
 
-期望得到：
+如果还要验证“存在名为 `workflow` 的 skill 时，`/workflow plan` 不会被 skill 截获”，必须显式传入第 6 个参数：
+
+```ts
+const decisionWithSkill = handleInput(
+  '/workflow plan --manual --timeout 120 周末家庭出游计划...',
+  '',
+  { return: true },
+  'idle',
+  createPasteStore(),
+  new Set(['workflow']),
+)
+
+// 期望 decisionWithSkill.command.type === 'workflow_plan'
+// 而不是 { type: 'skill_invoke', skill: 'workflow', ... }
+```
+
+上面两个示例都应得到同类结果：
 
 ```json
 {
@@ -131,11 +149,11 @@ GenericAgentBridge.workflow_plan()
 → WorkflowPlanner / LLMWorkflowPlanner
 ```
 
-如果设置真实 API 环境变量，就会调用真实 `gpt-5.5` planner。
+如果设置真实 API 环境变量，就会调用真实模型 planner；本轮验证使用的是 `gpt-5.5`。
 
 ---
 
-## 4. 第三层：测试 workflow list/detail/approve/deny/stop/resume
+## 4. 第三层：测试 workflow slash 命令和 bridge-only 命令
 
 同样从 slash 文本开始：
 
@@ -191,6 +209,21 @@ GenericAgentBridge.workflow_plan()
 
 都应该先由 `handleInput()` 生成对应 command，再由 bridge 执行。
 
+还要注意一个边界：`frontends/ink_bridge.py` 和 `protocol.ts` 还支持 `workflow_draft` 这个 **bridge/protocol 命令**：
+
+```json
+{"type":"workflow_draft","script":"export const meta = { name: 'demo' }\nreturn { ok: true }"}
+```
+
+它会走：
+
+```python
+elif cmd_type == "workflow_draft":
+    bridge.workflow_draft(str(command.get("script") or ""))
+```
+
+当前 Ink slash 文本并没有对应的 `/workflow draft ...` 用户入口；它是直接提交脚本、绕过 planner 的协议入口。因此，测试 `/workflow plan` 用户入口时不要把它混为同一类 slash 命令，但做完整 bridge/protocol 审查时应单独覆盖它，尤其要关注它与 planner 路径不同的安全语义。
+
 ---
 
 ## 5. 为什么需要持久 bridge 测试？
@@ -237,9 +270,13 @@ GenericAgentBridge.workflow_plan()
 
 ---
 
-## 6. 真实 gpt-5.5 测试环境变量
+## 6. 真实模型测试环境变量
 
-真实 API 测试通常通过环境变量启用，例如：
+真实 API 测试通常通过环境变量启用，但不同脚本的变量含义不同。下面分两类说明，本轮示例使用 `gpt-5.5`，不要把它当成所有真实 E2E 的通用默认值。
+
+### 6.1 bridge/list/detail/workflow_plan smoke
+
+这类测试通常验证 `/workflow plan` 经 bridge 创建 draft/detail，相关脚本会使用或设置 planner mode/config：
 
 ```text
 GA_RUN_REAL_API_E2E=1
@@ -248,14 +285,21 @@ GA_WORKFLOW_PLANNER_CONFIG=native_oai_config
 GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2
 ```
 
-复杂 MCP / skill E2E 还可能使用：
+### 6.2 complex MCP/skill/coding E2E
+
+`tests/real_complex_workflow_mcp_skill_coding_e2e.py` 这类复杂测试使用另一组变量控制 opt-in、MCP discovery 和 profile 校验：
 
 ```text
+GA_RUN_REAL_API_E2E=1
 GA_RUN_REAL_MCP_E2E=1
 GA_REAL_API_CONFIG=native_oai_config
 GA_REAL_API_EXPECTED_MODEL=gpt-5.5
 GA_REAL_API_EXPECTED_NAME=gpt-native
 ```
+
+其中 `GA_RUN_REAL_API_E2E=1` 是真实 API 总开关；`GA_RUN_REAL_MCP_E2E=1` 用于要求真实 MCP discovery/tool calling；`GA_REAL_API_CONFIG` 与 `GA_REAL_API_EXPECTED_*` 控制配置选择和 profile 校验。`GA_WORKFLOW_PLANNER_*` 不应被理解为所有复杂 E2E 的通用开关。
+
+不同真实 E2E 的默认模型可能不同。维护或复跑测试时，应以目标测试文件顶部的 `os.environ.get(...)` 默认值为准；例如部分 planner/child E2E 可能默认其它真实模型，而不是 `gpt-5.5`。不要把某一次运行的 `GA_REAL_API_EXPECTED_MODEL=gpt-5.5` 误当成整个测试矩阵的通用契约。
 
 安全要求：
 
@@ -279,7 +323,7 @@ tests/real_complex_workflow_mcp_skill_coding_e2e.py
 
 它覆盖：
 
-- 真实 `gpt-5.5` planner；
+- 真实模型 planner；
 - 真实 MCP discovery；
 - 真实 Tavily MCP tool：`mcp__tavily__tavily_search`；
 - 真实 skill：`using-superpowers`；
@@ -289,7 +333,7 @@ tests/real_complex_workflow_mcp_skill_coding_e2e.py
 - synthesis agent；
 - progress 生成。
 
-成功结果的关键字段通常包括：
+成功结果的关键字段通常包括。注意：`mcpCalled`、`mcpReturned`、`usingSuperpowersLoaded` 等来自 `tests/real_complex_workflow_mcp_skill_coding_e2e.py` 的 summary；`passed: true` 可能来自调用方或记录层对 `issues` 为空的汇总，不应在所有层级都硬编码断言该字段存在。`progressEntryCount` 是运行时 `workflowProgress` 条数，测试关注它非空，不保证固定等于 3。
 
 ```text
 passed: true
@@ -298,7 +342,7 @@ mcpReturned: true
 usingSuperpowersLoaded: true
 codingFileWritten: true
 codingFileOk: true
-progressEntryCount: 3
+progressEntryCount: <nonzero runtime count>
 jobStatuses: succeeded, succeeded, succeeded
 ```
 
@@ -378,7 +422,7 @@ BridgeCommand
 - `/workflow deny` 能取消等待审批的 workflow；
 - `/workflow stop` 能通过 bridge 分发；
 - `/workflow resume` 即使不能恢复，也能返回结构化错误而不是崩溃；
-- 真实 `gpt-5.5` API 可以完成 planner 和 child agent 运行；
+- 真实模型 API 可以完成 planner 和 child agent 运行；
 - MCP 和 skill 在复杂 workflow 中能真实工作。
 
 ---
@@ -457,7 +501,7 @@ slash text
 验证：
 
 - list/detail/deny/stop/resume；
-- plan + real gpt-5.5 draft。
+- plan + real model draft（本轮验证使用 gpt-5.5）。
 
 ### 11.4 持久 bridge approve 测试
 
@@ -481,7 +525,7 @@ plan --manual
 覆盖：
 
 ```text
-gpt-5.5 planner
+真实模型 planner（本轮验证使用 gpt-5.5）
 + MCP
 + skill
 + child agents
@@ -514,7 +558,7 @@ gpt-5.5 planner
 生成真实 BridgeCommand；
 通过 JSONL 喂给真实 Python bridge；
 让真实 workflow controller/planner/runtime 执行；
-使用真实 gpt-5.5、真实 MCP、真实 skill 验证能力。
+使用真实模型、真实 MCP、真实 skill 验证能力。
 ```
 
-这不是纯 mock 测试，而是从 UI 命令入口到 GA workflow 后端的真实链路测试。
+这不是纯 mock 测试，而是从 UI 命令入口到 GA workflow 后端的真实链路测试。各层证明的结论不同：`handleInput` 层只证明 slash 文本能生成正确 command；真实模型、MCP 和 skill 能力必须由后续 bridge/runtime E2E 证明。
