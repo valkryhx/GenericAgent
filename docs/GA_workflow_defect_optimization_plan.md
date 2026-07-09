@@ -3172,7 +3172,7 @@ tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failur
 
 #### Slice 7 continuation / agent schema fallback + workflow_issue（2026-07-09）
 
-状态：**已实现并通过自测，待提交**。
+状态：**已实现，并通过自测与真实 gpt-5.5 E2E**。
 
 本 continuation 确认 `c1ae55b` 只完成了 live `workflow_progress` 协议闭环；runtime robustness 的 `schema fallback` / `workflow_issue` 仍需继续推进。因此本次补齐最小 TDD 切片：
 
@@ -3225,6 +3225,31 @@ TDD 红灯 / 绿灯：
   - 46 tests pass。
 - npm --prefix frontends/ink-ui run typecheck
   - tsc --noEmit 无错误。
+```
+
+真实 gpt-5.5 Slice 7 E2E：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_REAL_API_CONFIG=native_oai_config GA_REAL_API_EXPECTED_MODEL=gpt-5.5 GA_REAL_API_EXPECTED_NAME=gpt-native python tests/real_workflow_slice7_schema_fallback_e2e.py
+```
+
+结果摘要（已 sanitize，未打印 `mykey.py` / `mykey.json` / `mcp.json` 内容）：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+runId: wf_slice7_schema_fallback_real
+status: succeeded
+jobStatus: succeeded
+jobLabel: schema-fallback-real
+schemaValidation.code: schema_validation_failed
+schemaValidation.fallback: text
+schemaValidation.fallbackApplied: true
+workflowIssueCount: 1
+progressEntryCount: 1
+finalWorkflowIssueCount: 1
+workflowIssueEventCount: 1
+result.schemaFallback: true
 ```
 
 本次范围刻意保持最小：
