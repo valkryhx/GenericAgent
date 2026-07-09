@@ -3060,6 +3060,116 @@ Slice 6 入口复杂 smoke：
 
 
 
+#### Slice 7 / live workflow_progress 协议进度记录（2026-07-09）
+
+状态：**已实现并通过自测，已提交**。
+
+相关提交：
+
+```text
+c1ae55b feat(workflow-ui): 推送 workflow 进度事件
+```
+
+本 slice 解决的缺口：`workflow_store.py` / `workflow_scheduler.py` / `workflow_runtime.py` 已经持续维护 `workflow-progress.json`，但 Ink bridge/protocol/UI 之前没有独立的 live progress 事件。前端只能通过 `/workflow detail` 获得 progress snapshot，status bar 未打开 detail 时只能退回 `run.jobs` 低保真 fallback，缺少 token、last tool、active agent 等结构化进度。
+
+实现内容：
+
+```text
+frontends/ink-ui/src/protocol.ts
+- 新增 BridgeCommand: { type: 'workflow_progress'; runId: string }。
+- 新增 BridgeEvent: { type: 'workflow_progress'; progress: WorkflowProgressPayload }。
+
+frontends/ink_bridge.py
+- 新增 GenericAgentBridge.workflow_progress(run_id)，读取 workflow-progress.json 并 emit workflow_progress。
+- JSONL loop 支持 workflow_progress command。
+- _run_workflow_runtime 在 workflow_run 后、workflow_final 前推送一次 workflow_progress，使 UI 不必先打开 detail 也能拿到最终 progress snapshot。
+- 读取 progress 继续复用 _workflow_artifact_payload，保持 artifact ref 有界、JSON payload sanitize、不内联 transcriptEvents。
+
+frontends/ink-ui/src/state.ts
+- applyBridgeEvent 支持 workflow_progress。
+- 已知 run 无 detail 时创建最小 detail cache：script='', events=[], draft=null, progress=...。
+- 已有 detail 时只合并 progress，保留 script/events/draft。
+- workflow_progress 可更新 run status；后续 workflow_run 到达时仍以 workflow_run payload 为权威 run 数据。
+
+frontends/ink-ui/src/workflowStatusBar.test.ts
+- 覆盖 status bar 使用 live workflow_progress 展示 completed/total agents、activeAgent、lastToolName、tokenText。
+
+frontends/ink-ui/src/bridgeClient.test.ts
+- 覆盖 workflow_progress JSONL serialization。
+
+tests/test_ink_bridge.py
+- 覆盖 bridge.workflow_progress(run_id) 只发 progress payload，不携带 script/transcriptEvents。
+- 覆盖 JSONL workflow_progress dispatch。
+- 覆盖 runtime 完成时 workflow_run -> workflow_progress -> workflow_final 链路。
+```
+
+TDD 红灯 / 绿灯：
+
+```text
+红灯：
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/state.test.ts
+  - workflow_progress 未被 applyBridgeEvent 处理，live progress cache 断言失败。
+- python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_progress_emits_current_progress_without_detail_payload
+  - GenericAgentBridge 没有 workflow_progress 方法。
+
+绿灯 / 回归：
+- python -m unittest tests.test_ink_bridge
+  - Ran 80 tests ... OK。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/state.test.ts
+  - 16 tests pass。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowStatusBar.test.ts
+  - 7 tests pass。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/workflowPanel.test.ts
+  - 13 tests pass。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/bridgeClient.test.ts
+  - 4 tests pass。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/inputController.test.ts
+  - 26 tests pass。
+- npm --prefix frontends/ink-ui run typecheck
+  - tsc --noEmit 无错误。
+- git diff --check -- <本 slice 相关文件>
+  - 无 whitespace 错误，仅 Windows CRLF 提示。
+```
+
+真实 gpt-5.5 smoke：
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_WORKFLOW_PLANNER_MODE=prompt_guided GA_WORKFLOW_PLANNER_CONFIG=native_oai_config GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS=2 python tests/real_ink_bridge_workflow_detail_smoke.py
+```
+
+结果摘要（已 sanitize，未读取或打印 `mykey.py` / `mykey.json` / `mcp.json`）：
+
+```text
+passed: true
+profile: gpt-native / gpt-5.5
+runId: wf_e5519c90b06e49f7a1018bcb755a3f3a
+status: awaiting_approval
+plannerMode: prompt_guided
+workflowTaskType: review
+draftPresent: true
+validationOk: true
+progressIsNullForAwaitingApproval: true
+```
+
+本次 dynamic workflow 并行调研结论补充：
+
+```text
+- UI polish 方向仍有后续空间：/workflows list、overview、status bar、agent detail 的 token/duration/description/scroll position/快捷键文案还可继续对齐 workflow_ui.md。
+- Stage 7 robustness 方向更偏 runtime：schema fallback、workflow_issue、provider anomaly classification 仍是下一片候选。
+- workflow_progress 协议缺口已在本 slice 修复：已有 artifact -> bridge/protocol -> state/status bar 的最小闭环。
+```
+
+下一步建议：优先做 **Stage 7 robustness 最小 TDD 切片：agent schema fallback + workflow_issue 记录**。
+
+建议红灯测试：
+
+```text
+tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_falls_back_to_text_and_records_workflow_issue
+tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue
+```
+
+目标：当 agent options 带 `schema` 且 child output 不满足最小 schema 时，`fallback: 'text'` 可让 workflow 继续但必须记录 `workflow_issue`；没有 fallback 时应明确失败为 `schema_validation_failed`，不能退化成不可诊断的泛化 child failure。
+
 - 不做固定模板库作为主入口；
 - 不让用户选择 `tdd-python-package` / `deep-research-template` 之类模板；
 - 不让模型直接输出自由 JS 并执行；
