@@ -440,6 +440,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 options = {"label": label, "phase": title}
                 if agent.get("schemaRef"):
                     options["schema"] = {"__schema_ref__": agent["schemaRef"]}
+                    options["fallback"] = "text"
                 lines.append(f"  () => agent(`{_template_string(prompt)}`, {_render_options(options)}),")
                 rendered_labels[label] = _js_identifier(label)
             lines.append("])")
@@ -458,6 +459,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
             options = {"label": label, "phase": title}
             if agent.get("schemaRef"):
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
+                options["fallback"] = "text"
             lines.append(f"const {var_name} = await agent(`{rendered_prompt}`, {_render_options(options)})")
             phase_vars.append(var_name)
             rendered_labels[label] = var_name

@@ -3170,6 +3170,73 @@ tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failur
 
 目标：当 agent options 带 `schema` 且 child output 不满足最小 schema 时，`fallback: 'text'` 可让 workflow 继续但必须记录 `workflow_issue`；没有 fallback 时应明确失败为 `schema_validation_failed`，不能退化成不可诊断的泛化 child failure。
 
+#### Slice 7 continuation / agent schema fallback + workflow_issue（2026-07-09）
+
+状态：**已实现并通过自测，待提交**。
+
+本 continuation 确认 `c1ae55b` 只完成了 live `workflow_progress` 协议闭环；runtime robustness 的 `schema fallback` / `workflow_issue` 仍需继续推进。因此本次补齐最小 TDD 切片：
+
+```text
+workflow_scheduler.py
+- 新增 agent payload 最小 JSON Schema 子集校验：type / required / properties.<field>.type。
+- 当 agent options 带 schema 且 payload 不匹配时，记录 job.metadata.schemaValidation。
+- fallback: 'text' 时保持 job succeeded，向 payload 写入 schemaFallback=true / schemaValidation，并记录 workflow_issue。
+- 未配置 fallback 时把 job 标为 failed，错误码固定为 schema_validation_failed，避免退化为泛化 child failure。
+- standalone scheduler final-result.json 也写入 workflowIssues。
+
+workflow_store.py
+- workflow-progress.json 顶层写入 workflowIssues。
+- 每个 workflowProgress entry 写入 schemaValidation。
+
+workflow_runtime.py
+- final-result.json 写入 workflowIssues。
+
+workflow_planner.py
+- renderer 对 schemaRef 默认生成 fallback: 'text'，保持 planner 生成的 research workflow 在真实 child 返回文本摘要时可降级继续。
+
+frontends/ink-ui/src/protocol.ts
+- WorkflowProgressPayload 允许 workflowIssues。
+- WorkflowProgressEntry 允许 schemaValidation。
+
+tests/test_workflow_runtime.py
+- 新增 schema fallback 继续执行并记录 workflow_issue 的红绿测试。
+- 新增无 fallback 时 schema_validation_failed 的红绿测试。
+
+tests/test_workflow_scheduler.py
+- 新增 standalone scheduler artifact 覆盖：result/progress/final 都包含 schema fallback / workflow_issue 证据。
+```
+
+TDD 红灯 / 绿灯：
+
+```text
+红灯：
+- python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_falls_back_to_text_and_records_workflow_issue tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue
+  - fallback 场景没有 schemaFallback 标记。
+  - 无 fallback 场景未抛出 schema_validation_failed。
+
+绿灯 / 回归：
+- python -m unittest tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_falls_back_to_text_and_records_workflow_issue tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue
+  - Ran 2 tests ... OK。
+- python -m unittest tests.test_workflow_scheduler tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_falls_back_to_text_and_records_workflow_issue tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue
+  - Ran 21 tests ... OK。
+- python -m unittest tests.test_workflow_runtime tests.test_workflow_store tests.test_workflow_scheduler tests.test_workflow_planner_compiler tests.test_workflow_plan_validator tests.test_workflow_prompt_guided_planner tests.test_ink_bridge
+  - Ran 180 tests ... OK。
+- npm --prefix frontends/ink-ui exec -- tsx --test frontends/ink-ui/src/state.test.ts frontends/ink-ui/src/workflowStatusBar.test.ts frontends/ink-ui/src/workflowPanel.test.ts frontends/ink-ui/src/bridgeClient.test.ts
+  - 46 tests pass。
+- npm --prefix frontends/ink-ui run typecheck
+  - tsc --noEmit 无错误。
+```
+
+本次范围刻意保持最小：
+
+- 不引入第三方 JSON Schema validator；
+- 不实现深层 nested schema / oneOf / enum / format；
+- 不把 schema 变成全局硬门禁；
+- 不改变无 schema 的 agent 行为；
+- 不在 UI 中新增 issue 展示，只先稳定协议和 artifact 字段。
+
+下一步建议：继续做 **Stage 7 robustness：provider anomaly classification**，把 provider 429 / SDK exception / empty content / schema_validation_failed 统一进入可查询的 failure category，并让 progress/detail 能直接展示失败类型。
+
 - 不做固定模板库作为主入口；
 - 不让用户选择 `tdd-python-package` / `deep-research-template` 之类模板；
 - 不让模型直接输出自由 JS 并执行；

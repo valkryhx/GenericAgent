@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import queue
 import re
 import subprocess
@@ -382,6 +383,7 @@ class WorkflowRuntime:
             "runId": run.run_id,
             "status": status,
             "workflowProgressRef": "workflow-progress.json",
+            "workflowIssues": sanitize(copy.deepcopy((run.metadata or {}).get("workflowIssues") or [])),
             "jobs": [
                 {
                     "jobId": job.job_id,

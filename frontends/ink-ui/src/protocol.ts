@@ -195,12 +195,14 @@ export type WorkflowProgressEntry = {
   promptPreview?: string | null
   resultPreview?: string | null
   error?: string | null
+  schemaValidation?: Record<string, unknown>
 }
 
 export type WorkflowProgressPayload = {
   runId: string
   sessionId?: string | null
   status: WorkflowRunStatus
+  workflowIssues?: unknown[]
   workflowProgress: WorkflowProgressEntry[]
 }
 

@@ -254,6 +254,32 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("succeeded", loaded.jobs[0].status)
         self.assertEqual(job.result_ref, loaded.jobs[0].result_ref)
 
+    def test_schema_fallback_records_workflow_issue_in_scheduler_artifacts(self):
+        scheduler, store, run = self.make_scheduler(runner=FakeChildAgentRunner(results={"agent_1": {"summary": "plain text"}}))
+        job = scheduler.register_agent(
+            prompt="collect sources",
+            label="collector",
+            options={"schema": {"type": "object", "required": ["sources"]}, "fallback": "text"},
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("succeeded", loaded.status)
+        loaded_job = loaded.jobs[0]
+        self.assertEqual("succeeded", loaded_job.status)
+        self.assertTrue(loaded_job.metadata["schemaValidation"]["fallbackApplied"])
+        self.assertTrue(loaded_job.metadata["result"]["schemaFallback"])
+        self.assertEqual("schema_validation_failed", loaded.metadata["workflowIssues"][0]["code"])
+        events = store.replay_events(run.run_id)
+        self.assertIn("workflow_issue", [event.event_type for event in events])
+        result_data = json.loads((Path(run.artifact_dir) / job.result_ref).read_text(encoding="utf-8"))
+        self.assertTrue(result_data["payload"]["schemaFallback"])
+        progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(loaded.metadata["workflowIssues"], progress["workflowIssues"])
+        final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(loaded.metadata["workflowIssues"], final_result["workflowIssues"])
+
     def test_concurrency_limit_only_starts_configured_number_of_jobs_per_tick(self):
         scheduler, _store, _ = self.make_scheduler(max_concurrent=3, runner=FakeChildAgentRunner(delay_ticks=1))
         for index in range(20):

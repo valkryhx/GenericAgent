@@ -617,6 +617,86 @@ return result.summary
             self.assertEqual({"label": "Scout", "effort": "low"}, loaded.jobs[0].metadata["options"])
             self.assertIn("cacheKey", loaded.jobs[0].metadata)
 
+    def test_runtime_agent_schema_failure_falls_back_to_text_and_records_workflow_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('collect sources', {
+  label: 'collector',
+  schema: {
+    type: 'object',
+    required: ['sources'],
+    properties: { sources: { type: 'array' } }
+  },
+  fallback: 'text'
+})
+return { summary: result.summary, fallback: result.schemaFallback }
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "plain text only"}}))
+
+            outcome = runtime.run(run)
+
+            self.assertEqual({"summary": "plain text only", "fallback": True}, outcome.result)
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            job = loaded.jobs[0]
+            self.assertEqual("succeeded", job.status)
+            self.assertTrue(job.metadata["schemaValidation"]["fallbackApplied"])
+            self.assertEqual("schema_validation_failed", job.metadata["schemaValidation"]["code"])
+            self.assertEqual("text", job.metadata["schemaValidation"]["fallback"])
+            self.assertTrue(job.metadata["result"]["schemaFallback"])
+            issues = loaded.metadata["workflowIssues"]
+            self.assertEqual(1, len(issues))
+            self.assertEqual("schema_validation_failed", issues[0]["code"])
+            self.assertEqual("agent_1", issues[0]["jobId"])
+            self.assertEqual("text", issues[0]["fallback"])
+            event = next(event for event in store.replay_events("wf_test") if event.event_type == "workflow_issue")
+            self.assertEqual("schema_validation_failed", event.payload["code"])
+            self.assertEqual("agent_1", event.job_id)
+            progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(issues, progress["workflowIssues"])
+            self.assertEqual(job.metadata["schemaValidation"], progress["workflowProgress"][0]["schemaValidation"])
+
+    def test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('collect sources', {
+  label: 'collector',
+  schema: {
+    type: 'object',
+    required: ['sources'],
+    properties: { sources: { type: 'array' } }
+  }
+})
+return result
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "plain text only"}}))
+
+            with self.assertRaisesRegex(RuntimeError, "schema_validation_failed"):
+                runtime.run(run)
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("failed", loaded.status)
+            self.assertIn("schema_validation_failed", loaded.error)
+            job = loaded.jobs[0]
+            self.assertEqual("failed", job.status)
+            self.assertEqual("schema_validation_failed", job.metadata["schemaValidation"]["code"])
+            self.assertFalse(job.metadata["schemaValidation"]["fallbackApplied"])
+            issues = loaded.metadata["workflowIssues"]
+            self.assertEqual(1, len(issues))
+            self.assertEqual("schema_validation_failed", issues[0]["code"])
+            event_types = [event.event_type for event in store.replay_events("wf_test")]
+            self.assertIn("agent_failed", event_types)
+            self.assertIn("workflow_issue", event_types)
+            self.assertEqual("workflow_failed", event_types[-1])
+            final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["status"])
+            self.assertIn("schema_validation_failed", final_result["error"])
+            self.assertEqual(issues, final_result["workflowIssues"])
+
     def test_runtime_agent_truthy_non_object_options_fail_before_registering_job(self):
         scripts = {
             "string": "return await agent('p', 'abc')",

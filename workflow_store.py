@@ -158,6 +158,7 @@ class WorkflowStore:
             "runId": run.run_id,
             "sessionId": run.session_id,
             "status": run.status,
+            "workflowIssues": copy.deepcopy((run.metadata or {}).get("workflowIssues") or []),
             "workflowProgress": [self._build_job_progress(run, job, index) for index, job in enumerate(run.jobs, start=1)],
         }
         self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
@@ -206,6 +207,7 @@ class WorkflowStore:
             "promptPreview": self._preview(job.prompt),
             "resultPreview": self._preview(payload.get("summary") if isinstance(payload, dict) and payload.get("summary") is not None else payload),
             "error": job.error,
+            "schemaValidation": copy.deepcopy(job.metadata.get("schemaValidation") or {}),
         }
         return progress
 

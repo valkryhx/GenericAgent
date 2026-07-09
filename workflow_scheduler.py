@@ -11,6 +11,9 @@ from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_store import WorkflowStore
 
 
+SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+
+
 @dataclass
 class SchedulerConfig:
     max_concurrent: int = 4
@@ -33,6 +36,48 @@ def normalize_agent_options(options: dict | None) -> dict:
     if not isinstance(options, dict):
         raise TypeError("agent options must be a plain object")
     return dict(options)
+
+
+def validate_agent_payload_against_schema(payload, schema) -> list[str]:
+    if not isinstance(schema, dict) or not schema:
+        return []
+    issues: list[str] = []
+    expected_type = schema.get("type")
+    if expected_type and not _schema_type_matches(payload, str(expected_type)):
+        issues.append(f"expected {expected_type}")
+        return issues
+    required = schema.get("required") or []
+    if isinstance(required, list):
+        for key in required:
+            if isinstance(key, str) and (not isinstance(payload, dict) or key not in payload):
+                issues.append(f"missing required field: {key}")
+    properties = schema.get("properties") or {}
+    if isinstance(payload, dict) and isinstance(properties, dict):
+        for key, field_schema in properties.items():
+            if key not in payload or not isinstance(field_schema, dict):
+                continue
+            field_type = field_schema.get("type")
+            if field_type and not _schema_type_matches(payload[key], str(field_type)):
+                issues.append(f"field {key} expected {field_type}")
+    return issues
+
+
+def _schema_type_matches(value, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "number":
+        return (isinstance(value, int) or isinstance(value, float)) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
 
 
 class AgentScheduler:
@@ -165,7 +210,14 @@ class AgentScheduler:
                 if failure_policy == "fail_fast":
                     self._fail_fast(job.error or "child agent failed")
             else:
-                self._complete_job(job, result)
+                result = self._apply_schema_contract(job, result)
+                if result.status == "failed":
+                    error = redact_sensitive_text(str(result.payload.get("error") or "child agent failed"))
+                    self._fail_job(job, error, result=result)
+                    if failure_policy == "fail_fast":
+                        self._fail_fast(job.error or "child agent failed")
+                else:
+                    self._complete_job(job, result)
             completed.append(job)
         if self.manage_run_completion:
             self._update_run_completion_state()
@@ -223,6 +275,7 @@ class AgentScheduler:
                     "runId": self.run.run_id,
                     "status": self.run.status,
                     "workflowProgressRef": "workflow-progress.json",
+                    "workflowIssues": sanitize(copy.deepcopy((self.run.metadata or {}).get("workflowIssues") or [])),
                     "jobs": [
                         {
                             "jobId": job.job_id,
@@ -250,6 +303,65 @@ class AgentScheduler:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
         self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
+
+    def _apply_schema_contract(self, job: WorkflowJob, result: AgentResult) -> AgentResult:
+        options = job.metadata.get("options") or {}
+        schema = options.get("schema")
+        if not isinstance(schema, dict) or not schema:
+            return result
+        issues = validate_agent_payload_against_schema(result.payload, schema)
+        if not issues:
+            job.metadata["schemaValidation"] = {
+                "ok": True,
+                "code": None,
+                "issues": [],
+                "fallback": None,
+                "fallbackApplied": False,
+            }
+            return result
+        fallback = str(options.get("fallback") or "").strip().lower()
+        fallback_applied = fallback == "text"
+        validation = {
+            "ok": False,
+            "code": SCHEMA_VALIDATION_FAILED,
+            "issues": issues,
+            "fallback": fallback or None,
+            "fallbackApplied": fallback_applied,
+        }
+        job.metadata["schemaValidation"] = validation
+        self._record_workflow_issue(job, validation)
+        if fallback_applied:
+            payload = copy.deepcopy(result.payload or {})
+            payload["schemaFallback"] = True
+            payload["schemaValidation"] = copy.deepcopy(validation)
+            result.payload = payload
+            return result
+        error = f"{SCHEMA_VALIDATION_FAILED}: " + "; ".join(issues)
+        result.status = "failed"
+        result.payload = {
+            "error": error,
+            "code": SCHEMA_VALIDATION_FAILED,
+            "schemaValidation": copy.deepcopy(validation),
+        }
+        return result
+
+    def _record_workflow_issue(self, job: WorkflowJob, validation: dict) -> None:
+        issue = {
+            "code": SCHEMA_VALIDATION_FAILED,
+            "type": SCHEMA_VALIDATION_FAILED,
+            "jobId": job.job_id,
+            "agentLabel": job.metadata.get("label"),
+            "retryable": True,
+            "fallback": validation.get("fallback"),
+            "fallbackUsed": validation.get("fallback") if validation.get("fallbackApplied") else None,
+            "fallbackApplied": bool(validation.get("fallbackApplied")),
+            "issues": copy.deepcopy(validation.get("issues") or []),
+        }
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
+        workflow_issues = metadata.setdefault("workflowIssues", [])
+        workflow_issues.append(issue)
+        self.run.metadata = metadata
+        self._append("workflow_issue", job, issue)
 
     def _event_result_summary(self, result: AgentResult) -> dict:
         summary = {
