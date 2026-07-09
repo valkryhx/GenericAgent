@@ -183,6 +183,113 @@ test('applyBridgeEvent stores workflow detail draft and progress payloads', () =
   assert.equal(state.workflowDetails.wf_progress.progress?.workflowProgress[0].label, 'planner')
   assert.equal(state.workflowDetails.wf_progress.progress?.workflowProgress[0].tokenUsage?.totalTokens, 12)
 })
+
+test('applyBridgeEvent stores live workflow progress without requiring detail first', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_run',
+    run: { runId: 'wf_live_progress', sessionId: 's1', status: 'running', metadata: { workflowName: 'live-progress' } },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_progress',
+    progress: {
+      runId: 'wf_live_progress',
+      sessionId: 's1',
+      status: 'running',
+      workflowProgress: [
+        { jobId: 'agent_1', label: 'planner', state: 'succeeded', tokenUsage: { totalTokens: 1000 } },
+        { jobId: 'agent_2', label: 'implementation', state: 'running', lastToolName: 'Edit', tokenUsage: { totalTokens: 2500 } },
+      ],
+    },
+  })
+
+  assert.equal(state.workflowDetails.wf_live_progress.run.runId, 'wf_live_progress')
+  assert.equal(state.workflowDetails.wf_live_progress.script, '')
+  assert.equal(state.workflowDetails.wf_live_progress.events.length, 0)
+  assert.equal(state.workflowDetails.wf_live_progress.progress?.workflowProgress[1].label, 'implementation')
+  assert.equal(state.workflows[0].status, 'running')
+})
+
+test('applyBridgeEvent merges live workflow progress into existing detail payload', () => {
+  let state = applyBridgeEvent(initialState, {
+    type: 'workflow_detail',
+    run: { runId: 'wf_existing', sessionId: 's1', status: 'running' },
+    script: 'return 1',
+    events: [{ type: 'workflow_started', runId: 'wf_existing', sequence: 1, payload: {} }],
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_progress',
+    progress: {
+      runId: 'wf_existing',
+      sessionId: 's1',
+      status: 'running',
+      workflowProgress: [{ jobId: 'agent_1', label: 'planner', state: 'succeeded' }],
+    },
+  })
+
+  assert.equal(state.workflowDetails.wf_existing.script, 'return 1')
+  assert.equal(state.workflowDetails.wf_existing.events.length, 1)
+  assert.equal(state.workflowDetails.wf_existing.progress?.workflowProgress[0].state, 'succeeded')
+})
+
+test('applyBridgeEvent ignores workflow progress when run is not known yet', () => {
+  const state = applyBridgeEvent(initialState, {
+    type: 'workflow_progress',
+    progress: {
+      runId: 'wf_unknown',
+      sessionId: 's1',
+      status: 'running',
+      workflowProgress: [{ jobId: 'agent_1', label: 'planner', state: 'running' }],
+    },
+  })
+
+  assert.equal(state.workflowDetails.wf_unknown, undefined)
+  assert.equal(state.workflows.length, 0)
+})
+
+test('applyBridgeEvent updates workflow run status from live workflow progress', () => {
+  let state = applyBridgeEvent(initialState, {
+    type: 'workflow_run',
+    run: { runId: 'wf_status_from_progress', sessionId: 's1', status: 'running', metadata: { workflowName: 'status-progress' } },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_progress',
+    progress: {
+      runId: 'wf_status_from_progress',
+      sessionId: 's1',
+      status: 'failed',
+      workflowProgress: [{ jobId: 'agent_1', label: 'planner', state: 'failed' }],
+    },
+  })
+
+  assert.equal(state.workflows[0].status, 'failed')
+  assert.equal(state.workflowDetails.wf_status_from_progress.run.status, 'failed')
+})
+
+test('applyBridgeEvent keeps workflow_run payload authoritative after live progress', () => {
+  let state = applyBridgeEvent(initialState, {
+    type: 'workflow_run',
+    run: { runId: 'wf_run_after_progress', sessionId: 's1', status: 'running', metadata: { workflowName: 'run-after-progress' } },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_progress',
+    progress: {
+      runId: 'wf_run_after_progress',
+      sessionId: 's1',
+      status: 'running',
+      workflowProgress: [{ jobId: 'agent_1', label: 'planner', state: 'running' }],
+    },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_run',
+    run: { runId: 'wf_run_after_progress', sessionId: 's1', status: 'succeeded', metadata: { workflowName: 'run-after-progress' }, resultRef: 'final-result.json' },
+  })
+
+  assert.equal(state.workflows[0].status, 'succeeded')
+  assert.equal(state.workflowDetails.wf_run_after_progress.run.status, 'succeeded')
+  assert.equal(state.workflowDetails.wf_run_after_progress.run.resultRef, 'final-result.json')
+  assert.equal(state.workflowDetails.wf_run_after_progress.progress?.workflowProgress[0].state, 'running')
+})
 test('applyBridgeEvent stores workflow list and detail payloads', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, {

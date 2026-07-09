@@ -535,6 +535,18 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
 
+    def workflow_progress(self, run_id: str) -> None:
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(str(run_id or ""))
+                progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            if progress is None:
+                self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
+                return
+            self.emit({"type": "workflow_progress", "progress": progress})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_progress_failed", "message": str(exc)})
+
     def workflow_deny(self, run_id: str, *, reason: str = "") -> bool:
         run_id = str(run_id or "")
         if not run_id:
@@ -588,6 +600,7 @@ class GenericAgentBridge:
                 current = self.workflow_store.load_run(run_id)
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+            self.workflow_progress(run_id)
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
         except Exception as exc:
             try:
@@ -617,6 +630,7 @@ class GenericAgentBridge:
                     current = self.workflow_store.load_run(run_id)
                 self._emit_workflow_events(run_id)
                 self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+                self.workflow_progress(run_id)
                 self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
             except Exception:
                 pass
@@ -1100,6 +1114,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":
             bridge.workflow_detail(str(command.get("runId") or command.get("run_id") or ""))
+        elif cmd_type == "workflow_progress":
+            bridge.workflow_progress(str(command.get("runId") or command.get("run_id") or ""))
         elif cmd_type == "workflow_deny":
             bridge.workflow_deny(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "workflow_stop":

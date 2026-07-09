@@ -43,7 +43,15 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
 
   if (event.type === 'workflow_draft' || event.type === 'workflow_run') {
     const existing = state.workflows.filter(run => run.runId !== event.run.runId)
-    return { ...state, workflows: [...existing, event.run], error: null }
+    const detail = state.workflowDetails[event.run.runId]
+    return {
+      ...state,
+      workflows: [...existing, event.run],
+      workflowDetails: detail
+        ? { ...state.workflowDetails, [event.run.runId]: { ...detail, run: event.run } }
+        : state.workflowDetails,
+      error: null,
+    }
   }
   if (event.type === 'workflow_runs') {
     return { ...state, workflows: event.runs, error: null }
@@ -56,6 +64,31 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       workflowDetails: {
         ...state.workflowDetails,
         [event.run.runId]: { run: event.run, script: event.script, events: event.events, draft: event.draft ?? null, progress: event.progress ?? null },
+      },
+      error: null,
+    }
+  }
+  if (event.type === 'workflow_progress') {
+    const existingRun = state.workflows.find(run => run.runId === event.progress.runId)
+    const existingDetail = state.workflowDetails[event.progress.runId]
+    if (!existingRun && !existingDetail) return { ...state, error: null }
+    const run = existingDetail?.run ?? existingRun!
+    const updatedRun = { ...run, status: event.progress.status }
+    const workflows = state.workflows.some(item => item.runId === updatedRun.runId)
+      ? state.workflows.map(item => item.runId === updatedRun.runId ? { ...item, status: event.progress.status } : item)
+      : [...state.workflows, updatedRun]
+    return {
+      ...state,
+      workflows,
+      workflowDetails: {
+        ...state.workflowDetails,
+        [updatedRun.runId]: {
+          run: updatedRun,
+          script: existingDetail?.script ?? '',
+          events: existingDetail?.events ?? [],
+          draft: existingDetail?.draft ?? null,
+          progress: event.progress,
+        },
       },
       error: null,
     }

@@ -150,9 +150,19 @@ class PlannedRunFakeRuntime:
             ),
         )
         payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True, "args": args}}
-        self.store.write_final_result(run, payload)
+        run.jobs.append(
+            WorkflowJob(
+                job_id="agent_1",
+                prompt="planned runtime fake agent",
+                status="succeeded",
+                phase="Plan",
+                metadata={"label": "planner"},
+            )
+        )
         run.status = "succeeded"
+        self.store.write_final_result(run, payload)
         self.store.save_run(run)
+        self.store.write_workflow_progress(run)
         return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
 
 
@@ -982,6 +992,13 @@ class InkBridgeTest(unittest.TestCase):
             final_event = next(event for event in events if event["type"] == "workflow_final")
             self.assertEqual("succeeded", final_event["result"]["status"])
             self.assertEqual({"ok": True, "args": {"value": 42}}, final_event["result"]["result"])
+            progress_events = [event for event in events if event["type"] == "workflow_progress"]
+            self.assertTrue(progress_events)
+            self.assertEqual(run_id, progress_events[-1]["progress"]["runId"])
+            self.assertEqual("succeeded", progress_events[-1]["progress"]["status"])
+            event_types = [event["type"] for event in events]
+            self.assertLess(event_types.index("workflow_run", event_types.index("workflow_event")), event_types.index("workflow_progress"))
+            self.assertLess(event_types.index("workflow_progress"), event_types.index("workflow_final"))
 
     def test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false(self):
         agent = FakeAgent()
@@ -1072,6 +1089,45 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("planner", detail["progress"]["workflowProgress"][0]["label"])
             self.assertEqual("Plan", detail["progress"]["workflowProgress"][0]["phaseTitle"])
             self.assertNotIn("transcriptEvents", json.dumps(detail, ensure_ascii=False))
+
+    def test_workflow_progress_emits_current_progress_without_detail_payload(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        draft = make_workflow_plan_draft(task_text="规划 live progress")
+        planner = FakeWorkflowPlanner(draft)
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_planner_factory=lambda: planner,
+            )
+            run_id = bridge.workflow_plan("规划 live progress", auto_approve=False)
+            run = bridge.workflow_store.load_run(run_id)
+            run.status = "running"
+            run.jobs.append(
+                WorkflowJob(
+                    job_id="agent_1",
+                    prompt="不要读取 mykey.py、mykey.json、mcp.json；不要提交。制定计划。",
+                    status="running",
+                    phase="Plan",
+                    metadata={"label": "planner", "tokenUsage": {"totalTokens": 1234}},
+                )
+            )
+            bridge.workflow_store.save_run(run)
+            bridge.workflow_store.write_workflow_progress(run)
+            events.clear()
+
+            bridge.workflow_progress(run_id)
+
+            progress_event = next(event for event in events if event["type"] == "workflow_progress")
+            self.assertEqual(run_id, progress_event["progress"]["runId"])
+            self.assertEqual("running", progress_event["progress"]["status"])
+            self.assertEqual("planner", progress_event["progress"]["workflowProgress"][0]["label"])
+            self.assertEqual(1234, progress_event["progress"]["workflowProgress"][0]["tokenUsage"]["totalTokens"])
+            self.assertNotIn("script", progress_event)
+            self.assertNotIn("transcriptEvents", json.dumps(progress_event, ensure_ascii=False))
 
     def test_workflow_detail_allows_missing_workflow_progress_and_draft(self):
         agent = FakeAgent()
@@ -2554,6 +2610,7 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
             + json.dumps({"type": "workflow_resume", "runId": "wf_1", "args": {"y": 2}, "timeoutSeconds": 3}) + "\n"
             + json.dumps({"type": "workflow_list"}) + "\n"
             + json.dumps({"type": "workflow_detail", "runId": "wf_1"}) + "\n"
+            + json.dumps({"type": "workflow_progress", "runId": "wf_1"}) + "\n"
             + json.dumps({"type": "workflow_deny", "runId": "wf_1", "reason": "no"}) + "\n"
             + json.dumps({"type": "workflow_stop", "runId": "wf_1", "reason": "user"}) + "\n"
             + json.dumps({"type": "shutdown"}) + "\n"
@@ -2570,6 +2627,7 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
         bridge.workflow_resume.assert_called_once_with("wf_1", args={"y": 2}, timeout_seconds=3.0)
         bridge.workflow_list.assert_called_once_with()
         bridge.workflow_detail.assert_called_once_with("wf_1")
+        bridge.workflow_progress.assert_called_once_with("wf_1")
         bridge.workflow_deny.assert_called_once_with("wf_1", reason="no")
         bridge.workflow_stop.assert_called_once_with("wf_1", reason="user")
 

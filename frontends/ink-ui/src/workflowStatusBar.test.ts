@@ -76,6 +76,41 @@ test('workflowStatusBarFromState selects latest running workflow and summarizes 
   })
 })
 
+test('workflowStatusBarFromState uses live workflow_progress without workflow_detail payload', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [
+      { runId: 'wf_live_progress', sessionId: 'session', status: 'running', metadata: { workflowName: 'live-progress' }, jobs: [] },
+    ],
+    workflowDetails: {
+      wf_live_progress: {
+        run: { runId: 'wf_live_progress', sessionId: 'session', status: 'running', metadata: { workflowName: 'live-progress' } },
+        script: '',
+        events: [],
+        progress: {
+          runId: 'wf_live_progress',
+          sessionId: 'session',
+          status: 'running',
+          workflowProgress: [
+            { jobId: 'agent_1', label: 'planner', state: 'succeeded', tokenUsage: { totalTokens: 900 } },
+            { jobId: 'agent_2', label: 'reviewer', state: 'running', lastToolName: 'Read', tokenUsage: { totalTokens: 1600 } },
+          ],
+        },
+      },
+    },
+  }))
+
+  assert.deepEqual(bar, {
+    runId: 'wf_live_progress',
+    status: 'running',
+    name: 'live-progress',
+    completedAgents: 1,
+    totalAgents: 2,
+    activeAgent: 'reviewer',
+    lastActivity: 'Read',
+    tokenText: '2.5k tok',
+  })
+})
+
 test('workflowStatusBarRows formats running workflow controls and summary', () => {
   const bar = workflowStatusBarFromState(stateWithWorkflows({
     workflows: [{ runId: 'wf_live', sessionId: 'session', status: 'running', metadata: { workflowName: 'live-workflow' }, jobs: [{ jobId: 'a1', status: 'succeeded' }, { jobId: 'a2', status: 'running' }] }],

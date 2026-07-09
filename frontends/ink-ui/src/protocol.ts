@@ -22,6 +22,7 @@ export type BridgeCommand =
   | { type: 'workflow_deny'; runId: string; reason?: string }
   | { type: 'workflow_list' }
   | { type: 'workflow_detail'; runId: string }
+  | { type: 'workflow_progress'; runId: string }
   | { type: 'workflow_stop'; runId: string; reason?: string }
   | { type: 'shutdown' }
 
@@ -226,6 +227,7 @@ export type BridgeEvent =
   | { type: 'workflow_run'; run: WorkflowRun }
   | { type: 'workflow_runs'; runs: WorkflowRun[] }
   | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
+  | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
   | { type: 'workflow_event'; event: WorkflowEvent }
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'error'; code: string; message: string; taskId?: number }
