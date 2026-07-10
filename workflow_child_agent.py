@@ -138,7 +138,15 @@ class NativeGPTChildAgentRunner:
             target.max_tokens = self.max_tokens
         if self.system_prompt is not None and not is_tool_client and hasattr(target, "system"):
             target.system = self.system_prompt
-        state = {"executable": executable, "session": target, "is_tool_client": is_tool_client, "result": None, "done": False}
+        state = {
+            "executable": executable,
+            "session": target,
+            "is_tool_client": is_tool_client,
+            "handler": None,
+            "cancelled": False,
+            "result": None,
+            "done": False,
+        }
         with self._lock:
             self._states[job.job_id] = state
         thread = threading.Thread(target=self._run_job, args=(job, state), daemon=True)
@@ -155,11 +163,16 @@ class NativeGPTChildAgentRunner:
     def cancel(self, job) -> None:
         with self._lock:
             state = self._states.get(job.job_id)
+            if state:
+                state["cancelled"] = True
         if not state:
             return
         for target in (state.get("executable"), state.get("session")):
             if hasattr(target, "cancel_current_request"):
                 target.cancel_current_request()
+        handler = state.get("handler")
+        if handler is not None:
+            handler.cancel()
 
     def _new_executable(self):
         if self.client_factory is not None:
@@ -205,7 +218,7 @@ class NativeGPTChildAgentRunner:
         transcript_events.append({"type": "request", "messages": [copy.deepcopy(message)]})
         try:
             if state.get("is_tool_client") and self.enable_tools:
-                answer, usage, tool_summary = self._run_tool_job(job, executable, prompt, transcript_events, profile, version)
+                answer, usage, tool_summary = self._run_tool_job(job, state, executable, prompt, transcript_events, profile, version)
             else:
                 answer = "".join(str(chunk) for chunk in session.ask(message))
                 usage = copy.deepcopy(getattr(session, "last_usage_tokens", None) or {})
@@ -237,21 +250,38 @@ class NativeGPTChildAgentRunner:
                 transcript_events=sanitize(transcript_events),
             )
         with self._lock:
+            if state.get("cancelled"):
+                result = AgentResult(
+                    job_id=job.job_id,
+                    status="cancelled",
+                    payload={"cancelled": True},
+                    transcript_ref=transcript_ref,
+                    token_usage=copy.deepcopy(result.token_usage),
+                    tool_summary=copy.deepcopy(result.tool_summary),
+                    transcript_events=copy.deepcopy(result.transcript_events),
+                )
             state["result"] = result
             state["done"] = True
 
-    def _run_tool_job(self, job, client, prompt: str, transcript_events: list[dict], profile: str, version: str):
+    def _run_tool_job(self, job, state: dict, client, prompt: str, transcript_events: list[dict], profile: str, version: str):
         from agent_loop import agent_runner_loop
+        from mcp_runtime import mcp_cancellation_scope
         handler = self._build_handler(job, transcript_events, profile, version)
-        tools_schema = self._load_tools_schema()
+        with self._lock:
+            state["handler"] = handler
+            cancelled = bool(state.get("cancelled"))
+        if cancelled:
+            handler.cancel()
+        with mcp_cancellation_scope(handler.code_stop_signal):
+            tools_schema = self._load_tools_schema()
         transcript_events.append({
             "type": "capability_snapshot",
             "runId": job.metadata.get("runId"),
             "jobId": job.job_id,
             "capabilities": copy.deepcopy(self.last_capability_snapshot),
         })
-        output = "".join(
-            str(chunk)
+        try:
+            chunks = []
             for chunk in agent_runner_loop(
                 client,
                 self._build_system_prompt(),
@@ -261,8 +291,16 @@ class NativeGPTChildAgentRunner:
                 max_turns=self.max_turns,
                 verbose=False,
                 initial_user_content=[{"type": "text", "text": prompt}],
-            )
-        )
+            ):
+                chunks.append(str(chunk))
+                with self._lock:
+                    if state.get("cancelled"):
+                        break
+            output = "".join(chunks)
+        finally:
+            with self._lock:
+                if state.get("handler") is handler:
+                    state["handler"] = None
         usage = copy.deepcopy(getattr(client, "last_usage_tokens", None) or getattr(getattr(client, "backend", None), "last_usage_tokens", None) or {})
         return output, usage, self._build_tool_summary(transcript_events)
 

@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -55,10 +56,39 @@ class McpServerState:
     client: Any = None
     entered: Any = None
     stderr_log: Any = None
+    connect_future: Any = None
 
 
 _MANAGER_LOCK = threading.Lock()
 _MANAGER: Optional["McpManager"] = None
+_CALL_CONTEXT = threading.local()
+
+
+@contextmanager
+def mcp_cancellation_scope(stop_signal):
+    previous = getattr(_CALL_CONTEXT, "stop_signal", None)
+    _CALL_CONTEXT.stop_signal = stop_signal
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                del _CALL_CONTEXT.stop_signal
+            except AttributeError:
+                pass
+        else:
+            _CALL_CONTEXT.stop_signal = previous
+
+
+def _current_stop_signal():
+    return getattr(_CALL_CONTEXT, "stop_signal", None)
+
+
+def _stop_requested(stop_signal) -> bool:
+    if stop_signal is None:
+        return False
+    is_set = getattr(stop_signal, "is_set", None)
+    return bool(is_set()) if callable(is_set) else bool(stop_signal)
 
 
 def normalize_mcp_name(name: str) -> str:
@@ -114,6 +144,9 @@ class McpManager:
         self.config_path = config_path
         self.lock = threading.RLock()
         self.states: dict[str, McpServerState] = {}
+        self._tracked_tasks: set[asyncio.Task] = set()
+        self._local_connect_semaphore: Optional[asyncio.Semaphore] = None
+        self._closing = False
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever,
@@ -151,16 +184,47 @@ class McpManager:
         }
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         with self.lock:
             states = list(self.states.values())
-        for state in states:
-            self._close_state(state)
         if self.loop.is_running():
+            shutdown = asyncio.run_coroutine_threadsafe(self._shutdown_async(states), self.loop)
+            try:
+                shutdown.result(timeout=15)
+            except Exception:
+                pass
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.loop_thread.is_alive():
-            self.loop_thread.join(timeout=2)
-        if not self.loop.is_closed():
+            self.loop_thread.join(timeout=5)
+        if not self.loop_thread.is_alive() and not self.loop.is_closed():
             self.loop.close()
+
+    async def _shutdown_async(self, states: list[McpServerState]) -> None:
+        current = asyncio.current_task()
+        tracked = [task for task in self._tracked_tasks if task is not current and not task.done()]
+        for task in tracked:
+            task.cancel()
+        if tracked:
+            await asyncio.wait(tracked, timeout=8)
+
+        for state in states:
+            try:
+                await self._close_state_async(state)
+            except Exception:
+                pass
+
+        remaining = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current and not task.done()
+        ]
+        for task in remaining:
+            task.cancel()
+        if remaining:
+            await asyncio.wait(remaining, timeout=3)
+        await asyncio.sleep(0.1)
 
     def discover(self, include_unavailable: bool = False, timeout: Optional[float] = None) -> McpDiscovery:
         self.ensure_all_connected(timeout=timeout, retry_failed=False)
@@ -180,51 +244,90 @@ class McpManager:
         return discovery
 
     def ensure_all_connected(self, timeout: Optional[float] = None, retry_failed: bool = True) -> None:
-        states = []
-        connect_timeout = _default_timeout(timeout)
+        wait_timeout = _default_timeout(timeout)
+        stop_signal = _current_stop_signal()
+        if _stop_requested(stop_signal):
+            return
         with self.lock:
+            states = []
             for state in self.states.values():
                 if state.status == "disabled" or state.client is not None:
                     continue
                 if state.status == "failed" and not retry_failed:
                     continue
+                states.append(state)
+        futures = []
+        for state in states:
+            future = self._connect_future(state)
+            if future is not None and future not in futures:
+                futures.append(future)
+        if futures:
+            deadline = time.monotonic() + max(wait_timeout + 1.0, wait_timeout * 2)
+            for future in futures:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    self._wait_future(
+                        future,
+                        timeout=remaining,
+                        stop_signal=stop_signal,
+                        cancel_on_stop=False,
+                        cancel_on_timeout=False,
+                    )
+                except asyncio.CancelledError:
+                    return
+                except TimeoutError:
+                    break
+
+    def _connect_future(self, state: McpServerState):
+        with self.lock:
+            if state.status == "connected" and state.client is not None:
+                return None
+            future = state.connect_future
+            if future is None or future.done():
                 state.status = "pending"
                 state.error = ""
-                states.append(state)
-        if states:
-            self._run(self._connect_all(states, connect_timeout))
+                startup_timeout = _default_timeout(state.config.get("startup_timeout_sec"))
+                future = self._submit(self._connect_state(state, startup_timeout))
+                state.connect_future = future
+                future.add_done_callback(lambda done, target=state: self._clear_connect_future(target, done))
+            return future
 
-    def ensure_connected(self, server_name: str, timeout: Optional[float] = None) -> McpServerState:
-        timeout = _default_timeout(timeout)
+    async def _connect_state(self, state: McpServerState, timeout: float) -> None:
+        if not _is_local_mcp_server(state.config):
+            await self._connect_and_fetch_tools(state, timeout)
+            return
+        if self._local_connect_semaphore is None:
+            self._local_connect_semaphore = asyncio.Semaphore(1)
+        async with self._local_connect_semaphore:
+            await self._connect_and_fetch_tools(state, timeout)
+
+    def ensure_connected(self, server_name: str, timeout: Optional[float] = None, stop_signal=None) -> McpServerState:
+        wait_timeout = _default_timeout(timeout)
+        if _stop_requested(stop_signal):
+            raise asyncio.CancelledError("MCP connection wait aborted by user")
         with self.lock:
             state = self.states[server_name]
             if state.status == "disabled":
                 return state
             if state.status == "connected" and state.client is not None:
                 return state
-            state.status = "pending"
-            state.error = ""
-        self._run(self._connect_and_fetch_tools(state, timeout))
+        future = self._connect_future(state)
+        if future is not None:
+            self._wait_future(
+                future,
+                timeout=wait_timeout + 1.0,
+                stop_signal=stop_signal,
+                cancel_on_stop=False,
+                cancel_on_timeout=False,
+            )
         return state
 
-    async def _connect_all(self, states: list[McpServerState], timeout: float) -> None:
-        local_states = [state for state in states if _is_local_mcp_server(state.config)]
-        remote_states = [state for state in states if not _is_local_mcp_server(state.config)]
-        await asyncio.gather(
-            self._connect_batched(local_states, timeout, concurrency=1),
-            self._connect_batched(remote_states, timeout, concurrency=max(1, len(remote_states))),
-        )
-
-    async def _connect_batched(self, states: list[McpServerState], timeout: float, concurrency: int) -> None:
-        if not states:
-            return
-        semaphore = asyncio.Semaphore(max(1, concurrency))
-
-        async def connect(state: McpServerState) -> None:
-            async with semaphore:
-                await self._connect_and_fetch_tools(state, timeout)
-
-        await asyncio.gather(*(connect(state) for state in states))
+    def _clear_connect_future(self, state: McpServerState, future) -> None:
+        with self.lock:
+            if state.connect_future is future:
+                state.connect_future = None
 
     def call_tool(
         self,
@@ -233,6 +336,7 @@ class McpManager:
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         call_timeout = _default_timeout(timeout, env_name="GA_MCP_CALL_TIMEOUT", fallback=60)
+        stop_signal = _current_stop_signal()
         server_name = self._server_name_for_tool(full_name)
         if server_name is None:
             known = ", ".join(sorted(self.states)[:30])
@@ -249,7 +353,12 @@ class McpManager:
                     "msg": f"MCP server is disabled: {server_name}",
                     "discovery_errors": {server_name: "disabled"},
                 }
-        self.ensure_connected(server_name, timeout=call_timeout)
+        try:
+            self.ensure_connected(server_name, timeout=call_timeout, stop_signal=stop_signal)
+        except TimeoutError as e:
+            return {"status": "error", "msg": _redact_sensitive(f"TimeoutError: {e}")}
+        except asyncio.CancelledError:
+            return {"status": "error", "msg": "MCP call aborted by user"}
         with self.lock:
             state = self.states[server_name]
             tool_ref = state.tool_refs.get(full_name)
@@ -267,7 +376,18 @@ class McpManager:
                 "discovery_errors": {server_name: server_error} if server_error else {},
             }
         clean_args = {k: v for k, v in (arguments or {}).items() if not str(k).startswith("_")}
-        return self._run(self._call_tool_async(state, tool_ref.tool_name, clean_args, timeout=call_timeout))
+        try:
+            return self._run(
+                self._call_tool_async(state, tool_ref.tool_name, clean_args, timeout=call_timeout),
+                timeout=call_timeout + 1.0,
+                stop_signal=stop_signal,
+            )
+        except TimeoutError as e:
+            self._mark_state_interrupted(state)
+            return {"status": "error", "msg": _redact_sensitive(f"TimeoutError: {e}")}
+        except asyncio.CancelledError:
+            self._mark_state_interrupted(state)
+            return {"status": "error", "msg": "MCP call aborted by user"}
 
     def _server_name_for_tool(self, full_name: str) -> Optional[str]:
         text = str(full_name or "")
@@ -315,9 +435,67 @@ class McpManager:
             state.tool_refs = {}
             return {"server": self._server_summary(state)}
 
-    def _run(self, coro):
-        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result()
+    def _run(self, coro, timeout: Optional[float] = None, stop_signal=None, poll_interval: float = 0.1):
+        """Run a coroutine on the manager loop without permanently blocking the caller.
+
+        The old future.result() path could hang forever if an MCP tool timed out
+        but the underlying transport refused to cancel. Poll with a short interval
+        so hard timeouts and /stop can free the agent thread.
+        """
+        future = self._submit(coro)
+        return self._wait_future(
+            future,
+            timeout=timeout,
+            stop_signal=stop_signal,
+            poll_interval=poll_interval,
+        )
+
+    def _submit(self, coro):
+        if self._closing or not self.loop.is_running():
+            coro.close()
+            raise RuntimeError("MCP manager is closed")
+        return asyncio.run_coroutine_threadsafe(self._track_task(coro), self.loop)
+
+    def _wait_future(
+        self,
+        future,
+        timeout: Optional[float] = None,
+        stop_signal=None,
+        poll_interval: float = 0.1,
+        cancel_on_stop: bool = True,
+        cancel_on_timeout: bool = True,
+    ):
+        deadline = None if timeout is None else (time.monotonic() + float(timeout))
+        interval = max(0.05, float(poll_interval))
+        while True:
+            if _stop_requested(stop_signal):
+                if cancel_on_stop:
+                    future.cancel()
+                raise asyncio.CancelledError("MCP call aborted by stop signal")
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if cancel_on_timeout:
+                        future.cancel()
+                    raise TimeoutError(f"MCP operation timed out after {timeout}s")
+            wait_for = interval if remaining is None else min(interval, remaining)
+            try:
+                return future.result(timeout=wait_for)
+            except concurrent.futures.TimeoutError:
+                continue
+            except concurrent.futures.CancelledError as e:
+                raise asyncio.CancelledError("MCP operation cancelled") from e
+
+    async def _track_task(self, coro):
+        task = asyncio.current_task()
+        if task is not None:
+            self._tracked_tasks.add(task)
+        try:
+            return await coro
+        finally:
+            if task is not None:
+                self._tracked_tasks.discard(task)
 
     async def _connect_and_fetch_tools(self, state: McpServerState, timeout: float) -> None:
         try:
@@ -374,7 +552,7 @@ class McpManager:
             with _stdio_errlog_patch(transport, stderr_log):
                 entered = _make_fastmcp_client(Client, transport, state.name, timeout)
                 client = await entered.__aenter__()
-        except Exception:
+        except BaseException:
             if stderr_log is not None:
                 stderr_log.close()
             raise
@@ -396,18 +574,26 @@ class McpManager:
                 timeout=timeout,
             )
             return _serialize_call_result(result)
+        except TimeoutError:
+            raise
         except Exception as e:
             with self.lock:
                 state.status = "failed"
                 state.error = _redact_sensitive(f"{type(e).__name__}: {e}")
             return {"status": "error", "msg": state.error}
 
+    def _mark_state_interrupted(self, state: McpServerState) -> None:
+        self._close_state(state)
+        with self.lock:
+            state.status = "pending"
+            state.error = ""
+
     def _close_state(self, state: McpServerState) -> None:
         if state.entered is not None:
             try:
-                self._run(self._close_state_async(state))
-                return
+                self._run(self._close_state_async(state), timeout=8.0)
             except Exception:
+                # Fall through and drop local refs even if the transport is stuck.
                 pass
         if state.stderr_log is not None:
             try:
@@ -420,14 +606,20 @@ class McpManager:
 
     async def _close_state_async(self, state: McpServerState) -> None:
         entered = state.entered
+        client = state.client
         stderr_log = state.stderr_log
         state.client = None
         state.entered = None
         state.stderr_log = None
-        if entered is not None:
-            await entered.__aexit__(None, None, None)
-        if stderr_log is not None:
-            stderr_log.close()
+        try:
+            close = getattr(client or entered, "close", None)
+            if close is not None:
+                await close()
+            elif entered is not None:
+                await entered.__aexit__(None, None, None)
+        finally:
+            if stderr_log is not None:
+                stderr_log.close()
 
     def _server_summary(self, state: McpServerState) -> dict[str, Any]:
         transport = state.config.get("type") or state.config.get("transport")
@@ -541,6 +733,8 @@ def discover_mcp_tools_cached(
         include_unavailable=include_unavailable,
         timeout=timeout,
     )
+    if _stop_requested(_current_stop_signal()):
+        return tools
     _write_mcp_tools_cache(cache_file, signature, tools)
     return tools
 

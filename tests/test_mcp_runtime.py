@@ -1,7 +1,10 @@
+import asyncio
 import json
 import os
 import shutil
 import sys
+import threading
+import time
 import unittest
 import uuid
 from contextlib import contextmanager
@@ -14,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from agent_loop import exhaust  # noqa: E402
+from agentmain import GenericAgent  # noqa: E402
 from ga import GenericAgentHandler  # noqa: E402
 from mcp_runtime import (  # noqa: E402
     build_mcp_tool_name,
@@ -25,6 +29,7 @@ from mcp_runtime import (  # noqa: E402
     enable_mcp_server,
     get_mcp_manager,
     load_mcp_config,
+    mcp_cancellation_scope,
     mcp_status,
     normalize_mcp_name,
     reconnect_mcp_server,
@@ -47,6 +52,43 @@ def _tempdir():
         yield str(path)
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _process_exists(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, int(pid))
+    if not handle:
+        return False
+    try:
+        return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 258
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _wait_for_process_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_exists(pid):
+            return True
+        time.sleep(0.05)
+    return not _process_exists(pid)
+
+
+async def _pending_manager_tasks() -> list[str]:
+    await asyncio.sleep(0)
+    current = asyncio.current_task()
+    return [
+        repr(task.get_coro())
+        for task in asyncio.all_tasks()
+        if task is not current and not task.done()
+    ]
 
 
 def _write_demo_server(tmp_path: Path) -> Path:
@@ -115,6 +157,108 @@ def _write_counting_server(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return script_path
+
+
+
+def _write_hanging_server(tmp_path: Path, sleep_seconds: float = 30.0) -> Path:
+    script_path = tmp_path / "hanging_mcp_server.py"
+    script_path.write_text(
+        "import time\n"
+        "from fastmcp import FastMCP\n"
+        "mcp = FastMCP('hanging')\n"
+        "@mcp.tool(description='Sleep for a long time before returning.')\n"
+        "def hang(text: str = 'x') -> str:\n"
+        f"    time.sleep({float(sleep_seconds)!r})\n"
+        "    return 'done:' + text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path
+
+
+def _write_hanging_startup_server(tmp_path: Path, sleep_seconds: float = 10.0) -> tuple[Path, Path, Path]:
+    marker_path = tmp_path / "startup_server_started.txt"
+    pid_path = tmp_path / "startup_server.pid"
+    script_path = tmp_path / "hanging_startup_mcp_server.py"
+    script_path.write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        f"Path({str(marker_path)!r}).write_text('started', encoding='utf-8')\n"
+        f"time.sleep({float(sleep_seconds)!r})\n",
+        encoding="utf-8",
+    )
+    return script_path, marker_path, pid_path
+
+
+def _write_cancellable_server(tmp_path: Path, sleep_seconds: float = 30.0) -> tuple[Path, Path, Path]:
+    call_marker = tmp_path / "tool_call_started.txt"
+    pid_path = tmp_path / "server.pid"
+    script_path = tmp_path / "cancellable_mcp_server.py"
+    script_path.write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "from fastmcp import FastMCP\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "mcp = FastMCP('cancellable')\n"
+        "@mcp.tool(description='Block long enough for cancellation.')\n"
+        "def hang(text: str = 'x') -> str:\n"
+        f"    Path({str(call_marker)!r}).write_text('started', encoding='utf-8')\n"
+        f"    time.sleep({float(sleep_seconds)!r})\n"
+        "    return 'done:' + text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path, call_marker, pid_path
+
+
+def _write_reconnect_after_timeout_server(tmp_path: Path) -> tuple[Path, Path, Path]:
+    starts_path = tmp_path / "timeout_server_starts.txt"
+    pid_path = tmp_path / "timeout_server.pid"
+    script_path = tmp_path / "timeout_reconnect_mcp_server.py"
+    script_path.write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "from fastmcp import FastMCP\n"
+        f"starts = Path({str(starts_path)!r})\n"
+        "starts.write_text(str(int(starts.read_text() or '0') + 1) if starts.exists() else '1', encoding='utf-8')\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "mcp = FastMCP('timeout-reconnect')\n"
+        "@mcp.tool(description='Sleep for the requested delay.')\n"
+        "def delay(text: str, seconds: float = 0) -> str:\n"
+        "    time.sleep(float(seconds))\n"
+        "    return 'done:' + text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path, starts_path, pid_path
+
+
+def _write_delayed_counting_server(tmp_path: Path, startup_delay: float = 1.0) -> tuple[Path, Path]:
+    starts_path = tmp_path / "delayed_server_starts.txt"
+    script_path = tmp_path / "delayed_counting_mcp_server.py"
+    script_path.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        f"starts = Path({str(starts_path)!r})\n"
+        "starts.write_text(str(int(starts.read_text() or '0') + 1) if starts.exists() else '1', encoding='utf-8')\n"
+        f"time.sleep({float(startup_delay)!r})\n"
+        "from fastmcp import FastMCP\n"
+        "mcp = FastMCP('delayed')\n"
+        "@mcp.tool(description='Echo after delayed startup.')\n"
+        "def echo(text: str) -> str:\n"
+        "    return 'echo:' + text\n"
+        "if __name__ == '__main__':\n"
+        "    mcp.run(transport='stdio', show_banner=False)\n",
+        encoding="utf-8",
+    )
+    return script_path, starts_path
 
 
 def _write_failing_marker_server(tmp_path: Path) -> tuple[Path, Path]:
@@ -208,6 +352,7 @@ class McpRuntimeTest(unittest.TestCase):
         clear_mcp_cache()
         reset_mcp_manager()
         os.environ.pop("GA_MCP_CONFIG", None)
+        os.environ.pop("GA_MCP_CALL_TIMEOUT", None)
 
     def test_build_mcp_tool_name_matches_claudecode_normalization(self):
         self.assertEqual(normalize_mcp_name("my server"), "my_server")
@@ -362,6 +507,358 @@ class McpRuntimeTest(unittest.TestCase):
 
         self.assertEqual(outcome.data["status"], "success")
         self.assertIn("echo:dispatch", json.dumps(outcome.data, ensure_ascii=False))
+
+    def test_generic_agent_abort_stops_mcp_during_initial_connection(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, started_marker, pid_path = _write_hanging_startup_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "starting", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            os.environ["GA_MCP_CALL_TIMEOUT"] = "2"
+            reset_mcp_manager()
+
+            agent = GenericAgent.__new__(GenericAgent)
+            agent.is_running = True
+            agent.stop_sig = False
+            agent.llmclient = None
+            handler = GenericAgentHandler(agent, last_history=[], cwd=tmp)
+            agent.handler = handler
+            box = {}
+
+            def run_dispatch():
+                box["outcome"] = exhaust(
+                    handler.dispatch(
+                        "mcp__starting__never",
+                        {},
+                        type("Response", (), {"content": ""})(),
+                    )
+                )
+
+            worker = threading.Thread(target=run_dispatch, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 3
+            while not started_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(started_marker.exists(), "MCP startup fixture did not launch")
+            server_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertTrue(_process_exists(server_pid))
+
+            started = time.monotonic()
+            agent.abort()
+            worker.join(timeout=0.75)
+            stopped_quickly = not worker.is_alive()
+            elapsed = time.monotonic() - started
+
+            worker.join(timeout=5)
+            manager = get_mcp_manager()
+            manager_thread = manager.loop_thread
+            reset_mcp_manager()
+            process_exited = _wait_for_process_exit(server_pid, timeout=3)
+
+        self.assertTrue(stopped_quickly, f"abort remained blocked in MCP startup for {elapsed:.2f}s")
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(box["outcome"].data["status"], "error")
+        self.assertRegex(str(box["outcome"].data.get("msg", "")), r"(?i)abort|cancel|stop")
+        self.assertTrue(process_exited, f"startup MCP process {server_pid} survived manager shutdown")
+        self.assertFalse(manager_thread.is_alive())
+
+    def test_cancelled_discovery_waiter_stops_without_failing_shared_startup(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, started_marker, pid_path = _write_hanging_startup_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "starting", server_script)
+            cache_path = tmp_path / "cancelled-discovery-cache.json"
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+            stop_signal = threading.Event()
+            box = {}
+
+            def run_discovery():
+                try:
+                    with mcp_cancellation_scope(stop_signal):
+                        box["tools"] = discover_mcp_tools_cached(timeout=30, cache_path=cache_path)
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    box["error"] = exc
+
+            worker = threading.Thread(target=run_discovery, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 3
+            while not started_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(started_marker.exists(), "MCP discovery fixture did not launch")
+            server_pid = int(pid_path.read_text(encoding="utf-8"))
+
+            stop_signal.set()
+            worker.join(timeout=0.75)
+            stopped_quickly = not worker.is_alive()
+            manager = get_mcp_manager()
+            with manager.lock:
+                server_status = manager.states["starting"].status
+            cache_written = cache_path.exists()
+            reset_mcp_manager()
+            worker.join(timeout=3)
+            process_exited = _wait_for_process_exit(server_pid, timeout=3)
+
+        self.assertTrue(stopped_quickly, "MCP discovery ignored the turn cancellation signal")
+        self.assertNotIn("error", box)
+        self.assertEqual(box["tools"], [])
+        self.assertFalse(cache_written, "cancelled discovery wrote an incomplete MCP tool cache")
+        self.assertEqual(server_status, "pending")
+        self.assertTrue(process_exited, f"startup MCP process {server_pid} survived manager shutdown")
+
+    def test_cancelled_waiter_does_not_cancel_shared_server_startup(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, starts_path = _write_delayed_counting_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "delayed", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            os.environ["GA_MCP_CALL_TIMEOUT"] = "10"
+            reset_mcp_manager()
+
+            agents = []
+            workers = []
+            boxes = [{}, {}]
+            for index in range(2):
+                agent = GenericAgent.__new__(GenericAgent)
+                agent.is_running = True
+                agent.stop_sig = False
+                agent.llmclient = None
+                handler = GenericAgentHandler(agent, last_history=[], cwd=tmp)
+                agent.handler = handler
+                agents.append(agent)
+
+                def run_dispatch(slot=index, active_handler=handler):
+                    boxes[slot]["outcome"] = exhaust(
+                        active_handler.dispatch(
+                            "mcp__delayed__echo",
+                            {"text": f"call-{slot}"},
+                            type("Response", (), {"content": ""})(),
+                        )
+                    )
+
+                worker = threading.Thread(target=run_dispatch, daemon=True)
+                workers.append(worker)
+                worker.start()
+
+            deadline = time.monotonic() + 3
+            while not starts_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(starts_path.exists(), "shared startup fixture did not launch")
+            time.sleep(0.2)
+
+            agents[0].abort()
+            workers[0].join(timeout=1)
+            workers[1].join(timeout=10)
+            starts = int(starts_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(workers[0].is_alive())
+        self.assertFalse(workers[1].is_alive())
+        self.assertRegex(str(boxes[0]["outcome"].data.get("msg", "")), r"(?i)abort|cancel|stop")
+        self.assertEqual(boxes[1]["outcome"].data["status"], "success")
+        self.assertEqual(starts, 1)
+
+    def test_short_timeout_waiter_does_not_cancel_shared_server_startup(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, starts_path = _write_delayed_counting_server(tmp_path, startup_delay=3.0)
+            config_path = _write_named_mcp_config(tmp_path, "delayed", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            boxes = [{}, {}]
+
+            def call_tool(slot, timeout):
+                boxes[slot]["result"] = call_mcp_tool(
+                    "mcp__delayed__echo",
+                    {"text": f"call-{slot}"},
+                    timeout=timeout,
+                )
+
+            short_waiter = threading.Thread(target=call_tool, args=(0, 1.5), daemon=True)
+            short_waiter.start()
+            deadline = time.monotonic() + 3
+            while not starts_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(starts_path.exists(), "shared startup fixture did not launch")
+
+            long_waiter = threading.Thread(target=call_tool, args=(1, 5), daemon=True)
+            long_waiter.start()
+            short_waiter.join(timeout=5)
+            long_waiter.join(timeout=10)
+            starts = int(starts_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(short_waiter.is_alive())
+        self.assertFalse(long_waiter.is_alive())
+        self.assertEqual(boxes[0]["result"]["status"], "error")
+        self.assertRegex(str(boxes[0]["result"].get("msg", "")), r"(?i)timeout|timed out")
+        self.assertEqual(boxes[1]["result"]["status"], "success")
+        self.assertIn("echo:call-1", json.dumps(boxes[1]["result"], ensure_ascii=False))
+        self.assertEqual(starts, 1)
+
+    def test_concurrent_discovery_reuses_shared_server_startup(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, starts_path = _write_delayed_counting_server(tmp_path, startup_delay=1.0)
+            config_path = _write_named_mcp_config(tmp_path, "delayed", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+            boxes = [{}, {}]
+
+            def discover(slot):
+                boxes[slot]["tools"] = discover_mcp_tools(timeout=5)
+
+            workers = [threading.Thread(target=discover, args=(slot,), daemon=True) for slot in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=8)
+            starts = int(starts_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        for box in boxes:
+            self.assertIn("mcp__delayed__echo", {tool["function"]["name"] for tool in box["tools"]})
+        self.assertEqual(starts, 1)
+
+
+    def test_call_mcp_tool_timeout_returns_error_without_hanging(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, starts_path, pid_path = _write_reconnect_after_timeout_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "timeout", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            warmup = call_mcp_tool(
+                "mcp__timeout__delay",
+                {"text": "warmup", "seconds": 0},
+                timeout=10,
+            )
+            self.assertEqual(warmup["status"], "success")
+            first_pid = int(pid_path.read_text(encoding="utf-8"))
+
+            started = time.monotonic()
+            result = call_mcp_tool(
+                "mcp__timeout__delay",
+                {"text": "slow", "seconds": 30},
+                timeout=0.5,
+            )
+            elapsed = time.monotonic() - started
+            first_process_exited = _wait_for_process_exit(first_pid, timeout=3)
+            manager = get_mcp_manager()
+            with manager.lock:
+                status_after_timeout = manager.states["timeout"].status
+            pending_after_timeout = manager._run(_pending_manager_tasks(), timeout=2)
+
+            restored = call_mcp_tool(
+                "mcp__timeout__delay",
+                {"text": "fast", "seconds": 0},
+                timeout=5,
+            )
+            starts = int(starts_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "error")
+        self.assertRegex(str(result.get("msg", "")), r"(?i)timeout|timed out")
+        self.assertLess(elapsed, 5.0)
+        self.assertTrue(first_process_exited, f"timed-out MCP process {first_pid} survived")
+        self.assertEqual(status_after_timeout, "pending")
+        self.assertEqual(pending_after_timeout, [])
+        self.assertEqual(restored["status"], "success")
+        self.assertIn("done:fast", json.dumps(restored, ensure_ascii=False))
+        self.assertEqual(starts, 2)
+
+    def test_generic_agent_abort_during_mcp_call_does_not_fail_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, call_marker, pid_path = _write_cancellable_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "cancellable", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            agent = GenericAgent.__new__(GenericAgent)
+            agent.is_running = True
+            agent.stop_sig = False
+            agent.llmclient = None
+            handler = GenericAgentHandler(agent, last_history=[], cwd=tmp)
+            agent.handler = handler
+            box = {}
+
+            def run_dispatch():
+                try:
+                    box["outcome"] = exhaust(
+                        handler.dispatch(
+                            "mcp__cancellable__hang",
+                            {"text": "stop-me"},
+                            type("Response", (), {"content": ""})(),
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - asserted below
+                    box["error"] = exc
+
+            worker = threading.Thread(target=run_dispatch, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 5
+            while not call_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(call_marker.exists(), "MCP tool fixture did not start")
+            server_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertTrue(_process_exists(server_pid))
+
+            agent.abort()
+            worker.join(timeout=5)
+            process_exited = _wait_for_process_exit(server_pid, timeout=3)
+            manager = get_mcp_manager()
+            with manager.lock:
+                server_status = manager.states["cancellable"].status
+            pending_after_cancel = manager._run(_pending_manager_tasks(), timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", box)
+        outcome = box["outcome"]
+        self.assertEqual(outcome.data["status"], "error")
+        self.assertRegex(str(outcome.data.get("msg", "")), r"(?i)abort|stop|cancel")
+        self.assertTrue(process_exited, f"MCP stdio process {server_pid} survived cancellation")
+        self.assertEqual(server_status, "pending")
+        self.assertEqual(pending_after_cancel, [])
+
+    def test_manager_shutdown_cancels_inflight_call_and_stops_server(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, call_marker, pid_path = _write_cancellable_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "cancellable", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+            box = {}
+
+            def run_call():
+                try:
+                    box["result"] = call_mcp_tool(
+                        "mcp__cancellable__hang",
+                        {"text": "shutdown"},
+                        timeout=60,
+                    )
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    box["error"] = exc
+
+            worker = threading.Thread(target=run_call, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 5
+            while not call_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(call_marker.exists(), "MCP tool fixture did not start")
+            server_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.assertTrue(_process_exists(server_pid))
+            manager_thread = get_mcp_manager().loop_thread
+
+            reset_mcp_manager()
+            worker.join(timeout=5)
+            process_exited = _wait_for_process_exit(server_pid, timeout=3)
+
+        self.assertFalse(worker.is_alive(), "in-flight MCP call survived manager shutdown")
+        self.assertNotIn("error", box)
+        self.assertEqual(box["result"]["status"], "error")
+        self.assertRegex(str(box["result"].get("msg", "")), r"(?i)abort|cancel|closed|shutdown")
+        self.assertTrue(process_exited, f"MCP stdio process {server_pid} survived manager shutdown")
+        self.assertFalse(manager_thread.is_alive())
 
     def test_manager_reuses_stdio_server_across_calls(self):
         with _tempdir() as tmp:

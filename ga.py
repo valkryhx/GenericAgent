@@ -16,6 +16,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generator
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
+
+def _stop_requested(stop_signal):
+    if stop_signal is None:
+        return False
+    is_set = getattr(stop_signal, "is_set", None)
+    return bool(is_set()) if callable(is_set) else bool(stop_signal)
+
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
@@ -72,7 +79,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
 
         while process.poll() is None:
             istimeout = time.time() - start_t > timeout
-            if istimeout or stop_signal:
+            if istimeout or _stop_requested(stop_signal):
                 process.kill()
                 print("[Debug] Process killed due to timeout or stop signal.")
                 if istimeout: full_stdout.append("\n[Timeout Error] 超时强制终止")
@@ -276,7 +283,7 @@ class GenericAgentHandler(BaseHandler):
         self.working = {}
         self.cwd = cwd;  self.current_turn = 0
         self.history_info = last_history if last_history else []
-        self.code_stop_signal = []
+        self.code_stop_signal = threading.Event()
         self._done_hooks = []
         self.workflow_permission_policy = None
         self.workflow_permission_context = {}
@@ -329,13 +336,17 @@ class GenericAgentHandler(BaseHandler):
         call_args = {k: v for k, v in (args or {}).items() if not str(k).startswith('_')}
         yield f"[Action] Calling MCP tool: {tool_name}\n"
         try:
-            from mcp_runtime import call_mcp_tool
-            result = call_mcp_tool(tool_name, call_args)
+            from mcp_runtime import call_mcp_tool, mcp_cancellation_scope
+            with mcp_cancellation_scope(self.code_stop_signal):
+                result = call_mcp_tool(tool_name, call_args)
         except Exception as e:
             result = {"status": "error", "msg": format_error(e)}
         yield f"[Status] MCP {result.get('status', 'unknown')}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
+
+    def cancel(self):
+        self.code_stop_signal.set()
 
     def _get_abs_path(self, path):
         if not path: return ""

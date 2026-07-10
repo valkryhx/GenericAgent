@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 from unittest import mock
@@ -305,6 +306,88 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         runner.cancel(job)
 
         self.assertTrue(session.cancelled)
+
+    def test_cancel_stops_active_mcp_dispatch(self):
+        tool_started = threading.Event()
+        release_tool = threading.Event()
+        client = StubToolClient([
+            StubToolResponse("<summary>call mcp</summary>", [
+                StubToolCall("mcp__deterministic__hang", {}, id="tool_mcp"),
+            ]),
+            StubToolResponse("<summary>done</summary>cancelled tool handled"),
+        ])
+        tools = [
+            {"type": "function", "function": {"name": "mcp__deterministic__hang", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        job = WorkflowJob(job_id="agent_cancel_mcp", prompt="call the blocking MCP tool", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+        def blocking_mcp_call(_name, _arguments):
+            from mcp_runtime import _current_stop_signal
+
+            tool_started.set()
+            while not release_tool.is_set():
+                stop_signal = _current_stop_signal()
+                if stop_signal is not None and stop_signal.is_set():
+                    return {"status": "error", "msg": "MCP call aborted by user"}
+                time.sleep(0.01)
+            return {"status": "error", "msg": "test cleanup released tool"}
+
+        result = None
+        with mock.patch("mcp_runtime.call_mcp_tool", side_effect=blocking_mcp_call), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            runner.start(job)
+            self.assertTrue(tool_started.wait(timeout=2), "workflow child did not enter MCP dispatch")
+            runner.cancel(job)
+            deadline = time.monotonic() + 1
+            while result is None and time.monotonic() < deadline:
+                result = runner.poll(job)
+                time.sleep(0.01)
+            stopped_quickly = result is not None
+            release_tool.set()
+            if result is None:
+                result = self.wait_for_result(runner, job, timeout=2)
+
+        self.assertTrue(stopped_quickly, "workflow child MCP dispatch ignored runner.cancel()")
+        self.assertTrue(client.cancelled)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(client.requests), 1, "cancelled workflow child requested another model turn")
+        self.assertEqual(result.status, "cancelled")
+
+    def test_cancel_stops_mcp_discovery_before_first_model_request(self):
+        discovery_started = threading.Event()
+        release_discovery = threading.Event()
+        client = StubToolClient([])
+        job = WorkflowJob(job_id="agent_cancel_discovery", prompt="discover tools", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client)
+
+        def blocking_discovery(*_args, **_kwargs):
+            from mcp_runtime import _current_stop_signal
+
+            discovery_started.set()
+            while not release_discovery.is_set():
+                stop_signal = _current_stop_signal()
+                if stop_signal is not None and stop_signal.is_set():
+                    return []
+                time.sleep(0.01)
+            return []
+
+        result = None
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", side_effect=blocking_discovery):
+            runner.start(job)
+            self.assertTrue(discovery_started.wait(timeout=2), "workflow child did not enter MCP discovery")
+            runner.cancel(job)
+            deadline = time.monotonic() + 0.75
+            while result is None and time.monotonic() < deadline:
+                result = runner.poll(job)
+                time.sleep(0.01)
+            stopped_quickly = result is not None
+            release_discovery.set()
+            if result is None:
+                result = self.wait_for_result(runner, job, timeout=2)
+
+        self.assertTrue(stopped_quickly, "workflow child cancellation did not interrupt MCP discovery")
+        self.assertEqual(client.requests, [])
+        self.assertEqual(result.status, "cancelled")
 
     def test_start_creates_a_fresh_session_for_each_job(self):
         created = []

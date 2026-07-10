@@ -225,7 +225,7 @@ class GenericAgent:
             if cancel:
                 try: cancel()
                 except Exception as e: print(f"[WARN] cancel_current_request failed: {e}")
-        if self.handler is not None: self.handler.code_stop_signal.append(1)
+        if self.handler is not None: self.handler.cancel()
             
     def put_task(self, query, source="user", images=None):
         display_queue = queue.Queue()
@@ -276,7 +276,9 @@ class GenericAgent:
             transcript_history_before = session_transcript.current_backend_history(self)
             initial_content = _build_user_content_with_images(raw_query, images) if _native_image_input_enabled(self.llmclient) else None
             name = self.get_llm_name(model=True)
-            load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
+            from mcp_runtime import mcp_cancellation_scope
+            with mcp_cancellation_scope(handler.code_stop_signal):
+                load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
                                 handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)
@@ -322,7 +324,7 @@ class GenericAgent:
                 if self.stop_sig: print('User aborted the task.')
                 self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
-                if self.handler is not None: self.handler.code_stop_signal.append(1)
+                if self.handler is not None: self.handler.cancel()
 
 GeneraticAgent = GenericAgent    
 
