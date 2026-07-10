@@ -222,13 +222,15 @@ def parse_json_object(raw: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
+    decoder = json.JSONDecoder()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start : end + 1])
+        if start >= 0:
+            parsed, _ = decoder.raw_decode(text, idx=start)
+            if isinstance(parsed, dict):
+                return parsed
         raise
 
 

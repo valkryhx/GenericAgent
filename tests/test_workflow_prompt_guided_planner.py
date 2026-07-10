@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import LLMWorkflowPlanner, NativeWorkflowPlannerClient, WorkflowPlanner, build_workflow_planner_from_env
+from workflow_planner import LLMWorkflowPlanner, NativeWorkflowPlannerClient, WorkflowPlanner, build_workflow_planner_from_env, parse_json_object
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
@@ -323,6 +323,14 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
             self.assertIn("coding_tests_parallel_implementation", {issue["code"] for issue in data["validation"]["issues"]})
 
 class NativeWorkflowPlannerClientTest(unittest.TestCase):
+    def test_parse_json_object_tolerates_extra_json_after_first_object(self):
+        raw = '{"taskType":"review","phases":[]}\n{"ignored":true}'
+
+        parsed = parse_json_object(raw)
+
+        self.assertEqual("review", parsed["taskType"])
+        self.assertEqual([], parsed["phases"])
+
     def test_native_client_uses_resolve_session_and_parses_json_without_markdown(self):
         class FakeSession:
             def __init__(self):
