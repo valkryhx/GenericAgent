@@ -45,7 +45,16 @@ import {
   visibleSlashSuggestions,
   type SlashCommand,
 } from './slashCommands.js'
-import { fixedInputLine, inputContentColumns, inputFrameBorderStyle, inputGutterColumns, inputLeftPaddingColumns, inputPromptLineItems, inputVisibleRowCount, renderInputLine } from './promptChrome.js'
+import {
+  fixedInputLine,
+  inputContentColumns,
+  inputFrameBorderStyle,
+  inputGutterColumns,
+  inputLeftPaddingColumns,
+  inputViewport,
+  renderInputLine,
+  type InputViewport,
+} from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
@@ -55,7 +64,12 @@ import {
   dismissedLocalCommandOutput,
 } from './localCommandTranscript.js'
 import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
-import { computeLayoutMetrics } from './layoutMetrics.js'
+import {
+  computeLayoutMetrics,
+  terminalCanvasColumns,
+  transcriptContentColumns,
+  transcriptScrollbarColumns,
+} from './layoutMetrics.js'
 import { cleanupTerminalForExit, enterMainScreenTerminalSequence, reassertMouseTracking } from './terminalCleanup.js'
 import { cursorPosition, inputCursorPosition } from './terminalCursor.js'
 import type { InputKey } from './inputController.js'
@@ -68,7 +82,12 @@ import {
   transcriptScrollStep,
   transcriptWheelStep,
 } from './transcriptScroll.js'
-import { scrollOffsetForScrollbarClick, shouldHandleScrollbarDrag, transcriptScrollbar } from './transcriptScrollbar.js'
+import {
+  scrollOffsetForScrollbarClick,
+  shouldHandleScrollbarDrag,
+  transcriptScrollbar,
+  transcriptScrollbarLines,
+} from './transcriptScrollbar.js'
 
 type Props = {
   python: string
@@ -252,18 +271,19 @@ function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffse
   theme: InkTheme
 }) {
   const scrollbar = transcriptScrollbar({ totalRows, viewportRows: height, scrollOffset })
+  const scrollbarColumns = transcriptScrollbarColumns(columns)
+  const messageColumns = Math.max(1, columns - scrollbarColumns)
+  const scrollbarText = transcriptScrollbarLines({ totalRows, viewportRows: height, scrollOffset }).join('\n')
   return (
     <Box flexDirection="row" height={height} width={columns} overflow="hidden">
-      <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={Math.max(1, columns - 1)} overflow="hidden">
+      <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={messageColumns} overflow="hidden">
         {ready ? <Text color={theme.muted}>Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
       </Box>
-      <Box flexDirection="column" width={1} height={height} overflow="hidden">
-        {Array.from({ length: height }, (_, index) => (
-          <Text key={index} color={scrollbar.visible ? theme.scrollbar : undefined}>
-            {scrollbar.visible ? (index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize ? '█' : '│') : ' '}
-          </Text>
-        ))}
-      </Box>
+      {scrollbarColumns > 0 ? (
+        <Box width={scrollbarColumns} height={height} overflow="hidden">
+          <Text color={scrollbar.visible ? theme.scrollbar : undefined} wrap="truncate-end">{scrollbarText}</Text>
+        </Box>
+      ) : null}
     </Box>
   )
 }
@@ -276,8 +296,8 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ input, cursorOffset, showCursor, visibleRows, columns, theme }: { input: string; cursorOffset: number; showCursor: boolean; visibleRows: number; columns: number; theme: InkTheme }) {
-  const lines = inputPromptLineItems(input, visibleRows, cursorOffset)
+function InputView({ viewport, showCursor, columns, theme }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme }) {
+  const lines = viewport.lines
   const contentColumns = inputContentColumns(columns)
   return (
     <Box
@@ -290,7 +310,7 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns, them
       borderTop
       borderBottom
       width="100%"
-      height={visibleRows + 2}
+      height={viewport.lines.length + 2}
       paddingLeft={inputLeftPaddingColumns}
       overflow="hidden"
     >
@@ -310,7 +330,7 @@ function InputView({ input, cursorOffset, showCursor, visibleRows, columns, them
 
 function ActivityView({ seconds, label, tokenUsage, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; theme: InkTheme }) {
   return (
-    <Box>
+    <Box paddingX={1}>
       <Text color={theme.warning}>{formatRunningStatus(seconds, label, tokenUsage)}</Text>
     </Box>
   )
@@ -377,6 +397,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { setRawMode, internal_eventEmitter } = useStdin()
+  const [terminalSize, setTerminalSize] = useState(() => ({
+    columns: Math.max(1, stdout.columns || 80),
+    rows: Math.max(1, stdout.rows || 24),
+  }))
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [cursorOffset, setCursorOffset] = useState(0)
@@ -517,6 +541,22 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     setTerminalReady(true)
     return () => {
       cleanupTerminalForExit(stdout)
+    }
+  }, [stdout])
+
+  useEffect(() => {
+    const syncTerminalSize = () => {
+      const next = {
+        columns: Math.max(1, stdout.columns || 80),
+        rows: Math.max(1, stdout.rows || 24),
+      }
+      setTerminalSize(current => (
+        current.columns === next.columns && current.rows === next.rows ? current : next
+      ))
+    }
+    stdout.on('resize', syncTerminalSize)
+    return () => {
+      stdout.off('resize', syncTerminalSize)
     }
   }, [stdout])
 
@@ -698,7 +738,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       if (shouldHandleScrollbarDrag({
         kind: mouseEvent.kind,
         x: mouseEvent.x,
-        columns: stdout.columns || 80,
+        columns: terminalCanvasColumns(terminalSize.columns),
         dragging: scrollbarDragRef.current,
       })) {
         const offset = scrollOffsetForScrollbarClick({ totalRows, viewportRows, y: mouseEvent.y, viewportTop: 2 })
@@ -912,12 +952,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   }, [internal_eventEmitter, setRawMode, stdout])
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
-  const columns = Math.max(1, stdout.columns || 80)
+  const columns = terminalSize.columns
+  const canvasColumns = terminalCanvasColumns(columns)
   const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
-  const inputRows = inputVisibleRowCount(input)
+  const promptViewport = useMemo(() => inputViewport(input, {
+    columns: inputContentColumns(canvasColumns),
+    maxRows: 6,
+    cursorOffset,
+  }), [canvasColumns, cursorOffset, input])
+  const inputRows = promptViewport.lines.length
   const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const panelRows = modelPanel
     ? modelPanelRows(modelPanel)
@@ -933,7 +979,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
       : 0
   const metrics = computeLayoutMetrics({
-    rows: stdout.rows,
+    rows: terminalSize.rows,
     columns,
     hasActivity,
     hasError: Boolean(state.error),
@@ -942,10 +988,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     inputRows,
     panelRows,
   })
-  const inputLineItems = inputPromptLineItems(input, inputRows, cursorOffset)
-  const inputCursorLine = inputLineItems.findIndex(line => line.cursorColumn !== undefined)
-  const inputCursorColumn = inputLineItems.find(line => line.cursorColumn !== undefined)?.cursorColumn ?? 0
-
   useLayoutEffect(() => {
     if (!terminalReady || state.status === 'running' || state.status === 'stopping') return
     const position = inputCursorPosition({
@@ -958,15 +1000,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       inputBorderTopRows: 1,
       inputPaddingLeftColumns: inputLeftPaddingColumns,
       inputGutterColumns,
-      inputCursorLine: Math.max(0, inputCursorLine),
-      inputCursorColumn,
+      inputCursorLine: promptViewport.cursorLine,
+      inputCursorColumn: promptViewport.cursorColumn,
     })
-    stdout.write(cursorPosition(position.row, position.column, metrics.rows, metrics.columns))
-  }, [activePanel, cursorOffset, input, inputCursorColumn, inputCursorLine, inputRows, metrics, panelRows, slashItems.length, state.error, state.status, stdout, terminalReady])
+    stdout.write(cursorPosition(position.row, position.column, metrics.rows, metrics.canvasColumns))
+  }, [activePanel, metrics, panelRows, promptViewport.cursorColumn, promptViewport.cursorLine, slashItems.length, state.error, state.status, stdout, terminalReady])
 
   const transcriptRows = useMemo(() => (
-    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), Math.max(1, metrics.columns - 3))
-  ), [state.messages, expandedTools, metrics.columns, theme])
+    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
+  ), [state.messages, expandedTools, metrics.canvasColumns, theme])
   const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
   const historyReplacementScrollOffset = pendingHistoryReplacementScrollRef.current
     ? scrollOffsetForHistoryReplacement(transcriptRows.length, metrics.messageRows)
@@ -995,8 +1037,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   }, [transcriptScrollOffset, visibleTranscript.scrollOffset])
 
   const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? `Running: keep typing, Enter waits - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - /stop or Esc stops`
-    : `Enter send - Alt+Enter newline - Wheel/PgUp/PgDn scroll - Ctrl+O ${expandedTools ? 'collapse' : 'expand'} tools - Ctrl+C exit`
+    ? 'Running · Enter keeps draft · PgUp/PgDn · Ctrl+O tools · Esc stop'
+    : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const activitySeconds = runningStartedAt === null ? lastActivitySeconds : runningSeconds
   const inputSections = inputChromeSections({
@@ -1005,9 +1047,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     hasSlashSuggestions: slashItems.length > 0,
   })
   const renderInputSection = (section: InputChromeSection) => {
-    if (section === 'error') return state.error ? <Text key={section} color={theme.error}>{state.error}</Text> : null
-    if (section === 'hint') return <Text key={section} color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text>
-    if (section === 'input') return <InputView key={section} input={input} cursorOffset={cursorOffset} showCursor={state.status !== 'running' && state.status !== 'stopping'} visibleRows={inputRows} columns={metrics.columns} theme={theme} />
+    if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
+    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text></Box>
+    if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
@@ -1021,21 +1063,21 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   }
   if (!terminalReady) return null
   return (
-    <Box flexDirection="column" width={metrics.columns}>
-      <Box justifyContent="space-between" width={metrics.columns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
-        <Text bold wrap="truncate-end">GenericAgent Ink</Text>
+    <Box flexDirection="column" width={metrics.canvasColumns}>
+      <Box justifyContent="space-between" paddingX={1} width={metrics.canvasColumns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
+        <Text bold wrap="truncate-end">GenericAgent</Text>
         <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
       </Box>
       <MessageViewport
         height={metrics.messageRows}
-        columns={metrics.columns}
+        columns={metrics.canvasColumns}
         lines={visibleTranscript.lines}
         ready={visibleTranscript.totalRows === 0}
         totalRows={visibleTranscript.totalRows}
         scrollOffset={visibleTranscript.scrollOffset}
         theme={theme}
       />
-      <BottomChrome columns={metrics.columns} height={metrics.bottomRows}>
+      <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
         {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}
         {inputSections.map(renderInputSection)}
       </BottomChrome>

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import stringWidth from 'string-width'
 import {
   assistantDisplayText,
   clampTranscriptScrollOffset,
@@ -217,4 +218,16 @@ test('wrapTranscriptLines wraps wide characters by terminal display width', () =
   const wrapped = wrapTranscriptLines([{ id: 'wide-0', text: '中文测试' }], 4)
 
   assert.deepEqual(wrapped.map(line => line.text), ['中文', '测试'])
+})
+
+test('wrapTranscriptLines keeps emoji and combining graphemes intact', () => {
+  const wrapped = wrapTranscriptLines([{ id: 'mixed', text: 'ab👨‍💻e\u0301cd' }], 4)
+
+  assert.deepEqual(wrapped.map(line => line.text), ['ab👨‍💻', 'e\u0301cd'])
+})
+
+test('wrapTranscriptLines never exceeds the requested display width', () => {
+  const wrapped = wrapTranscriptLines([{ id: 'wide', text: '中文👨‍💻abcdef' }], 4)
+
+  assert.equal(wrapped.every(line => stringWidth(line.text) <= 4), true)
 })

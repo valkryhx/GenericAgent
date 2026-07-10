@@ -2,7 +2,7 @@ import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
-import stringWidth from 'string-width'
+import { terminalSegments, terminalTextWidth } from './terminalText.js'
 
 export type TranscriptPart = MarkdownPart & {
   backgroundColor?: string
@@ -200,7 +200,7 @@ function lineParts(line: TranscriptLine): TranscriptPart[] {
 }
 
 function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
-  if (stringWidth(line.text) <= width) return [line]
+  if (terminalTextWidth(line.text) <= width) return [line]
   const wrapped: TranscriptLine[] = []
   let currentText = ''
   let currentWidth = 0
@@ -219,11 +219,12 @@ function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
   }
 
   for (const part of lineParts(line)) {
-    for (const char of part.text) {
-      const charWidth = Math.max(1, stringWidth(char))
-      if (currentText && currentWidth + charWidth > width) flush()
-      currentText += char
-      currentWidth += charWidth
+    for (const segment of terminalSegments(part.text)) {
+      const segmentText = segment.width > width ? '…' : segment.text
+      const segmentWidth = segment.width > width ? 1 : segment.width
+      if (currentText && currentWidth + segmentWidth > width) flush()
+      currentText += segmentText
+      currentWidth += segmentWidth
       const last = currentParts[currentParts.length - 1]
       const sameStyle = last
         && last.color === part.color
@@ -233,9 +234,9 @@ function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
         && last.underline === part.underline
         && last.dimColor === part.dimColor
       if (sameStyle) {
-        last.text += char
+        last.text += segmentText
       } else {
-        currentParts.push({ ...part, text: char })
+        currentParts.push({ ...part, text: segmentText })
       }
     }
   }

@@ -1,11 +1,44 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { computeLayoutMetrics, terminalRows } from './layoutMetrics.js'
+import {
+  computeLayoutMetrics,
+  terminalCanvasColumns,
+  terminalRows,
+  transcriptContentColumns,
+  transcriptScrollbarColumns,
+} from './layoutMetrics.js'
 
 test('terminalRows uses real narrow heights without forcing a tall minimum', () => {
   assert.equal(terminalRows(8), 8)
   assert.equal(terminalRows(1), 1)
   assert.equal(terminalRows(undefined), 24)
+})
+
+test('terminalCanvasColumns permanently reserves the physical final column', () => {
+  assert.equal(terminalCanvasColumns(120), 119)
+  assert.equal(terminalCanvasColumns(80), 79)
+  assert.equal(terminalCanvasColumns(40), 39)
+  assert.equal(terminalCanvasColumns(1), 1)
+})
+
+test('transcript widths derive from the safe canvas', () => {
+  assert.equal(transcriptScrollbarColumns(79), 1)
+  assert.equal(transcriptContentColumns(79), 76)
+})
+
+test('computeLayoutMetrics exposes physical and safe widths separately', () => {
+  const metrics = computeLayoutMetrics({
+    rows: 24,
+    columns: 80,
+    hasActivity: false,
+    hasError: false,
+    hasPanel: false,
+    hasSlashSuggestions: false,
+    inputRows: 1,
+  })
+
+  assert.equal(metrics.terminalColumns, 80)
+  assert.equal(metrics.canvasColumns, 79)
 })
 
 test('computeLayoutMetrics reserves one terminal row so Ink does not full-clear on each render', () => {
@@ -18,7 +51,8 @@ test('computeLayoutMetrics reserves one terminal row so Ink does not full-clear 
     hasSlashSuggestions: false,
   }), {
     rows: 23,
-    columns: 80,
+    terminalColumns: 80,
+    canvasColumns: 79,
     headerRows: 1,
     bottomRows: 5,
     messageRows: 17,
@@ -105,5 +139,6 @@ test('computeLayoutMetrics never returns negative message rows on tiny terminals
 
   assert.equal(metrics.messageRows, 1)
   assert.equal(metrics.rows, 3)
-  assert.equal(metrics.columns, 20)
+  assert.equal(metrics.terminalColumns, 20)
+  assert.equal(metrics.canvasColumns, 19)
 })

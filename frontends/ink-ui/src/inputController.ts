@@ -1,5 +1,6 @@
 import type { BridgeCommand } from './protocol.js'
 import { compactPasteRefs, appendFoldedText, expandPastedTextRefs, flushPendingPaste, type PasteStore } from './paste.js'
+import { clampGraphemeOffset, nextGraphemeOffset, previousGraphemeOffset } from './terminalText.js'
 
 export type InputKey = {
   ctrl?: boolean
@@ -30,7 +31,7 @@ export type InputDecision = {
 }
 
 function clampCursorOffset(value: string, cursorOffset: number): number {
-  return Math.max(0, Math.min(value.length, Math.floor(cursorOffset)))
+  return clampGraphemeOffset(value, cursorOffset)
 }
 
 function makeDecision(
@@ -173,10 +174,10 @@ export function handleInput(
       : decision(value, offset)
   }
   if (key.leftArrow) {
-    return decision(value, offset - 1)
+    return decision(value, previousGraphemeOffset(value, offset))
   }
   if (key.rightArrow) {
-    return decision(value, offset + 1)
+    return decision(value, nextGraphemeOffset(value, offset))
   }
   if ((key.meta || key.shift) && key.return) {
     const inserted = insertLiteralTextAtCursor(value, offset, '\n')
@@ -192,15 +193,18 @@ export function handleInput(
   }
   if (key.backspace) {
     if (offset <= 0) return decision(value, offset)
-    return decision(value.slice(0, offset - 1) + value.slice(offset), offset - 1)
+    const previousOffset = previousGraphemeOffset(value, offset)
+    return decision(value.slice(0, previousOffset) + value.slice(offset), previousOffset)
   }
   if (key.delete && (key.sequence === '\x7f' || key.sequence === '\b')) {
     if (offset <= 0) return decision(value, offset)
-    return decision(value.slice(0, offset - 1) + value.slice(offset), offset - 1)
+    const previousOffset = previousGraphemeOffset(value, offset)
+    return decision(value.slice(0, previousOffset) + value.slice(offset), previousOffset)
   }
   if (key.delete) {
     if (offset >= value.length) return decision(value, offset)
-    return decision(value.slice(0, offset) + value.slice(offset + 1), offset)
+    const nextOffset = nextGraphemeOffset(value, offset)
+    return decision(value.slice(0, offset) + value.slice(nextOffset), offset)
   }
   if (key.return) {
     if (value.endsWith('\\') && (!includeCursorOffset || offset === value.length)) {

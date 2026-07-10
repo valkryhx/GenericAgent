@@ -72,6 +72,24 @@ test('handleInput moves cursor and edits at cursor offset', () => {
   })
 })
 
+test('handleInput moves and deletes whole grapheme clusters', () => {
+  const store = createPasteStore()
+  const value = 'A👨‍💻e\u0301Z'
+  const afterEmoji = 'A👨‍💻'.length
+  const afterAccent = 'A👨‍💻e\u0301'.length
+
+  assert.equal(handleInput(value, '', { leftArrow: true }, 'idle', store, new Set(), afterAccent).cursorOffset, afterEmoji)
+  assert.equal(handleInput(value, '', { rightArrow: true }, 'idle', store, new Set(), 1).cursorOffset, afterEmoji)
+  assert.deepEqual(handleInput(value, '', { backspace: true }, 'idle', store, new Set(), afterEmoji), {
+    value: 'Ae\u0301Z',
+    cursorOffset: 1,
+  })
+  assert.deepEqual(handleInput(value, '', { delete: true }, 'idle', store, new Set(), afterEmoji), {
+    value: 'A👨‍💻Z',
+    cursorOffset: afterEmoji,
+  })
+})
+
 test('handleInput treats terminal backspace bytes as backward delete', () => {
   const store = createPasteStore()
 

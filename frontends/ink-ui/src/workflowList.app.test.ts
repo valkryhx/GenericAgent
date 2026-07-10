@@ -57,7 +57,7 @@ async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: strin
   const deadline = Date.now() + 2000
   let lastFrame = ''
   while (Date.now() < deadline) {
-    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent Ink'))
+    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent'))
     lastFrame = frames.at(-1) ?? ''
     if (predicate(lastFrame)) return lastFrame
     await delay(20)

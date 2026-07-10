@@ -27,6 +27,19 @@ export function transcriptScrollbar(input: {
   return { thumbStart, thumbSize, trackRows, visible: true }
 }
 
+export function transcriptScrollbarLines(input: {
+  totalRows: number
+  viewportRows: number
+  scrollOffset: number
+}): string[] {
+  const scrollbar = transcriptScrollbar(input)
+  return Array.from({ length: scrollbar.trackRows }, (_, index) => (
+    scrollbar.visible
+      ? index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize ? '█' : '│'
+      : ' '
+  ))
+}
+
 export function scrollOffsetForScrollbarClick(input: {
   totalRows: number
   viewportRows: number
@@ -50,7 +63,8 @@ export function scrollOffsetForScrollbarClick(input: {
 
 export function isScrollbarColumn(x: number, columns: number): boolean {
   const lastColumn = Math.max(1, Math.floor(columns))
-  return Math.floor(x) >= Math.max(1, lastColumn - 1)
+  const column = Math.floor(x)
+  return column <= lastColumn && column >= Math.max(1, lastColumn - 1)
 }
 
 export function shouldHandleScrollbarDrag(input: {
