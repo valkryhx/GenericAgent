@@ -17,6 +17,7 @@ from ga import GenericAgentHandler, smart_format, get_global_memory, format_erro
 from skills_runtime import build_skill_prompt
 import session_transcript
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
+from subagent_prompts import build_agent_role_usage_hint
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
@@ -112,11 +113,12 @@ if not os.path.exists(cdp_cfg):
         open(cdp_cfg, 'w', encoding='utf-8').write(f"const TID = '__ljq_{hex(random.randint(0, 99999999))[2:8]}';")
     except Exception as e: print(f'[WARN] CDP config init failed: {e} — advanced web features (tmwebdriver) will be unavailable.')
 
-def get_system_prompt():
+def get_system_prompt(agent=None):
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
     prompt += get_global_memory()
     prompt += build_skill_prompt()
+    prompt += "\n" + build_agent_role_usage_hint(is_subagent=bool(getattr(agent, 'task_dir', None)), lang_suffix=lang_suffix) + "\n"
     return prompt
 
 class GenericAgent:
@@ -264,7 +266,7 @@ class GenericAgent:
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             
-            sys_prompt = get_system_prompt() + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
+            sys_prompt = get_system_prompt(self) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
             if self.handler and 'key_info' in self.handler.working: 

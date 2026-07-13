@@ -85,7 +85,7 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
         globals_ref = GenericAgent.run.__globals__
         worker = threading.Thread(target=agent.run, daemon=True)
         with patch.dict(globals_ref, {
-            "get_system_prompt": lambda: "",
+            "get_system_prompt": lambda *_args, **_kwargs: "",
             "load_tool_schema": blocking_load_tool_schema,
         }), patch.object(globals_ref["session_transcript"], "current_backend_history", return_value=[]), patch.object(
             globals_ref["session_transcript"], "record_agent_turn", return_value=None
