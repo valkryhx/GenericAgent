@@ -5,8 +5,11 @@ import {
   shouldHandleScrollbarDrag,
   scrollOffsetForScrollbarClick,
   transcriptScrollbar,
+  transcriptScrollbarCells,
   transcriptScrollbarLines,
 } from './transcriptScrollbar.js'
+import { transcriptLines, visibleTranscriptLines, wrapTranscriptLines } from './messageWindow.js'
+import type { ChatMessage } from './protocol.js'
 
 test('transcriptScrollbar sizes the thumb from the complete transcript history', () => {
   assert.deepEqual(transcriptScrollbar({ totalRows: 100, viewportRows: 10, scrollOffset: 0 }), {
@@ -39,7 +42,44 @@ test('transcriptScrollbarLines returns exactly one cell for every viewport row',
   const lines = transcriptScrollbarLines({ totalRows: 100, viewportRows: 10, scrollOffset: 45 })
 
   assert.equal(lines.length, 10)
-  assert.equal(lines.every(line => line === '│' || line === '█'), true)
+  assert.equal(lines.every(line => line === '▐'), true)
+})
+
+test('transcriptScrollbarCells keeps the active thumb position while using one glyph', () => {
+  assert.deepEqual(transcriptScrollbarCells({ totalRows: 100, viewportRows: 4, scrollOffset: 0 }), [
+    { active: false, text: '▐' },
+    { active: false, text: '▐' },
+    { active: false, text: '▐' },
+    { active: true, text: '▐' },
+  ])
+})
+
+test('subagent MCP transcript keeps a continuous scrollbar cell beside every visible row', () => {
+  const messages: ChatMessage[] = [{
+    id: 'subagent-mcp',
+    role: 'assistant',
+    done: false,
+    text: [
+      'Turn 1 ...',
+      '',
+      '<summary>开始权威检索与交叉核验</summary>',
+      '',
+      '🛠️ mcp__tavily__tavily_search({"topic":"general","query":"FIFA France World Cup record 1930 2022 final rank","search_depth":"basic"})',
+      '',
+      '[omitted long output]',
+    ].join('\n'),
+  }]
+  const rendered = wrapTranscriptLines(transcriptLines(messages, { expandedTools: false }), 28)
+  const viewport = visibleTranscriptLines(rendered, { maxRows: 4, scrollOffset: 0 })
+  const scrollbar = transcriptScrollbarLines({
+    totalRows: viewport.totalRows,
+    viewportRows: 4,
+    scrollOffset: viewport.scrollOffset,
+  })
+
+  assert.ok(viewport.totalRows > 4)
+  assert.equal(scrollbar.length, viewport.lines.length)
+  assert.equal(scrollbar.every(cell => cell === '▐'), true)
 })
 
 test('scrollOffsetForScrollbarClick maps top and bottom track clicks to transcript edges', () => {

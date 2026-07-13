@@ -5,6 +5,11 @@ export type TranscriptScrollbar = {
   visible: boolean
 }
 
+export type TranscriptScrollbarCell = {
+  active: boolean
+  text: string
+}
+
 export function transcriptScrollbar(input: {
   totalRows: number
   viewportRows: number
@@ -32,11 +37,20 @@ export function transcriptScrollbarLines(input: {
   viewportRows: number
   scrollOffset: number
 }): string[] {
+  return transcriptScrollbarCells(input).map(cell => cell.text)
+}
+
+export function transcriptScrollbarCells(input: {
+  totalRows: number
+  viewportRows: number
+  scrollOffset: number
+}): TranscriptScrollbarCell[] {
   const scrollbar = transcriptScrollbar(input)
   return Array.from({ length: scrollbar.trackRows }, (_, index) => (
-    scrollbar.visible
-      ? index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize ? '█' : '│'
-      : ' '
+    {
+      active: scrollbar.visible && index >= scrollbar.thumbStart && index < scrollbar.thumbStart + scrollbar.thumbSize,
+      text: scrollbar.visible ? '▐' : ' ',
+    }
   ))
 }
 

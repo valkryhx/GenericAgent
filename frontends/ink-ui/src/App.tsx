@@ -86,7 +86,7 @@ import {
   scrollOffsetForScrollbarClick,
   shouldHandleScrollbarDrag,
   transcriptScrollbar,
-  transcriptScrollbarLines,
+  transcriptScrollbarCells,
 } from './transcriptScrollbar.js'
 
 type Props = {
@@ -273,7 +273,7 @@ function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffse
   const scrollbar = transcriptScrollbar({ totalRows, viewportRows: height, scrollOffset })
   const scrollbarColumns = transcriptScrollbarColumns(columns)
   const messageColumns = Math.max(1, columns - scrollbarColumns)
-  const scrollbarText = transcriptScrollbarLines({ totalRows, viewportRows: height, scrollOffset }).join('\n')
+  const scrollbarCells = transcriptScrollbarCells({ totalRows, viewportRows: height, scrollOffset })
   return (
     <Box flexDirection="row" height={height} width={columns} overflow="hidden">
       <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={messageColumns} overflow="hidden">
@@ -281,7 +281,9 @@ function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffse
       </Box>
       {scrollbarColumns > 0 ? (
         <Box width={scrollbarColumns} height={height} overflow="hidden">
-          <Text color={scrollbar.visible ? theme.scrollbar : undefined} wrap="truncate-end">{scrollbarText}</Text>
+          <Text wrap="truncate-end">{scrollbarCells.map((cell, index) => (
+            <Text key={index} color={cell.active ? theme.scrollbar : theme.muted}>{cell.text}{index < scrollbarCells.length - 1 ? '\n' : ''}</Text>
+          ))}</Text>
         </Box>
       ) : null}
     </Box>

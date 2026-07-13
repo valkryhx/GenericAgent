@@ -170,11 +170,11 @@ test('App renders one continuous safe-canvas scrollbar cell per message viewport
   })
 
   try {
-    const frame = await waitForFrame(stdout, value => value.includes('█') && value.includes('回答 12'))
+    const frame = await waitForFrame(stdout, value => value.includes('▐') && value.includes('回答 12'))
     const messageRows = frame.split('\n').slice(1, 18)
 
     assert.equal(messageRows.length, 17)
-    assert.equal(messageRows.every(line => /[│█]$/.test(line)), true)
+    assert.equal(messageRows.every(line => /▐$/.test(line)), true)
     assert.equal(frame.split('\n').every(line => stringWidth(line) < stdout.columns), true)
   } finally {
     instance.unmount()
