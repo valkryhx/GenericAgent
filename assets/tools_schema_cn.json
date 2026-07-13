@@ -69,10 +69,10 @@
   }},
   {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "启动一个后台子智能体，子智能体拥有完整 GA 工具能力。适合独立且边界清晰的子任务。默认继承当前全部上下文；可用 fork_turns='none' 或正整数字符串限制上下文。",
+    "description": "启动一个后台子智能体，子智能体拥有完整 GA 工具能力，用于边界清晰的任务。仅在用户明确要求子智能体、委派或并行工作，或当前 GA SOP 明确要求验证/探索子智能体时使用；深度调研、复杂、全面本身不构成使用授权。启动前先判断关键路径：紧急且阻塞下一步的工作由主进程本地完成，只把可并行推进的旁路任务委派出去。委派任务必须具体、有边界、自包含，能实质推进主任务，且不能和主进程或其他子智能体重复。不要重复执行已经委派给子智能体的任务；主进程负责整合结果。谨慎调用 wait_agent，只在下一步关键路径确实需要子智能体更新时等待。message 应写成清晰任务契约：目标、范围/非目标、相关路径/上下文、工具/约束、最终结果契约、artifact 要求、完成/失败判定。编码或文件生成任务应拆分互不重叠的写入范围，并要求最终回答列出修改/生成路径。默认继承当前全部上下文；可用 fork_turns='none' 或正整数字符串限制上下文。",
     "parameters": {"type": "object", "properties": {
       "task_name": {"type": "string", "description": "只能包含小写字母、数字、下划线"},
-      "message": {"type": "string", "description": "给子智能体的完整任务说明"},
+      "message": {"type": "string", "description": "自包含任务提示。写清下一步真正需要的结果、约束、相关路径/上下文和最终结果契约；避免泛泛请求，不要与主进程工作重复。"},
       "fork_turns": {"type": "string", "description": "'all'（默认）、'none'，或表示最近轮数的正整数字符串", "default": "all"},
       "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
@@ -87,12 +87,18 @@
   }},
   {"type": "function", "function": {
     "name": "wait_agent",
-    "description": "等待子智能体事件或最终状态；可用时返回 final_output 摘要。",
+    "description": "等待子智能体 mailbox/status 更新。谨慎调用 wait_agent；只有下一步关键路径确实需要子智能体更新时才等待。它只是事件等待，不会读取最终输出正文。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},
-      "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30},
-      "poll_interval_seconds": {"type": "number", "description": "轮询间隔（秒）", "default": 0.5}}}
+      "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30}}}
+  }},
+  {"type": "function", "function": {
+    "name": "read_agent_result",
+    "description": "读取已完成子智能体的权威最终结果。应在 wait_agent 报告 completed 后，或显式收集结果时调用；优先使用 final result 字段，不把 raw output 轨迹当最终答案。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "max_output_chars": {"type": "integer", "description": "最多返回的最终输出字符数", "default": 8000}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",

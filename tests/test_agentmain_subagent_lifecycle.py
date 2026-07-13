@@ -131,6 +131,11 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
                 events,
                 ["turn_started", "turn_completed", "agent_waiting_reply", "agent_exited"],
             )
+            parent_events = [
+                json.loads(line)["type"]
+                for line in (Path(td) / "temp" / "subagents" / "inbox.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(parent_events, ["turn_completed", "agent_waiting_reply", "agent_exited"])
 
     def test_task_worker_loop_stops_gracefully_when_stop_file_appears_during_reply_wait(self):
         with tempfile.TemporaryDirectory() as td:

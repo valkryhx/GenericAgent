@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_state import atomic_write_json  # noqa: E402
+from subagent_state import append_jsonl_event, atomic_write_json  # noqa: E402
 from subagent_manager import SubagentManager  # noqa: E402
 
 
@@ -335,6 +335,41 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
 
             self.assertFalse(result.timed_out)
             self.assertEqual([state.task_name for state in result.changed_agents], ["demo"])
+
+    def test_wait_agents_returns_when_parent_inbox_receives_update(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "demo"
+            task_dir.mkdir(parents=True)
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "demo",
+                    "agent_path": "/root/demo",
+                    "pid": 1,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                },
+            )
+            manager = SubagentManager(root_dir=td, process_exists=lambda pid: True)
+
+            def notify_later():
+                time.sleep(0.05)
+                append_jsonl_event(
+                    Path(td) / "temp" / "subagents" / "inbox.jsonl",
+                    {"type": "turn_completed", "task_name": "demo", "agent_path": "/root/demo"},
+                )
+
+            thread = threading.Thread(target=notify_later)
+            thread.start()
+            result = manager.wait_agents(["demo"], timeout_s=1, poll_interval_s=0.01)
+            thread.join(timeout=1)
+
+            self.assertFalse(result.timed_out)
+            self.assertEqual([state.task_name for state in result.changed_agents], ["demo"])
+            self.assertEqual(result.message, "Subagent mailbox update received.")
+            self.assertEqual(result.events[0]["type"], "turn_completed")
 
     def test_list_agents_ignores_non_agent_temp_dirs(self):
         with tempfile.TemporaryDirectory() as td:

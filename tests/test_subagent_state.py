@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+import subagent_state  # noqa: E402
 from subagent_state import append_jsonl_event, atomic_write_json, read_json_or_none, sha256_file  # noqa: E402
 
 
@@ -25,6 +27,28 @@ class SubagentStateTest(unittest.TestCase):
                 read_json_or_none(path),
                 {"turn_status": "completed", "process_status": "waiting_reply"},
             )
+            self.assertEqual(list(Path(td).glob("*.tmp")), [])
+
+    def test_atomic_write_json_retries_transient_replace_permission_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            real_replace = subagent_state.os.replace
+            replace_calls = []
+
+            def flaky_replace(src, dst):
+                replace_calls.append((src, dst))
+                if len(replace_calls) == 1:
+                    raise PermissionError("temporarily locked")
+                return real_replace(src, dst)
+
+            with patch.object(subagent_state.os, "name", "nt"):
+                with patch.object(subagent_state.time, "sleep") as sleep_mock:
+                    with patch.object(subagent_state.os, "replace", side_effect=flaky_replace):
+                        atomic_write_json(path, {"turn_status": "completed"})
+
+            self.assertEqual(read_json_or_none(path), {"turn_status": "completed"})
+            self.assertEqual(len(replace_calls), 2)
+            sleep_mock.assert_called_once_with(0.02)
             self.assertEqual(list(Path(td).glob("*.tmp")), [])
 
     def test_append_jsonl_event_writes_one_json_object_per_line(self):

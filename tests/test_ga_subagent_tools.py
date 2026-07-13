@@ -86,7 +86,7 @@ class GaSubagentToolsTest(unittest.TestCase):
         self.assertIn("workspace root =", prompt)
         self.assertIn("README.md", prompt)
 
-    def test_wait_agent_tool_returns_already_completed_final_output(self):
+    def test_wait_agent_tool_reports_completed_without_reading_final_output(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "done_worker"
             task_dir.mkdir(parents=True)
@@ -120,7 +120,20 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "changed")
             self.assertEqual(outcome.data["agents"][0]["turn_status"], "completed")
             self.assertEqual(outcome.data["agents"][0]["process_status"], "waiting_reply")
-            self.assertEqual(outcome.data["agents"][0]["final_output"], "finished work")
+            self.assertNotIn("final_output", outcome.data["agents"][0])
+            self.assertIn("read_agent_result", outcome.data["result_hint"])
+
+            read_outcome = exhaust(
+                handler.do_read_agent_result(
+                    {
+                        "target": "done_worker",
+                        "max_output_chars": 2000,
+                    },
+                    response=None,
+                )
+            )
+            self.assertEqual(read_outcome.data["status"], "success")
+            self.assertEqual(read_outcome.data["agent"]["final_output"], "finished work")
 
     def test_wait_agent_empty_targets_falls_back_to_target(self):
         with tempfile.TemporaryDirectory() as td:
@@ -159,7 +172,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
             self.assertEqual(outcome.data["status"], "changed")
             self.assertEqual([agent["task_name"] for agent in outcome.data["agents"]], ["done_worker"])
-            self.assertEqual(outcome.data["agents"][0]["final_output"], "finished work")
+            self.assertNotIn("final_output", outcome.data["agents"][0])
 
     def test_message_followup_and_interrupt_tools_write_mailbox_reply_and_stop_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -196,12 +209,39 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual((task_dir / "_stop").read_text(encoding="utf-8"), "test")
 
     def test_tool_schemas_include_subagent_tools(self):
-        expected = {"spawn_agent", "list_agents", "wait_agent", "send_message", "followup_task", "interrupt_agent"}
+        expected = {"spawn_agent", "list_agents", "wait_agent", "read_agent_result", "send_message", "followup_task", "interrupt_agent"}
         for schema_name in ["tools_schema.json", "tools_schema_cn.json"]:
             with self.subTest(schema_name=schema_name):
                 raw = json.loads((REPO_ROOT / "assets" / schema_name).read_text(encoding="utf-8"))
                 names = {item["function"]["name"] for item in raw}
                 self.assertTrue(expected.issubset(names))
+                wait_schema = next(item["function"] for item in raw if item["function"]["name"] == "wait_agent")
+                self.assertNotIn("poll_interval_seconds", wait_schema["parameters"]["properties"])
+
+    def test_tool_schemas_teach_codex_style_subagent_delegation(self):
+        required_by_schema = {
+            "tools_schema.json": [
+                "critical path",
+                "concrete, bounded, and self-contained",
+                "Do not redo delegated subagent tasks yourself",
+                "Call wait_agent sparingly",
+                "final answer contract",
+            ],
+            "tools_schema_cn.json": [
+                "关键路径",
+                "具体、有边界、自包含",
+                "不要重复执行已经委派给子智能体的任务",
+                "谨慎调用 wait_agent",
+                "最终结果契约",
+            ],
+        }
+        for schema_name, required_phrases in required_by_schema.items():
+            with self.subTest(schema_name=schema_name):
+                raw = json.loads((REPO_ROOT / "assets" / schema_name).read_text(encoding="utf-8"))
+                spawn_schema = next(item["function"] for item in raw if item["function"]["name"] == "spawn_agent")
+                schema_text = json.dumps(spawn_schema, ensure_ascii=False)
+                for phrase in required_phrases:
+                    self.assertIn(phrase, schema_text)
 
 
 if __name__ == "__main__":

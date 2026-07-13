@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from subagent_state import append_jsonl_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
+from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 
 
 ROUND_END_MARKER = "[ROUND END]"
@@ -43,6 +43,7 @@ class WaitResult:
     timed_out: bool
     changed_agents: list[AgentState]
     message: str
+    events: list[dict] | None = None
 
 
 @dataclass
@@ -155,6 +156,7 @@ class SubagentManager:
         }
         atomic_write_json(state_path, state)
         append_jsonl_event(task_dir / "events.jsonl", {"type": "agent_started", "task_name": task_name, "parent_session_id": parent_session_id})
+        append_parent_inbox_event(task_dir, {"type": "agent_started", "task_name": task_name, "parent_session_id": parent_session_id})
         cmd = [
             self.python_executable,
             str(self.repo_dir / "agentmain.py"),
@@ -230,16 +232,30 @@ class SubagentManager:
         if not targets:
             return WaitResult(True, [], "No subagents to wait for.")
         baseline = since_event_offsets or {target: self._event_size(target) for target in targets}
+        inbox_baseline = self._parent_inbox_size()
         while True:
+            inbox_events = self._read_parent_inbox_events_since(inbox_baseline, targets)
+            if inbox_events:
+                return WaitResult(
+                    False,
+                    self._states_for_events(inbox_events, targets),
+                    "Subagent mailbox update received.",
+                    inbox_events,
+                )
             changed = []
+            state_events = []
             for target in targets:
                 state = self.read_agent(target)
-                if self._event_size(target) != baseline.get(target, 0) or self._is_notify_state(state):
+                if self._is_notify_state(state):
                     changed.append(state)
+                    state_events.append({"type": "state_notify", "task_name": state.task_name, "agent_path": state.agent_path})
+                elif self._event_size(target) != baseline.get(target, 0):
+                    changed.append(state)
+                    state_events.append({"type": "task_event_file_changed", "task_name": state.task_name, "agent_path": state.agent_path})
             if changed:
-                return WaitResult(False, changed, "Wait completed.")
+                return WaitResult(False, changed, "Subagent state update received.", state_events)
             if time.monotonic() >= deadline:
-                return WaitResult(True, [], "Wait timed out.")
+                return WaitResult(True, [], "Wait timed out.", [])
             self.sleep(poll_interval_s)
 
     def interrupt_agent(self, target, reason="parent_interrupt"):
@@ -300,6 +316,17 @@ class SubagentManager:
         atomic_write_json(task_dir / "state.json", raw)
         append_jsonl_event(
             task_dir / "events.jsonl",
+            {
+                "type": "agent_closed",
+                "task_name": previous.task_name,
+                "previous_turn_status": previous.turn_status,
+                "previous_process_status": previous.process_status,
+                "closed_process_status": close_process_status,
+                "reason": reason,
+            },
+        )
+        append_parent_inbox_event(
+            task_dir,
             {
                 "type": "agent_closed",
                 "task_name": previous.task_name,
@@ -391,6 +418,71 @@ class SubagentManager:
             return path.stat().st_size
         except FileNotFoundError:
             return 0
+
+    def _parent_inbox_path(self):
+        return self.temp_dir / "subagents" / "inbox.jsonl"
+
+    def _parent_inbox_size(self):
+        try:
+            return self._parent_inbox_path().stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    def _read_parent_inbox_events_since(self, offset, targets):
+        path = self._parent_inbox_path()
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return []
+        offset = int(offset or 0)
+        if offset < 0 or offset > size:
+            offset = 0
+        if size <= offset:
+            return []
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                raw = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return []
+        target_set = set(targets or [])
+        events = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            task_name = row.get("task_name")
+            if not task_name and row.get("agent_path"):
+                task_name = str(row.get("agent_path")).rstrip("/").split("/")[-1]
+            try:
+                task_name = self._task_name_from_target(task_name)
+            except (TypeError, ValueError):
+                continue
+            if target_set and task_name not in target_set:
+                continue
+            row["task_name"] = task_name
+            row.setdefault("agent_path", f"/root/{task_name}")
+            events.append(row)
+        return events
+
+    def _states_for_events(self, events, fallback_targets):
+        names = []
+        for event in events:
+            task_name = event.get("task_name")
+            if task_name and task_name not in names:
+                names.append(task_name)
+        if not names:
+            names = list(fallback_targets or [])
+        states = []
+        for name in names:
+            try:
+                states.append(self.read_agent(name))
+            except Exception:
+                continue
+        return states
 
     def _is_notify_state(self, state):
         return state.turn_status in {"completed", "errored", "interrupted"} or state.process_status in {

@@ -69,10 +69,10 @@
   }},
   {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Start a background subagent with full GA tool access. Use for independent bounded subtasks. By default forks all current context; set fork_turns='none' or a positive integer string to limit context.",
+    "description": "Spawn a background subagent with full GA tool access for a well-scoped task. Use it only when the user explicitly asks for subagents, delegation, or parallel work, or an active GA SOP explicitly requires a verification/explorer subagent. Depth, research, or complexity alone is not authorization. Before spawning, identify the critical path: do urgent blocking work locally, and delegate only sidecar work that can run in parallel. Delegated subtasks must be concrete, bounded, and self-contained, materially advance the main task, and not overlap with local work or other subagents. Do not redo delegated subagent tasks yourself; integrate their results. Call wait_agent sparingly, only when you need a subagent update for the next critical-path step. The message should be a clear task contract: objective, scope/non-goals, relevant paths/context, allowed tools/constraints, expected final answer contract, artifacts if any, and completion/failure criteria. For coding/artifact work, assign disjoint write paths and require changed/generated paths in the final answer. By default forks all current context; set fork_turns='none' or a positive integer string to limit context.",
     "parameters": {"type": "object", "properties": {
       "task_name": {"type": "string", "description": "Lowercase letters, digits, and underscores only"},
-      "message": {"type": "string", "description": "The complete task prompt for the subagent"},
+      "message": {"type": "string", "description": "Self-contained task prompt. Include the exact result needed next, constraints, relevant paths/context, and final answer contract; avoid vague requests and do not duplicate parent work."},
       "fork_turns": {"type": "string", "description": "'all' (default), 'none', or a positive integer string for recent turns", "default": "all"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
       "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
@@ -87,12 +87,18 @@
   }},
   {"type": "function", "function": {
     "name": "wait_agent",
-    "description": "Wait for subagent event or final status. Returns final output snippets when available.",
+    "description": "Wait for a subagent mailbox/status update. Call wait_agent sparingly; use it as an event wait only when the next critical-path step needs a subagent update. It does not read final output content.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional non-empty list of task names; overrides target"},
-      "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30},
-      "poll_interval_seconds": {"type": "number", "description": "Polling interval in seconds", "default": 0.5}}}
+      "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30}}}
+  }},
+  {"type": "function", "function": {
+    "name": "read_agent_result",
+    "description": "Read the authoritative final result of a completed subagent. Call after wait_agent reports completed status or when explicitly collecting results; prefer final result fields over raw output traces.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "max_output_chars": {"type": "integer", "description": "Maximum final output characters to return", "default": 8000}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",

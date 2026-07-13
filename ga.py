@@ -672,7 +672,7 @@ class GenericAgentHandler(BaseHandler):
         return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_wait_agent(self, args, response):
-        '''等待子智能体事件或最终状态。完成时返回 final_output 摘要。'''
+        '''等待子智能体 mailbox/status 更新；不读取最终输出正文。'''
         raw_targets = args.get("targets")
         target = args.get("target") or args.get("task_name")
         if raw_targets is None:
@@ -697,16 +697,45 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         yield f"[Action] Waiting for subagent update ({timeout_s:g}s).\n"
         result = manager.wait_agents(targets=targets, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
-        max_output_chars = max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))
         data = {
             "status": "timeout" if result.timed_out else "changed",
             "message": result.message,
+            "events": result.events or [],
             "agents": [
-                self._subagent_state_payload(state, include_output=True, max_output_chars=max_output_chars)
+                self._subagent_state_payload(state, include_output=False)
                 for state in result.changed_agents
             ],
         }
+        if any(agent.get("turn_status") == "completed" for agent in data["agents"]):
+            data["result_hint"] = "Call read_agent_result for a completed subagent when you need its final output."
         yield f"[Status] {data['status']}: {len(data['agents'])} update(s).\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_read_agent_result(self, args, response):
+        '''读取一个已完成子智能体的最终输出；和 wait_agent 的事件等待职责分离。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        try:
+            max_output_chars = int(args.get("max_output_chars", max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))))
+        except Exception:
+            max_output_chars = 8000
+        max_output_chars = max(1000, min(max_output_chars, 50000))
+        manager = self._get_subagent_manager()
+        try:
+            state = manager.read_agent(target)
+            payload = self._subagent_state_payload(state, include_output=True, max_output_chars=max_output_chars)
+            if state.turn_status != "completed":
+                status = "not_completed"
+            elif payload.get("final_output") is None:
+                status = "missing_result"
+            else:
+                status = "success"
+            data = {"status": status, "agent": payload}
+            yield f"[Status] Read result for {state.agent_path}: {status}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to read subagent result: {data['msg']}\n"
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_interrupt_agent(self, args, response):

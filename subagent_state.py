@@ -2,15 +2,29 @@ import hashlib
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 SCHEMA_VERSION = 1
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2)
 
 
 def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _replace_file(src, dst):
+    delays = _WINDOWS_REPLACE_RETRY_DELAYS if os.name == "nt" else ()
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt >= len(delays):
+                raise
+            time.sleep(delays[attempt])
 
 
 def atomic_write_json(path, data):
@@ -20,7 +34,7 @@ def atomic_write_json(path, data):
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    os.replace(tmp, path)
+    _replace_file(tmp, path)
 
 
 def read_json_or_none(path):
@@ -42,6 +56,22 @@ def append_jsonl_event(path, event):
     row.setdefault("ts", now_iso())
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def parent_inbox_path_for_task_dir(task_dir):
+    return Path(task_dir).parent / "subagents" / "inbox.jsonl"
+
+
+def append_parent_inbox_event(task_dir, event):
+    row = dict(event)
+    task_name = row.get("task_name") or Path(task_dir).name
+    row.setdefault("type", "subagent_update")
+    row.setdefault("author", f"/root/{task_name}")
+    row.setdefault("recipient", "/root")
+    row.setdefault("task_name", task_name)
+    row.setdefault("agent_path", f"/root/{task_name}")
+    row.setdefault("task_dir", str(task_dir))
+    append_jsonl_event(parent_inbox_path_for_task_dir(task_dir), row)
 
 
 def consume_mailbox_trigger(path):
@@ -73,7 +103,7 @@ def consume_mailbox_trigger(path):
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-        os.replace(tmp, path)
+        _replace_file(tmp, path)
     if selected is None:
         return None
     return selected.get("content") or ""

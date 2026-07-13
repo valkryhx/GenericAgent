@@ -16,7 +16,7 @@ from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
 import session_transcript
-from subagent_state import append_jsonl_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
+from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
@@ -359,8 +359,19 @@ def _subagent_state(task_dir, task_name, nround, turn_status, process_status, ou
     atomic_write_json(state_path, old)
     return old
 
+PARENT_INBOX_EVENT_TYPES = {
+    'agent_started',
+    'turn_completed',
+    'agent_waiting_reply',
+    'agent_exited',
+    'agent_shutdown',
+    'agent_error',
+}
+
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
+    if event.get('type') in PARENT_INBOX_EVENT_TYPES:
+        append_parent_inbox_event(task_dir, event)
 
 def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep):
     task_dir = str(task_dir)
