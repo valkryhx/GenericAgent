@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import run_task_worker_loop, start_task_background  # noqa: E402
+from agentmain import _subagent_event, run_task_worker_loop, start_task_background  # noqa: E402
 
 
 class FakeAgent:
@@ -129,6 +129,31 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             )
             state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["fork_turns"], "2")
+
+    def test_subagent_event_mirrors_agent_closed_to_parent_inbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "demo_close"
+            task_dir.mkdir(parents=True)
+
+            _subagent_event(
+                task_dir,
+                {
+                    "type": "agent_closed",
+                    "task_name": "demo_close",
+                    "reason": "parent_cleanup",
+                },
+            )
+
+            events = [
+                json.loads(line)["type"]
+                for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            inbox = [
+                json.loads(line)["type"]
+                for line in (Path(td) / "temp" / "subagents" / "inbox.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(events, ["agent_closed"])
+            self.assertEqual(inbox, ["agent_closed"])
 
     def test_task_worker_loop_writes_output_state_and_events(self):
         with tempfile.TemporaryDirectory() as td:

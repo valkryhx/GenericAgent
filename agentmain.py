@@ -368,6 +368,7 @@ PARENT_INBOX_EVENT_TYPES = {
     'agent_exited',
     'agent_shutdown',
     'agent_error',
+    'agent_closed',
 }
 
 def _subagent_event(task_dir, event):

@@ -93,6 +93,28 @@ Python 文件 IO 没有真正的跨进程 async channel，所以 manager 内部�
    - `read_agent_result` 能读取 completed 输出；
    - schema 包含新工具且不暴露 polling interval。
 
+## 当前实施进度
+
+状态：代码实现已完成，当前没有已知功能缺口。
+
+已完成：
+
+| 项目 | 状态 | 说明 |
+| --- | --- | --- |
+| parent inbox helper | 已完成 | `subagent_state.py` 提供 `append_parent_inbox_event()` 和 root 级 `temp/subagents/inbox.jsonl` 路径计算。 |
+| 生命周期事件镜像 | 已完成 | `agent_started`、`turn_completed`、`agent_waiting_reply`、`agent_exited`、`agent_shutdown`、`agent_error`、`agent_closed` 都能进入 parent inbox；启动失败会写 `agent_error`，不会伪造 `agent_started`。 |
+| `wait_agents()` 事件驱动等待 | 已完成 | 优先读取 parent inbox 新事件；兼容旧 `events.jsonl` 文件变化、`state.json` 状态刷新和 `[ROUND END]` 推导。 |
+| `wait_agent` 工具职责收窄 | 已完成 | 返回 `status/events/agents/result_hint`，不内联 `final_output`。 |
+| `read_agent_result` 工具 | 已完成 | completed 后显式读取最终输出，并复用 `final_output_path` / `[ROUND END]` 兼容逻辑。 |
+| schema/SOP 调整 | 已完成 | 中英文工具 schema 已加入 `read_agent_result`，移除对模型暴露的 `poll_interval_seconds`；`memory/subagent.md` 已改为 Codex 式事件等待流程。 |
+| 回归测试 | 已完成 | 覆盖 parent inbox、`wait_agent` 不返回 final output、`read_agent_result`、schema、启动失败事件、`agent_closed` 镜像。 |
+| 真实 gpt-5.5 smoke | 已完成 | 使用本地 `native_oai_config`（`gpt-native` / `gpt-5.5`）跑通真实 GA root：并行启动 `prime_smoke_*` 和 `readme_smoke_*` 两个 subagent，父端按 `spawn_agent → wait_agent → read_agent_result` 收敛；两个子任务均 completed，parent inbox 收到 `agent_started`、`turn_completed`、`agent_waiting_reply`，最终结果正确汇总。 |
+
+未完成/后续：
+
+- 无设计内剩余功能项。
+- 后续可选项是用真实模型做更长时间、多 subagent、多 MCP/skill 混合压力测试；这属于上线信心验证，不是本设计的代码缺口。
+
 ## 预期效果
 
 父 agent 的自然行为会从：
