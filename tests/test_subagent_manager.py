@@ -218,6 +218,46 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
                 registry["agents"]["/root/research_france"]["last_task_message"],
                 "long task prompt",
             )
+            event_rows = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            inbox_rows = [
+                json.loads(line)
+                for line in (Path(td) / "temp" / "subagents" / "inbox.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(event_rows[-1]["type"], "agent_started")
+            self.assertEqual(event_rows[-1]["pid"], 2468)
+            self.assertEqual(inbox_rows[-1]["type"], "agent_started")
+            self.assertEqual(inbox_rows[-1]["pid"], 2468)
+
+    def test_spawn_agent_reports_agent_error_when_process_launch_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            def fake_popen(_cmd, **_kwargs):
+                raise OSError("cannot launch child")
+
+            manager = SubagentManager(root_dir=td, popen=fake_popen, python_executable="python-test")
+
+            with self.assertRaises(OSError):
+                manager.spawn_agent("broken_child", "prompt")
+
+            task_dir = Path(td) / "temp" / "broken_child"
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["turn_status"], "errored")
+            self.assertEqual(state["process_status"], "exited")
+            self.assertIn("cannot launch child", state["last_error"])
+            event_rows = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            inbox_rows = [
+                json.loads(line)
+                for line in (Path(td) / "temp" / "subagents" / "inbox.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([row["type"] for row in event_rows], ["agent_error"])
+            self.assertEqual([row["type"] for row in inbox_rows], ["agent_error"])
+            registry = json.loads((Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["agents"]["/root/broken_child"]["pid"], None)
 
     def test_spawn_agent_rejects_unsafe_task_names(self):
         with tempfile.TemporaryDirectory() as td:

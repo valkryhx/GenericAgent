@@ -155,8 +155,6 @@ class SubagentManager:
             "fork_turns": fork_mode,
         }
         atomic_write_json(state_path, state)
-        append_jsonl_event(task_dir / "events.jsonl", {"type": "agent_started", "task_name": task_name, "parent_session_id": parent_session_id})
-        append_parent_inbox_event(task_dir, {"type": "agent_started", "task_name": task_name, "parent_session_id": parent_session_id})
         cmd = [
             self.python_executable,
             str(self.repo_dir / "agentmain.py"),
@@ -177,12 +175,41 @@ class SubagentManager:
             if os.name == "nt":
                 kwargs["creationflags"] = 0x08000000
             proc = (self.popen or __import__("subprocess").Popen)(cmd, **kwargs)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            state.update(
+                {
+                    "turn_status": "errored",
+                    "process_status": "exited",
+                    "last_error": error,
+                    "updated_at": now_iso(),
+                }
+            )
+            atomic_write_json(state_path, state)
+            event = {
+                "type": "agent_error",
+                "task_name": task_name,
+                "parent_session_id": parent_session_id,
+                "error": error,
+            }
+            append_jsonl_event(task_dir / "events.jsonl", event)
+            append_parent_inbox_event(task_dir, event)
+            self._write_registry_entry(task_name, state, task_dir)
+            raise
         finally:
             stdout.close()
             stderr.close()
         pid = getattr(proc, "pid", None)
         state.update({"pid": pid, "process_status": "alive", "updated_at": now_iso()})
         atomic_write_json(state_path, state)
+        event = {
+            "type": "agent_started",
+            "task_name": task_name,
+            "parent_session_id": parent_session_id,
+            "pid": pid,
+        }
+        append_jsonl_event(task_dir / "events.jsonl", event)
+        append_parent_inbox_event(task_dir, event)
         self._write_registry_entry(task_name, state, task_dir)
         return AgentHandle(task_name, state["agent_path"], pid, str(task_dir), str(state_path), cmd)
 

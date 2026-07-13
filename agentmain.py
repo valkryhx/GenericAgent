@@ -441,12 +441,26 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
             raise
 
-def start_task_background(task_name, input_text=None, *, llm_no=0, verbose=False, root_dir=None, popen=None, python_executable=None):
+def start_task_background(
+    task_name,
+    input_text=None,
+    *,
+    llm_no=0,
+    verbose=False,
+    root_dir=None,
+    popen=None,
+    python_executable=None,
+    fork_turns=None,
+    fork_history=None,
+):
     from subagent_manager import SubagentManager
 
     root_dir = os.path.abspath(root_dir or script_dir)
     manager = SubagentManager(root_dir=root_dir, popen=popen, python_executable=python_executable or sys.executable)
     task_name = manager._task_name_from_target(task_name)
+    if fork_turns is None:
+        fork_turns = 'all' if fork_history is not None else 'none'
+    fork_mode, history_to_write = manager._select_fork_history(fork_turns, fork_history)
     task_dir = os.path.join(root_dir, 'temp', task_name)
     os.makedirs(task_dir, exist_ok=True)
     input_path = os.path.join(task_dir, 'input.txt')
@@ -461,6 +475,11 @@ def start_task_background(task_name, input_text=None, *, llm_no=0, verbose=False
                 pass
         with open(input_path, 'w', encoding='utf-8') as f:
             f.write(input_text)
+    history_path = os.path.join(task_dir, '_history.json')
+    if os.path.exists(history_path):
+        os.remove(history_path)
+    if history_to_write is not None:
+        atomic_write_json(history_path, history_to_write)
     state = {
         'schema_version': 1,
         'task_name': task_name,
@@ -479,6 +498,7 @@ def start_task_background(task_name, input_text=None, *, llm_no=0, verbose=False
         'last_message': input_text,
         'last_error': None,
         'close_reason': None,
+        'fork_turns': fork_mode,
     }
     state_path = os.path.join(task_dir, 'state.json')
     atomic_write_json(state_path, state)
@@ -521,6 +541,17 @@ def start_task_background(task_name, input_text=None, *, llm_no=0, verbose=False
     manager.register_agent(task_name, state, task_dir)
     return pid
 
+def _load_fork_history_arg(value):
+    if not value:
+        return None
+    source = value[1:] if value.startswith('@') else value
+    if os.path.exists(source):
+        with open(source, 'r', encoding='utf-8') as f:
+            payload = f.read()
+    else:
+        payload = value
+    return json.loads(payload)
+
 if __name__ == '__main__':
     import argparse
     from datetime import datetime
@@ -532,11 +563,22 @@ if __name__ == '__main__':
     parser.add_argument('--llm_no', type=int, default=0)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--nobg', action='store_true')
+    parser.add_argument('--fork_turns', default=None, help='context fork mode: none, all, or a positive integer')
+    parser.add_argument('--fork_history', default=None, help='context fork history as JSON, a JSON file path, or @file')
     args, _unknown = parser.parse_known_args()
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
 
     if args.task and not args.nobg:
-        print(start_task_background(args.task, input_text=args.input, llm_no=args.llm_no, verbose=args.verbose, root_dir=args.task_root)); sys.exit(0)
+        fork_history = _load_fork_history_arg(args.fork_history)
+        print(start_task_background(
+            args.task,
+            input_text=args.input,
+            llm_no=args.llm_no,
+            verbose=args.verbose,
+            root_dir=args.task_root,
+            fork_turns=args.fork_turns,
+            fork_history=fork_history,
+        )); sys.exit(0)
 
     agent = GeneraticAgent()
     agent.next_llm(args.llm_no)

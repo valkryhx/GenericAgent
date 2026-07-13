@@ -98,6 +98,38 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             registry = json.loads((Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8"))
             self.assertEqual(registry["agents"]["/root/cli_task"]["pid"], 13579)
 
+    def test_start_task_background_writes_context_fork_history_when_requested(self):
+        with tempfile.TemporaryDirectory() as td:
+            history = [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"},
+                {"role": "user", "content": "third"},
+            ]
+
+            class FakeProcess:
+                pid = 24680
+
+            def fake_popen(_cmd, **_kwargs):
+                return FakeProcess()
+
+            start_task_background(
+                "forked_cli_task",
+                input_text="new task prompt",
+                root_dir=td,
+                popen=fake_popen,
+                python_executable="python-test",
+                fork_turns="2",
+                fork_history=history,
+            )
+
+            task_dir = Path(td) / "temp" / "forked_cli_task"
+            self.assertEqual(
+                json.loads((task_dir / "_history.json").read_text(encoding="utf-8")),
+                history[-2:],
+            )
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["fork_turns"], "2")
+
     def test_task_worker_loop_writes_output_state_and_events(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "demo_task"
