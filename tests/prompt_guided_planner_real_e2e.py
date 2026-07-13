@@ -162,7 +162,7 @@ def run_fake_runtime(root: Path, scenario_name: str, script: str) -> dict:
     outcome = WorkflowRuntime(
         store=store,
         runner=FakeChildAgentRunner(),
-        scheduler_config=SchedulerConfig(max_concurrent=4, max_total=12),
+        scheduler_config=SchedulerConfig(max_concurrent=4, max_total=32),
         timeout_seconds=8.0,
     ).run(run)
     loaded = store.load_run(run.run_id)

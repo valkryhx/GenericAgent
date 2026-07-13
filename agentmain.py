@@ -16,6 +16,7 @@ from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
 import session_transcript
+from subagent_state import append_jsonl_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
@@ -328,6 +329,185 @@ class GenericAgent:
 
 GeneraticAgent = GenericAgent    
 
+def _subagent_state(task_dir, task_name, nround, turn_status, process_status, output_path=None, final_output_path=None, final_output_sha256=None, last_error=None):
+    state_path = os.path.join(task_dir, 'state.json')
+    old = {}
+    try:
+        with open(state_path, encoding='utf-8', errors='replace') as f:
+            old = json.load(f)
+    except Exception:
+        pass
+    old.update({
+        'schema_version': 1,
+        'task_name': task_name,
+        'agent_path': old.get('agent_path') or f'/root/{task_name}',
+        'pid': os.getpid(),
+        'round': int(nround) if isinstance(nround, int) else 0,
+        'turn_status': turn_status,
+        'process_status': process_status,
+        'updated_at': now_iso(),
+        'input_path': os.path.join(task_dir, 'input.txt'),
+        'output_path': str(output_path) if output_path else old.get('output_path'),
+        'final_output_path': str(final_output_path) if final_output_path else old.get('final_output_path'),
+        'final_output_sha256': final_output_sha256 if final_output_sha256 else old.get('final_output_sha256'),
+        'last_error': last_error,
+    })
+    if turn_status == 'running':
+        old['last_round_started_at'] = old['updated_at']
+    if turn_status == 'completed':
+        old['last_round_end_at'] = old['updated_at']
+    atomic_write_json(state_path, old)
+    return old
+
+def _subagent_event(task_dir, event):
+    append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
+
+def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep):
+    task_dir = str(task_dir)
+    task_name = os.path.basename(os.path.normpath(task_dir))
+    agent.peer_hint = False
+    agent.task_dir = task_dir
+    nround = ''
+    infile = os.path.join(task_dir, 'input.txt')
+    if input_text:
+        os.makedirs(task_dir, exist_ok=True)
+        import glob
+        [os.remove(f) for f in glob.glob(os.path.join(task_dir, 'output*.txt'))]
+        with open(infile, 'w', encoding='utf-8') as f: f.write(input_text)
+    if (fh := consume_file(task_dir, '_history.json')):
+        agent.llmclient.backend.history = json.loads(fh)
+    with open(infile, encoding='utf-8') as f: raw = f.read()
+    while True:
+        output_path = os.path.join(task_dir, f'output{nround}.txt')
+        try:
+            _subagent_state(task_dir, task_name, nround, 'running', 'alive', output_path=output_path)
+            _subagent_event(task_dir, {'type': 'turn_started', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+            dq = agent.put_task(raw, source='task')
+            while 'done' not in (item := dq.get(timeout=300)):
+                if 'next' in item and random.random() < 0.95:
+                    with open(output_path, 'w', encoding='utf-8') as f: f.write(item.get('next', ''))
+                    _subagent_event(task_dir, {'type': 'output_snapshot', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path})
+            with open(output_path, 'w', encoding='utf-8') as f: f.write(item['done'] + '\n\n[ROUND END]\n')
+            digest = sha256_file(output_path)
+            _subagent_state(task_dir, task_name, nround, 'completed', 'waiting_reply', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
+            _subagent_event(task_dir, {'type': 'turn_completed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path, 'sha256': digest})
+            _subagent_event(task_dir, {'type': 'agent_waiting_reply', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+            consume_file(task_dir, '_stop')
+            stop_requested = False
+            for _ in range(reply_wait_iterations):
+                sleep_fn(reply_sleep_s)
+                if consume_file(task_dir, '_stop'):
+                    _subagent_state(task_dir, task_name, nround, 'completed', 'shutdown', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
+                    _subagent_event(task_dir, {'type': 'agent_shutdown', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+                    stop_requested = True
+                    break
+                if (raw := consume_mailbox_trigger(os.path.join(task_dir, 'mailbox.jsonl'))) is not None:
+                    reply_path = os.path.join(task_dir, 'reply.txt')
+                    try:
+                        if os.path.exists(reply_path):
+                            with open(reply_path, encoding='utf-8', errors='replace') as f:
+                                reply_raw = f.read()
+                            if reply_raw == raw:
+                                os.remove(reply_path)
+                    except OSError:
+                        pass
+                    _subagent_event(task_dir, {'type': 'message_consumed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'source': 'mailbox'})
+                    break
+                if (raw := consume_file(task_dir, 'reply.txt')):
+                    _subagent_event(task_dir, {'type': 'message_consumed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+                    break
+            else:
+                _subagent_state(task_dir, task_name, nround, 'completed', 'exited', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
+                _subagent_event(task_dir, {'type': 'agent_exited', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+                break
+            if stop_requested:
+                break
+            nround = nround + 1 if isinstance(nround, int) else 1
+        except Exception as e:
+            _subagent_state(task_dir, task_name, nround, 'errored', 'exited', output_path=output_path, last_error=format_error(e))
+            _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
+            raise
+
+def start_task_background(task_name, input_text=None, *, llm_no=0, verbose=False, root_dir=None, popen=None, python_executable=None):
+    from subagent_manager import SubagentManager
+
+    root_dir = os.path.abspath(root_dir or script_dir)
+    manager = SubagentManager(root_dir=root_dir, popen=popen, python_executable=python_executable or sys.executable)
+    task_name = manager._task_name_from_target(task_name)
+    task_dir = os.path.join(root_dir, 'temp', task_name)
+    os.makedirs(task_dir, exist_ok=True)
+    input_path = os.path.join(task_dir, 'input.txt')
+    output_path = os.path.join(task_dir, 'output.txt')
+    if input_text is not None:
+        import glob
+
+        for old_output in glob.glob(os.path.join(task_dir, 'output*.txt')):
+            try:
+                os.remove(old_output)
+            except OSError:
+                pass
+        with open(input_path, 'w', encoding='utf-8') as f:
+            f.write(input_text)
+    state = {
+        'schema_version': 1,
+        'task_name': task_name,
+        'agent_path': f'/root/{task_name}',
+        'parent_session_id': None,
+        'pid': None,
+        'round': 0,
+        'turn_status': 'pending',
+        'process_status': 'starting',
+        'started_at': now_iso(),
+        'updated_at': now_iso(),
+        'input_path': input_path,
+        'output_path': output_path,
+        'final_output_path': None,
+        'final_output_sha256': None,
+        'last_message': input_text,
+        'last_error': None,
+        'close_reason': None,
+    }
+    state_path = os.path.join(task_dir, 'state.json')
+    atomic_write_json(state_path, state)
+
+    cmd = [
+        manager.python_executable,
+        os.path.abspath(__file__),
+        '--task',
+        task_name,
+        '--nobg',
+        '--task_root',
+        root_dir,
+        '--llm_no',
+        str(llm_no),
+    ]
+    if verbose:
+        cmd.append('--verbose')
+
+    stdout = open(os.path.join(task_dir, 'stdout.log'), 'w', encoding='utf-8')
+    stderr = open(os.path.join(task_dir, 'stderr.log'), 'w', encoding='utf-8')
+    try:
+        kwargs = {'cwd': root_dir, 'stdout': stdout, 'stderr': stderr}
+        if os.name == 'nt':
+            kwargs['creationflags'] = 0x08000000
+        proc = (popen or __import__('subprocess').Popen)(cmd, **kwargs)
+    except Exception as e:
+        state.update({'turn_status': 'errored', 'process_status': 'exited', 'last_error': format_error(e), 'updated_at': now_iso()})
+        atomic_write_json(state_path, state)
+        _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': 0, 'error': format_error(e)})
+        manager.register_agent(task_name, state, task_dir)
+        raise
+    finally:
+        stdout.close()
+        stderr.close()
+
+    pid = getattr(proc, 'pid', None)
+    state.update({'pid': pid, 'process_status': 'alive', 'updated_at': now_iso()})
+    atomic_write_json(state_path, state)
+    _subagent_event(task_dir, {'type': 'agent_started', 'task_name': task_name, 'pid': pid})
+    manager.register_agent(task_name, state, task_dir)
+    return pid
+
 if __name__ == '__main__':
     import argparse
     from datetime import datetime
@@ -335,6 +515,7 @@ if __name__ == '__main__':
     parser.add_argument('--task', metavar='IODIR', help='一次性任务模式(文件IO)')
     parser.add_argument('--reflect', metavar='SCRIPT', help='反射模式：加载监控脚本，check()触发时发任务')
     parser.add_argument('--input', help='prompt')
+    parser.add_argument('--task_root', default=script_dir, help='子智能体任务根目录')
     parser.add_argument('--llm_no', type=int, default=0)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--nobg', action='store_true')
@@ -342,14 +523,7 @@ if __name__ == '__main__':
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
 
     if args.task and not args.nobg:
-        import subprocess, platform
-        cmd = [sys.executable, os.path.abspath(__file__)] + [a for a in sys.argv[1:]] + ['--nobg']
-        d = os.path.join(script_dir, f'temp/{args.task}'); os.makedirs(d, exist_ok=True)
-        p = subprocess.Popen(cmd, cwd=script_dir,
-            creationflags=0x08000000 if platform.system() == 'Windows' else 0,
-            stdout=open(os.path.join(d, 'stdout.log'), 'w', encoding='utf-8'),
-            stderr=open(os.path.join(d, 'stderr.log'), 'w', encoding='utf-8'))
-        print(p.pid); sys.exit(0)
+        print(start_task_background(args.task, input_text=args.input, llm_no=args.llm_no, verbose=args.verbose, root_dir=args.task_root)); sys.exit(0)
 
     agent = GeneraticAgent()
     agent.next_llm(args.llm_no)
@@ -357,27 +531,8 @@ if __name__ == '__main__':
     threading.Thread(target=agent.run, daemon=True).start()
 
     if args.task:
-        agent.peer_hint = False
-        agent.task_dir = d = os.path.join(script_dir, f'temp/{args.task}'); nround = ''
-        infile = os.path.join(d, 'input.txt')
-        if args.input:
-            os.makedirs(d, exist_ok=True)
-            import glob; [os.remove(f) for f in glob.glob(os.path.join(d, 'output*.txt'))]
-            with open(infile, 'w', encoding='utf-8') as f: f.write(args.input)
-        if (fh := consume_file(d, '_history.json')): agent.llmclient.backend.history = json.loads(fh)
-        with open(infile, encoding='utf-8') as f: raw = f.read()
-        while True:
-            dq = agent.put_task(raw, source='task')
-            while 'done' not in (item := dq.get(timeout=300)): 
-                if 'next' in item and random.random() < 0.95:  # 概率写一次中间结果
-                    with open(f'{d}/output{nround}.txt', 'w', encoding='utf-8') as f: f.write(item.get('next', ''))
-            with open(f'{d}/output{nround}.txt', 'w', encoding='utf-8') as f: f.write(item['done'] + '\n\n[ROUND END]\n')
-            consume_file(d, '_stop')  # 已经成功停下来了，避免打断下次reply
-            for _ in range(300):  # 等reply.txt，10分钟超时
-                time.sleep(2)
-                if (raw := consume_file(d, 'reply.txt')): break
-            else: break
-            nround = nround + 1 if isinstance(nround, int) else 1
+        task_root = os.path.abspath(args.task_root or script_dir)
+        run_task_worker_loop(agent, os.path.join(task_root, f'temp/{args.task}'), input_text=args.input)
     elif args.reflect:
         agent.peer_hint = False
         import importlib.util

@@ -547,6 +547,186 @@ class GenericAgentHandler(BaseHandler):
         next_prompt += "\n[SYSTEM TIPS] 已加载 skill。必须按上方 SKILL.md 内容执行；如技能引用相对路径，使用返回的 base_dir。"
         return StepOutcome(result, next_prompt=next_prompt)
 
+    def _get_subagent_manager(self):
+        manager = getattr(self, "subagent_manager", None)
+        if manager is not None:
+            return manager
+        from subagent_manager import SubagentManager
+        return SubagentManager(root_dir=script_dir, python_executable=sys.executable)
+
+    def _current_backend_history_snapshot(self):
+        backend = getattr(getattr(self.parent, "llmclient", None), "backend", None)
+        history = getattr(backend, "history", None)
+        if history is None:
+            return []
+        try:
+            return json.loads(json.dumps(history, ensure_ascii=False, default=json_default))
+        except Exception:
+            return []
+
+    def _subagent_state_payload(self, state, include_output=False, max_output_chars=8000):
+        payload = {
+            "task_name": state.task_name,
+            "agent_path": state.agent_path,
+            "pid": state.pid,
+            "task_dir": state.task_dir,
+            "turn_status": state.turn_status,
+            "process_status": state.process_status,
+            "round": state.round,
+            "output_path": state.output_path,
+            "final_output_path": state.final_output_path,
+            "updated_at": state.updated_at,
+            "last_message": state.last_message,
+            "last_error": state.last_error,
+        }
+        if include_output and state.final_output_path and os.path.exists(state.final_output_path):
+            try:
+                with open(state.final_output_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                text = text.replace("\n\n[ROUND END]\n", "").rstrip()
+                payload["final_output"] = smart_format(text, max_str_len=max_output_chars, omit_str="\n\n[omitted long subagent output]\n\n")
+            except Exception as e:
+                payload["final_output_error"] = str(e)
+        return payload
+
+    def do_spawn_agent(self, args, response):
+        '''启动一个后台子智能体。默认继承当前会话上下文，子智能体拥有完整 GA 工具能力。'''
+        task_name = args.get("task_name") or args.get("name")
+        message = args.get("message") or args.get("prompt") or ""
+        if not task_name:
+            return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
+        if not message:
+            return StepOutcome({"status": "error", "msg": "message is required"}, next_prompt="\n")
+        fork_turns = str(args.get("fork_turns", "all"))
+        fork_history = None if fork_turns.lower() == "none" else self._current_backend_history_snapshot()
+        try:
+            llm_no = int(args.get("llm_no", getattr(self.parent, "llm_no", 0)))
+        except Exception:
+            llm_no = getattr(self.parent, "llm_no", 0)
+        verbose = bool(args.get("verbose", getattr(self.parent, "verbose", False)))
+        manager = self._get_subagent_manager()
+        yield f"[Action] Spawning subagent: {task_name}\n"
+        try:
+            handle = manager.spawn_agent(
+                task_name,
+                message,
+                llm_no=llm_no,
+                verbose=verbose,
+                parent_session_id=getattr(self.parent, "session_id", None),
+                fork_turns=fork_turns,
+                fork_history=fork_history,
+            )
+            result = {
+                "status": "started",
+                "task_name": handle.task_name,
+                "agent_path": handle.agent_path,
+                "pid": handle.pid,
+                "task_dir": handle.task_dir,
+                "state_path": handle.state_path,
+                "fork_turns": fork_turns,
+            }
+            yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
+        except Exception as e:
+            result = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_list_agents(self, args, response):
+        '''列出当前 root 下的子智能体状态。'''
+        manager = self._get_subagent_manager()
+        include_closed = bool(args.get("include_closed", False))
+        include_output = bool(args.get("include_output", False))
+        path_prefix = args.get("path_prefix")
+        max_output_chars = max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))
+        states = manager.list_agents(path_prefix=path_prefix, include_closed=include_closed)
+        result = {
+            "status": "success",
+            "agents": [
+                self._subagent_state_payload(state, include_output=include_output, max_output_chars=max_output_chars)
+                for state in states
+            ],
+        }
+        yield f"[Status] Found {len(states)} subagent(s).\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_send_message(self, args, response):
+        '''向子智能体邮箱发送消息，但不触发新一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        row = manager.send_message(target, message, author="/root")
+        yield f"[Status] Message queued for {row.get('recipient')}.\n"
+        return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_followup_task(self, args, response):
+        '''给已完成或等待中的子智能体发送后续任务，并触发下一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        row = manager.followup_task(target, message, author="/root")
+        yield f"[Status] Follow-up task queued for {row.get('recipient')}.\n"
+        return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_wait_agent(self, args, response):
+        '''等待子智能体事件或最终状态。完成时返回 final_output 摘要。'''
+        raw_targets = args.get("targets")
+        if raw_targets is None:
+            target = args.get("target") or args.get("task_name")
+            targets = [target] if target else None
+        elif isinstance(raw_targets, str):
+            targets = [raw_targets]
+        else:
+            targets = list(raw_targets)
+        try:
+            timeout_s = float(args.get("timeout_seconds", args.get("timeout_s", 30)))
+        except Exception:
+            timeout_s = 30.0
+        timeout_s = max(0.0, min(timeout_s, 3600.0))
+        try:
+            poll_interval_s = float(args.get("poll_interval_seconds", 0.5))
+        except Exception:
+            poll_interval_s = 0.5
+        poll_interval_s = max(0.05, min(poll_interval_s, 10.0))
+        manager = self._get_subagent_manager()
+        yield f"[Action] Waiting for subagent update ({timeout_s:g}s).\n"
+        result = manager.wait_agents(targets=targets, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+        max_output_chars = max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))
+        data = {
+            "status": "timeout" if result.timed_out else "changed",
+            "message": result.message,
+            "agents": [
+                self._subagent_state_payload(state, include_output=True, max_output_chars=max_output_chars)
+                for state in result.changed_agents
+            ],
+        }
+        yield f"[Status] {data['status']}: {len(data['agents'])} update(s).\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_interrupt_agent(self, args, response):
+        '''请求子智能体中断当前轮次；子进程会尽量保留以便后续 followup_task。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or "parent_interrupt"
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.interrupt_agent(target, reason=reason)
+            data = {
+                "status": "interrupt_requested",
+                "target": result.target,
+                "stop_path": result.stop_path,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+            }
+            yield f"[Status] Interrupt requested for {result.previous_state.agent_path}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to interrupt subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
     def _retry_or_exit(self, prompt):
         self._empty_ct = getattr(self, '_empty_ct', 0) + 1
         if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)

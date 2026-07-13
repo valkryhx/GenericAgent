@@ -68,6 +68,54 @@
       "search_roots": {"type": "array", "items": {"type": "string"}, "description": "Optional debug/test override for skill root directories; normally omit"}}}
   }},
   {"type": "function", "function": {
+    "name": "spawn_agent",
+    "description": "Start a background subagent with full GA tool access. Use for independent bounded subtasks. By default forks all current context; set fork_turns='none' or a positive integer string to limit context.",
+    "parameters": {"type": "object", "properties": {
+      "task_name": {"type": "string", "description": "Lowercase letters, digits, and underscores only"},
+      "message": {"type": "string", "description": "The complete task prompt for the subagent"},
+      "fork_turns": {"type": "string", "description": "'all' (default), 'none', or a positive integer string for recent turns", "default": "all"},
+      "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
+      "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "list_agents",
+    "description": "List subagents and their current state. Use after spawning or before cleanup.",
+    "parameters": {"type": "object", "properties": {
+      "path_prefix": {"type": "string", "description": "Optional canonical prefix such as /root"},
+      "include_closed": {"type": "boolean", "description": "Include shutdown/killed agents", "default": false},
+      "include_output": {"type": "boolean", "description": "Include final output snippets when available", "default": false}}}
+  }},
+  {"type": "function", "function": {
+    "name": "wait_agent",
+    "description": "Wait for subagent event or final status. Returns final output snippets when available.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
+      "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of task names; overrides target"},
+      "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30},
+      "poll_interval_seconds": {"type": "number", "description": "Polling interval in seconds", "default": 0.5}}}
+  }},
+  {"type": "function", "function": {
+    "name": "send_message",
+    "description": "Send a mailbox message to a subagent without triggering a new turn.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "message": {"type": "string", "description": "Message content"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "followup_task",
+    "description": "Send a follow-up task to an existing subagent and trigger its next turn after it becomes idle.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "message": {"type": "string", "description": "Follow-up task prompt"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "interrupt_agent",
+    "description": "Ask a subagent to interrupt its current turn while preserving its task directory for follow-up.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "reason": {"type": "string", "description": "Optional interrupt reason"}}}
+  }},
+  {"type": "function", "function": {
     "name": "ask_user",
     "description": "Interrupt task to ask user when needing decisions, extra info, or facing unresolvable blockers",
     "parameters": {"type": "object", "properties": {

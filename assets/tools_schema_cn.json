@@ -68,6 +68,54 @@
       "search_roots": {"type": "array", "items": {"type": "string"}, "description": "可选调试/测试覆盖技能根目录；正常使用时省略"}}}
   }},
   {"type": "function", "function": {
+    "name": "spawn_agent",
+    "description": "启动一个后台子智能体，子智能体拥有完整 GA 工具能力。适合独立且边界清晰的子任务。默认继承当前全部上下文；可用 fork_turns='none' 或正整数字符串限制上下文。",
+    "parameters": {"type": "object", "properties": {
+      "task_name": {"type": "string", "description": "只能包含小写字母、数字、下划线"},
+      "message": {"type": "string", "description": "给子智能体的完整任务说明"},
+      "fork_turns": {"type": "string", "description": "'all'（默认）、'none'，或表示最近轮数的正整数字符串", "default": "all"},
+      "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
+      "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "list_agents",
+    "description": "列出子智能体及其当前状态。启动后或清理前使用。",
+    "parameters": {"type": "object", "properties": {
+      "path_prefix": {"type": "string", "description": "可选规范路径前缀，例如 /root"},
+      "include_closed": {"type": "boolean", "description": "是否包含 shutdown/killed 的子智能体", "default": false},
+      "include_output": {"type": "boolean", "description": "可用时返回最终输出摘要", "default": false}}}
+  }},
+  {"type": "function", "function": {
+    "name": "wait_agent",
+    "description": "等待子智能体事件或最终状态；可用时返回 final_output 摘要。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
+      "targets": {"type": "array", "items": {"type": "string"}, "description": "可选 task_name 列表；优先于 target"},
+      "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30},
+      "poll_interval_seconds": {"type": "number", "description": "轮询间隔（秒）", "default": 0.5}}}
+  }},
+  {"type": "function", "function": {
+    "name": "send_message",
+    "description": "向子智能体邮箱发送消息，但不触发新一轮。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "message": {"type": "string", "description": "消息内容"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "followup_task",
+    "description": "向已有子智能体发送后续任务，并在其空闲后触发下一轮。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "message": {"type": "string", "description": "后续任务说明"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "interrupt_agent",
+    "description": "请求子智能体中断当前轮次，同时保留任务目录以便后续 followup。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "reason": {"type": "string", "description": "可选中断原因"}}}
+  }},
+  {"type": "function", "function": {
     "name": "ask_user",
     "description": "当需要用户决策、提供额外信息或遇到无法自动解决的阻碍时，调用此工具中断任务并提问",
     "parameters": {"type": "object", "properties": {
