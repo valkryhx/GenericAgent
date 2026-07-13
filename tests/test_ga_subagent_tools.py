@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from agent_loop import exhaust  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
+from ga import GenericAgentHandler, get_global_memory  # noqa: E402
 from subagent_manager import SubagentManager  # noqa: E402
 from subagent_state import atomic_write_json  # noqa: E402
 
@@ -79,6 +79,13 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertNotIn("inspect inherited context", cmd)
             self.assertEqual(Path(kwargs["cwd"]), Path(td))
 
+    def test_global_memory_distinguishes_tool_cwd_from_workspace_root(self):
+        prompt = get_global_memory()
+
+        self.assertIn("tool scratch/output dir", prompt)
+        self.assertIn("workspace root =", prompt)
+        self.assertIn("README.md", prompt)
+
     def test_wait_agent_tool_returns_already_completed_final_output(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "done_worker"
@@ -113,6 +120,45 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "changed")
             self.assertEqual(outcome.data["agents"][0]["turn_status"], "completed")
             self.assertEqual(outcome.data["agents"][0]["process_status"], "waiting_reply")
+            self.assertEqual(outcome.data["agents"][0]["final_output"], "finished work")
+
+    def test_wait_agent_empty_targets_falls_back_to_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            temp_root = Path(td) / "temp"
+            (temp_root / "ga-real-e2e-tmp").mkdir(parents=True)
+            (temp_root / "ga-real-e2e-tmp" / "state.json").write_text("{}", encoding="utf-8")
+            task_dir = temp_root / "done_worker"
+            task_dir.mkdir()
+            output_path = task_dir / "output.txt"
+            output_path.write_text("finished work\n\n[ROUND END]\n", encoding="utf-8")
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "done_worker",
+                    "agent_path": "/root/done_worker",
+                    "pid": 123,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                    "output_path": str(output_path),
+                },
+            )
+            handler = self.make_handler(td, process_exists=lambda pid: True, sleep=lambda _: None)
+
+            outcome = exhaust(
+                handler.do_wait_agent(
+                    {
+                        "target": "/root/done_worker",
+                        "targets": [],
+                        "timeout_seconds": 0,
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "changed")
+            self.assertEqual([agent["task_name"] for agent in outcome.data["agents"]], ["done_worker"])
             self.assertEqual(outcome.data["agents"][0]["final_output"], "finished work")
 
     def test_message_followup_and_interrupt_tools_write_mailbox_reply_and_stop_file(self):

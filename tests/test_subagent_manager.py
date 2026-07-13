@@ -336,6 +336,40 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             self.assertFalse(result.timed_out)
             self.assertEqual([state.task_name for state in result.changed_agents], ["demo"])
 
+    def test_list_agents_ignores_non_agent_temp_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            temp_root = Path(td) / "temp"
+            temp_root.mkdir(parents=True)
+            for name in [".playwright-cli", "ga-real-e2e-tmp", "model_responses", "sessions"]:
+                (temp_root / name).mkdir()
+            (temp_root / "ga-real-e2e-tmp" / "state.json").write_text("{}", encoding="utf-8")
+            state_less_dir = temp_root / "valid_no_state"
+            state_less_dir.mkdir()
+            task_dir = temp_root / "demo_agent"
+            task_dir.mkdir()
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "demo_agent",
+                    "agent_path": "/root/demo_agent",
+                    "pid": 1,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                },
+            )
+            manager = SubagentManager(root_dir=td, process_exists=lambda pid: True)
+
+            states = manager.list_agents()
+            result = manager.wait_agents([], timeout_s=1, poll_interval_s=0.01)
+
+            self.assertEqual([state.task_name for state in states], ["demo_agent"])
+            self.assertFalse((state_less_dir / "state.json").exists())
+            self.assertTrue(result.timed_out)
+            self.assertEqual(result.changed_agents, [])
+            self.assertEqual(result.message, "No subagents to wait for.")
+
     def test_send_message_queues_without_reply_and_followup_task_triggers_reply(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "demo"

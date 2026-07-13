@@ -90,7 +90,7 @@
     "description": "等待子智能体事件或最终状态；可用时返回 final_output 摘要。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
-      "targets": {"type": "array", "items": {"type": "string"}, "description": "可选 task_name 列表；优先于 target"},
+      "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},
       "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30},
       "poll_interval_seconds": {"type": "number", "description": "轮询间隔（秒）", "default": 0.5}}}
   }},

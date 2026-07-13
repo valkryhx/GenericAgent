@@ -90,7 +90,7 @@
     "description": "Wait for subagent event or final status. Returns final output snippets when available.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
-      "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of task names; overrides target"},
+      "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional non-empty list of task names; overrides target"},
       "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30},
       "poll_interval_seconds": {"type": "number", "description": "Polling interval in seconds", "default": 0.5}}}
   }},

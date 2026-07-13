@@ -674,13 +674,16 @@ class GenericAgentHandler(BaseHandler):
     def do_wait_agent(self, args, response):
         '''等待子智能体事件或最终状态。完成时返回 final_output 摘要。'''
         raw_targets = args.get("targets")
+        target = args.get("target") or args.get("task_name")
         if raw_targets is None:
-            target = args.get("target") or args.get("task_name")
             targets = [target] if target else None
         elif isinstance(raw_targets, str):
-            targets = [raw_targets]
+            raw_targets = raw_targets.strip()
+            targets = [raw_targets] if raw_targets else ([target] if target else None)
         else:
             targets = list(raw_targets)
+            if not targets:
+                targets = [target] if target else None
         try:
             timeout_s = float(args.get("timeout_seconds", args.get("timeout_s", 30)))
         except Exception:
@@ -894,7 +897,8 @@ def get_global_memory():
         suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
         with open(os.path.join(script_dir, 'memory/global_mem_insight.txt'), 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
         with open(os.path.join(script_dir, f'assets/insight_fixed_structure{suffix}.txt'), 'r', encoding='utf-8') as f: structure = f.read()
-        prompt += f'cwd = {os.path.join(script_dir, "temp")} (./)\n'
+        prompt += f'cwd = {os.path.join(script_dir, "temp")} (./; tool scratch/output dir)\n'
+        prompt += f'workspace root = {script_dir} (..; project files such as README.md usually live here)\n'
         prompt += f"\n[Memory] (../memory)\n"
         prompt += structure + '\n../memory/global_mem_insight.txt:\n'
         prompt += insight + "\n"

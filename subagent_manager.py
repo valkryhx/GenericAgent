@@ -198,9 +198,12 @@ class SubagentManager:
         for child in sorted(self.temp_dir.iterdir()):
             if not child.is_dir() or child.name == "subagents":
                 continue
+            if not (child / "state.json").is_file():
+                continue
             try:
+                self._task_name_from_target(child.name)
                 state = self.read_agent(child.name)
-            except FileNotFoundError:
+            except (FileNotFoundError, ValueError):
                 continue
             if path_prefix and not state.agent_path.startswith(path_prefix):
                 continue
@@ -220,7 +223,12 @@ class SubagentManager:
 
     def wait_agents(self, targets=None, timeout_s=30, poll_interval_s=0.5, since_event_offsets=None):
         deadline = time.monotonic() + timeout_s
-        targets = list(targets or [state.task_name for state in self.list_agents()])
+        if targets is None:
+            targets = [state.task_name for state in self.list_agents()]
+        else:
+            targets = [self._task_name_from_target(target) for target in targets if str(target).strip()]
+        if not targets:
+            return WaitResult(True, [], "No subagents to wait for.")
         baseline = since_event_offsets or {target: self._event_size(target) for target in targets}
         while True:
             changed = []
