@@ -39,26 +39,6 @@ export function inputContentColumns(columns: number): number {
   return Math.max(1, Math.floor(columns) - inputLeftPaddingColumns - inputGutterColumns - inputRightReserveColumns)
 }
 
-/**
- * Width of each input text row inside the padded border box.
- * Must stay constant across keystrokes so Yoga/Ink does not reflow the
- * composer left/right (horizontal "shake" while typing).
- */
-export function inputLineBoxWidth(columns: number): number {
-  return Math.max(1, Math.floor(columns) - inputLeftPaddingColumns)
-}
-
-/**
- * Render one input visual row as a single fixed-width string:
- * gutter + content (padded/truncated) + right reserve spaces.
- */
-export function fixedInputRow(line: InputLineItem, columns: number): string {
-  const contentColumns = inputContentColumns(columns)
-  const body = fixedInputLine(line.text, contentColumns)
-  const rightPad = Math.max(0, inputRightReserveColumns)
-  return `${line.gutter}${body}${' '.repeat(rightPad)}`
-}
-
 function graphemes(text: string): string[] {
   return terminalSegments(text).map(segment => segment.text)
 }

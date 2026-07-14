@@ -47,12 +47,11 @@ import {
   type SlashCommand,
 } from './slashCommands.js'
 import {
-  fixedInputRow,
+  fixedInputLine,
   inputContentColumns,
   inputFrameBorderStyle,
   inputGutterColumns,
   inputLeftPaddingColumns,
-  inputLineBoxWidth,
   inputViewport,
   renderInputLine,
   type InputViewport,
@@ -310,10 +309,7 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
 
 function InputView({ viewport, showCursor, columns, theme }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme }) {
   const lines = viewport.lines
-  // Fixed pixel width (not "100%") so Yoga cannot reflow the composer when the
-  // inverse caret moves or the text length changes — that reflow looks like
-  // horizontal shaking while typing in Windows terminals.
-  const lineWidth = inputLineBoxWidth(columns)
+  const contentColumns = inputContentColumns(columns)
   return (
     <Box
       flexDirection="column"
@@ -324,31 +320,21 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
       borderRight={false}
       borderTop
       borderBottom
-      width={columns}
+      width="100%"
       height={viewport.lines.length + 2}
       paddingLeft={inputLeftPaddingColumns}
       overflow="hidden"
     >
-      {lines.map((line, index) => {
-        const rowText = fixedInputRow(line, columns)
-        // Cursor target is measured within the content area only (after gutter).
-        const contentCursorColumn = line.cursorColumn === undefined
-          ? undefined
-          : inputGutterColumns + line.cursorColumn + 1
-        return (
-          <Box key={index} width={lineWidth} overflow="hidden">
-            <Text color={theme.accent} wrap="truncate-end">
-              {renderInputLine(
-                rowText,
-                showCursor && contentCursorColumn !== undefined,
-                contentCursorColumn,
-              ).map((part, partIndex) => (
-                <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
-              ))}
-            </Text>
-          </Box>
-        )
-      })}
+      {lines.map((line, index) => (
+        <Box key={index} width="100%" overflow="hidden">
+          <Text color={theme.accent} wrap="truncate-end">{line.gutter}</Text>
+          <Text color={theme.accent} wrap="truncate-end">
+            {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
+              <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
+            ))}
+          </Text>
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -1115,10 +1101,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   // Slash/panel render *below* the input (Codex popup under composer), so they
   // must not push the IME caret row. panelRows stays 0 for cursor math; total
   // bottomRows / clear geometry still include panel height via metrics.
-  // IMPORTANT: cursor math is relative to the live Ink band only.
-  // Absolute-screen CUP races Ink's redraw and can paint a second ghost
-  // composer (截图/严重bug.png). Codex owns the full frame buffer so it can
-  // set absolute caret coords; we must stay inside Ink's coordinate system.
   const inputCursor = inputCursorPosition({
     headerRows: metrics.headerRows,
     messageRows: messageRowsForCursor,
@@ -1148,30 +1130,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       restoreParkedCursor()
       return undefined
     }
-    // Park IME caret inside the live band (relative CUP), then restore before
-    // Ink's next paint so we do not leave a second composer ghost on screen.
     restoreParkedCursor()
-    stdout.write(
-      `${saveCursorPosition}${cursorPosition(
-        inputCursor.row,
-        inputCursor.column,
-        liveViewportRows,
-        metrics.canvasColumns,
-      )}`,
-    )
+    stdout.write(`${saveCursorPosition}${cursorPosition(inputCursor.row, inputCursor.column, metrics.rows, metrics.canvasColumns)}`)
     parkedCursorRef.current = true
     return () => {
       restoreParkedCursor()
     }
-  }, [
-    inputCursor.column,
-    inputCursor.row,
-    liveViewportRows,
-    metrics.canvasColumns,
-    state.status,
-    stdout,
-    terminalReady,
-  ])
+  }, [inputCursor.column, inputCursor.row, metrics, state.status, stdout, terminalReady])
 
   useEffect(() => {
     if (mouseMode !== 'full') {

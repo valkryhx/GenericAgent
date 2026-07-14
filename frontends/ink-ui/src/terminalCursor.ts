@@ -30,14 +30,6 @@ export function cursorPosition(row: number, column: number, rows: number, column
   return `\x1b[${clampedRow + 1};${clampedColumn + 1}H`
 }
 
-/**
- * Cursor position *relative to the live Ink band* (not absolute screen).
- *
- * Ink owns stdout and redraws the live region with its own cursor bookkeeping.
- * Absolute-screen CUP (Codex-style against the full terminal) races Ink and can
- * leave a second ghost composer (截图/严重bug.png). Park the IME caret with
- * relative geometry + save/restore so Ink's next frame starts from a known spot.
- */
 export function inputCursorPosition(input: InputCursorPositionInput): TerminalCursorPosition {
   return {
     row: input.headerRows
