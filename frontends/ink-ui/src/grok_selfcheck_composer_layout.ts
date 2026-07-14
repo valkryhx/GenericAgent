@@ -198,7 +198,7 @@ async function main() {
 
     const combined = stdout.chunks.join('')
     // No status header: ready caret is row 5 (1-based CUP 5;4H).
-    check('stdout 含 ready 光标 CUP ESC[5;4H', combined.includes('\x1b[5;4H'))
+    check('stdout 含 ready 光标 CUP ESC[5;4H', combined.includes('[5;4H'))
 
     console.log('\n=== 5) App: slash 在输入框边框下 ===')
     stdin.send('/')

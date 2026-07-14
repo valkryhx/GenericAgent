@@ -101,7 +101,7 @@ test('transcriptLines keeps [Action]/[Status] left-aligned and equally muted', (
       taskId: 1,
     },
   ]
-  const rows = transcriptLines(messages, { theme: getInkTheme('default') })
+  const rows = transcriptLines(messages, { expandedTools: false, theme: getInkTheme('default') })
   const action = rows.find(row => row.text.includes('[Action]'))
   const status = rows.find(row => row.text.includes('[Status]'))
   assert.ok(action)
@@ -128,7 +128,7 @@ test('transcriptLines strips blockquote markers from [Action]/[Status] lines', (
       taskId: 9,
     },
   ]
-  const rows = transcriptLines(messages, { theme: getInkTheme('default') })
+  const rows = transcriptLines(messages, { expandedTools: false, theme: getInkTheme('default') })
   const action = rows.find(row => row.text.includes('[Action]'))
   const status = rows.find(row => row.text.includes('[Status]'))
   assert.ok(action)
@@ -157,7 +157,7 @@ test('transcriptLines forces [Action]/[Status] to muted gray even when one side 
     },
   ]
   const theme = getInkTheme('default')
-  const rows = transcriptLines(messages, { theme })
+  const rows = transcriptLines(messages, { expandedTools: false, theme })
   const action = rows.find(row => row.text.includes('[Action]'))
   const status = rows.find(row => row.text.includes('[Status]'))
   assert.ok(action)

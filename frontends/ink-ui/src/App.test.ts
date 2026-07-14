@@ -204,6 +204,62 @@ test('App soft-wraps long input without writing into the physical final column',
   }
 })
 
+test('App keeps composer input chrome width stable while typing (no horizontal shake)', async () => {
+  // Regression: dual Text + width="100%" reflowed when the inverse caret moved,
+  // so the prompt appeared to shake left/right on each keystroke.
+  // Frame dumps may trim trailing spaces on content rows, so lock the border
+  // line width (full canvas) across keystrokes instead of the padded body.
+  const columns = 80
+  const stdout = new CaptureWriteStream()
+  stdout.columns = columns
+  const stderr = new CaptureWriteStream()
+  stderr.columns = columns
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    const borderWidths: number[] = []
+    const maxContentWidths: number[] = []
+    for (const chunk of ['a', 'b', 'c', '中', '文', '1', '2']) {
+      stdin.send(chunk)
+      const frame = await waitForFrame(stdout, value => value.includes('>'))
+      const lines = frame.split('\n')
+      const borders = inputBorderRows(frame)
+      assert.ok(borders.length >= 2, `missing input borders after ${chunk}`)
+      borderWidths.push(stringWidth(lines[borders[0]!] ?? ''))
+      const contentLine = lines[borders[0]! + 1] ?? ''
+      maxContentWidths.push(stringWidth(contentLine))
+      assert.ok(stringWidth(contentLine) < columns, `input line reached physical edge: ${stringWidth(contentLine)}`)
+      assert.ok(stringWidth(lines[borders[0]!] ?? '') < columns, 'border hit physical edge')
+    }
+    assert.ok(
+      borderWidths.every(width => width === borderWidths[0] && width > 0),
+      `composer border width jittered: ${JSON.stringify(borderWidths)}`,
+    )
+    // Content display width may grow with typed text (trailing pad not always in
+    // captured frames), but must never shrink after growing (leftward jump).
+    for (let i = 1; i < maxContentWidths.length; i++) {
+      assert.ok(
+        maxContentWidths[i]! >= maxContentWidths[i - 1]!,
+        `content width shrank (horizontal jump): ${JSON.stringify(maxContentWidths)}`,
+      )
+    }
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App renders one continuous safe-canvas scrollbar cell per message viewport row', async () => {
   const previousMouseMode = process.env.GA_INK_MOUSE
   process.env.GA_INK_MOUSE = 'full'
@@ -507,7 +563,8 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
   try {
     await waitForFrame(stdout, frame => frame.includes('>'))
 
-    // Content-desired ready (height=1), no header: activity+hint+border = row 5 (1-based).
+    // Content-desired ready (height=1), no header: relative live caret → CUP 5;4H.
+    // Must stay relative to the live Ink band (absolute CUP races Ink → ghost composer).
     assert.match(stdout.chunks.join(''), /\x1b\[5;4H/)
   } finally {
     instance.unmount()
@@ -546,7 +603,7 @@ test('App restores the renderer cursor before redrawing after parking the input 
     await waitForFrame(stdout, frame => frame.includes('> x'))
 
     const combined = stdout.chunks.join('')
-    // Cursor parks on content-desired ready caret row without header (messageRows live = 1).
+    // Relative live CUP + save/restore brackets Ink redraws.
     const parkedCaret = combined.indexOf('\x1b[5;4H')
     assert.notEqual(parkedCaret, -1)
     const nextInkErase = combined.indexOf('\x1b[2K', parkedCaret + 1)

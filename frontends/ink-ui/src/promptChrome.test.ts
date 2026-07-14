@@ -1,9 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import stringWidth from 'string-width'
 import {
   fixedInputLine,
+  fixedInputRow,
   inputContentColumns,
   inputFrameBorderStyle,
+  inputLeftPaddingColumns,
   inputViewport,
   renderInputLine,
 } from './promptChrome.js'
@@ -52,6 +55,17 @@ test('fixedInputLine keeps rendered input rows at a stable width', () => {
 test('inputContentColumns reserves fixed gutter, left padding, and a right-edge cursor cell', () => {
   assert.equal(inputContentColumns(20), 16)
   assert.equal(1 + 2 + inputContentColumns(20), 19)
+})
+
+test('fixedInputRow keeps every keystroke at a constant display width', () => {
+  const columns = 40
+  const expected = columns - inputLeftPaddingColumns
+  for (const text of ['', 'a', 'ab', '你好', 'x'.repeat(80)]) {
+    const first = fixedInputRow({ gutter: '> ', text }, columns)
+    const cont = fixedInputRow({ gutter: '  ', text }, columns)
+    assert.equal(stringWidth(first), expected, `first gutter width for ${JSON.stringify(text)}`)
+    assert.equal(stringWidth(cont), expected, `cont gutter width for ${JSON.stringify(text)}`)
+  }
 })
 
 test('inputViewport soft-wraps one logical line by terminal display width', () => {
