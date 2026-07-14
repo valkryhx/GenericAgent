@@ -5,6 +5,13 @@ export type MessagePartition = {
   activeMessages: ChatMessage[]
 }
 
+/**
+ * Split transcript into terminal scrollback (static) vs live viewport (active).
+ *
+ * Codex-aligned rule: done messages commit to scrollback; only !done messages
+ * stay in the live ring. A done user prompt must never re-enter active, or
+ * Ink <Static> + live will double-render the same user line.
+ */
 export function splitStaticAndActiveMessages(
   messages: ChatMessage[],
   options: { keepLatestTaskActive?: boolean } = {},
@@ -17,25 +24,23 @@ export function splitStaticAndActiveMessages(
       break
     }
   }
+
+  const staticMessages = messages.filter(message => message.done)
   if (latestTaskId === undefined) {
-    return { staticMessages: messages.filter(message => message.done), activeMessages: [] }
+    return { staticMessages, activeMessages: [] }
   }
 
-  const latestTaskMessages = messages.filter(message => message.taskId === latestTaskId)
-  const hasPendingMessage = latestTaskMessages.some(message => !message.done)
-  if (!hasPendingMessage && !options.keepLatestTaskActive) {
-    return { staticMessages: messages.filter(message => message.done), activeMessages: [] }
+  const hasPendingMessage = messages.some(
+    message => message.taskId === latestTaskId && !message.done,
+  )
+  const holdActive = hasPendingMessage || Boolean(options.keepLatestTaskActive)
+  if (!holdActive) {
+    return { staticMessages, activeMessages: [] }
   }
 
-  const activeStart = messages.findIndex(message => message.taskId === latestTaskId)
-  if (activeStart === -1) {
-    return { staticMessages: messages.filter(message => message.done), activeMessages: [] }
-  }
-
-  const beforeActive = messages.slice(0, activeStart)
-  const activeMessages = messages.slice(activeStart)
-  return {
-    staticMessages: beforeActive.filter(message => message.done),
-    activeMessages,
-  }
+  // Live only carries in-flight content (streaming assistant, etc.).
+  const activeMessages = messages.filter(
+    message => message.taskId === latestTaskId && !message.done,
+  )
+  return { staticMessages, activeMessages }
 }

@@ -619,16 +619,20 @@ test('App writes completed transcript to static terminal scrollback instead of t
   })
 
   try {
+    // Codex-aligned: done user prompts commit to Static immediately (including the
+    // latest running-turn user). Live viewport must not re-render them.
     await waitForOutput(stdout, output => output.includes('静态回答') && output.includes('活动问题'))
     const chunks = stdout.chunks.map(stripAnsi)
-    const staticChunk = chunks.find(chunk => chunk.includes('静态问题') || chunk.includes('静态回答'))
+    const staticOutput = chunks.filter(chunk => !chunk.includes('GenericAgent')).join('\n')
     const liveFrame = chunks.filter(chunk => chunk.includes('GenericAgent')).at(-1) ?? ''
 
-    assert.ok(staticChunk)
-    assert.equal(staticChunk.includes('GenericAgent'), false)
+    assert.match(staticOutput, /静态问题/)
+    assert.match(staticOutput, /静态回答/)
+    assert.match(staticOutput, /活动问题/)
     assert.doesNotMatch(liveFrame, /静态问题/)
     assert.doesNotMatch(liveFrame, /静态回答/)
-    assert.match(liveFrame, /活动问题/)
+    assert.doesNotMatch(liveFrame, /活动问题/)
+    assert.match(liveFrame, /running/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
