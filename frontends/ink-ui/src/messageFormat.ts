@@ -69,14 +69,22 @@ function formatToolBlock(name: string, argsText: string, options: FormatOptions)
 
 export function formatAssistantText(raw: string, options: FormatOptions = {}): string {
   let text = raw || ''
+  // Normalize newlines early so fence/tool regexes match Windows CRLF transcripts.
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   text = text.replace(/<summary>([\s\S]*?)<\/summary>/g, (_match, summary) => `Summary: ${String(summary).trim()}`)
   text = text.replace(
     /🛠️?\s*Tool:\s*`([^`]+)`\s*📥\s*args:\s*\n````text\n([\s\S]*?)\n````/g,
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
   text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `> ${name}(${args})`)
-  // Collapse 4+ backtick fences (tool result wrappers) to markdown triple fences so
-  // markdown rendering does not leave orphan fence tails like ":28**".
+  // GA wraps tool execution status in 4–5 backtick fences. Unwrap those status
+  // blocks (keep [Action]/[Status]/[Stdout] body) so a later turn header is
+  // never trapped inside a markdown code fence after stream-commit splits.
+  text = text.replace(
+    /(?:^|\n)`{4,}\s*\n((?:.*\n)*?(?:\[Action\]|\[Status\]|\[Stdout\])[\s\S]*?)\n`{4,}\s*(?=\n|$)/g,
+    (_match, body: string) => `\n${String(body).replace(/^\n+|\n+$/g, '')}\n`,
+  )
+  // Collapse remaining 4+ backtick fences to triple for markdown safety.
   text = text.replace(/`{4,}/g, '```')
   text = text.replace(/(?:^|\n)```\s*\n\s*\[Info\] Final response to user\.\s*\n```\s*(?=\n|$)/g, '\n')
   text = text.replace(/(?:^|\n)\s*\[Info\] Final response to user\.\s*(?=\n|$)/g, '\n')

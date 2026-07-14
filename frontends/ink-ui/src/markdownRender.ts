@@ -46,6 +46,12 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
       return
     case 'code':
       token.text.split('\n').forEach((line: string) => {
+        // GA [Action]/[Status] lines must never pick up code indent/color even if a
+        // residual fence still classifies them as code (stream-commit mid-fence).
+        if (/^\s*\[(?:Action|Status)\]/.test(line)) {
+          pushLine(lines, [{ text: line.trimStart() || ' ', color: theme?.muted ?? 'gray', dimColor: true }])
+          return
+        }
         pushLine(lines, [{ text: `  ${line || ' '}`, color: theme?.code ?? 'gray' }])
       })
       return

@@ -26,6 +26,57 @@ test('commitStreamingAssistantMessages leaves short streams untouched', () => {
   assert.equal(next.find(m => m.id === 'a-1')?.text, lines)
 })
 
+test('commitStreamingAssistantMessages does not split inside an open backtick fence', () => {
+  // Real GA tool traces wrap [Action]/[Status] in ````` fences. A naive
+  // "keep last N lines" cut can leave the fence open in the committed segment
+  // and put "**LLM Running (Turn 2)**" into the live tail after an unmatched
+  // opener — marked then treats Turn 2 as a code block and shows literal **.
+  const body = [
+    'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7',
+    '`````',
+    '[Action] Calling MCP tool: mcp__tavily__tavily_search',
+    '[Status] MCP success',
+    '`````',
+    '**LLM Running (Turn 2) ...**',
+    'tail0',
+    'tail1',
+    'tail2',
+  ].join('\n')
+  // Naive cut with maxTail=4 would commit through "[Status]" and leave the
+  // closing fence + Turn 2 in the live tail → open fence in commit, Turn 2
+  // after opener in live. Fence-safe cut must move the boundary.
+  const messages: ChatMessage[] = [liveAssistant(7, body)]
+  const next = commitStreamingAssistantMessages(messages, 7, 5)
+  const commits = next.filter(m => m.id.startsWith('a-7-c'))
+  const live = next.find(m => m.id === 'a-7')
+  assert.ok(commits.length >= 1)
+  for (const commit of commits) {
+    assert.equal(
+      fenceBalance(commit.text),
+      0,
+      `commit ${commit.id} left an open fence:\n${commit.text}`,
+    )
+  }
+  assert.equal(fenceBalance(live?.text ?? ''), 0, `live tail open fence:\n${live?.text}`)
+  // Turn 2 header must not sit after an unmatched opening fence in the same segment.
+  for (const segment of [...commits, live!]) {
+    if (!segment.text.includes('Turn 2')) continue
+    const beforeTurn2 = segment.text.slice(0, segment.text.indexOf('Turn 2'))
+    assert.equal(fenceBalance(beforeTurn2), 0, `Turn 2 trapped in open fence:\n${segment.text}`)
+  }
+  // Turn 2 must still appear exactly once across segments.
+  const all = [...commits, live!].map(m => m.text).join('\n')
+  assert.equal(all.split('LLM Running (Turn 2)').length - 1, 1)
+})
+
+function fenceBalance(text: string): number {
+  let open = 0
+  for (const line of text.split(/\r?\n/)) {
+    if (/^`{3,}\s*$/.test(line.trim())) open = open === 0 ? 1 : 0
+  }
+  return open
+}
+
 test('commitStreamingAssistantMessages commits overflow lines and keeps a short live tail', () => {
   const lines = Array.from({ length: 12 }, (_, i) => `L${i}`).join('\n')
   const messages: ChatMessage[] = [liveAssistant(2, lines)]

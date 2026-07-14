@@ -94,3 +94,21 @@ test('formatAssistantText collapses tool fence noise without dropping final bold
   assert.doesNotMatch(formatted, /^:28\*\*/m)
   assert.equal(formatted.split('LLM Running (Turn 1)').length - 1, 1)
 })
+
+test('formatAssistantText strips GA tool status fences so later turns stay markdown bold', () => {
+  const raw = [
+    '`````',
+    '[Action] Calling MCP tool: mcp__tavily__tavily_search',
+    '[Status] MCP success',
+    '`````',
+    '',
+    '**LLM Running (Turn 2) ...**',
+    '',
+    'Summary: second pass',
+  ].join('\n')
+  const formatted = formatAssistantText(raw)
+  assert.match(formatted, /\[Action\] Calling MCP tool/)
+  assert.doesNotMatch(formatted, /```/)
+  // After format, markdown renderer should still bold Turn 2 (no open fence).
+  assert.match(formatted, /\*\*LLM Running \(Turn 2\) \.\.\.\*\*/)
+})

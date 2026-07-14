@@ -191,17 +191,31 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
   const body = formatAssistantText(message.text, { expanded: expandedTools }) || ' '
   const markdownLines = renderMarkdownLines(body, theme)
   markdownLines.forEach((line, index) => {
-    // Do NOT prefix assistant body with ✻ — that glyph is reserved for the activity
-    // status line (formatRunningStatus / Thinking…). Stream-commit segments used to
-    // re-apply ✻ on every a-*-c* chunk, so it wrongly appeared many times in content.
-    const prefix = index === 0 ? '' : '  '
+    // No per-line "continuation indent". Stream-commit splits one logical turn into
+    // many a-*-c* messages; indenting every non-first line of each segment made
+    // [Action] (segment start) and [Status] (continuation) look misaligned.
+    const styled = styleAssistantTranscriptLine(line.parts ?? [{ text: line.text }], theme)
     rows.push({
       id: `${message.id}-${index}`,
-      text: prefix ? `${prefix}${line.text}` : line.text,
-      parts: prefix ? [{ text: prefix }, ...line.parts] : line.parts,
+      text: styled.map(part => part.text).join('') || ' ',
+      parts: styled,
     })
   })
   rows.push(blankLine(`${message.id}-blank`))
+}
+
+/** Keep GA tool progress lines left-aligned and consistently muted (not code cyan). */
+function styleAssistantTranscriptLine(parts: TranscriptPart[], theme?: InkTheme): TranscriptPart[] {
+  const text = parts.map(part => part.text).join('')
+  // Match even when markdown left a blockquote marker or residual indent:
+  //   "  [Status] ...", "| [Action] ...", "  | [Status] ..."
+  if (/^\s*(?:\|\s*)?\[(?:Action|Status)\]/.test(text)) {
+    const cleaned = text
+      .replace(/^\s*(?:\|\s*)+/, '')
+      .replace(/^\s+/, '')
+    return [{ text: cleaned || text.trim() || ' ', color: theme?.muted ?? 'gray', dimColor: true }]
+  }
+  return parts
 }
 
 function appendPlainLines(

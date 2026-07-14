@@ -8,6 +8,11 @@ export const DEFAULT_STREAM_LIVE_TAIL_LINES = 8
  * done Static segments (`a-{taskId}-c{n}`) and leave only the tail in the live message.
  *
  * Codex analogy: StreamController commit ticks + sync_active_stream_tail.
+ *
+ * Fence-safe: never cut between an unmatched opening/closing line of backticks
+ * (` ``` ` / ` ```` ` / ` ````` `). GA wraps tool status in ````` fences; a mid-fence
+ * cut leaves the next "**LLM Running (Turn N)**" inside a markdown code block so
+ * bold markers render literally (Turn 2 screenshot bug).
  */
 export function commitStreamingAssistantMessages(
   messages: ChatMessage[],
@@ -23,7 +28,9 @@ export function commitStreamingAssistantMessages(
   const maxTail = Math.max(1, Math.floor(tailLines))
   if (lines.length <= maxTail) return messages
 
-  const overflowCount = lines.length - maxTail
+  const overflowCount = findFenceSafeOverflowCount(lines, maxTail)
+  if (overflowCount <= 0) return messages
+
   const overflowText = lines.slice(0, overflowCount).join('\n')
   const tailText = lines.slice(overflowCount).join('\n')
   if (!overflowText) return messages
@@ -44,6 +51,50 @@ export function commitStreamingAssistantMessages(
   const newLiveIndex = next.findIndex(message => message.id === liveId)
   next[newLiveIndex] = { ...live, text: tailText, done: false }
   return next
+}
+
+/**
+ * Choose how many leading lines to commit so:
+ * - live tail has at least `maxTail` lines when possible
+ * - neither overflow nor tail starts/ends with an unmatched fence
+ * If every candidate leaves a fence open, prefer committing nothing this tick
+ * (wait for more lines) rather than splitting mid-fence.
+ */
+export function findFenceSafeOverflowCount(lines: string[], maxTail: number): number {
+  const total = lines.length
+  const maxTailSafe = Math.max(1, Math.floor(maxTail))
+  if (total <= maxTailSafe) return 0
+
+  // Preferred cut: keep last maxTail lines live.
+  let overflow = total - maxTailSafe
+  // If that cut is mid-fence, walk overflow downward (commit less / keep more live)
+  // until fences balance on both sides, or overflow hits 0.
+  while (overflow > 0) {
+    if (isFenceSafeCut(lines, overflow)) return overflow
+    overflow -= 1
+  }
+  return 0
+}
+
+function isFenceSafeCut(lines: string[], overflowCount: number): boolean {
+  if (overflowCount <= 0 || overflowCount >= lines.length) return false
+  const head = lines.slice(0, overflowCount)
+  const tail = lines.slice(overflowCount)
+  return fenceOpenState(head) === 0 && fenceOpenState(tail) === 0
+}
+
+/** Toggle on fence-only lines (` ``` ` / longer). 0 = closed, 1 = open. */
+function fenceOpenState(lines: string[]): number {
+  let open = 0
+  for (const line of lines) {
+    if (isFenceLine(line)) open = open === 0 ? 1 : 0
+  }
+  return open
+}
+
+function isFenceLine(line: string): boolean {
+  // GA uses 3–5 backticks, optionally with a language tag (````text`).
+  return /^`{3,}[^\n`]*$/.test(line.trim())
 }
 
 /**
