@@ -72,7 +72,14 @@ async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: strin
   const deadline = Date.now() + 2000
   let lastFrame = ''
   while (Date.now() < deadline) {
-    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent'))
+    // Live frames used to always include a "GenericAgent" header; default inline
+    // mode no longer paints that header, so detect chrome via composer/hint instead.
+    const frames = stdout.chunks.map(stripAnsi).filter(chunk => (
+      chunk.includes('GenericAgent')
+      || chunk.includes('Enter send')
+      || chunk.includes('Running ·')
+      || /─{8,}/.test(chunk)
+    ))
     lastFrame = frames.at(-1) ?? ''
     if (predicate(lastFrame)) return lastFrame
     await delay(20)
@@ -101,7 +108,12 @@ function readyBridge(
 }
 
 function completeFrames(stdout: CaptureWriteStream, start = 0): string[] {
-  return stdout.chunks.slice(start).map(stripAnsi).filter(chunk => chunk.includes('GenericAgent'))
+  return stdout.chunks.slice(start).map(stripAnsi).filter(chunk => (
+    chunk.includes('GenericAgent')
+    || chunk.includes('Enter send')
+    || chunk.includes('Running ·')
+    || /─{8,}/.test(chunk)
+  ))
 }
 
 function inputBorderRows(frame: string): number[] {
@@ -110,6 +122,51 @@ function inputBorderRows(frame: string): number[] {
     .filter(item => /^─+$/.test(item.line))
     .map(item => item.index)
 }
+
+/** Empty live rows between last non-chrome content and the activity/hint chrome. */
+function emptyLiveGapAboveChrome(frame: string): number {
+  const lines = frame.split('\n')
+  const chromeIdx = lines.findIndex(line => (
+    line.includes('Enter send')
+    || line.includes('Running ·')
+    || line.includes('✻')
+  ))
+  if (chromeIdx < 0) return Number.POSITIVE_INFINITY
+  // activity placeholder is usually one row above the hint line
+  const activityIdx = Math.max(0, chromeIdx - 1)
+  let empty = 0
+  for (let row = activityIdx - 1; row >= 0; row -= 1) {
+    if ((lines[row] ?? '').trim().length === 0) empty += 1
+    else break
+  }
+  return empty
+}
+
+test('App default inline mode does not paint a GenericAgent status header above the transcript', async () => {
+  // Status belongs in the bottom activity chrome; a live header after <Static>
+  // looks like "GenericAgent running" jammed into the middle of output.
+  delete process.env.GA_INK_MOUSE
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    const live = stdout.chunks.map(stripAnsi).filter(c => c.includes('Enter send') || c.includes('>')).at(-1) ?? ''
+    assert.doesNotMatch(live, /GenericAgent\s+(idle|running|connecting)/)
+  } finally {
+    instance.unmount()
+  }
+})
 
 test('App soft-wraps long input without writing into the physical final column', async () => {
   const longInput = `${'0123456789'.repeat(13)}尾部`
@@ -276,29 +333,32 @@ test('App keeps input chrome fixed while long mixed-width output streams', async
 
     eventSink({ type: 'status', status: 'running', taskId: 1 })
     eventSink({ type: 'user', taskId: 1, text: '保持输入区稳定' })
-    let expectedBorders: number[] | null = null
     const streamingFrames: string[] = []
     for (const text of [
       `第一段 ${'中文'.repeat(20)}`,
       `https://example.test/${'path/'.repeat(20)}`,
-      `👨‍💻 e\u0301 **streaming** ${'abcdef'.repeat(20)}`,
+      `👨‍💻 é **streaming** ${'abcdef'.repeat(20)}`,
     ]) {
       const frameStart = stdout.chunks.length
       eventSink({ type: 'assistant_delta', taskId: 1, text })
       await delay(120)
       const frame = completeFrames(stdout, frameStart).at(-1)
-      if (frame) {
-        streamingFrames.push(frame)
-        expectedBorders ??= inputBorderRows(frame)
-      }
+      if (frame) streamingFrames.push(frame)
     }
 
     assert.equal(streamingFrames.length, 3)
-    assert.ok(expectedBorders)
+    // Content-desired: live height may grow with stream lines (Codex-like), so absolute
+    // border row indices can increase — but the input chrome block size (border pair gap)
+    // stays 2, and lines stay within the safe canvas width.
     for (const frame of streamingFrames) {
-      assert.deepEqual(inputBorderRows(frame), expectedBorders)
+      const borders = inputBorderRows(frame)
+      assert.ok(borders.length >= 2)
+      assert.equal(borders[1]! - borders[0]!, 2)
       assert.equal(frame.split('\n').every(line => stringWidth(line) < 40), true)
     }
+    const lastBorders = inputBorderRows(streamingFrames.at(-1)!)
+    const midBorders = inputBorderRows(streamingFrames[1]!)
+    assert.ok(lastBorders[0]! >= midBorders[0]!)
   } finally {
     instance.unmount()
   }
@@ -447,7 +507,8 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
   try {
     await waitForFrame(stdout, frame => frame.includes('>'))
 
-    assert.match(stdout.chunks.join(''), /\x1b\[6;4H/)
+    // Content-desired ready (height=1), no header: activity+hint+border = row 5 (1-based).
+    assert.match(stdout.chunks.join(''), /\x1b\[5;4H/)
   } finally {
     instance.unmount()
   }
@@ -485,7 +546,8 @@ test('App restores the renderer cursor before redrawing after parking the input 
     await waitForFrame(stdout, frame => frame.includes('> x'))
 
     const combined = stdout.chunks.join('')
-    const parkedCaret = combined.indexOf('\x1b[6;4H')
+    // Cursor parks on content-desired ready caret row without header (messageRows live = 1).
+    const parkedCaret = combined.indexOf('\x1b[5;4H')
     assert.notEqual(parkedCaret, -1)
     const nextInkErase = combined.indexOf('\x1b[2K', parkedCaret + 1)
     assert.notEqual(nextInkErase, -1)
@@ -526,7 +588,7 @@ test('App does not enter the alternate screen before the first Ink frame is writ
   })
 
   try {
-    await waitForFrame(stdout, frame => frame.includes('GenericAgent'))
+    await waitForFrame(stdout, frame => frame.includes('>') || frame.includes('Enter send'))
     const combined = stdout.chunks.join('')
     const alternateScreenIndex = combined.indexOf('\u001B[?1049h')
 
@@ -575,9 +637,11 @@ test('App clears the inline live input block before exiting on Ctrl+C', async ()
 
     const combined = stdout.chunks.join('')
     assert.deepEqual(sentCommands.at(-1), { type: 'shutdown' })
-    assert.match(combined, /\u001B\[0m\u001B\[(?:5|7)A\r/)
-    assert.ok((combined.match(/\u001B\[2K/g) ?? []).length >= 7)
-    assert.match(combined, /\u001B\[6A\r/)
+    // No header: liveViewportRows = msg(1)+bottom(5) = 6.
+    // Parked caret ~row 4; unparked uses rows as cursorRow → 6A up, 6×2K, 5A back.
+    assert.match(combined, /\u001B\[0m\u001B\[(?:4|6)A\r/)
+    assert.ok((combined.match(/\u001B\[2K/g) ?? []).length >= 6)
+    assert.match(combined, /\u001B\[5A\r/)
   } finally {
     instance.unmount()
   }
@@ -619,23 +683,115 @@ test('App writes completed transcript to static terminal scrollback instead of t
   })
 
   try {
-    // Codex-aligned: done user prompts commit to Static immediately (including the
-    // latest running-turn user). Live viewport must not re-render them.
+    // P0-A: completed turn commits to Static; open-turn user stays in live only (single channel).
     await waitForOutput(stdout, output => output.includes('静态回答') && output.includes('活动问题'))
     const chunks = stdout.chunks.map(stripAnsi)
-    const staticOutput = chunks.filter(chunk => !chunk.includes('GenericAgent')).join('\n')
-    const liveFrame = chunks.filter(chunk => chunk.includes('GenericAgent')).at(-1) ?? ''
+    const staticOutput = chunks.filter(chunk => !chunk.includes('活动问题') && (chunk.includes('静态问题') || chunk.includes('静态回答'))).join('\n')
+    const liveFrame = chunks.filter(chunk => chunk.includes('活动问题') || chunk.includes('Running ·') || chunk.includes('running')).at(-1) ?? ''
 
     assert.match(staticOutput, /静态问题/)
     assert.match(staticOutput, /静态回答/)
-    assert.match(staticOutput, /活动问题/)
+    assert.doesNotMatch(staticOutput, /活动问题/)
     assert.doesNotMatch(liveFrame, /静态问题/)
     assert.doesNotMatch(liveFrame, /静态回答/)
-    assert.doesNotMatch(liveFrame, /活动问题/)
-    assert.match(liveFrame, /running/)
+    assert.match(liveFrame, /活动问题/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
+  }
+})
+
+
+test('App places slash suggestions below the input frame', async () => {
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    stdin.send('/')
+    const frame = await waitForFrame(stdout, f => f.includes('/help') || f.includes('/clear') || f.includes('/model'))
+    const lines = frame.split('\n')
+    const borders = inputBorderRows(frame)
+    assert.ok(borders.length >= 2, `input borders missing: ${frame.slice(0, 500)}`)
+    // Composer body sits between the two border rows; slash popup must be after the bottom border.
+    const inputLine = borders[0] + 1
+    const bottomBorder = borders[1]
+    const slashLine = lines.findIndex((line, index) => index > bottomBorder && /\/(help|clear|model|workflow)/.test(line))
+    assert.ok(slashLine > bottomBorder, `expected slash below input border@${bottomBorder}, got slash@${slashLine}; frame=${frame.slice(0, 500)}`)
+    assert.ok(inputLine < slashLine)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App sticks composer near static history without a full-height empty live slot', async () => {
+  let emit: ((event: BridgeEvent) => void) | null = null
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    emit = onEvent
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return { send() {}, stop() {} }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    const readyFrame = await waitForFrame(stdout, frame => frame.includes('>'))
+    // Ready: compact 1-row cue only — no full-height empty live spacer.
+    assert.ok(
+      emptyLiveGapAboveChrome(readyFrame) <= 2,
+      `ready live slot still full-height overfix: gap=${emptyLiveGapAboveChrome(readyFrame)}`,
+    )
+    const readyBorders = inputBorderRows(readyFrame)
+    assert.ok(readyBorders.length >= 2)
+
+    const sink = emit as (event: BridgeEvent) => void
+    sink({ type: 'user', taskId: 1, text: '长历史锚点探针' })
+    sink({ type: 'assistant_done', taskId: 1, text: '这是一段足够长的助手回答，用来写入 Static scrollback。' })
+    sink({ type: 'status', status: 'idle' })
+    await delay(150)
+
+    // Static history is not part of live frames; wait for idle composer chrome only.
+    // debug:true may still include Static lines in the same frame, so measure the empty
+    // gap above activity/hint chrome rather than first-non-empty → border.
+    const idleFrame = await waitForFrame(stdout, frame => (
+      frame.includes('>')
+      && frame.includes('Enter send')
+      && !frame.includes('Running ·')
+    ))
+    const idleBorders = inputBorderRows(idleFrame)
+    assert.ok(idleBorders.length >= 2)
+    const idleGap = emptyLiveGapAboveChrome(idleFrame)
+    // Idle + Static: live kind none → no tall empty live gap above chrome.
+    assert.ok(idleGap <= 1, `idle still has tall empty live gap: ${idleGap}`)
+  } finally {
+    instance.unmount()
   }
 })
 

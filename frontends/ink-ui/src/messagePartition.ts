@@ -8,9 +8,12 @@ export type MessagePartition = {
 /**
  * Split transcript into terminal scrollback (static) vs live viewport (active).
  *
- * Codex-aligned rule: done messages commit to scrollback; only !done messages
- * stay in the live ring. A done user prompt must never re-enter active, or
- * Ink <Static> + live will double-render the same user line.
+ * Single-channel rule:
+ * - done → Static only (never re-enter live)
+ * - !done → live only (open-turn user + streaming assistant)
+ *
+ * P0-A running visibility: open-turn user is !done so it paints in live until
+ * finalize, avoiding premature Static writes that the growing live dock can cover.
  */
 export function splitStaticAndActiveMessages(
   messages: ChatMessage[],
@@ -38,7 +41,6 @@ export function splitStaticAndActiveMessages(
     return { staticMessages, activeMessages: [] }
   }
 
-  // Live only carries in-flight content (streaming assistant, etc.).
   const activeMessages = messages.filter(
     message => message.taskId === latestTaskId && !message.done,
   )

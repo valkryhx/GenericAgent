@@ -53,11 +53,20 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function isLiveChromeFrame(chunk: string): boolean {
+  // Default inline mode no longer paints a "GenericAgent" status header.
+  return chunk.includes('GenericAgent')
+    || chunk.includes('Enter send')
+    || chunk.includes('Running ·')
+    || chunk.includes('Dynamic workflows')
+    || /─{8,}/.test(chunk)
+}
+
 async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: string) => boolean): Promise<string> {
   const deadline = Date.now() + 2000
   let lastFrame = ''
   while (Date.now() < deadline) {
-    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent'))
+    const frames = stdout.chunks.map(stripAnsi).filter(isLiveChromeFrame)
     lastFrame = frames.at(-1) ?? ''
     if (predicate(lastFrame)) return lastFrame
     await delay(20)

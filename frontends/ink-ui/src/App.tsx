@@ -741,10 +741,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         return
       }
       if (event.type === 'assistant_done') {
+        // Bridge `done` is already the full assistant_text for the turn.
+        // Flush any throttled deltas first, then finalize with the full text only —
+        // never concatenate pending + done (that double-counts streamed content and
+        // breaks stream-commit prefix stripping → "LLM Running Turn 1" appears twice).
+        if (throttleTimer) {
+          clearTimeout(throttleTimer)
+          throttleTimer = null
+        }
+        flushDeltas()
         const taskIdStr = String(event.taskId)
-        const cachedDelta = pendingDeltas[taskIdStr] || ''
         delete pendingDeltas[taskIdStr]
-        dispatch({ type: 'assistant_done', taskId: event.taskId, text: cachedDelta + event.text })
+        dispatch({ type: 'assistant_done', taskId: event.taskId, text: event.text })
         return
       }
       dispatch(event)
@@ -1033,6 +1041,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     hasSlashSuggestions: slashItems.length > 0,
     inputRows,
     panelRows,
+    // Inline scrollback: no title/status header. A live "GenericAgent running"
+    // band sits after <Static> and looks jammed into the middle of output.
+    // Full mouse mode keeps a 1-row header (single viewport, no Static).
+    headerRows: mouseMode === 'full' ? 1 : 0,
   })
   const keepLatestTaskActive = state.status === 'running' || state.status === 'stopping'
   const messagePartition = useMemo(() => (
@@ -1054,13 +1066,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       hasStaticMessages: staticTranscriptRows.length > 0,
       liveLineCount: activeTranscriptRows.length,
       messageRows: metrics.messageRows,
+      keepLivePlaceholder: keepLatestTaskActive && activeTranscriptRows.length === 0,
     })
-  ), [activeTranscriptRows.length, metrics.messageRows, staticTranscriptRows.length])
-  const inlineMessageRows = inlineMessageViewportPlan.kind === 'live'
-    ? inlineMessageViewportPlan.height
-    : inlineMessageViewportPlan.kind === 'ready'
-      ? 1
-      : 0
+  ), [activeTranscriptRows.length, keepLatestTaskActive, metrics.messageRows, staticTranscriptRows.length])
+  const inlineMessageRows = inlineMessageViewportPlan.kind === 'none'
+    ? 0
+    : inlineMessageViewportPlan.height
   const messageRowsForCursor = mouseMode === 'full' ? metrics.messageRows : inlineMessageRows
   const liveTranscriptRows = useMemo(() => (
     inlineMessageViewportPlan.kind === 'live'
@@ -1087,13 +1098,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   transcriptRowsRef.current = mouseMode === 'full'
     ? { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
     : { totalRows: activeTranscriptRows.length, viewportRows: Math.max(1, inlineMessageRows) }
-  const visiblePanelRows = Math.max(0, metrics.bottomRows - (1 + errorRows + 3 + inputRows))
+  // Slash/panel render *below* the input (Codex popup under composer), so they
+  // must not push the IME caret row. panelRows stays 0 for cursor math; total
+  // bottomRows / clear geometry still include panel height via metrics.
   const inputCursor = inputCursorPosition({
     headerRows: metrics.headerRows,
     messageRows: messageRowsForCursor,
     activityRows: 1,
     errorRows,
-    panelRows: visiblePanelRows,
+    panelRows: 0,
     hintRows: 1,
     inputBorderTopRows: 1,
     inputPaddingLeftColumns: inputLeftPaddingColumns,
@@ -1106,6 +1119,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     rows: liveViewportRows,
     cursorRow: Math.min(inputCursor.row, Math.max(0, liveViewportRows - 1)),
   }
+
+  // NOTE: Phase-3 raw ANSI insert_history sequences must NOT be written while Ink owns
+  // stdout. Doing so (DECSTBM + RI) races Ink redraws and produces duplicated headers /
+  // stacked composers (see 截图/新bug.png). Geometry helpers remain in insertHistory.ts
+  // for unit tests and a future non-Ink or coordinated renderer path.
 
   useLayoutEffect(() => {
     if (!terminalReady || state.status === 'running' || state.status === 'stopping') {
@@ -1180,7 +1198,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     if (inlineMessageViewportPlan.kind === 'ready') {
       return (
         <MessageViewport
-          height={1}
+          height={inlineMessageViewportPlan.height}
           columns={metrics.canvasColumns}
           lines={[]}
           ready
@@ -1196,7 +1214,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         height={inlineMessageViewportPlan.height}
         columns={metrics.canvasColumns}
         lines={liveTranscriptRows}
-        ready={false}
+        ready={liveTranscriptRows.length === 0}
         totalRows={activeTranscriptRows.length}
         scrollOffset={0}
         theme={theme}
@@ -1213,10 +1231,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
         </Static>
       )}
       <Box flexDirection="column" width={metrics.canvasColumns}>
-        <Box justifyContent="space-between" paddingX={1} width={metrics.canvasColumns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
-          <Text bold wrap="truncate-end">GenericAgent</Text>
-          <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
-        </Box>
+        {metrics.headerRows > 0 ? (
+          <Box justifyContent="space-between" paddingX={1} width={metrics.canvasColumns} height={metrics.headerRows} flexShrink={0} overflow="hidden">
+            <Text bold wrap="truncate-end">GenericAgent</Text>
+            <Text color={statusColor} wrap="truncate-end">{state.status}</Text>
+          </Box>
+        ) : null}
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
           {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}

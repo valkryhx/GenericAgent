@@ -41,22 +41,19 @@ test('computeLayoutMetrics exposes physical and safe widths separately', () => {
   assert.equal(metrics.canvasColumns, 79)
 })
 
-test('computeLayoutMetrics reserves one terminal row so Ink does not full-clear on each render', () => {
-  assert.deepEqual(computeLayoutMetrics({
+test('computeLayoutMetrics allows zero header rows for inline scrollback chrome', () => {
+  const metrics = computeLayoutMetrics({
     rows: 24,
     columns: 80,
     hasActivity: false,
     hasError: false,
     hasPanel: false,
     hasSlashSuggestions: false,
-  }), {
-    rows: 23,
-    terminalColumns: 80,
-    canvasColumns: 79,
-    headerRows: 1,
-    bottomRows: 5,
-    messageRows: 17,
+    headerRows: 0,
   })
+  assert.equal(metrics.headerRows, 0)
+  assert.equal(metrics.bottomRows, 5)
+  assert.equal(metrics.messageRows, 18)
 })
 
 test('computeLayoutMetrics does not change bottom height when activity toggles', () => {

@@ -64,3 +64,33 @@ test('formatAssistantText removes final response marker block', () => {
 
   assert.equal(formatAssistantText(raw), '这是最终回答。')
 })
+
+test('formatAssistantText collapses tool fence noise without dropping final bold answer', () => {
+  const raw = [
+    '**LLM Running (Turn 1) ...**',
+    '',
+    '<summary>需要当前时间，读取系统钟</summary>',
+    '',
+    '🛠️ Tool: `code_run`  📥 args:',
+    '````text',
+    '{"script":"print(1)","type":"python"}',
+    '````',
+    '`````',
+    '[Action] Running python',
+    '[Status] Exit Code: 0',
+    '[Stdout]',
+    '2026-07-14 15:28:09 Tuesday',
+    '`````',
+    '',
+    '**LLM Running (Turn 2) ...**',
+    '',
+    '<summary>系统时间为15:28</summary>',
+    '',
+    '现在是 **2026年7月14日 15:28**。',
+  ].join('\n')
+
+  const formatted = formatAssistantText(raw)
+  assert.match(formatted, /现在是 \*\*2026年7月14日 15:28\*\*。/)
+  assert.doesNotMatch(formatted, /^:28\*\*/m)
+  assert.equal(formatted.split('LLM Running (Turn 1)').length - 1, 1)
+})

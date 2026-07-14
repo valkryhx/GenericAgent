@@ -77,6 +77,44 @@ def should_flush_display_delta(full_resp, last_pos, chunk):
     return len(full_resp) - last_pos >= STREAM_FLUSH_CHARS or 'LLM Running' in chunk
 
 
+def normalize_display_assistant_text(full_resp: str) -> str:
+    """Idempotent display-only markup rewrites (tests / non-streaming callers).
+
+    Prefer not using this on the live stream path after partial flushes — inserting
+    characters before `last_pos` corrupts incremental deltas. The agent run loop
+    ships raw stream text and leaves spacing to the frontend formatter.
+    """
+    if not full_resp:
+        return full_resp
+    text = full_resp
+    if '</summary>' in text:
+        text = text.replace('</summary>\n\n', '</summary>')
+        text = text.replace('</summary>', '</summary>\n\n')
+    if '</file_content>' in text:
+        # Wrap bare tags only; leave already-fenced blocks untouched (idempotent).
+        parts: list[str] = []
+        cursor = 0
+        for match in re.finditer(r'<file_content>\s*(.*?)\s*</file_content>', text, flags=re.DOTALL):
+            start, end = match.span()
+            before = text[max(0, start - 5):start]
+            after = text[end:end + 5]
+            already_fenced = before.endswith('````\n') or before.endswith('````') and after.startswith('\n````')
+            # Also detect fenced form "````\n<file_content>...\n````"
+            window_before = text[max(0, start - 6):start]
+            window_after = text[end:end + 6]
+            already_fenced = window_before.endswith('````\n') and window_after.startswith('\n````')
+            parts.append(text[cursor:start])
+            if already_fenced:
+                parts.append(match.group(0))
+            else:
+                body = match.group(1)
+                parts.append(f'\n````\n<file_content>\n{body}\n</file_content>\n````')
+            cursor = end
+        parts.append(text[cursor:])
+        text = ''.join(parts)
+    return text
+
+
 def load_tool_schema(suffix='', include_mcp_tools=True):
     global TOOLS_SCHEMA
     with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
@@ -295,8 +333,11 @@ class GenericAgent:
                         display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 'source': source})
                         last_pos = len(full_resp)
                 if self.inc_out and last_pos < len(full_resp): display_queue.put({'next': full_resp[last_pos:], 'source': source})
-                if '</summary>' in full_resp: full_resp = full_resp.replace('</summary>', '</summary>\n\n')
-                if '</file_content>' in full_resp: full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)                
+                # Do NOT rewrite markup only on `done` (e.g. </summary> → </summary>\n\n).
+                # Streamed `next` chunks already shipped the raw text; a done-only rewrite
+                # makes the full payload diverge from the stream-commit prefix and the
+                # Ink UI re-paints Turn 1 + tools a second time. Display spacing belongs
+                # in the frontend formatter (formatAssistantText).
                 display_queue.put({'done': full_resp, 'source': source})
                 self.history = handler.history_info
                 try:

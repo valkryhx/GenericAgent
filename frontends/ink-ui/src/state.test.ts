@@ -5,12 +5,14 @@ import { applyBridgeEvent, initialState } from './state.js'
 test('applyBridgeEvent appends stream deltas and replaces final text', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, { type: 'user', taskId: 1, text: 'hi' })
+  assert.equal(state.messages[0]?.done, false)
   state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 1, text: 'he' })
   state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 1, text: 'llo' })
   state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 1, text: 'hello final' })
 
   assert.equal(state.status, 'idle')
   assert.equal(state.messages.length, 2)
+  assert.equal(state.messages[0]?.done, true)
   assert.deepEqual(state.messages[1], {
     id: 'a-1',
     role: 'assistant',
@@ -18,6 +20,77 @@ test('applyBridgeEvent appends stream deltas and replaces final text', () => {
     done: true,
     taskId: 1,
   })
+})
+
+test('applyBridgeEvent commits overflow stream lines and finalizes only the remaining tail', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 2, text: 'q' })
+  const many = Array.from({ length: 12 }, (_, i) => `S${i}`).join('\n')
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 2, text: many })
+
+  // First assistant content finalizes the open user so Static order is user → assistant commits.
+  assert.equal(state.messages.find(m => m.id === 'u-2')?.done, true)
+  const commits = state.messages.filter(m => m.id.startsWith('a-2-c'))
+  const live = state.messages.find(m => m.id === 'a-2')
+  assert.ok(commits.length >= 1)
+  assert.ok(commits.every(m => m.done))
+  assert.equal(live?.done, false)
+  assert.ok((live?.text.split('\n').length ?? 99) <= 8)
+  // Chronological: user before any assistant commit segment in messages array.
+  const userIdx = state.messages.findIndex(m => m.id === 'u-2')
+  const firstCommitIdx = state.messages.findIndex(m => m.id.startsWith('a-2-c'))
+  assert.ok(userIdx >= 0 && firstCommitIdx > userIdx)
+
+  const full = many
+  state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 2, text: full })
+  const finalLive = state.messages.find(m => m.id === 'a-2')
+  assert.equal(finalLive?.done, true)
+  // Final body must not re-include already committed lines as a second full dump.
+  const allAssistantText = state.messages.filter(m => m.role === 'assistant').map(m => m.text).join('\n')
+  for (const line of full.split('\n')) {
+    assert.equal(allAssistantText.split('\n').filter(l => l === line).length, 1, `line duplicated: ${line}`)
+  }
+  assert.equal(state.messages.find(m => m.id === 'u-2')?.done, true)
+})
+
+
+test('applyBridgeEvent assistant_done with summary newline rewrite does not duplicate LLM Running turns', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 11, text: '现在几点' })
+  // Simulate long incremental stream (tool + two turns) so stream-commit creates a-11-c* segments.
+  const parts = [
+    '**LLM Running (Turn 1) ...**\n\n',
+    '<summary>需要当前时间，读取系统钟</summary>\n',
+    '🛠️ Tool: `code_run`  📥 args:\n````text\n{"script":"print(1)"}\n````\n',
+    '`````\n[Action] Running python\n[Status] Exit Code: 0\n[Stdout]\n2026-07-14 15:28:09 Tuesday\n`````\n\n',
+    '**LLM Running (Turn 2) ...**\n\n',
+    '<summary>系统时间为15:28</summary>\n\n',
+    '现在是 **2026年7月14日 15:28**。\n',
+  ]
+  for (const part of parts) {
+    state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 11, text: part })
+  }
+  const streamed = state.messages.filter(m => m.role === 'assistant').map(m => m.text).join('\n')
+  assert.ok(state.messages.some(m => m.id.startsWith('a-11-c')), 'expected stream commits for long turn')
+  // agentmain only injects extra newline after </summary> on the final done payload
+  const done = streamed.replaceAll('</summary>', '</summary>\n\n')
+  state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 11, text: done })
+  const all = state.messages.filter(m => m.role === 'assistant').map(m => m.text).join('\n')
+  assert.equal(all.split('LLM Running (Turn 1)').length - 1, 1, `Turn 1 duplicated in:\n${all}`)
+  assert.equal(all.split('LLM Running (Turn 2)').length - 1, 1, `Turn 2 duplicated in:\n${all}`)
+  assert.match(all, /15:28/)
+  assert.doesNotMatch(all, /^:28\*\*/m)
+})
+
+test('applyBridgeEvent finalizes open user on first assistant_delta so user is not lost mid-stream', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 4, text: '现在几点了' })
+  assert.equal(state.messages.find(m => m.id === 'u-4')?.done, false)
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 4, text: '稍等' })
+  assert.equal(state.messages.find(m => m.id === 'u-4')?.done, true)
+  const split = state.messages
+  assert.ok(split.find(m => m.id === 'u-4')!.done)
+  assert.equal(split.find(m => m.id === 'a-4')?.done, false)
 })
 
 test('applyBridgeEvent appends system messages and clears display only', () => {

@@ -1,4 +1,9 @@
 import type { BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
+import {
+  commitStreamingAssistantMessages,
+  committedAssistantPrefix,
+  remainingAssistantTextAfterCommits,
+} from './streamCommit.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
@@ -29,7 +34,19 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     return { ...state, status: 'idle', activityLabel: null, tokenUsage: null, error: null }
   }
   if (event.type === 'status') {
-    return { ...state, status: event.status, activityLabel: event.status === 'idle' ? null : state.activityLabel, tokenUsage: event.status === 'running' ? null : state.tokenUsage, error: null }
+    const nextStatus = event.status
+    // Finalize open-turn user prompts when the turn returns to idle so they commit to Static once.
+    const messages = nextStatus === 'idle'
+      ? finalizeOpenUserMessages(state.messages)
+      : state.messages
+    return {
+      ...state,
+      status: nextStatus,
+      activityLabel: nextStatus === 'idle' ? null : state.activityLabel,
+      tokenUsage: nextStatus === 'running' ? null : state.tokenUsage,
+      messages,
+      error: null,
+    }
   }
   if (event.type === 'activity') {
     return { ...state, activityLabel: event.label, error: null }
@@ -144,37 +161,64 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     return { ...state, messages: state.messages.slice(0, idx), error: null }
   }
   if (event.type === 'user') {
+    // P0-A: open-turn user stays !done so it only paints in live until finalize.
+    // Prevents premature Static write that live dock height changes can cover.
     return {
       ...state,
-      messages: [...state.messages, { id: `u-${event.taskId}`, role: 'user', text: event.text, done: true, taskId: event.taskId }],
+      messages: [...state.messages, { id: `u-${event.taskId}`, role: 'user', text: event.text, done: false, taskId: event.taskId }],
       error: null,
     }
   }
   if (event.type === 'assistant_delta') {
     const id = `a-${event.taskId}`
     const idx = state.messages.findIndex(message => message.id === id)
+    let messages: ChatMessage[]
     if (idx === -1) {
-      return {
-        ...state,
-        messages: [...state.messages, { id, role: 'assistant', text: event.text, done: false, taskId: event.taskId }],
-      }
+      messages = [...state.messages, { id, role: 'assistant', text: event.text, done: false, taskId: event.taskId }]
+    } else {
+      messages = state.messages.slice()
+      messages[idx] = { ...messages[idx], text: messages[idx].text + event.text, done: false }
     }
-    const messages = state.messages.slice()
-    messages[idx] = { ...messages[idx], text: messages[idx].text + event.text, done: false }
+    // Finalize open user BEFORE any stream-commit segments so Static order is:
+    //   user → a-{id}-c0 → a-{id}-c1 → … (never assistant-before-user).
+    messages = finalizeOpenUserMessages(messages, event.taskId)
+    // Phase 2: commit overflow lines to Static; keep a short live tail (Codex stream tail).
+    messages = commitStreamingAssistantMessages(messages, event.taskId)
     return { ...state, messages }
   }
   if (event.type === 'assistant_done') {
     const id = `a-${event.taskId}`
     const idx = state.messages.findIndex(message => message.id === id)
+    const alreadyCommitted = committedAssistantPrefix(state.messages, event.taskId)
+    const remaining = remainingAssistantTextAfterCommits(event.text, alreadyCommitted)
+    let messages: ChatMessage[]
     if (idx === -1) {
-      return {
-        ...state,
-        messages: [...state.messages, { id, role: 'assistant', text: event.text, done: true, taskId: event.taskId }],
-      }
+      // No live tail left (fully committed mid-stream) or never started — only append remaining once.
+      messages = remaining
+        ? [...state.messages, { id, role: 'assistant', text: remaining, done: true, taskId: event.taskId }]
+        : state.messages.slice()
+    } else if (!remaining) {
+      // Entire body already in commit segments — drop empty live shell.
+      messages = state.messages.filter(message => message.id !== id)
+    } else {
+      messages = state.messages.slice()
+      messages[idx] = { ...messages[idx], text: remaining, done: true }
     }
-    const messages = state.messages.slice()
-    messages[idx] = { ...messages[idx], text: event.text, done: true }
+    // Finalize matching open user with this task so the whole turn commits to Static once.
+    messages = finalizeOpenUserMessages(messages, event.taskId)
     return { ...state, messages }
   }
   return state
+}
+
+/** Mark open (!done) user prompts as finalized so they can enter Static scrollback once. */
+function finalizeOpenUserMessages(messages: ChatMessage[], taskId?: number): ChatMessage[] {
+  let changed = false
+  const next = messages.map(message => {
+    if (message.role !== 'user' || message.done) return message
+    if (taskId !== undefined && message.taskId !== taskId) return message
+    changed = true
+    return { ...message, done: true }
+  })
+  return changed ? next : messages
 }

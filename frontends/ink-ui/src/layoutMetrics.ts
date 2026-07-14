@@ -7,6 +7,8 @@ export type LayoutMetricInput = {
   hasSlashSuggestions: boolean
   panelRows?: number
   inputRows?: number
+  /** When 0, no title/status header band (default inline scrollback). */
+  headerRows?: number
 }
 
 export type LayoutMetrics = {
@@ -43,7 +45,7 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const rows = Math.max(1, terminalRows(input.rows) - 1)
   const terminalColumnCount = terminalColumns(input.columns)
   const canvasColumns = terminalCanvasColumns(terminalColumnCount)
-  const headerRows = 1
+  const headerRows = Math.max(0, Math.floor(input.headerRows ?? 1))
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
   const baseBottomRows = 3 + inputRows
   const activityRows = 1

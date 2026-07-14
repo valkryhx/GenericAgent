@@ -75,9 +75,13 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
   text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `> ${name}(${args})`)
+  // Collapse 4+ backtick fences (tool result wrappers) to markdown triple fences so
+  // markdown rendering does not leave orphan fence tails like ":28**".
   text = text.replace(/`{4,}/g, '```')
   text = text.replace(/(?:^|\n)```\s*\n\s*\[Info\] Final response to user\.\s*\n```\s*(?=\n|$)/g, '\n')
   text = text.replace(/(?:^|\n)\s*\[Info\] Final response to user\.\s*(?=\n|$)/g, '\n')
+  // Drop empty fence pairs left after stripping tool/info wrappers.
+  text = text.replace(/(?:^|\n)```(?:[^\n`]*)\n\s*```(?=\n|$)/g, '\n')
   text = text.replace(/\n{4,}/g, '\n\n\n')
   return text.trimEnd()
 }

@@ -67,6 +67,22 @@ test('visibleMessagesForViewport always keeps the active streaming assistant tai
   assert.equal(visible.length, 1)
 })
 
+test('liveTranscriptViewportLines pins open-turn user lines above a long assistant tail', () => {
+  const userLine = { id: 'u-1-0', text: '> 现在几点了', color: 'black', backgroundColor: '#d7d7d7' }
+  const userBlank = { id: 'u-1-blank', text: ' ' }
+  const assistantLines = Array.from({ length: 20 }, (_, index) => ({
+    id: `a-1-${index}`,
+    text: index === 0 ? `line ${index}` : `  line ${index}`,
+  }))
+  const lines = [userLine, userBlank, ...assistantLines]
+  const visible = liveTranscriptViewportLines(lines, 6)
+  assert.ok(visible.some(line => line.id === 'u-1-0'), 'open user must remain visible in live viewport')
+  assert.ok(visible.some(line => line.id.startsWith('a-1-')), 'assistant tail still shown')
+  assert.ok(visible.length <= 6)
+  // User block stays at the front of the live window (question before answer).
+  assert.equal(visible[0]?.id, 'u-1-0')
+})
+
 test('visibleMessagesForViewport can scroll upward from the sticky bottom', () => {
   const messages: ChatMessage[] = Array.from({ length: 6 }, (_, index) => ({
     id: String(index + 1),
@@ -113,7 +129,7 @@ test('transcriptLines renders assistant markdown as styled parts', () => {
     { id: 'a1', role: 'assistant', text: 'Use **bold** and `code`.', done: true },
   ], { expandedTools: false })
 
-  assert.equal(lines[0]!.text, '✻ Use bold and code.')
+  assert.equal(lines[0]!.text, 'Use bold and code.')
   assert.equal(lines[0]!.parts?.some(part => part.text === 'bold' && part.bold), true)
   assert.equal(lines[0]!.parts?.some(part => part.text === 'code' && part.color === 'cyan'), true)
 })
@@ -135,7 +151,7 @@ test('wrapTranscriptLines preserves styled parts across wrapped rows', () => {
 
   const wrapped = wrapTranscriptLines(lines, 5)
 
-  assert.equal(wrapped.map(line => line.text).join('|'), '✻ abc|def| ')
+  assert.equal(wrapped.map(line => line.text).join('|'), 'abcde|f| ')
   assert.equal(wrapped[0]!.parts?.some(part => part.bold), true)
   assert.equal(wrapped[1]!.parts?.some(part => part.bold), true)
 })
@@ -188,8 +204,22 @@ test('liveTranscriptViewportLines keeps completed and streaming transcript in on
   const lines = transcriptLines(messages, { expandedTools: false })
   const viewport = liveTranscriptViewportLines(lines, 4).map(line => line.text)
 
-  assert.deepEqual(viewport, ['> second prompt', ' ', '✻ streaming answer', ' '])
+  assert.deepEqual(viewport, ['> second prompt', ' ', 'streaming answer', ' '])
 })
+
+test('transcriptLines does not prefix assistant body with activity glyph ✻', () => {
+  // ✻ is reserved for formatRunningStatus activity chrome, not message content.
+  // Stream commits create many assistant segments; each must not re-stamp ✻.
+  const lines = transcriptLines([
+    { id: 'a-1-c0', role: 'assistant', text: 'committed prefix', done: true, taskId: 1 },
+    { id: 'a-1', role: 'assistant', text: 'live tail', done: false, taskId: 1 },
+  ], { expandedTools: false })
+  const texts = lines.map(line => line.text)
+  assert.equal(texts.some(text => text.includes('✻')), false)
+  assert.ok(texts.some(text => text.includes('committed prefix')))
+  assert.ok(texts.some(text => text.includes('live tail')))
+})
+
 
 test('clampTranscriptScrollOffset keeps scrollbar state inside rendered line bounds', () => {
   assert.equal(clampTranscriptScrollOffset(0, 10, 4), 0)
