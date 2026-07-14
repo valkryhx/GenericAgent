@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mouseTrackingOff, mouseTrackingOn, parseMouseEvent, parseMouseWheel } from './mouseWheel.js'
+import { mouseTrackingOff, mouseTrackingOn, parseMouseEvent, parseMouseWheel, resolveMouseCaptureMode } from './mouseWheel.js'
 
 test('parseMouseWheel recognizes SGR wheel reports with or without leading escape', () => {
   assert.equal(parseMouseWheel('\u001B[<64;12;4M'), 'up')
@@ -18,8 +18,13 @@ test('parseMouseWheel ignores non-wheel input', () => {
   assert.equal(parseMouseWheel('\u001B[<0;12;4M'), null)
 })
 
-test('mouse tracking sequences enable and disable SGR wheel reporting', () => {
-  assert.equal(mouseTrackingOn(), '\u001B[?1000h\u001B[?1002h\u001B[?1003h\u001B[?1006h')
+test('mouse tracking is off by default and full mode opts into legacy SGR reporting', () => {
+  assert.equal(resolveMouseCaptureMode({}), 'off')
+  assert.equal(resolveMouseCaptureMode({ GA_INK_MOUSE: 'full' }), 'full')
+  assert.equal(resolveMouseCaptureMode({ GA_INK_MOUSE: 'off', GA_ENABLE_MOUSE_DRAG: 'true' }), 'off')
+  assert.equal(resolveMouseCaptureMode({ GA_ENABLE_MOUSE_DRAG: 'true' }), 'full')
+  assert.equal(mouseTrackingOn('off'), '')
+  assert.equal(mouseTrackingOn('full'), '\u001B[?1000h\u001B[?1002h\u001B[?1003h\u001B[?1006h')
   assert.equal(mouseTrackingOff(), '\u001B[?1006l\u001B[?1003l\u001B[?1002l\u001B[?1000l')
 })
 

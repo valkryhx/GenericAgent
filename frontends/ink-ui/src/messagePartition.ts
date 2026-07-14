@@ -5,7 +5,10 @@ export type MessagePartition = {
   activeMessages: ChatMessage[]
 }
 
-export function splitStaticAndActiveMessages(messages: ChatMessage[]): MessagePartition {
+export function splitStaticAndActiveMessages(
+  messages: ChatMessage[],
+  options: { keepLatestTaskActive?: boolean } = {},
+): MessagePartition {
   let latestTaskId: number | undefined
   for (let index = messages.length - 1; index >= 0; index--) {
     const taskId = messages[index]?.taskId
@@ -15,6 +18,12 @@ export function splitStaticAndActiveMessages(messages: ChatMessage[]): MessagePa
     }
   }
   if (latestTaskId === undefined) {
+    return { staticMessages: messages.filter(message => message.done), activeMessages: [] }
+  }
+
+  const latestTaskMessages = messages.filter(message => message.taskId === latestTaskId)
+  const hasPendingMessage = latestTaskMessages.some(message => !message.done)
+  if (!hasPendingMessage && !options.keepLatestTaskActive) {
     return { staticMessages: messages.filter(message => message.done), activeMessages: [] }
   }
 

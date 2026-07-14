@@ -80,6 +80,17 @@ async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: strin
   return lastFrame
 }
 
+async function waitForOutput(stdout: CaptureWriteStream, predicate: (output: string) => boolean): Promise<string> {
+  const deadline = Date.now() + 2000
+  let output = ''
+  while (Date.now() < deadline) {
+    output = stdout.chunks.map(stripAnsi).join('')
+    if (predicate(output)) return output
+    await delay(20)
+  }
+  return output
+}
+
 function readyBridge(
   _python: string,
   _bridgeScript: string,
@@ -137,6 +148,8 @@ test('App soft-wraps long input without writing into the physical final column',
 })
 
 test('App renders one continuous safe-canvas scrollbar cell per message viewport row', async () => {
+  const previousMouseMode = process.env.GA_INK_MOUSE
+  process.env.GA_INK_MOUSE = 'full'
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -179,6 +192,11 @@ test('App renders one continuous safe-canvas scrollbar cell per message viewport
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
+    if (previousMouseMode === undefined) {
+      delete process.env.GA_INK_MOUSE
+    } else {
+      process.env.GA_INK_MOUSE = previousMouseMode
+    }
   }
 })
 
@@ -253,13 +271,12 @@ test('App keeps input chrome fixed while long mixed-width output streams', async
   })
 
   try {
-    const idleFrame = await waitForFrame(stdout, frame => frame.includes('>'))
-    const expectedBorders = inputBorderRows(idleFrame)
-    assert.equal(expectedBorders.length, 2)
+    await waitForFrame(stdout, frame => frame.includes('>'))
     const eventSink = emit as unknown as (event: BridgeEvent) => void
 
     eventSink({ type: 'status', status: 'running', taskId: 1 })
     eventSink({ type: 'user', taskId: 1, text: '保持输入区稳定' })
+    let expectedBorders: number[] | null = null
     const streamingFrames: string[] = []
     for (const text of [
       `第一段 ${'中文'.repeat(20)}`,
@@ -270,10 +287,14 @@ test('App keeps input chrome fixed while long mixed-width output streams', async
       eventSink({ type: 'assistant_delta', taskId: 1, text })
       await delay(120)
       const frame = completeFrames(stdout, frameStart).at(-1)
-      if (frame) streamingFrames.push(frame)
+      if (frame) {
+        streamingFrames.push(frame)
+        expectedBorders ??= inputBorderRows(frame)
+      }
     }
 
     assert.equal(streamingFrames.length, 3)
+    assert.ok(expectedBorders)
     for (const frame of streamingFrames) {
       assert.deepEqual(inputBorderRows(frame), expectedBorders)
       assert.equal(frame.split('\n').every(line => stringWidth(line) < 40), true)
@@ -283,7 +304,7 @@ test('App keeps input chrome fixed while long mixed-width output streams', async
   }
 })
 
-test('App scrolls a resumed history replacement to its first user message even when row count is unchanged', async () => {
+test('App appends a resumed history replacement into static terminal scrollback', async () => {
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -332,20 +353,20 @@ test('App scrolls a resumed history replacement to its first user message even w
   })
 
   try {
-    const finalFrame = await waitForFrame(stdout, frame => /> 介绍美国/.test(frame) && /恢复完成：12 轮历史 · session\.json/.test(frame))
+    const output = await waitForOutput(stdout, value => value.includes('介绍美国') && value.includes('恢复完成：12 轮历史 · session.json'))
+    const chunks = stdout.chunks.map(stripAnsi)
+    const staticChunk = chunks.find(chunk => chunk.includes('介绍美国'))
 
-    assert.match(finalFrame, /> 介绍美国/)
-    assert.match(finalFrame, /恢复完成：12 轮历史 · session\.json/)
-    assert.doesNotMatch(finalFrame, /已写入 backend\.history/)
-    const transcriptArea = finalFrame.split('Enter send')[0] ?? finalFrame
-    assert.doesNotMatch(transcriptArea, /已恢复 12 轮结构化会话/)
+    assert.match(output, /介绍美国/)
+    assert.match(output, /恢复完成：12 轮历史 · session\.json/)
+    assert.ok(staticChunk)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
   }
 })
 
-test('App renders the first restored frame at the oldest resumed message', async () => {
+test('App replays a restored history replacement when the visible row count stays the same', async () => {
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -387,15 +408,10 @@ test('App renders the first restored frame at the oldest resumed message', async
   })
 
   try {
-    await delay(300)
-    const frames = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('GenericAgent'))
-    const firstRestoredFrame = frames.find(frame => frame.includes('介绍美国') || frame.includes('恢复问题 12'))
+    const output = await waitForOutput(stdout, value => value.includes('介绍美国') && value.includes('恢复完成：12 轮历史 · session.json'))
 
-    assert.ok(firstRestoredFrame)
-    assert.match(firstRestoredFrame, /> 介绍美国/)
-    assert.doesNotMatch(firstRestoredFrame, /已写入 backend\.history/)
-    const transcriptArea = firstRestoredFrame.split('Enter send')[0] ?? firstRestoredFrame
-    assert.doesNotMatch(transcriptArea, /已恢复 12 轮结构化会话/)
+    assert.match(output, /介绍美国/)
+    assert.match(output, /恢复完成：12 轮历史 · session\.json/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
@@ -431,13 +447,56 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
   try {
     await waitForFrame(stdout, frame => frame.includes('>'))
 
-    assert.match(stdout.chunks.join(''), /\x1b\[22;4H/)
+    assert.match(stdout.chunks.join(''), /\x1b\[6;4H/)
   } finally {
     instance.unmount()
   }
 })
 
-test('App enters the alternate screen before the first Ink frame is written', async () => {
+test('App restores the renderer cursor before redrawing after parking the input caret', async () => {
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send() {},
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    stdin.send('x')
+    await waitForFrame(stdout, frame => frame.includes('> x'))
+
+    const combined = stdout.chunks.join('')
+    const parkedCaret = combined.indexOf('\x1b[6;4H')
+    assert.notEqual(parkedCaret, -1)
+    const nextInkErase = combined.indexOf('\x1b[2K', parkedCaret + 1)
+    assert.notEqual(nextInkErase, -1)
+    const between = combined.slice(parkedCaret, nextInkErase)
+    assert.match(between, /\x1b\[u/)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App does not enter the alternate screen before the first Ink frame is written', async () => {
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -470,10 +529,106 @@ test('App enters the alternate screen before the first Ink frame is written', as
     await waitForFrame(stdout, frame => frame.includes('GenericAgent'))
     const combined = stdout.chunks.join('')
     const alternateScreenIndex = combined.indexOf('\u001B[?1049h')
-    const firstFrameIndex = combined.indexOf('GenericAgent')
 
-    assert.notEqual(alternateScreenIndex, -1)
-    assert.ok(alternateScreenIndex < firstFrameIndex)
+    assert.equal(alternateScreenIndex, -1)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})
+
+test('App clears the inline live input block before exiting on Ctrl+C', async () => {
+  const sentCommands: unknown[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        sentCommands.push(command)
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    stdin.send('你好')
+    await waitForFrame(stdout, frame => frame.includes('你好'))
+    stdin.send('\u0003')
+    await delay(50)
+
+    const combined = stdout.chunks.join('')
+    assert.deepEqual(sentCommands.at(-1), { type: 'shutdown' })
+    assert.match(combined, /\u001B\[0m\u001B\[(?:5|7)A\r/)
+    assert.ok((combined.match(/\u001B\[2K/g) ?? []).length >= 7)
+    assert.match(combined, /\u001B\[6A\r/)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App writes completed transcript to static terminal scrollback instead of the live viewport', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => {
+      onEvent({ type: 'ready', version: 1 })
+      onEvent({ type: 'user', taskId: 1, text: '静态问题' })
+      onEvent({ type: 'assistant_done', taskId: 1, text: '静态回答' })
+      onEvent({ type: 'status', status: 'running', taskId: 2 })
+      onEvent({ type: 'user', taskId: 2, text: '活动问题' })
+    }, 0))
+    return {
+      send() {},
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForOutput(stdout, output => output.includes('静态回答') && output.includes('活动问题'))
+    const chunks = stdout.chunks.map(stripAnsi)
+    const staticChunk = chunks.find(chunk => chunk.includes('静态问题') || chunk.includes('静态回答'))
+    const liveFrame = chunks.filter(chunk => chunk.includes('GenericAgent')).at(-1) ?? ''
+
+    assert.ok(staticChunk)
+    assert.equal(staticChunk.includes('GenericAgent'), false)
+    assert.doesNotMatch(liveFrame, /静态问题/)
+    assert.doesNotMatch(liveFrame, /静态回答/)
+    assert.match(liveFrame, /活动问题/)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))

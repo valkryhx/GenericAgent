@@ -1,11 +1,24 @@
 export type MouseWheelDirection = 'up' | 'down'
+export type MouseCaptureMode = 'off' | 'full'
 
 export type MouseEvent =
   | { kind: 'wheel'; direction: MouseWheelDirection; x: number; y: number }
   | { kind: 'press' | 'drag' | 'release'; button: number; x: number; y: number }
 
-export function mouseTrackingOn(): string {
-  return '\u001B[?1000h\u001B[?1002h\u001B[?1003h\u001B[?1006h'
+const fullMouseTrackingOn = '\u001B[?1000h\u001B[?1002h\u001B[?1003h\u001B[?1006h'
+
+export function resolveMouseCaptureMode(env: Record<string, string | undefined> = process.env): MouseCaptureMode {
+  const value = env.GA_INK_MOUSE?.trim().toLowerCase()
+  if (value === 'full' || value === '1' || value === 'true' || value === 'on') return 'full'
+  if (value === 'off' || value === '0' || value === 'false' || value === 'none') return 'off'
+
+  const legacyValue = env.GA_ENABLE_MOUSE_DRAG?.trim().toLowerCase()
+  if (legacyValue === 'full' || legacyValue === '1' || legacyValue === 'true' || legacyValue === 'on') return 'full'
+  return 'off'
+}
+
+export function mouseTrackingOn(mode: MouseCaptureMode = resolveMouseCaptureMode()): string {
+  return mode === 'full' ? fullMouseTrackingOn : ''
 }
 
 export function mouseTrackingOff(): string {

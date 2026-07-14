@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { splitStaticAndActiveMessages } from './messagePartition.js'
 import type { ChatMessage } from './protocol.js'
 
-test('splitStaticAndActiveMessages keeps a newly submitted user prompt in the active viewport', () => {
+test('splitStaticAndActiveMessages defaults completed prompts to terminal scrollback', () => {
   const messages: ChatMessage[] = [
     { id: 'u-1', role: 'user', text: 'old question', done: true, taskId: 1 },
     { id: 'a-1', role: 'assistant', text: 'old answer', done: true, taskId: 1 },
@@ -11,6 +11,19 @@ test('splitStaticAndActiveMessages keeps a newly submitted user prompt in the ac
   ]
 
   const split = splitStaticAndActiveMessages(messages)
+
+  assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1', 'u-2'])
+  assert.deepEqual(split.activeMessages, [])
+})
+
+test('splitStaticAndActiveMessages can keep the latest task active while the backend is running', () => {
+  const messages: ChatMessage[] = [
+    { id: 'u-1', role: 'user', text: 'old question', done: true, taskId: 1 },
+    { id: 'a-1', role: 'assistant', text: 'old answer', done: true, taskId: 1 },
+    { id: 'u-2', role: 'user', text: 'new question', done: true, taskId: 2 },
+  ]
+
+  const split = splitStaticAndActiveMessages(messages, { keepLatestTaskActive: true })
 
   assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1'])
   assert.deepEqual(split.activeMessages.map(message => message.id), ['u-2'])
@@ -30,7 +43,7 @@ test('splitStaticAndActiveMessages keeps the latest user and streaming assistant
   assert.deepEqual(split.activeMessages.map(message => message.id), ['u-2', 'a-2'])
 })
 
-test('splitStaticAndActiveMessages keeps the latest completed task visible until a newer task appears', () => {
+test('splitStaticAndActiveMessages moves the latest completed task to terminal scrollback by default', () => {
   const messages: ChatMessage[] = [
     { id: 'u-1', role: 'user', text: 'old question', done: true, taskId: 1 },
     { id: 'a-1', role: 'assistant', text: 'old answer', done: true, taskId: 1 },
@@ -40,8 +53,8 @@ test('splitStaticAndActiveMessages keeps the latest completed task visible until
 
   const split = splitStaticAndActiveMessages(messages)
 
-  assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1'])
-  assert.deepEqual(split.activeMessages.map(message => message.id), ['u-2', 'a-2'])
+  assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1', 'u-2', 'a-2'])
+  assert.deepEqual(split.activeMessages, [])
 })
 
 test('splitStaticAndActiveMessages leaves local command transcript in terminal scrollback', () => {
