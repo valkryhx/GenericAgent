@@ -322,6 +322,7 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
       borderBottom
       width="100%"
       height={viewport.lines.length + 2}
+      flexShrink={0}
       paddingLeft={inputLeftPaddingColumns}
       overflow="hidden"
     >

@@ -798,3 +798,48 @@ test('App sticks composer near static history without a full-height empty live s
 test('App help documents workflow plan slash command entry', () => {
   assert.match(helpText(), /\/workflow plan \[--manual\] \[--timeout SECONDS\] TASK - plan and run a dynamic workflow/)
 })
+
+test('App keeps the input composer visible when the tall help panel opens', async () => {
+  // Regression: the /help panel renders ~14 rows below the composer. When the
+  // live region total height exceeded the terminal, Ink flex-shrank the input
+  // Box to zero, so /help showed two adjacent border rows with no ">" caret row
+  // between them (unlike /model). flexShrink={0} on the composer keeps it intact.
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    for (const ch of '/help') {
+      stdin.send(ch)
+      await delay(8)
+    }
+    stdin.send('\r')
+    const frame = await waitForFrame(stdout, f => f.includes('Esc close') && f.includes('/resume, /continue'))
+    const lines = frame.split('\n')
+    const borders = inputBorderRows(frame)
+    assert.ok(borders.length >= 2, `expected two composer borders, got ${borders.length}; frame=\n${frame}`)
+    // The composer's ">" caret row must sit between the top and bottom borders —
+    // i.e. the input Box was not shrunk to just its two touching border rows.
+    const caretRow = lines.findIndex((line, index) => index > borders[0]! && index < borders[1]! && line.includes('>'))
+    assert.ok(
+      caretRow > borders[0]! && caretRow < borders[1]!,
+      `input caret row collapsed: borders=${JSON.stringify(borders)}; frame=\n${frame}`,
+    )
+    // Help body still renders below the composer.
+    assert.ok(frame.includes('Esc close'), `help body missing; frame=\n${frame}`)
+  } finally {
+    instance.unmount()
+  }
+})
