@@ -94,7 +94,14 @@ async function main() {
   console.log('\n=== B) unit: planMessageViewport content-desired + running placeholder ===')
   check('idle static → none', planMessageViewport({ hasStaticMessages: true, liveLineCount: 0, messageRows: 17 }).kind === 'none')
   check('running placeholder', planMessageViewport({ hasStaticMessages: true, liveLineCount: 0, messageRows: 17, keepLivePlaceholder: true }).kind === 'live')
-  check('stream height follows content', planMessageViewport({ hasStaticMessages: true, liveLineCount: 5, messageRows: 17 }).height === 5)
+  {
+    const streamPlan = planMessageViewport({ hasStaticMessages: true, liveLineCount: 5, messageRows: 17 })
+    check(
+      'stream height follows content',
+      streamPlan.kind === 'live' && streamPlan.height === 5,
+      `plan=${JSON.stringify(streamPlan)}`,
+    )
+  }
 
   console.log('\n=== C) state/partition long turn ===')
   let st = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
@@ -143,13 +150,13 @@ async function main() {
 
   console.log('\n=== D) App render: running visible + stream visible + finalize Static ===')
   delete process.env.GA_INK_MOUSE
-  let emit: ((e: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((e: BridgeEvent) => void) }
   const startBridgeClient = (
     _p: string,
     _s: string,
     onEvent: (e: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -169,12 +176,12 @@ async function main() {
 
   try {
     await delay(80)
-    const sink = emit as (e: BridgeEvent) => void
+    if (!bridge.emit) throw new Error('bridge emit not ready')
     const u = `APP-${USER}`
     const d = `APP-${DELTA}`
-    sink({ type: 'user', taskId: 88, text: u })
+    bridge.emit({ type: 'user', taskId: 88, text: u })
     await delay(50)
-    sink({ type: 'status', status: 'running', taskId: 88 })
+    bridge.emit({ type: 'status', status: 'running', taskId: 88 })
     await delay(100)
 
     let plain = stdout.chunks.map(stripAnsi)
@@ -185,19 +192,19 @@ async function main() {
     // long stream via many deltas
     for (let b = 0; b < 3; b++) {
       const chunk = Array.from({ length: 5 }, (_, i) => `${d}-B${b}-L${i}`).join('\n') + '\n'
-      sink({ type: 'assistant_delta', taskId: 88, text: chunk })
+      bridge.emit({ type: 'assistant_delta', taskId: 88, text: chunk })
       await delay(40)
     }
     await delay(120)
     plain = stdout.chunks.map(stripAnsi)
     check('App mid-stream: assistant visible before done', plain.join('').includes(`${d}-B0-L0`))
 
-    sink({ type: 'assistant_done', taskId: 88, text: Array.from({ length: 15 }, (_, i) => {
+    bridge.emit({ type: 'assistant_done', taskId: 88, text: Array.from({ length: 15 }, (_, i) => {
       const b = Math.floor(i / 5)
       const li = i % 5
       return `${d}-B${b}-L${li}`
     }).join('\n') + '\n' })
-    sink({ type: 'status', status: 'idle' })
+    bridge.emit({ type: 'status', status: 'idle' })
     await delay(250)
     plain = stdout.chunks.map(stripAnsi)
     const combined = plain.join('')

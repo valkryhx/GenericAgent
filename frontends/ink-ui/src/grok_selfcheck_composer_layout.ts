@@ -146,13 +146,13 @@ async function main() {
 
   console.log('\n=== 4) App: idle+Static 矮槽贴内容（非满高）===')
   delete process.env.GA_INK_MOUSE
-  let emit: ((e: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((e: BridgeEvent) => void) }
   const startBridgeClient = (
     _p: string,
     _s: string,
     onEvent: (e: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -179,10 +179,10 @@ async function main() {
     console.log(`ready: borders=${JSON.stringify(readyBorders)} emptyGap=${readyGap}`)
     check('ready live 槽矮（empty gap ≤2，非满高）', readyGap <= 2, `gap=${readyGap}`)
 
-    const sink = emit as (e: BridgeEvent) => void
-    sink({ type: 'user', taskId: 1, text: '自测-composer-static-user' })
-    sink({ type: 'assistant_done', taskId: 1, text: '自测-composer-static-assistant 长回答用于写入 Static。' })
-    sink({ type: 'status', status: 'idle' })
+    if (!bridge.emit) throw new Error('bridge emit not ready')
+    bridge.emit({ type: 'user', taskId: 1, text: '自测-composer-static-user' })
+    bridge.emit({ type: 'assistant_done', taskId: 1, text: '自测-composer-static-assistant 长回答用于写入 Static。' })
+    bridge.emit({ type: 'status', status: 'idle' })
     await delay(180)
 
     const idleFrame = await waitForFrame(stdout, f => (

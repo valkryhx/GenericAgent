@@ -148,13 +148,13 @@ test('grok: status idle finalizes open user without assistant', () => {
 
 test('grok: App running path shows user in live and not premature Static', async () => {
   delete process.env.GA_INK_MOUSE
-  let emit: ((event: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((event: BridgeEvent) => void) }
   const startBridgeClient = (
     _python: string,
     _bridgeScript: string,
     onEvent: (event: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -175,10 +175,10 @@ test('grok: App running path shows user in live and not premature Static', async
 
   try {
     await waitForOutput(stdout, o => o.includes('Enter send') || o.includes('>'))
-    const sink = emit as (e: BridgeEvent) => void
-    sink({ type: 'user', taskId: 42, text: UNIQUE_USER_TEXT })
+    if (!bridge.emit) throw new Error('bridge emit not ready')
+    bridge.emit({ type: 'user', taskId: 42, text: UNIQUE_USER_TEXT })
     await delay(60)
-    sink({ type: 'status', status: 'running', taskId: 42 })
+    bridge.emit({ type: 'status', status: 'running', taskId: 42 })
     await waitForOutput(stdout, o => o.includes(UNIQUE_USER_TEXT) && (o.includes('Running') || o.includes('✻')))
     await delay(100)
 
@@ -195,13 +195,13 @@ test('grok: App running path shows user in live and not premature Static', async
 
 test('grok: App streaming deltas are visible before assistant_done', async () => {
   delete process.env.GA_INK_MOUSE
-  let emit: ((event: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((event: BridgeEvent) => void) }
   const startBridgeClient = (
     _python: string,
     _bridgeScript: string,
     onEvent: (event: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -222,11 +222,11 @@ test('grok: App streaming deltas are visible before assistant_done', async () =>
 
   try {
     await waitForOutput(stdout, o => o.includes('Enter send') || o.includes('>'))
-    const sink = emit as (e: BridgeEvent) => void
-    sink({ type: 'user', taskId: 44, text: UNIQUE_USER_TEXT })
-    sink({ type: 'status', status: 'running', taskId: 44 })
+    if (!bridge.emit) throw new Error('bridge emit not ready')
+    bridge.emit({ type: 'user', taskId: 44, text: UNIQUE_USER_TEXT })
+    bridge.emit({ type: 'status', status: 'running', taskId: 44 })
     await delay(80)
-    sink({ type: 'assistant_delta', taskId: 44, text: UNIQUE_ASSISTANT_DELTA })
+    bridge.emit({ type: 'assistant_delta', taskId: 44, text: UNIQUE_ASSISTANT_DELTA })
     await waitForOutput(stdout, o => o.includes(UNIQUE_ASSISTANT_DELTA))
     await delay(80)
 
@@ -238,8 +238,8 @@ test('grok: App streaming deltas are visible before assistant_done', async () =>
     const liveWithAssistant = liveFramesWithText(stdout.chunks.map(stripAnsi), UNIQUE_ASSISTANT_DELTA)
     assert.ok(liveWithAssistant.length > 0, '流式内容应在 live 帧中')
 
-    sink({ type: 'assistant_done', taskId: 44, text: UNIQUE_ASSISTANT_DELTA })
-    sink({ type: 'status', status: 'idle' })
+    bridge.emit({ type: 'assistant_done', taskId: 44, text: UNIQUE_ASSISTANT_DELTA })
+    bridge.emit({ type: 'status', status: 'idle' })
     await delay(150)
 
     const plain = stdout.chunks.map(stripAnsi)

@@ -97,13 +97,13 @@ async function main() {
 
   console.log('\n=== 2) App: running 中 user 在 live、无过早 Static；stream 可见 ===')
   delete process.env.GA_INK_MOUSE
-  let emit: ((e: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((e: BridgeEvent) => void) }
   const startBridgeClient = (
     _p: string,
     _s: string,
     onEvent: (e: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -124,10 +124,10 @@ async function main() {
 
   try {
     await delay(80)
-    const sink = emit as (e: BridgeEvent) => void
-    sink({ type: 'user', taskId: 99, text: PROBE })
+    if (!bridge.emit) throw new Error('bridge emit not ready')
+    bridge.emit({ type: 'user', taskId: 99, text: PROBE })
     await delay(80)
-    sink({ type: 'status', status: 'running', taskId: 99 })
+    bridge.emit({ type: 'status', status: 'running', taskId: 99 })
     await delay(120)
 
     // Before any assistant content: user must stay live-only (no premature Static).
@@ -146,7 +146,7 @@ async function main() {
       ok = false
     }
 
-    sink({ type: 'assistant_delta', taskId: 99, text: '助手流式片段-selfcheck' })
+    bridge.emit({ type: 'assistant_delta', taskId: 99, text: '助手流式片段-selfcheck' })
     await delay(150)
 
     plain = stdout.chunks.map(stripAnsi)
@@ -173,8 +173,8 @@ async function main() {
       ok = false
     }
 
-    sink({ type: 'assistant_done', taskId: 99, text: '助手流式片段-selfcheck' })
-    sink({ type: 'status', status: 'idle' })
+    bridge.emit({ type: 'assistant_done', taskId: 99, text: '助手流式片段-selfcheck' })
+    bridge.emit({ type: 'status', status: 'idle' })
     await delay(150)
 
     const plainAfter = stdout.chunks.map(stripAnsi)

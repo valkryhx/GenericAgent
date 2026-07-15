@@ -736,13 +736,13 @@ test('App places slash suggestions below the input frame', async () => {
 })
 
 test('App sticks composer near static history without a full-height empty live slot', async () => {
-  let emit: ((event: BridgeEvent) => void) | null = null
+  const bridge = { emit: null as null | ((event: BridgeEvent) => void) }
   const startBridgeClient = (
     _python: string,
     _bridgeScript: string,
     onEvent: (event: BridgeEvent) => void,
   ): BridgeClient => {
-    emit = onEvent
+    bridge.emit = onEvent
     setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
     return { send() {}, stop() {} }
   }
@@ -771,10 +771,10 @@ test('App sticks composer near static history without a full-height empty live s
     const readyBorders = inputBorderRows(readyFrame)
     assert.ok(readyBorders.length >= 2)
 
-    const sink = emit as (event: BridgeEvent) => void
-    sink({ type: 'user', taskId: 1, text: '长历史锚点探针' })
-    sink({ type: 'assistant_done', taskId: 1, text: '这是一段足够长的助手回答，用来写入 Static scrollback。' })
-    sink({ type: 'status', status: 'idle' })
+    if (!bridge.emit) throw new Error('bridge emit not ready')
+    bridge.emit({ type: 'user', taskId: 1, text: '长历史锚点探针' })
+    bridge.emit({ type: 'assistant_done', taskId: 1, text: '这是一段足够长的助手回答，用来写入 Static scrollback。' })
+    bridge.emit({ type: 'status', status: 'idle' })
     await delay(150)
 
     // Static history is not part of live frames; wait for idle composer chrome only.
