@@ -904,6 +904,105 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertIn("mcp__counting__echo", {tool["function"]["name"] for tool in second_tools})
         self.assertEqual(starts, 1)
 
+    def test_incomplete_discovery_cache_marks_complete_false_and_expires_by_ttl(self):
+        # Root cause of the "tavily missing" bug: when one server times out at
+        # discovery, the partial tool set was cached permanently (signature only
+        # tracked config file + server names, never which servers connected).
+        # A transient remote timeout then hid that server's tools forever.
+        # Fix: partial results are marked complete=false and expire by a short TTL.
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            good_script = _write_demo_server(tmp_path)
+            bad_script, _bad_marker = _write_failing_marker_server(tmp_path)
+            cache_path = tmp_path / "mcp_tools_cache.json"
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {"good": good_script, "bad": bad_script},
+            )
+            reset_mcp_manager()
+
+            first_tools = discover_mcp_tools_cached(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+            )
+            first_names = {tool["function"]["name"] for tool in first_tools}
+            # The good server still surfaces its tool despite the bad server failing.
+            self.assertIn("mcp__good__echo", first_names)
+
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+            # A failed server means the tool set is partial → complete must be false.
+            self.assertFalse(cache_data.get("complete", True))
+
+            # Within TTL the partial cache is reused as-is.
+            reset_mcp_manager()
+            cached_again = discover_mcp_tools_cached(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+            )
+            self.assertEqual(
+                first_names,
+                {tool["function"]["name"] for tool in cached_again},
+            )
+
+            # Age the partial cache past its TTL: it must NOT be reused, so a
+            # recovered server's tools can reappear instead of staying hidden.
+            stale = json.loads(cache_path.read_text(encoding="utf-8"))
+            stale["cached_at"] = time.time() - (mcp_runtime._MCP_TOOLS_CACHE_INCOMPLETE_TTL + 10)
+            cache_path.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+            self.assertIsNone(
+                mcp_runtime._read_mcp_tools_cache(
+                    cache_path,
+                    mcp_runtime._cache_signature(
+                        mcp_runtime.load_mcp_config_with_disabled(config_path),
+                        False,
+                    ),
+                ),
+            )
+
+    def test_complete_discovery_cache_has_no_ttl_expiry(self):
+        # Complete results (every server connected) stay cached as long as the
+        # config signature matches — no TTL — to avoid paying discovery cost each
+        # turn. Only partial results self-heal via TTL.
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_counting_server(tmp_path)
+            cache_path = tmp_path / "mcp_tools_cache.json"
+            config_path = _write_named_mcp_config(tmp_path, "counting", server_script)
+            reset_mcp_manager()
+
+            discover_mcp_tools_cached(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+            )
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertTrue(cache_data.get("complete"))
+
+            # Even aged far past the incomplete TTL, a complete cache is still valid.
+            aged = json.loads(cache_path.read_text(encoding="utf-8"))
+            aged["cached_at"] = time.time() - (mcp_runtime._MCP_TOOLS_CACHE_INCOMPLETE_TTL * 100)
+            cache_path.write_text(json.dumps(aged, ensure_ascii=False), encoding="utf-8")
+
+            reused = mcp_runtime._read_mcp_tools_cache(
+                cache_path,
+                mcp_runtime._cache_signature(
+                    mcp_runtime.load_mcp_config_with_disabled(config_path),
+                    False,
+                ),
+            )
+            self.assertIsNotNone(reused)
+            self.assertIn(
+                "mcp__counting__echo",
+                {tool["function"]["name"] for tool in reused},
+            )
+
     def test_call_tool_only_connects_target_server(self):
         with _tempdir() as tmp:
             tmp_path = Path(tmp)

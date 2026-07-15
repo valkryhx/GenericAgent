@@ -19,6 +19,10 @@ _MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 _DISCOVERY_CACHE: dict[tuple, "McpDiscovery"] = {}
 _MCP_LOG_DIR = Path(script_dir) / "temp" / "mcp_logs"
 _MCP_TOOLS_CACHE_PATH = Path(script_dir) / "temp" / "mcp_tools_cache.json"
+# Incomplete discovery (a server failed/timed out) is cached only briefly so a
+# transient remote-server timeout cannot permanently hide its tools. Complete
+# results stay cached as long as the config signature matches (no TTL).
+_MCP_TOOLS_CACHE_INCOMPLETE_TTL = 60.0
 _MAX_MCP_DESCRIPTION_LENGTH = 2048
 
 
@@ -728,14 +732,18 @@ def discover_mcp_tools_cached(
     cached = _read_mcp_tools_cache(cache_file, signature)
     if cached is not None:
         return cached
-    tools = discover_mcp_tools(
+    discovery = discover_mcp(
         config_path=config_path,
         include_unavailable=include_unavailable,
         timeout=timeout,
     )
+    tools = [dict(tool) for tool in discovery.tools]
     if _stop_requested(_current_stop_signal()):
         return tools
-    _write_mcp_tools_cache(cache_file, signature, tools)
+    # A server that failed/timed out (errors non-empty) means the tool set is
+    # partial; cache it only briefly so a transient remote timeout self-heals.
+    complete = not discovery.errors
+    _write_mcp_tools_cache(cache_file, signature, tools, complete=complete)
     return tools
 
 
@@ -815,15 +823,28 @@ def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Option
     tools = data.get("tools")
     if not isinstance(tools, list):
         return None
+    # Incomplete results (a server failed at discovery) expire after a short TTL
+    # so a transient remote-server timeout does not permanently hide its tools.
+    if not data.get("complete", True):
+        cached_at = data.get("cached_at")
+        if not isinstance(cached_at, (int, float)):
+            return None
+        if time.time() - cached_at > _MCP_TOOLS_CACHE_INCOMPLETE_TTL:
+            return None
     return [dict(tool) for tool in tools if isinstance(tool, dict)]
 
 
-def _write_mcp_tools_cache(cache_path: Path, signature: dict[str, Any], tools: list[dict[str, Any]]) -> None:
+def _write_mcp_tools_cache(
+    cache_path: Path,
+    signature: dict[str, Any],
+    tools: list[dict[str, Any]],
+    complete: bool = True,
+) -> None:
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
             json.dumps(
-                {"signature": signature, "tools": tools, "cached_at": time.time()},
+                {"signature": signature, "tools": tools, "cached_at": time.time(), "complete": bool(complete)},
                 ensure_ascii=False,
                 indent=2,
             ),
