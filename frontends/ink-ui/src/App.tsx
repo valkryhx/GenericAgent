@@ -58,7 +58,7 @@ import {
 } from './promptChrome.js'
 import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
+import { footerPanelRows, modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
   commandTextForLocalDecision,
@@ -1029,6 +1029,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
       ? Math.min(selectorSize(selector), 8) + 2
     : workflowPanel
       ? Math.min(workflowPanelRows(workflowPanel).length, 8)
+    : footerPanel
+      ? footerPanelRows(footerPanel)
     : slashItems.length > 0
       ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
       : 0
