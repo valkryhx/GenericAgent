@@ -72,8 +72,12 @@ models:
     supports: [thinking, prompt_cache]    # 合法值见文件末尾说明
     # ── 以下都是可选默认参数（能被 profile 覆盖）──
     context_window: 400000
-    thinking_type: adaptive          # adaptive | enabled | disabled
-    # thinking_budget_tokens: 32768  # 仅 thinking_type=enabled 时用
+    # 【推荐】统一思考级别：off | low | medium | high | max
+    #   一个字段搞定所有 wire。配置层按 provider.wire_api 自动翻译：
+    #     anthropic → thinking_type=adaptive + output_config.effort
+    #     openai_*  → reasoning_effort
+    #   off 关思考（anthropic→disabled，openai→reasoning_effort=none）。
+    thinking: high
     max_tokens: 32768
     max_retries: 3
     read_timeout: 180
@@ -81,11 +85,16 @@ models:
   gpt-5.4:
     provider: my-openai
     supports: [image_input]          # 支持图片输入的模型加 image_input（取代旧的 provider.native_image_input）
-    reasoning_effort: high           # none|minimal|low|medium|high|xhigh
+    thinking: high                   # 同一个统一字段，openai wire 会翻译成 reasoning_effort
     max_tokens: 8192
     max_retries: 3
     read_timeout: 120
     # api_model: gpt-5.4-2026-01-01  # 发给 API 的真实 model 名与 key 不同时填
+
+    # ── 高级逃生舱（一般不用；想绕过统一翻译、精细控制底层时才填，优先级高于 thinking）──
+    # thinking_type: adaptive        # anthropic 专属：adaptive | enabled | disabled
+    # thinking_budget_tokens: 32768  # 仅 thinking_type=enabled 时用
+    # reasoning_effort: high         # none|minimal|low|medium|high|xhigh（个别模型的硬约束在这里兜底）
 
 
 # ── 3. profiles：命名预设（这是你日常「用哪个模型」的开关）───────────────────
@@ -98,7 +107,7 @@ profiles:
 
   fast:
     model: gpt-5.4
-    reasoning_effort: minimal        # 覆盖 model 里的 high → 这个 profile 用 minimal
+    thinking: low                    # 覆盖 model 里的 high → 这个 profile 思考更省
     temperature: 0.3                 # profile 可覆盖任意采样/推理参数
 
 

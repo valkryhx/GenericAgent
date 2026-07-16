@@ -105,7 +105,7 @@ def _resolve_model_directly(config: LLMConfig, model_key: str) -> ResolvedModel:
     model = config.models[model_key]
     provider = config.providers[model.provider]
 
-    from llm_config import _PROFILE_OVERRIDABLE
+    from llm_config import _PROFILE_OVERRIDABLE, apply_thinking_translation
 
     params: dict[str, Any] = {}
     d = config.defaults
@@ -117,6 +117,8 @@ def _resolve_model_directly(config: LLMConfig, model_key: str) -> ResolvedModel:
         if mv is not None:
             params[key] = mv
     params["_model_key"] = model_key
+    # 统一 thinking 级别 → 该 wire 的底层字段（与 LLMConfig.resolve 一致）。
+    apply_thinking_translation(params, provider.wire_api)
     return ResolvedModel(model_key, model, provider, model.provider, params)
 
 

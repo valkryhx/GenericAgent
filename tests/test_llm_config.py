@@ -328,6 +328,131 @@ active_profile: a
         self.assertFalse(cfg.resolve("b").to_legacy_cfg()["native_image_input"])
 
 
+class ThinkingLevelTest(unittest.TestCase):
+    """统一 thinking 级别 → 各 wire 底层字段的翻译。"""
+
+    def _cfg_with_thinking(self, wire_api: str, level: str) -> dict:
+        text = f"""
+providers:
+  p:
+    wire_api: {wire_api}
+    base_url: https://x/v1
+    api_key: k
+models:
+  m:
+    provider: p
+    thinking: {level}
+profiles:
+  default:
+    model: m
+active_profile: default
+"""
+        return _parse(text).resolve("default").to_legacy_cfg()
+
+    def test_anthropic_off_disables_thinking(self):
+        legacy = self._cfg_with_thinking("anthropic", "off")
+        self.assertEqual(legacy["thinking_type"], "disabled")
+        self.assertNotIn("reasoning_effort", legacy)
+
+    def test_anthropic_high_maps_to_adaptive_plus_effort(self):
+        legacy = self._cfg_with_thinking("anthropic", "high")
+        self.assertEqual(legacy["thinking_type"], "adaptive")
+        self.assertEqual(legacy["reasoning_effort"], "high")
+
+    def test_anthropic_max_maps_to_xhigh(self):
+        legacy = self._cfg_with_thinking("anthropic", "max")
+        self.assertEqual(legacy["reasoning_effort"], "xhigh")
+
+    def test_openai_chat_maps_level_to_reasoning_effort(self):
+        legacy = self._cfg_with_thinking("openai_chat", "medium")
+        self.assertEqual(legacy["reasoning_effort"], "medium")
+        # openai wire 不写 thinking_type
+        self.assertNotIn("thinking_type", legacy)
+
+    def test_openai_off_maps_to_none(self):
+        legacy = self._cfg_with_thinking("openai_chat", "off")
+        self.assertEqual(legacy["reasoning_effort"], "none")
+
+    def test_explicit_backend_field_overrides_thinking_level(self):
+        # model 同时写了统一 thinking 和显式 reasoning_effort → 显式的赢。
+        text = """
+providers:
+  p:
+    wire_api: openai_chat
+    base_url: https://x/v1
+    api_key: k
+models:
+  m:
+    provider: p
+    thinking: high
+    reasoning_effort: minimal
+profiles:
+  default:
+    model: m
+active_profile: default
+"""
+        legacy = _parse(text).resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["reasoning_effort"], "minimal")
+
+    def test_profile_thinking_overrides_model_thinking(self):
+        text = """
+providers:
+  p:
+    wire_api: anthropic
+    base_url: https://x
+    api_key: k
+models:
+  m:
+    provider: p
+    thinking: low
+profiles:
+  default:
+    model: m
+    thinking: max
+active_profile: default
+"""
+        legacy = _parse(text).resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["reasoning_effort"], "xhigh")
+
+    def test_invalid_thinking_level_rejected(self):
+        text = """
+providers:
+  p:
+    wire_api: openai_chat
+    base_url: https://x/v1
+    api_key: k
+models:
+  m:
+    provider: p
+    thinking: ultra
+profiles:
+  default:
+    model: m
+active_profile: default
+"""
+        with self.assertRaises(ValidationError):
+            _parse(text)
+
+    def test_no_thinking_field_leaves_fields_untouched(self):
+        text = """
+providers:
+  p:
+    wire_api: openai_chat
+    base_url: https://x/v1
+    api_key: k
+models:
+  m:
+    provider: p
+profiles:
+  default:
+    model: m
+active_profile: default
+"""
+        legacy = _parse(text).resolve("default").to_legacy_cfg()
+        self.assertNotIn("reasoning_effort", legacy)
+        self.assertNotIn("thinking_type", legacy)
+
+
 class MixinAndResolveHelpersTest(unittest.TestCase):
     def test_mixin_chain_validated(self):
         text = BASE_YAML + """

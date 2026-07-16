@@ -31,7 +31,7 @@ import re
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 WireApi = Literal["openai_chat", "openai_responses", "anthropic"]
 
@@ -39,6 +39,65 @@ WireApi = Literal["openai_chat", "openai_responses", "anthropic"]
 KNOWN_CAPABILITIES = frozenset({
     "thinking", "prompt_cache", "1m_context", "image_input", "responses",
 })
+
+# 统一思考级别（thinking 字段的合法取值）。三种 wire 写法一致，由配置层按 wire
+# 翻译成各自底层字段，屏蔽 Claude(thinking_type+effort) 与 OpenAI/Grok(reasoning_effort)
+# 的差异。想精细控制的高级用户仍可直接写 thinking_type / reasoning_effort（优先级更高）。
+THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+
+# YAML 的 "Norway problem"：裸写 thinking: off 会被 YAML 解析成布尔 False
+# （on/yes/no 同理）。用户自然会写 thinking: off，所以在校验前把布尔还原成字符串，
+# 免得逼用户加引号。还原后仍走 THINKING_LEVELS 合法性校验（on→"on" 会被拒）。
+_YAML_BOOL_TO_STR = {True: "on", False: "off"}
+
+
+def _coerce_thinking(v: Any) -> Any:
+    """把 YAML 误判成布尔的 thinking 值还原成字符串（off/on）。其它原样返回。"""
+    if isinstance(v, bool):
+        return _YAML_BOOL_TO_STR[v]
+    return v
+
+# 统一级别 → 各 wire 的底层字段翻译表。
+#   anthropic：off → 关思考；其余 → adaptive 思考 + output_config.effort（由 reasoning_effort 承载）
+#   openai   ：直接映射到 chat/responses 的 reasoning_effort（none/low/medium/high/xhigh）
+# 注意：个别模型有硬约束（如 grok-4.5 思考不可关、无 xhigh），那种情况用显式
+# reasoning_effort 逃生舱覆盖即可；此表覆盖通用情形。
+_THINKING_TO_ANTHROPIC = {
+    "off":    {"thinking_type": "disabled"},
+    "low":    {"thinking_type": "adaptive", "reasoning_effort": "low"},
+    "medium": {"thinking_type": "adaptive", "reasoning_effort": "medium"},
+    "high":   {"thinking_type": "adaptive", "reasoning_effort": "high"},
+    "max":    {"thinking_type": "adaptive", "reasoning_effort": "xhigh"},
+}
+_THINKING_TO_OPENAI = {
+    "off":    {"reasoning_effort": "none"},
+    "low":    {"reasoning_effort": "low"},
+    "medium": {"reasoning_effort": "medium"},
+    "high":   {"reasoning_effort": "high"},
+    "max":    {"reasoning_effort": "xhigh"},
+}
+
+def apply_thinking_translation(params: dict[str, Any], wire_api: str) -> None:
+    """把合并后的统一 thinking 级别翻译成该 wire 的底层字段，就地写入 params。
+
+    规则：
+      - params["thinking"] 为空 → 什么都不做。
+      - 否则按 wire_api 选翻译表（anthropic 用 thinking_type+reasoning_effort，
+        openai_* 用 reasoning_effort），把级别展开成底层字段。
+      - 显式字段优先：若 params 里对应的底层字段已由 model/profile 显式设过
+        （非 None），保留显式值，不被翻译覆盖。这样高级用户能精细控制。
+    """
+    level = params.get("thinking")
+    if level is None:
+        return
+    table = _THINKING_TO_ANTHROPIC if wire_api == "anthropic" else _THINKING_TO_OPENAI
+    mapping = table.get(level)
+    if not mapping:
+        return
+    for key, value in mapping.items():
+        if params.get(key) is None:
+            params[key] = value
+
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -123,10 +182,14 @@ class ModelCfg(_Strict):
     provider: str
     context_window: Optional[int] = None
     supports: list[str] = Field(default_factory=list)
-    # 采样 / 推理默认（可被 profile 覆盖）。
-    thinking_type: Optional[str] = None
-    thinking_budget_tokens: Optional[int] = None
-    reasoning_effort: Optional[str] = None
+    # 【推荐】统一思考级别：off/low/medium/high/max，三种 wire 写法一致，
+    # 由配置层按 wire 翻译成底层字段。日常只需写这一个。
+    thinking: Optional[str] = None
+    # 【高级逃生舱】想绕过统一翻译、直接控制底层字段时才填（优先级高于 thinking）。
+    thinking_type: Optional[str] = None            # anthropic 专属：adaptive/enabled/disabled
+    thinking_budget_tokens: Optional[int] = None   # 仅 thinking_type=enabled 时用
+    reasoning_effort: Optional[str] = None          # none/minimal/low/medium/high/xhigh
+    # 采样 / 传输默认（可被 profile 覆盖）。
     service_tier: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -137,6 +200,11 @@ class ModelCfg(_Strict):
     # 发给 API 的真实 model 字符串；不填则用 model 表的 key 本身。
     api_model: Optional[str] = None
 
+    @field_validator("thinking", mode="before")
+    @classmethod
+    def _coerce_thinking(cls, v: Any) -> Any:
+        return _coerce_thinking(v)
+
     @model_validator(mode="after")
     def _check_supports(self) -> "ModelCfg":
         unknown = [s for s in self.supports if s not in KNOWN_CAPABILITIES]
@@ -144,19 +212,26 @@ class ModelCfg(_Strict):
             raise ValueError(
                 f"未知 capability {unknown}；合法取值：{sorted(KNOWN_CAPABILITIES)}"
             )
+        if self.thinking is not None and self.thinking not in THINKING_LEVELS:
+            raise ValueError(
+                f"model 的 thinking={self.thinking!r} 非法；合法级别：{list(THINKING_LEVELS)}"
+            )
         return self
 
 
 # profile 可覆盖的参数字段（不含 provider/supports/context_window 等结构性字段）。
+# thinking 排在最前：它是统一入口，翻译在 resolve() 里展开成底层字段。
 _PROFILE_OVERRIDABLE = (
-    "thinking_type", "thinking_budget_tokens", "reasoning_effort", "service_tier",
-    "temperature", "max_tokens", "stream", "max_retries", "timeout", "read_timeout",
+    "thinking", "thinking_type", "thinking_budget_tokens", "reasoning_effort",
+    "service_tier", "temperature", "max_tokens", "stream", "max_retries",
+    "timeout", "read_timeout",
 )
 
 
 class ProfileCfg(_Strict):
     """命名预设：选一个 model，并可覆盖其参数。/model 命令切换的单位。"""
     model: str
+    thinking: Optional[str] = None                  # 统一思考级别，覆盖 model 的同名字段
     thinking_type: Optional[str] = None
     thinking_budget_tokens: Optional[int] = None
     reasoning_effort: Optional[str] = None
@@ -167,6 +242,19 @@ class ProfileCfg(_Strict):
     max_retries: Optional[int] = None
     timeout: Optional[int] = None
     read_timeout: Optional[int] = None
+
+    @field_validator("thinking", mode="before")
+    @classmethod
+    def _coerce_thinking(cls, v: Any) -> Any:
+        return _coerce_thinking(v)
+
+    @model_validator(mode="after")
+    def _check_thinking(self) -> "ProfileCfg":
+        if self.thinking is not None and self.thinking not in THINKING_LEVELS:
+            raise ValueError(
+                f"profile 的 thinking={self.thinking!r} 非法；合法级别：{list(THINKING_LEVELS)}"
+            )
+        return self
 
 
 class MixinCfg(_Strict):
@@ -341,6 +429,8 @@ class LLMConfig(_Strict):
             if pv is not None:
                 params[key] = pv
         params["_model_key"] = prof.model
+        # 统一 thinking 级别 → 该 wire 的底层字段（显式底层字段优先，不被覆盖）。
+        apply_thinking_translation(params, provider.wire_api)
         return ResolvedModel(name, model, provider, model.provider, params)
 
 
