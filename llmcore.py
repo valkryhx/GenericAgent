@@ -283,8 +283,11 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             except: continue
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
-            if delta.get("reasoning_content"):
-                reasoning_text += delta["reasoning_content"]
+            # reasoning_content 是标准字段；部分 vLLM/内部端点（如九天 GLM-5.2）
+            # 流式思考在 reasoning 字段，回退兼容之。
+            delta_reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if delta_reasoning:
+                reasoning_text += delta_reasoning
             if delta.get("content"):
                 text = delta["content"]; content_text += text; yield text
             for tc in (delta.get("tool_calls") or []):
@@ -376,7 +379,9 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     else:
         _record_usage(data.get("usage") or {}, api_mode, sess)
         msg = (data.get("choices") or [{}])[0].get("message", {})
-        reasoning = msg.get("reasoning_content", "")
+        # reasoning_content 是标准字段名；部分 vLLM/内部端点（如九天 GLM-5.2）
+        # 把思考放在 reasoning 字段，回退兼容之。
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
         if reasoning:
             blocks.append({"type": "thinking", "thinking": reasoning})
         content = msg.get("content", "")
