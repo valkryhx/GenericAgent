@@ -28,6 +28,8 @@ model_responses.txt
 
 # Sensitive files (API keys, credentials)
 mykey.py
+llm.yaml
+llm.yml
 
 tasks/
 

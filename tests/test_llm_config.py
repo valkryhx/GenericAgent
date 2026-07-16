@@ -301,6 +301,32 @@ active_profile: default
         self.assertEqual(legacy["user_agent"], "claude-cli/2.1.113 (external, cli)")
         self.assertEqual(legacy["extra_headers"], {"X-Foo": "bar"})
 
+    def test_image_input_capability_drives_native_image_input(self):
+        # native_image_input 是「模型能力」，由 model.supports 里的 image_input
+        # 推导，而不是 provider 字段。声明了就 True，没声明就 False。
+        text = """
+providers:
+  openai:
+    wire_api: openai_chat
+    base_url: https://api.openai.com/v1
+    api_key: sk-oai
+models:
+  with-img:
+    provider: openai
+    supports: [image_input]
+  no-img:
+    provider: openai
+profiles:
+  a:
+    model: with-img
+  b:
+    model: no-img
+active_profile: a
+"""
+        cfg = _parse(text)
+        self.assertTrue(cfg.resolve("a").to_legacy_cfg()["native_image_input"])
+        self.assertFalse(cfg.resolve("b").to_legacy_cfg()["native_image_input"])
+
 
 class MixinAndResolveHelpersTest(unittest.TestCase):
     def test_mixin_chain_validated(self):

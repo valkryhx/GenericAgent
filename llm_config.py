@@ -63,23 +63,42 @@ class _Strict(BaseModel):
 
 
 class ProviderCfg(_Strict):
-    """provider 表条目：定义「连哪、什么协议、怎么鉴权」，一次定义多处引用。"""
+    """provider 表条目：定义「连哪、什么协议、怎么鉴权」，一次定义多处引用。
+
+    字段分三档，填写时按需取用：
+
+    【必填三件套】—— 任何 provider 都只需要这三个就能跑：
+        wire_api   走哪种线协议：openai_chat（默认首选，兼容性最强）/
+                   openai_responses / anthropic
+        base_url   API 端点。支持自动补全（http://host:2001 会补 /v1/...）
+        api_key    明文 API key（一等支持）。或用 api_key_env 放环境变量名。
+                   本地无鉴权端点可填空串 ""。
+
+    【通用可选】—— 所有 wire 都可用，不填就用默认：
+        api_key_env / proxy / verify / extra_headers / extra_body
+
+    【wire 专属可选】—— 只对某种 wire 有意义，其它 wire 填了会被忽略：
+        anthropic 专属：fake_cc_system_prompt、user_agent（反代 CC 协议的中转渠道用）
+        openai   专属：native_tools（个别 relay 不支持 tools 字段时设 false）
+
+    注意：模型能力（是否支持图片输入 / thinking / 缓存）不在这里，而在
+    对应 model 的 supports 列表里声明——因为那是「模型」的属性，不是「连接」的属性。
+    """
+    # ── 必填三件套 ───────────────────────────────────────────────
     wire_api: WireApi
     base_url: str
-    # 密钥：api_key 明文一等支持；api_key_env 只放环境变量名，可选备选。
-    api_key: Optional[str] = None
-    api_key_env: Optional[str] = None
-    # 渠道专属开关（保留 GA 现有能力）。
-    fake_cc_system_prompt: bool = False
-    user_agent: Optional[str] = None
-    # 逃生舱：吸收单个渠道怪癖，不污染通用构造逻辑。
-    extra_headers: dict[str, str] = Field(default_factory=dict)
-    extra_body: dict[str, Any] = Field(default_factory=dict)
+    api_key: Optional[str] = None          # 明文 key（一等）；与 api_key_env 二选一
+    # ── 通用可选 ─────────────────────────────────────────────────
+    api_key_env: Optional[str] = None      # 只放环境变量名（可选备选）
     proxy: Optional[str] = None
     verify: bool = True
-    # OpenAI 系专属（对 anthropic wire 无意义，留默认即可）。
-    native_tools: bool = True
-    native_image_input: bool = False
+    extra_headers: dict[str, str] = Field(default_factory=dict)  # 逃生舱：吸收渠道怪癖
+    extra_body: dict[str, Any] = Field(default_factory=dict)     # 逃生舱：附加 body 字段
+    # ── anthropic wire 专属可选 ─────────────────────────────────
+    fake_cc_system_prompt: bool = False    # 反代 Claude Code 协议的中转渠道置 true
+    user_agent: Optional[str] = None       # 伪装 UA（某些渠道按 UA 白名单校验）
+    # ── openai wire 专属可选 ────────────────────────────────────
+    native_tools: bool = True              # 端点不支持 tools 字段时设 false
 
     def resolve_api_key(self) -> str:
         """解析实际 key：优先明文 api_key，其次 api_key_env 指向的环境变量。
@@ -235,7 +254,8 @@ class ResolvedModel:
             cfg["user_agent"] = prov.user_agent
         if self.wire_api in ("openai_chat", "openai_responses"):
             cfg["native_tools"] = prov.native_tools
-            cfg["native_image_input"] = prov.native_image_input
+            # 图片输入是「模型能力」，从 model 的 supports 推导，而非 provider 字段。
+            cfg["native_image_input"] = self.supports("image_input")
         if prov.extra_headers:
             cfg["extra_headers"] = dict(prov.extra_headers)
         if prov.extra_body:

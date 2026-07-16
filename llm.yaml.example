@@ -1,115 +1,141 @@
-# ══════════════════════════════════════════════════════════════════════════════
-#  GenericAgent — llm.yaml 配置模板（复制为 llm.yaml 后填入真实凭证）
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+#  GenericAgent —— LLM 接入配置（llm.yaml 模板）
+# ═══════════════════════════════════════════════════════════════════════════
 #
-#  这是 GA LLM 接入层的新配置方式，取代 mykey.py 的「变量名魔法」。
-#  设计依据见 docs/ga_llm_config_research_2026-07-16.md。
+#  复制本文件为 llm.yaml，填入你的 provider / model / key 即可。
+#  llm.yaml 已被 .gitignore 忽略，可以放心写明文 key。
 #
-#  ┌─ 快速上手（3 步）───────────────────────────────────────────────────────┐
-#  │  1. 复制本文件为 llm.yaml                                                 │
-#  │  2. 在 providers 里填入你的 api_key（可直接明文写，见下）                  │
-#  │  3. 运行 python agentmain.py                                             │
-#  └──────────────────────────────────────────────────────────────────────────┘
+#  ┌─ 四张表，各司其职（这是理解整个配置的钥匙）──────────────────────────┐
+#  │  providers  「连到哪、什么协议、怎么鉴权」—— 一个 API 端点 = 一条     │
+#  │  models     「哪个模型、什么能力、默认参数」—— 绑定到某个 provider    │
+#  │  profiles   「一套用起来的预设」= 选一个 model + 可覆盖它的参数        │
+#  │  mixin      「故障转移链」—— 多个 model 顺序尝试（可选）              │
+#  └────────────────────────────────────────────────────────────────────────┘
 #
-#  三层结构：
-#    providers  —— 连哪个端点、走什么协议(wire_api)、怎么鉴权。一次定义，多处引用。
-#    models     —— 绑定 provider，声明能力(supports)与默认参数。
-#    profiles   —— 一组命名预设，/model 一键切换。
+#  关系：profile 引用 model，model 引用 provider。加一个新模型的步骤：
+#    1. 在 providers 加一条（如果是新端点）
+#    2. 在 models 加一条，指向那个 provider
+#    3. 在 profiles 加一条，指向那个 model（这样 /model 能切到它）
 #
-#  ── wire_api 三种取值（全部一等支持）──────────────────────────────────────
-#    openai_chat       OpenAI Chat Completions —— 兼容性最强、接入新模型的默认首选。
-#                      绝大多数第三方/开源/本地/中转模型都实现它（vLLM、Ollama、
-#                      DeepSeek、Kimi、SiliconFlow、OpenRouter、各类 relay…）。
-#                      拿不准用哪个时，就用它。
-#    openai_responses  OpenAI /v1/responses —— OpenAI 原生端点的可选增强。
-#    anthropic         Anthropic messages —— Claude 原生端点 / 反代 CC 协议的渠道。
-#
-#  ── 密钥写法 ────────────────────────────────────────────────────────────────
-#    api_key: sk-xxx           直接明文写在文件里（本项目允许，最简单）。
-#    api_key_env: OPENAI_KEY   或只写环境变量名，运行时从环境变量读（可选备选）。
-#    任意字符串值都支持 ${ENV_VAR} 插值，例如 base_url: ${MY_RELAY_URL}
-#
-#  ── 运行时调参（GA REPL 内）────────────────────────────────────────────────
-#    /session.reasoning_effort=high    /session.thinking_type=adaptive
-#    /session.temperature=0.3          /session.max_tokens=16384
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ── provider 表 ───────────────────────────────────────────────────────────────
+
+# ── 1. providers：API 端点表 ────────────────────────────────────────────────
+#  每条 provider 的字段分三档：必填三件套 / 通用可选 / wire 专属可选。
+#  加新 provider 时，通常只需填「必填三件套」。
 providers:
-  # Anthropic 官方端点。sk-ant- 开头的 key 自动用 x-api-key 头，其它前缀用 Bearer。
-  anthropic:
-    wire_api: anthropic
-    base_url: https://api.anthropic.com
-    api_key: sk-ant-<your-anthropic-key>       # 直接明文填写
 
-  # OpenAI 官方端点 —— 默认用最具兼容性的 Chat Completions。
-  openai:
-    wire_api: openai_chat
+  # 例 A：Anthropic 原生 / 反代 Claude Code 协议的中转渠道
+  my-claude:
+    # ── 必填三件套（任何 provider 都只需这三个就能跑）──
+    wire_api: anthropic              # openai_chat（默认首选，兼容性最强）
+                                     #   | openai_responses | anthropic
+    base_url: https://api.anthropic.com   # 支持自动补全：给 http://host:2001 会补 /v1/...
+    api_key: sk-ant-填你的key         # 明文 key（一等支持）。或改用下面的 api_key_env。
+
+    # ── anthropic wire 专属可选（其它 wire 不要填）──
+    # fake_cc_system_prompt: true    # 反代 Claude Code 协议的中转渠道必须置 true；真 Anthropic 端点不用
+    # user_agent: "claude-cli/2.1.151 (external, cli)"   # 某些渠道按 UA 白名单校验时用
+
+  # 例 B：OpenAI 兼容端点（含绝大多数第三方/开源/本地/中转模型）
+  my-openai:
+    wire_api: openai_chat            # ← 接入新模型时的默认首选，覆盖 vLLM/Ollama/
+                                     #   DeepSeek/Kimi/SiliconFlow/OpenRouter/各类 relay
     base_url: https://api.openai.com/v1
-    api_key: sk-<your-openai-key>
+    api_key: sk-填你的key
 
-  # 需要 /v1/responses 原生增强时才用 openai_responses；不确定就用上面的 openai。
-  # openai-responses:
-  #   wire_api: openai_responses
-  #   base_url: https://api.openai.com/v1
-  #   api_key: sk-<your-openai-key>
+    # ── openai wire 专属可选 ──
+    # native_tools: false            # 个别 relay 不支持原生 tools 字段时设 false（默认 true）
 
-  # 任意 OpenAI 兼容的第三方 / 本地模型，一律 openai_chat。
-  # deepseek:
-  #   wire_api: openai_chat
-  #   base_url: https://api.deepseek.com/v1
-  #   api_key: sk-<your-deepseek-key>
-
-  # 本地 vLLM / Ollama（通常无鉴权，api_key 可留空字符串）。
+  # 例 C：用环境变量存 key（而非明文），本地无鉴权端点等
   # local-vllm:
   #   wire_api: openai_chat
   #   base_url: http://localhost:8000/v1
-  #   api_key: ""
+  #   api_key_env: VLLM_API_KEY      # 只放环境变量名；运行时读 os.environ。本地无鉴权可填空 api_key: ""
 
-  # 第三方中转渠道（反代 Anthropic/CC 协议）。
-  # my-relay:
-  #   wire_api: anthropic
-  #   base_url: http://host:2001               # apibase 自动补全 /v1/... 规则仍生效
-  #   api_key: <relay-key>
-  #   fake_cc_system_prompt: true              # 反代 CC 协议的渠道必须置 true
-  #   user_agent: "claude-cli/2.1.113 (external, cli)"
-  #   extra_headers:                           # 逃生舱：吸收渠道怪癖
-  #     X-Custom-Header: value
+  # ── 所有 provider 都可用的「通用可选」字段（按需取用）──
+  #   api_key_env:   Optional，只放环境变量名（api_key 与 api_key_env 二选一即可）
+  #   proxy:         "http://127.0.0.1:7890"   单 provider 代理
+  #   verify:        true/false     是否校验 TLS 证书
+  #   extra_headers: {X-Foo: bar}   逃生舱：附加 HTTP header（吸收渠道怪癖）
+  #   extra_body:    {foo: 1}       逃生舱：附加请求 body 字段
 
-# ── model 表 ──────────────────────────────────────────────────────────────────
+
+# ── 2. models：模型表 ───────────────────────────────────────────────────────
+#  每个 model 绑定一个 provider，声明它的能力和默认参数。
+#  key（如 claude-opus-4-8）默认就是发给 API 的 model 名；不同时用 api_model 覆盖。
 models:
+
   claude-opus-4-8:
-    provider: anthropic
-    # api_model: claude-opus-4-8[1m]     # 发给 API 的真实 model 名（[1m] 触发 1M 上下文）
+    provider: my-claude              # ← 必填：指向上面 providers 里的某个 key
+    # ── 能力声明（供程序查表决定发不发 thinking/cache/图片 字段）──
+    supports: [thinking, prompt_cache]    # 合法值见文件末尾说明
+    # ── 以下都是可选默认参数（能被 profile 覆盖）──
     context_window: 400000
-    supports: [thinking, prompt_cache, 1m_context]
-    thinking_type: adaptive              # adaptive | enabled | disabled
+    thinking_type: adaptive          # adaptive | enabled | disabled
+    # thinking_budget_tokens: 32768  # 仅 thinking_type=enabled 时用
+    max_tokens: 32768
+    max_retries: 3
+    read_timeout: 180
 
   gpt-5.4:
-    provider: openai
-    context_window: 400000
-    reasoning_effort: high               # none|minimal|low|medium|high|xhigh
+    provider: my-openai
+    supports: [image_input]          # 支持图片输入的模型加 image_input（取代旧的 provider.native_image_input）
+    reasoning_effort: high           # none|minimal|low|medium|high|xhigh
+    max_tokens: 8192
+    max_retries: 3
+    read_timeout: 120
+    # api_model: gpt-5.4-2026-01-01  # 发给 API 的真实 model 名与 key 不同时填
 
-# ── profiles：命名预设，/model 切换的单位 ─────────────────────────────────────
+
+# ── 3. profiles：命名预设（这是你日常「用哪个模型」的开关）───────────────────
+#  一个 profile = 选一个 model + 可选地覆盖它的参数。
+#  作用：给不同用途起名字，一键切换。比如 default 用 Claude 深思，fast 用便宜模型。
+#  运行时用 /model <profile名> 切换；active_profile 指定启动默认。
 profiles:
   default:
-    model: claude-opus-4-8
+    model: claude-opus-4-8           # ← 必填：指向上面 models 里的某个 key
+
   fast:
     model: gpt-5.4
-    reasoning_effort: minimal
+    reasoning_effort: minimal        # 覆盖 model 里的 high → 这个 profile 用 minimal
+    temperature: 0.3                 # profile 可覆盖任意采样/推理参数
 
-# ── mixin：故障转移（可选）────────────────────────────────────────────────────
-# mixin:
-#   failover:
-#     chain: [claude-opus-4-8, gpt-5.4]   # 引用 model key，按序尝试，失败切下一个
-#     max_retries: 5
-#     spring_back: 300
 
-# ── 全局默认（被 model / profile 覆盖）────────────────────────────────────────
+# ── 4. mixin：故障转移链（可选，不需要就整段删掉）──────────────────────────
+#  chain 里按顺序尝试 model，前一个失败自动切下一个，成功后一段时间会 spring-back。
+mixin:
+  failover:
+    chain: [gpt-5.4, claude-opus-4-8]   # ← 引用 models 的 key（不是 provider，不是 profile）
+    max_retries: 10
+    base_delay: 0.5
+    # spring_back: 300               # 秒；成功后多久回主模型
+
+
+# ── 5. defaults：全局默认（被 model / profile 覆盖）──────────────────────────
 defaults:
   max_tokens: 8192
   temperature: 1.0
   stream: true
 
-# 启动默认用哪个 profile。
+
+# ── 6. 启动默认 profile ─────────────────────────────────────────────────────
 active_profile: default
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  附：supports 能力清单（models.*.supports 的合法取值）
+#    thinking      模型支持思考/推理块（Claude thinking、OpenAI reasoning）
+#    prompt_cache  支持 prompt 缓存（Claude cache_control）
+#    1m_context    支持 1M 超长上下文（Claude [1m] beta）
+#    image_input   支持图片输入（多模态）
+#    responses     支持 OpenAI Responses API 增强
+#
+#  三种 wire_api 的区别：
+#    openai_chat       OpenAI Chat Completions —— 兼容性最强、接入新模型默认首选。
+#                      绝大多数第三方/开源/本地/中转模型只暴露这个接口。不确定就用它。
+#    openai_responses  OpenAI /v1/responses —— OpenAI 原生端点的可选增强。
+#    anthropic         Anthropic messages —— Claude 原生端点 / 反代 CC 协议的中转渠道。
+#
+#  key 头自动判断：sk-ant- 开头 → x-api-key 头；其它前缀 → Authorization: Bearer。
+# ═══════════════════════════════════════════════════════════════════════════
