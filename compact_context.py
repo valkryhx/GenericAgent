@@ -6,7 +6,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 
 SummarizeFn = Callable[[str, str], str]
@@ -28,10 +28,44 @@ def estimate_history_chars(history: list[dict[str, Any]], pending_text: str = ""
     return sum(len(json.dumps(m, ensure_ascii=False)) for m in history or []) + len(str(pending_text or ""))
 
 
+# 字符→token 的粗略换算系数：约 3 个字符 ≈ 1 token（与旧的 context_win*3 口径一致，
+# 反过来即 chars/3≈tokens）。只用于估算「尚未发出的 pending_text」这一小段增量。
+_CHARS_PER_TOKEN = 3
+
+
+def _real_total_tokens(backend: Any) -> Optional[int]:
+    """取上次成功请求 API 返回的真实上下文 token 总数（input+output）。
+
+    来自 llmcore `_record_usage` 写入的 `backend.last_usage_tokens`。没有成功请求过
+    （None）或结构不符时返回 None，调用方据此回退到字符估算。
+    """
+    usage = getattr(backend, "last_usage_tokens", None)
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens")
+    if isinstance(total, (int, float)) and total > 0:
+        return int(total)
+    inp = usage.get("input_tokens") or 0
+    out = usage.get("output_tokens") or 0
+    if inp or out:
+        return int(inp) + int(out)
+    return None
+
+
 def should_auto_compact_agent(agent: Any, pending_text: str = "", threshold: float = 0.75) -> bool:
     backend = _backend(agent)
     history = getattr(backend, "history", []) if backend is not None else []
     context_win = int(getattr(backend, "context_win", DEFAULT_CONTEXT_WIN) or DEFAULT_CONTEXT_WIN) if backend is not None else DEFAULT_CONTEXT_WIN
+
+    # 优先用真实 token：上次成功请求的上下文 token 总数 + 本次待发 pending_text 的估算增量，
+    # 与 context_win（真实 token 窗口）* threshold 比较。比字符 ÷3 的粗估准得多。
+    real_total = _real_total_tokens(backend) if backend is not None else None
+    if real_total is not None:
+        pending_tokens = len(str(pending_text or "")) // _CHARS_PER_TOKEN
+        return real_total + pending_tokens > context_win * threshold
+
+    # 回退：从未成功请求过（last_usage_tokens 仍为 None），用字符估算。
+    # 字符口径下窗口需 ×3（约 3 字符/token）才与 token 口径对齐。
     return estimate_history_chars(history, pending_text) > context_win * 3 * threshold
 
 

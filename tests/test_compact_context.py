@@ -155,6 +155,50 @@ class CompactContextTest(unittest.TestCase):
         self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 890_000))
         self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 910_000))
 
+    def test_auto_compact_prefers_real_token_count_when_available(self):
+        # backend 有 last_usage_tokens（上次成功请求的真实 token）→ 优先用它，
+        # 不再走字符估算。窗口 1000，阈值 0.75 → 触发线 750。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 1000
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 700, "output_tokens": 0, "total_tokens": 700,
+        }
+        # 700 + 0（空 pending）= 700 < 750 → 不触发
+        self.assertFalse(should_auto_compact_agent(agent, pending_text=""))
+        # 700 + 300//3=100 = 800 > 750 → 触发（pending_text 估算增量计入）
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 300))
+
+    def test_auto_compact_real_token_ignores_char_estimate_magnitude(self):
+        # 真实 token 路径下，即便历史字符数很大（旧口径会误判），只要真实 token 低
+        # 就不该触发——证明确实用的是 token 而非字符。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 100_000
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 10, "output_tokens": 10, "total_tokens": 20,
+        }
+        # history 里塞一大段文本（字符估算会很大），但真实 token 仅 20
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "x" * 500_000}]},
+        ]
+        self.assertFalse(should_auto_compact_agent(agent, pending_text=""))
+
+    def test_auto_compact_falls_back_to_chars_when_no_usage(self):
+        # 没有 last_usage_tokens（从未成功请求过）→ 回退字符估算，保持旧行为。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 20
+        # 旧口径：字符 > context_win*3*0.75 = 45 才触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 200))
+
+    def test_auto_compact_total_derived_from_input_output_when_no_total(self):
+        # last_usage_tokens 只有 input/output、没 total_tokens → 由二者求和。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 1000
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 500, "output_tokens": 400,
+        }
+        # 500+400=900 > 750 → 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text=""))
+
     def test_compact_source_budget_scales_for_large_default_context(self):
         backend = type("Backend", (), {})()
 
