@@ -3,6 +3,8 @@
 **日期：** 2026-07-14  
 **截图：** `截图/严重bug.png`
 
+> ⚠️ **2026-07-16 修正**：本文对「双输入框 / ghost composer」的根因判断（**stdout 所有权** / 绝对 CUP 旁路 Ink）是**正确的**，请放心参考。但本文末尾「后续 IME 方向」把 **IME 漂移**与 ghost 混为同一根因链，这一点不准确——它们是**两个独立根因**：ghost = stdout 所有权，IME 漂移 = 原生光标不可见。IME 漂移的真正根因与最终解见 `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`。
+
 ## 现象
 
 启动 `ga ink` 后同时出现**两个**用户输入框（ghost composer）。

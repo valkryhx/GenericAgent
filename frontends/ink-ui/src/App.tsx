@@ -77,7 +77,8 @@ import {
   enterMainScreenTerminalSequenceForMode,
   reassertMouseTracking,
 } from './terminalCleanup.js'
-import { cursorPosition, inputCursorPosition, restoreCursorPosition, saveCursorPosition } from './terminalCursor.js'
+import { inputCursorPosition } from './terminalCursor.js'
+import type { CursorParkController } from './stdoutCursorPark.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
 import { parseMouseEvent, parseMouseWheel, resolveMouseCaptureMode } from './mouseWheel.js'
@@ -101,6 +102,7 @@ type Props = {
   python: string
   bridgeScript: string
   startBridgeClient?: typeof startBridge
+  cursorPark?: CursorParkController
 }
 
 const STDIN_RESUME_GAP_MS = 5000
@@ -405,7 +407,7 @@ export function helpText(): string {
   ].join('\n')
 }
 
-export function App({ python, bridgeScript, startBridgeClient = startBridge }: Props) {
+export function App({ python, bridgeScript, startBridgeClient = startBridge, cursorPark }: Props) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { setRawMode, internal_eventEmitter } = useStdin()
@@ -441,7 +443,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   const transcriptRowsRef = useRef({ totalRows: 0, viewportRows: 1 })
   const liveViewportGeometryRef = useRef({ rows: 1, cursorRow: 0 })
   const terminalCleanedRef = useRef(false)
-  const parkedCursorRef = useRef(false)
   const resumePendingRef = useRef(false)
   const mcpPanelOpenRef = useRef(false)
   const modelPanelPendingRef = useRef(false)
@@ -468,20 +469,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
     setStaticTranscriptGeneration(value => value + 1)
   }
 
-  const restoreParkedCursor = () => {
-    if (!parkedCursorRef.current) return
-    stdout.write(restoreCursorPosition)
-    parkedCursorRef.current = false
-  }
-
   const cleanupTerminalOnce = () => {
     if (terminalCleanedRef.current) return
     terminalCleanedRef.current = true
+    // park 由 cursorPark 控制器管理（相对移动，无 save/restore）。清理前先 unpark：
+    // 把光标从 caret 相对移回帧底，让下面的 clear 几何从确定的帧底出发。
+    cursorPark?.unpark()
+    cursorPark?.dispose()
     const liveViewportGeometry = liveViewportGeometryRef.current
-    const inlineCleanupGeometry = parkedCursorRef.current
-      ? liveViewportGeometry
-      : { rows: liveViewportGeometry.rows, cursorRow: liveViewportGeometry.rows }
-    parkedCursorRef.current = false
+    // unpark 后光标恒在帧底（= rows 行、cursorRow 取 rows），与旧「未 park」分支一致。
+    const inlineCleanupGeometry = { rows: liveViewportGeometry.rows, cursorRow: liveViewportGeometry.rows }
     if (mouseMode !== 'full') {
       stdout.write(clearInlineLiveViewportSequence(inlineCleanupGeometry))
     }
@@ -1128,18 +1125,20 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge }: P
   // stacked composers (see 截图/新bug.png). Geometry helpers remain in insertHistory.ts
   // for unit tests and a future non-Ink or coordinated renderer path.
 
+  // 路径 A：不再旁路 stdout.write(CUP)。改为每次渲染把 caret 相对帧底的位置声明给
+  // cursorPark 包裹流（相当于 CC 的 cursorDeclarationRef），由包裹流在 ink 写完帧后
+  // 用相对移动定位光标、写下一帧前相对复位回帧底。运行中 / 未就绪 → null（不 park，
+  // 光标留在帧底，与 ink 默认一致）。geometry 计算沿用现有 inputCursor。
   useLayoutEffect(() => {
-    if (!terminalReady || state.status === 'running' || state.status === 'stopping') {
-      restoreParkedCursor()
-      return undefined
+    if (!cursorPark) return
+    const inactive = !terminalReady || state.status === 'running' || state.status === 'stopping'
+    if (inactive) {
+      cursorPark.setPark(null)
+      return
     }
-    restoreParkedCursor()
-    stdout.write(`${saveCursorPosition}${cursorPosition(inputCursor.row, inputCursor.column, metrics.rows, metrics.canvasColumns)}`)
-    parkedCursorRef.current = true
-    return () => {
-      restoreParkedCursor()
-    }
-  }, [inputCursor.column, inputCursor.row, metrics, state.status, stdout, terminalReady])
+    const up = Math.max(0, liveViewportRows - inputCursor.row)
+    cursorPark.setPark({ up, col: inputCursor.column })
+  }, [cursorPark, inputCursor.column, inputCursor.row, liveViewportRows, state.status, terminalReady])
 
   useEffect(() => {
     if (mouseMode !== 'full') {

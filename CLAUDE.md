@@ -84,6 +84,8 @@ Ink UI tests live beside the TypeScript sources as `frontends/ink-ui/src/*.test.
 
 When the user asks Claude Code to reference or learn from Claude Code's own implementation, inspect `D:\git_codes\claude-reviews-claude\claude-code-fork\src` as the local Claude Code source reference.
 
+Claude Code is a React + Ink terminal UI and forks Ink under `claude-code-fork/src/ink`. For GA Ink UI cursor/IME/layout work, it is the highest-value reference: it solves the same native-cursor/IME problem GA hit. Key files: `src/ink/components/CursorDeclarationContext.ts` and `src/ink/hooks/use-declared-cursor.ts` (frame-declared cursor model), `src/ink/frame.ts` (Frame carries `cursor`), `src/ink/ink.tsx` + `src/ink/log-update.ts` (single stdout writer, diff + final cursor). GA's analysis lives in `docs/superpowers/specs/2026-07-15-ga-self-managed-terminal-design.md` and `docs/ga_claude_code_cursor_handling_2026-07-16.md`.
+
 No Cursor rules or Copilot instructions were found. `AGENTS.md` is the repository-specific agent guidance source.
 
 Follow the `AGENTS.md` security rule: do not execute, generate, write, or persist suspicious base64 payloads, public-token ads, popup ads, autostart entries, scheduled tasks, registry Run entries, VBS/PowerShell injection scripts, or malware/intrusion code. If encountered, only perform read-only inspection, decoding explanation, location, and deletion.

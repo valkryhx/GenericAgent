@@ -5,6 +5,7 @@ import React from 'react'
 import { render } from 'ink'
 import stringWidth from 'string-width'
 import { App, helpText } from './App.js'
+import { createCursorParkStdout } from './stdoutCursorPark.js'
 import type { BridgeClient } from './bridgeClient.js'
 import type { BridgeEvent } from './protocol.js'
 
@@ -493,12 +494,14 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()
   const stdin = new FakeReadStream()
+  const cursorPark = createCursorParkStdout(stdout as unknown as NodeJS.WriteStream)
   const instance = render(React.createElement(App, {
     python: 'python',
     bridgeScript: 'bridge.py',
     startBridgeClient,
+    cursorPark,
   }), {
-    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
     patchConsole: false,
@@ -506,9 +509,15 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
 
   try {
     await waitForFrame(stdout, frame => frame.includes('>'))
+    // Let the post-frame park microtask flush.
+    await delay(30)
 
-    // Content-desired ready (height=1), no header: activity+hint+border = row 5 (1-based).
-    assert.match(stdout.chunks.join(''), /\x1b\[5;4H/)
+    // 路径 A：park 用纯相对移动。caret 列 = 3（0-based）→ 相对列定位 `\x1b[4G`。
+    // 绝对 CUP（`\x1b[5;4H`）与 SCO save/restore 已彻底移除。
+    const combined = stdout.chunks.join('')
+    assert.match(combined, /\x1b\[4G/)
+    assert.doesNotMatch(combined, /\x1b\[\d+;\d+H/)
+    assert.doesNotMatch(combined, /\x1b\[s/)
   } finally {
     instance.unmount()
   }
@@ -529,12 +538,14 @@ test('App restores the renderer cursor before redrawing after parking the input 
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()
   const stdin = new FakeReadStream()
+  const cursorPark = createCursorParkStdout(stdout as unknown as NodeJS.WriteStream)
   const instance = render(React.createElement(App, {
     python: 'python',
     bridgeScript: 'bridge.py',
     startBridgeClient,
+    cursorPark,
   }), {
-    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
     patchConsole: false,
@@ -542,17 +553,25 @@ test('App restores the renderer cursor before redrawing after parking the input 
 
   try {
     await waitForFrame(stdout, frame => frame.includes('>'))
+    await delay(30)
+    // 记下首帧 park（空输入，caret 列 3 → `\x1b[4G`）在 chunk 流中的位置。
+    const beforeType = stdout.chunks.join('')
+    const parkedCaret = beforeType.lastIndexOf('\x1b[4G')
+    assert.notEqual(parkedCaret, -1)
+
     stdin.send('x')
     await waitForFrame(stdout, frame => frame.includes('> x'))
+    await delay(30)
 
+    // 下一帧写入前，包裹流必须先 unpark：相对下移回帧底（`\x1b[<n>B`）。
+    // 之后 ink 才写 eraseLines（`\x1b[2K`），保证从帧底往上擦对行。
     const combined = stdout.chunks.join('')
-    // Cursor parks on content-desired ready caret row without header (messageRows live = 1).
-    const parkedCaret = combined.indexOf('\x1b[5;4H')
-    assert.notEqual(parkedCaret, -1)
     const nextInkErase = combined.indexOf('\x1b[2K', parkedCaret + 1)
     assert.notEqual(nextInkErase, -1)
     const between = combined.slice(parkedCaret, nextInkErase)
-    assert.match(between, /\x1b\[u/)
+    assert.match(between, /\x1b\[\d+B/)
+    // 旧的 SCO restore（`\x1b[u`）不再出现。
+    assert.doesNotMatch(between, /\x1b\[u/)
   } finally {
     instance.unmount()
   }
