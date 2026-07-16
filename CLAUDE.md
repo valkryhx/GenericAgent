@@ -80,11 +80,15 @@ Python tests use the standard library `unittest` and live under `tests/` as `tes
 
 Ink UI tests live beside the TypeScript sources as `frontends/ink-ui/src/*.test.ts` and run with Node's test runner through `tsx`.
 
+For Ink UI bugs (cursor/IME, layout, wrapping, duplicate rendering, streaming), prefer program-driven regression tests over eyeballing screenshots. The core idea: terminal UI bugs reduce to deterministic facts in the emitted stdout bytes or the laid-out row/column geometry, both of which are machine-assertable. Reach for the matching technique — virtual-terminal cursor tracker for relative-cursor arithmetic, byte-level ANSI assertions (match + doesNotMatch + indexOf-slice for ordering) for control sequences, in-memory terminal (`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`) with frame-geometry parsers for layout, pure functions for layout/partition decisions, `string-width` (never `.length`) for CJK/emoji wrapping, and unique-probe counting for duplicate rendering. The full playbook, decision table, and reusable helpers are in `docs/ga_ink_ui_testing_playbook_2026-07-16.md` — read it before adding or debugging Ink UI tests. Its one blind spot: cross-terminal behavior (e.g. IME anchoring to the visible native cursor) can only be caught by real-terminal screenshots, then reduced back into a byte-level contract.
+
 ## Repository guidance
 
 When the user asks Claude Code to reference or learn from Claude Code's own implementation, inspect `D:\git_codes\claude-reviews-claude\claude-code-fork\src` as the local Claude Code source reference.
 
 Claude Code is a React + Ink terminal UI and forks Ink under `claude-code-fork/src/ink`. For GA Ink UI cursor/IME/layout work, it is the highest-value reference: it solves the same native-cursor/IME problem GA hit. Key files: `src/ink/components/CursorDeclarationContext.ts` and `src/ink/hooks/use-declared-cursor.ts` (frame-declared cursor model), `src/ink/frame.ts` (Frame carries `cursor`), `src/ink/ink.tsx` + `src/ink/log-update.ts` (single stdout writer, diff + final cursor). GA's analysis lives in `docs/superpowers/specs/2026-07-15-ga-self-managed-terminal-design.md` and `docs/ga_claude_code_cursor_handling_2026-07-16.md`.
+
+For the GA Ink UI IME/cursor bug, the authoritative root-cause writeup is `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`: Windows Terminal anchors the IME candidate window to the **visible** native cursor (DECTCEM `\x1b[?25h`), so the cursor-park writer (`frontends/ink-ui/src/stdoutCursorPark.ts`) must SHOW the native cursor once it lands on the caret and HIDE it before the next frame write. Earlier 2026-07-14/07-15 diagnoses that concluded "keep the native cursor hidden, use the inverse-video block only" are wrong and are corrected there.
 
 No Cursor rules or Copilot instructions were found. `AGENTS.md` is the repository-specific agent guidance source.
 
