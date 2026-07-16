@@ -1,0 +1,115 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  GenericAgent — llm.yaml 配置模板（复制为 llm.yaml 后填入真实凭证）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  这是 GA LLM 接入层的新配置方式，取代 mykey.py 的「变量名魔法」。
+#  设计依据见 docs/ga_llm_config_research_2026-07-16.md。
+#
+#  ┌─ 快速上手（3 步）───────────────────────────────────────────────────────┐
+#  │  1. 复制本文件为 llm.yaml                                                 │
+#  │  2. 在 providers 里填入你的 api_key（可直接明文写，见下）                  │
+#  │  3. 运行 python agentmain.py                                             │
+#  └──────────────────────────────────────────────────────────────────────────┘
+#
+#  三层结构：
+#    providers  —— 连哪个端点、走什么协议(wire_api)、怎么鉴权。一次定义，多处引用。
+#    models     —— 绑定 provider，声明能力(supports)与默认参数。
+#    profiles   —— 一组命名预设，/model 一键切换。
+#
+#  ── wire_api 三种取值（全部一等支持）──────────────────────────────────────
+#    openai_chat       OpenAI Chat Completions —— 兼容性最强、接入新模型的默认首选。
+#                      绝大多数第三方/开源/本地/中转模型都实现它（vLLM、Ollama、
+#                      DeepSeek、Kimi、SiliconFlow、OpenRouter、各类 relay…）。
+#                      拿不准用哪个时，就用它。
+#    openai_responses  OpenAI /v1/responses —— OpenAI 原生端点的可选增强。
+#    anthropic         Anthropic messages —— Claude 原生端点 / 反代 CC 协议的渠道。
+#
+#  ── 密钥写法 ────────────────────────────────────────────────────────────────
+#    api_key: sk-xxx           直接明文写在文件里（本项目允许，最简单）。
+#    api_key_env: OPENAI_KEY   或只写环境变量名，运行时从环境变量读（可选备选）。
+#    任意字符串值都支持 ${ENV_VAR} 插值，例如 base_url: ${MY_RELAY_URL}
+#
+#  ── 运行时调参（GA REPL 内）────────────────────────────────────────────────
+#    /session.reasoning_effort=high    /session.thinking_type=adaptive
+#    /session.temperature=0.3          /session.max_tokens=16384
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── provider 表 ───────────────────────────────────────────────────────────────
+providers:
+  # Anthropic 官方端点。sk-ant- 开头的 key 自动用 x-api-key 头，其它前缀用 Bearer。
+  anthropic:
+    wire_api: anthropic
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-<your-anthropic-key>       # 直接明文填写
+
+  # OpenAI 官方端点 —— 默认用最具兼容性的 Chat Completions。
+  openai:
+    wire_api: openai_chat
+    base_url: https://api.openai.com/v1
+    api_key: sk-<your-openai-key>
+
+  # 需要 /v1/responses 原生增强时才用 openai_responses；不确定就用上面的 openai。
+  # openai-responses:
+  #   wire_api: openai_responses
+  #   base_url: https://api.openai.com/v1
+  #   api_key: sk-<your-openai-key>
+
+  # 任意 OpenAI 兼容的第三方 / 本地模型，一律 openai_chat。
+  # deepseek:
+  #   wire_api: openai_chat
+  #   base_url: https://api.deepseek.com/v1
+  #   api_key: sk-<your-deepseek-key>
+
+  # 本地 vLLM / Ollama（通常无鉴权，api_key 可留空字符串）。
+  # local-vllm:
+  #   wire_api: openai_chat
+  #   base_url: http://localhost:8000/v1
+  #   api_key: ""
+
+  # 第三方中转渠道（反代 Anthropic/CC 协议）。
+  # my-relay:
+  #   wire_api: anthropic
+  #   base_url: http://host:2001               # apibase 自动补全 /v1/... 规则仍生效
+  #   api_key: <relay-key>
+  #   fake_cc_system_prompt: true              # 反代 CC 协议的渠道必须置 true
+  #   user_agent: "claude-cli/2.1.113 (external, cli)"
+  #   extra_headers:                           # 逃生舱：吸收渠道怪癖
+  #     X-Custom-Header: value
+
+# ── model 表 ──────────────────────────────────────────────────────────────────
+models:
+  claude-opus-4-8:
+    provider: anthropic
+    # api_model: claude-opus-4-8[1m]     # 发给 API 的真实 model 名（[1m] 触发 1M 上下文）
+    context_window: 400000
+    supports: [thinking, prompt_cache, 1m_context]
+    thinking_type: adaptive              # adaptive | enabled | disabled
+
+  gpt-5.4:
+    provider: openai
+    context_window: 400000
+    reasoning_effort: high               # none|minimal|low|medium|high|xhigh
+
+# ── profiles：命名预设，/model 切换的单位 ─────────────────────────────────────
+profiles:
+  default:
+    model: claude-opus-4-8
+  fast:
+    model: gpt-5.4
+    reasoning_effort: minimal
+
+# ── mixin：故障转移（可选）────────────────────────────────────────────────────
+# mixin:
+#   failover:
+#     chain: [claude-opus-4-8, gpt-5.4]   # 引用 model key，按序尝试，失败切下一个
+#     max_retries: 5
+#     spring_back: 300
+
+# ── 全局默认（被 model / profile 覆盖）────────────────────────────────────────
+defaults:
+  max_tokens: 8192
+  temperature: 1.0
+  stream: true
+
+# 启动默认用哪个 profile。
+active_profile: default
