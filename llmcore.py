@@ -1,8 +1,12 @@
 import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
+import token_meter
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 DEFAULT_CONTEXT_WIN = 400_000
+# 硬裁剪触发后，回收到的目标 token 水位（相对硬线的比例）。保留旧的「压到 6 成」
+# 手感，但以 token 计而非字符。
+_HARD_TRIM_RECOVER_RATIO = 0.6
 
 def expand_llm_profile_configs(mykeys):
     expanded = dict(mykeys or {})
@@ -104,19 +108,33 @@ def safeprint(*argv):
     except OSError: pass
 print = safeprint
 
-def trim_messages_history(history, context_win):
+def trim_messages_history(history, hard_limit_tokens, last_usage=None):
+    """硬裁剪兜底：估算当前上下文 token 超硬线时，丢最旧消息压回目标水位。
+
+    token 化后（对齐 Codex/CC）：
+      - 触发判断用 token_meter.estimate_context_tokens（真实 usage 基准 + 增量估算），
+        而非旧的 len(json.dumps)×3 字符估算。
+      - 裁剪收敛时已 mutate、真实基准失效，用本会话校准出的 chars/token 比率把每条
+        消息折成 token（calibrated_cpt），pop 到低于目标 token 水位。
+
+    hard_limit_tokens：硬线 token 阈值（BaseSession 从 context_win 派生或由配置给定）。
+    last_usage：上次成功请求的真实 usage dict（backend.last_usage_tokens），可为 None。
+    """
     compress_history_tags(history)
-    cost = sum(len(json.dumps(m, ensure_ascii=False)) for m in history) 
-    print(f'[Debug] Current context: {cost} chars, {len(history)} messages.')
-    if cost > context_win * 3: 
+    tokens = token_meter.estimate_context_tokens(history, last_usage)
+    print(f'[Debug] Current context: ~{tokens} tokens, {len(history)} messages.')
+    if tokens > hard_limit_tokens:
         compress_history_tags(history, keep_recent=4, force=True)   # trim breaks cache, so compress more btw
-        target = context_win * 3 * 0.6
+        # 裁剪过程中无新 API 调用，用校准比率把消息折成 token 来收敛。
+        cpt = token_meter.calibrated_cpt(history, last_usage)
+        target = hard_limit_tokens * _HARD_TRIM_RECOVER_RATIO
+        cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
         while len(history) > 5 and cost > target:
             history.pop(0)
             while history and history[0].get('role') != 'user': history.pop(0)
             if history and history[0].get('role') == 'user': history[0] = _sanitize_leading_user_msg(history[0])
-            cost = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
-        print(f'[Debug] Trimmed context, current: {cost} chars, {len(history)} messages.')
+            cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
+        print(f'[Debug] Trimmed context, current: ~{cost} tokens, {len(history)} messages.')
 
 def auto_make_url(base, path):
     b, p = base.rstrip('/'), path.strip('/')
@@ -627,6 +645,12 @@ class BaseSession:
         self.api_base = cfg['apibase'].rstrip('/')
         self.model = cfg.get('model', '')
         self.context_win = cfg.get('context_win', DEFAULT_CONTEXT_WIN)
+        # 两道压缩线（token 口径，对齐 Codex 90%/95%）。配置层（to_legacy_cfg）会直接
+        # 派生好写入 cfg；直接喂 legacy cfg 的老路径则从 context_win 兜底派生，行为等价。
+        #   auto_compact_tokens 软线：摘要式压缩触发（保留信息，ink 前端用）
+        #   hard_limit_tokens   硬线：裁剪兜底触发（丢最旧消息，所有前端的安全网）
+        self.auto_compact_tokens = int(cfg.get('auto_compact_tokens') or round(self.context_win * 0.90))
+        self.hard_limit_tokens = int(cfg.get('hard_limit_tokens') or round(self.context_win * 0.95))
         self.history = []
         self.lock = threading.Lock()
         self.system = ""
@@ -692,7 +716,7 @@ class BaseSession:
         def _ask_gen():
             with self.lock:
                 self.history.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-                trim_messages_history(self.history, self.context_win)
+                trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
                 messages = self.make_messages(self.history)
             content_blocks = None; content = ''
             gen = self.raw_ask(messages)
@@ -813,7 +837,7 @@ class NativeClaudeSession(BaseSession):
         assert type(msg) is dict
         with self.lock:
             self.history.append(msg)
-            trim_messages_history(self.history, self.context_win)
+            trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
             messages = [{"role": m["role"], "content": list(m["content"])} for m in self.history]
         content_blocks = None
         gen = self.raw_ask(messages)
