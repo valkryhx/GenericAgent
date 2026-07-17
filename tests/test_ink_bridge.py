@@ -859,6 +859,55 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([], agent.prompts)
         self.assertEqual({"type": "error", "code": "auto_compact_failed", "message": "summary failed"}, events[-1])
 
+    def test_auto_compact_circuit_breaker_disables_after_consecutive_failures(self):
+        # 连续失败达上限后，熔断器停用自动压缩：不再调 compact_agent_context，
+        # 并放行请求（返回非 -1），让用户仍能继续对话（硬裁剪安全网仍在 llmcore 层）。
+        from ink_bridge import MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with (
+            patch("ink_bridge.should_auto_compact_agent", return_value=True),
+            patch("ink_bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = False
+            compact.return_value.message = "summary failed"
+            # 前 N 次失败：每次都尝试压缩、返回 -1（拦住请求）。
+            for _ in range(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES):
+                self.assertEqual(-1, bridge.submit("large prompt"))
+            self.assertEqual(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, compact.call_count)
+
+            # 熔断后：不再调用 compact，且放行请求（不再是 -1）。
+            result = bridge.submit("large prompt")
+            self.assertNotEqual(-1, result)
+            self.assertEqual(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, compact.call_count)
+
+        bridge.wait_for_idle(timeout=1)
+
+    def test_auto_compact_success_resets_failure_counter(self):
+        # 一次成功压缩把连续失败计数清零，避免历史失败累积误触发熔断。
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        with (
+            patch("ink_bridge.should_auto_compact_agent", return_value=True),
+            patch("ink_bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = False
+            compact.return_value.message = "summary failed"
+            self.assertEqual(-1, bridge.submit("p"))
+            self.assertEqual(1, bridge._auto_compact_failures)
+
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted."
+            bridge.submit("p2")
+            self.assertEqual(0, bridge._auto_compact_failures)
+
+        bridge.wait_for_idle(timeout=1)
+
     def test_submit_auto_compact_replaces_visible_history_before_new_user_message(self):
         agent = FakeAgent()
         events = []

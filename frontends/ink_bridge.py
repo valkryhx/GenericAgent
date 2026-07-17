@@ -90,6 +90,11 @@ except Exception:  # pragma: no cover - compact core import failures are reporte
     should_auto_compact_agent = None
 
 
+# 自动压缩熔断器：连续失败这么多次后，本 session 停用自动压缩，避免摘要模型宕机时
+# 每次用户请求都空打一次 API。对齐 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES。
+MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+
+
 try:
     from continue_cmd import (
         extract_ui_messages as continue_extract,
@@ -127,6 +132,10 @@ class GenericAgentBridge:
         raw_emit = emit or make_stdout_emitter(sys.stdout)
         self.emit = lambda event: raw_emit(sanitize(event))
         self._task_seq = 0
+        # 自动压缩熔断器：连续失败 N 次后本 session 停用自动压缩，避免摘要模型宕机
+        # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
+        self._auto_compact_failures = 0
+        self._auto_compact_disabled = False
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
         self._workflow_threads: dict[str, threading.Thread] = {}
@@ -774,12 +783,18 @@ class GenericAgentBridge:
     def _auto_compact_if_needed(self, pending_text: str) -> bool:
         if compact_agent_context is None or should_auto_compact_agent is None:
             return True
+        # 熔断器：连续失败达上限后，本 session 停用自动压缩，避免摘要模型宕机时
+        # 每次请求都空打一发（对齐 Claude Code）。放行请求（返回 True），让用户
+        # 仍能继续对话（硬裁剪安全网在 llmcore 层仍生效）。
+        if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+            return True
         try:
             if not should_auto_compact_agent(self.agent, pending_text=pending_text):
                 return True
             with backend_output_redirect():
                 result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
             if result.ok:
+                self._auto_compact_failures = 0
                 self._replace_compact_log()
                 self._record_compact_transcript(result.message)
                 self._rewind_snapshots.clear()
@@ -790,10 +805,18 @@ class GenericAgentBridge:
                 ]})
                 return True
             else:
+                self._auto_compact_failures += 1
                 self.emit({"type": "error", "code": "auto_compact_failed", "message": result.message})
+                if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+                    self.emit({"type": "local_command_output",
+                               "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
                 return False
         except Exception as exc:
+            self._auto_compact_failures += 1
             self.emit({"type": "error", "code": "auto_compact_failed", "message": str(exc)})
+            if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+                self.emit({"type": "local_command_output",
+                           "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
             return False
 
     def _replace_compact_log(self) -> None:
