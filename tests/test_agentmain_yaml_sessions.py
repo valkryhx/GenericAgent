@@ -50,12 +50,12 @@ class LoadLlmSessionsYamlTest(unittest.TestCase):
         self.assertEqual(len(agent.llmclients), 3)
         self.assertIs(agent.llmclient, c_grok)
         self.assertEqual(agent.llm_no, 1)
-        self.assertEqual(agent.get_llm_name(), "_FakeBackend/grok")
+        self.assertEqual(agent.get_llm_name(), "grok/grok-4.5")
         names = [agent.get_llm_name(c) for c in agent.llmclients]
         self.assertEqual(names, [
-            "_FakeBackend/default",
-            "_FakeBackend/grok",
-            "_FakeBackend/gpt",
+            "default/claude-opus-4-8",
+            "grok/grok-4.5",
+            "gpt/gpt-5.4",
         ])
         # 热重载：mtime 不变则不重建
         with patch.object(agentmain_mod, "load_clients_from_yaml") as again:

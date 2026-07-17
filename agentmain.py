@@ -285,8 +285,11 @@ class GenericAgent:
     def get_llm_name(self, b=None, model=False):
         b = self.llmclient if b is None else b
         if isinstance(b, dict): return 'BADCONFIG_MIXIN'
-        if model: return b.backend.model.lower()
-        return f"{type(b.backend).__name__}/{b.backend.name}"
+        if model: return (getattr(b.backend, 'model', '') or '').lower()
+        # 显示成 profile/model（profile 名 = backend.name，来自 llm.yaml）。
+        profile = getattr(b.backend, 'name', '') or type(b.backend).__name__
+        mdl = getattr(b.backend, 'model', '') or ''
+        return f"{profile}/{mdl}" if mdl else profile
 
     def abort(self):
         if not self.is_running: return
