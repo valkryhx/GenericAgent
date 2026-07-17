@@ -1,4 +1,4 @@
-import os, sys, threading, queue, time, json, re, random, locale, base64, mimetypes
+import os, sys, threading, queue, time, json, re, random, locale, base64, mimetypes, copy
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 def _configure_stdio_utf8():
     for name in ('stdout', 'stderr'):
@@ -16,6 +16,11 @@ from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
 import session_transcript
+try:
+    from compact_context import compact_agent_context, replace_log_with_compact_history
+except Exception:  # 压缩核心导入失败时降级：/compact 报不可用，不影响主流程
+    compact_agent_context = None
+    replace_log_with_compact_history = None
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
 from subagent_prompts import build_agent_role_usage_hint
 
@@ -285,9 +290,34 @@ class GenericAgent:
             setattr(self.llmclient.backend, k, v)
             display_queue.put({'done': smart_format(f"✅ session.{k} = {repr(v)}", max_str_len=500), 'source': 'system'})
             return None
+        if _cm := re.match(r'/compact(?:\s+([\s\S]*))?$', raw_query.strip()):
+            self._manual_compact(_cm.group(1) or "", display_queue)
+            return None
         if raw_query.strip() == '/resume':
             return r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
         return raw_query
+
+    def _manual_compact(self, instructions, display_queue):
+        """手动 /compact：用 LLM 摘要替换长历史。CLI/TUI 复用与 ink 相同的核心。"""
+        if compact_agent_context is None:
+            display_queue.put({'done': "/compact 不可用（compact_context 未加载）", 'source': 'system'})
+            return
+        result = compact_agent_context(self, instructions=str(instructions or ""))
+        if not result.ok:
+            display_queue.put({'done': f"压缩失败：{result.message}", 'source': 'system'})
+            return
+        # 同步刷新日志与会话记录，与 ink_bridge 一致。
+        try:
+            if replace_log_with_compact_history is not None:
+                replace_log_with_compact_history(getattr(self, "log_path", None), copy.deepcopy(self.llmclient.backend.history))
+        except Exception: pass
+        try:
+            if session_transcript is not None and getattr(self, "session_path", None):
+                session_transcript.record_compact(
+                    self.session_path, session_id=getattr(self, "session_id", ""),
+                    message=result.message, backend_history_after=copy.deepcopy(self.llmclient.backend.history))
+        except Exception: pass
+        display_queue.put({'done': smart_format(result.message, max_str_len=500), 'source': 'system'})
 
     def run(self):
         while True:

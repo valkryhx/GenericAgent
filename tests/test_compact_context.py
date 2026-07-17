@@ -170,6 +170,16 @@ class CompactContextTest(unittest.TestCase):
         # + pending 400 字符 ≈ 100 token → 超 50 → 触发
         self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 400))
 
+    def test_auto_compact_switch_off_never_triggers(self):
+        # auto_compact_enabled=False（对齐 CC DISABLE_AUTO_COMPACT）：无论上下文多大都不自动摘要。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 20  # 软线 18，正常必触发
+        agent.llmclient.backend.auto_compact_enabled = False
+        self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 10_000))
+        # 打开开关 → 恢复触发，证明前者确实是被开关拦下
+        agent.llmclient.backend.auto_compact_enabled = True
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 10_000))
+
     def test_auto_compact_uses_real_token_baseline(self):
         # 有 last_usage_tokens（真实 token）→ 用它当基准（history 末尾是 assistant，
         # 其后无新增，delta=0）。软线 900。

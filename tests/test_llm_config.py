@@ -316,6 +316,49 @@ class LegacyCfgTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             _parse(text)
 
+    def test_auto_compact_enabled_defaults_true(self):
+        # 不写 auto_compact → cfg 里 auto_compact_enabled=True（默认自动压缩开）。
+        cfg = _parse(BASE_YAML)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertTrue(legacy["auto_compact_enabled"])
+
+    def test_auto_compact_switch_off_carried(self):
+        # auto_compact: false → cfg 里 auto_compact_enabled=False（关自动压缩）。
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact: false",
+        )
+        cfg = _parse(text)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertFalse(legacy["auto_compact_enabled"])
+
+    def test_explicit_absolute_tokens_override_window_ratio(self):
+        # 显式绝对 token 阈值优先于「窗口×ratio」派生。
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact_tokens: 111\n    hard_limit_tokens: 222",
+        )
+        cfg = _parse(text)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["auto_compact_tokens"], 111)
+        self.assertEqual(legacy["hard_limit_tokens"], 222)
+
+    def test_explicit_soft_tokens_must_be_below_hard_tokens(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact_tokens: 300\n    hard_limit_tokens: 200",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(text)
+
+    def test_absolute_tokens_must_be_positive(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact_tokens: 0",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(text)
+
     def test_channel_quirk_fields_carried(self):
         text = """
 providers:

@@ -181,12 +181,19 @@ class ModelCfg(_Strict):
     """model 表条目：绑定 provider，声明 capability 与默认参数。"""
     provider: str
     context_window: Optional[int] = None
+    # 自动压缩总开关：false 则本 model 完全关闭软线摘要 + 硬线裁剪（对齐 Claude
+    # Code 的 DISABLE_AUTO_COMPACT）。手动 /compact 不受影响，仍可用。
+    auto_compact: bool = True
     # 两道压缩线相对 context_window 的比率（token 口径，对齐 Codex 90%/95%）。
     #   auto_compact_ratio 软线：摘要式压缩触发（保留信息）
     #   hard_limit_ratio   硬线：裁剪兜底触发（丢最旧消息）
     # 不填则用默认；仅当 context_window 有值时 to_legacy_cfg 才派生出 token 阈值。
     auto_compact_ratio: float = 0.90
     hard_limit_ratio: float = 0.95
+    # 直接写死绝对 token 阈值（对齐 Codex 的 model_auto_compact_token_limit）。
+    # 若填了，优先级高于「窗口 × ratio」派生；两者都不填才走 Session 端默认。
+    auto_compact_tokens: Optional[int] = None
+    hard_limit_tokens: Optional[int] = None
     supports: list[str] = Field(default_factory=list)
     # 【推荐】统一思考级别：off/low/medium/high/max，三种 wire 写法一致，
     # 由配置层按 wire 翻译成底层字段。日常只需写这一个。
@@ -230,6 +237,16 @@ class ModelCfg(_Strict):
             raise ValueError(
                 f"auto_compact_ratio({self.auto_compact_ratio}) 必须小于 "
                 f"hard_limit_ratio({self.hard_limit_ratio})：软线应早于硬线触发"
+            )
+        for name in ("auto_compact_tokens", "hard_limit_tokens"):
+            v = getattr(self, name)
+            if v is not None and v <= 0:
+                raise ValueError(f"model 的 {name}={v} 非法；须为正整数 token 数")
+        if (self.auto_compact_tokens is not None and self.hard_limit_tokens is not None
+                and self.auto_compact_tokens >= self.hard_limit_tokens):
+            raise ValueError(
+                f"auto_compact_tokens({self.auto_compact_tokens}) 必须小于 "
+                f"hard_limit_tokens({self.hard_limit_tokens})：软线应早于硬线触发"
             )
         return self
 
@@ -333,11 +350,18 @@ class ResolvedModel:
 
         window = m.context_window if m.context_window is not None else p.get("context_window")
         put("context_win", window)
-        # 两道压缩线：仅当 model 声明了 context_window 时才派生 token 阈值写入 cfg；
-        # 未声明则不写，交给 Session 端从 context_win 默认值兜底派生（行为等价）。
-        if m.context_window is not None:
-            put("auto_compact_tokens", round(m.context_window * m.auto_compact_ratio))
-            put("hard_limit_tokens", round(m.context_window * m.hard_limit_ratio))
+        # 两道压缩线阈值（token）。优先级：显式绝对值 > 窗口×ratio 派生 > 交给
+        # Session 端从 context_win 默认兜底（三者都无时）。
+        #   auto_compact 总开关关闭 → 写 auto_compact_enabled=False，Session/前端据此跳过。
+        put("auto_compact_enabled", m.auto_compact)
+        auto_tok = m.auto_compact_tokens
+        hard_tok = m.hard_limit_tokens
+        if auto_tok is None and m.context_window is not None:
+            auto_tok = round(m.context_window * m.auto_compact_ratio)
+        if hard_tok is None and m.context_window is not None:
+            hard_tok = round(m.context_window * m.hard_limit_ratio)
+        put("auto_compact_tokens", auto_tok)
+        put("hard_limit_tokens", hard_tok)
         put("max_retries", p.get("max_retries"))
         put("timeout", p.get("timeout"))
         put("read_timeout", p.get("read_timeout"))

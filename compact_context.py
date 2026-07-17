@@ -53,6 +53,9 @@ def should_auto_compact_agent(agent: Any, pending_text: str = "") -> bool:
     backend = _backend(agent)
     if backend is None:
         return False
+    # 总开关关闭（对齐 Claude Code DISABLE_AUTO_COMPACT）：不自动摘要。手动 /compact 不走这里。
+    if not bool(getattr(backend, "auto_compact_enabled", True)):
+        return False
     history = getattr(backend, "history", []) or []
     last_usage = getattr(backend, "last_usage_tokens", None)
 

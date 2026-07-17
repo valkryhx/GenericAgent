@@ -81,6 +81,14 @@ models:
     # 软线必须 < 硬线（先摘要、再兜底裁剪）。想让压缩更激进就调小 auto_compact_ratio。
     auto_compact_ratio: 0.90
     hard_limit_ratio: 0.95
+    # 想直接写死绝对 token 阈值（不用「窗口×比率」派生）就填这两个，优先级更高：
+    #   auto_compact_tokens 软线绝对值 / hard_limit_tokens 硬线绝对值（软 < 硬）。
+    # 对齐 Codex 的 model_auto_compact_token_limit。都不填才走上面的比率派生。
+    # auto_compact_tokens: 360000
+    # hard_limit_tokens: 380000
+    # 自动压缩总开关（对齐 Claude Code 的 DISABLE_AUTO_COMPACT）。默认 true。
+    # 设 false 则本 model 关闭软线摘要 + 硬线裁剪；手动 /compact 仍可用、不受影响。
+    auto_compact: true
     # 【推荐】统一思考级别：off | low | medium | high | max
     #   一个字段搞定所有 wire。配置层按 provider.wire_api 自动翻译：
     #     anthropic → thinking_type=adaptive + output_config.effort

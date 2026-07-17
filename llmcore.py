@@ -651,6 +651,9 @@ class BaseSession:
         #   hard_limit_tokens   硬线：裁剪兜底触发（丢最旧消息，所有前端的安全网）
         self.auto_compact_tokens = int(cfg.get('auto_compact_tokens') or round(self.context_win * 0.90))
         self.hard_limit_tokens = int(cfg.get('hard_limit_tokens') or round(self.context_win * 0.95))
+        # 自动压缩总开关（对齐 Claude Code 的 DISABLE_AUTO_COMPACT）。False 时软线摘要
+        # 与硬线裁剪都跳过；手动 /compact 不受此开关影响，仍可触发。
+        self.auto_compact_enabled = bool(cfg.get('auto_compact_enabled', True))
         self.history = []
         self.lock = threading.Lock()
         self.system = ""
@@ -716,7 +719,8 @@ class BaseSession:
         def _ask_gen():
             with self.lock:
                 self.history.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-                trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
+                if self.auto_compact_enabled:
+                    trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
                 messages = self.make_messages(self.history)
             content_blocks = None; content = ''
             gen = self.raw_ask(messages)
@@ -837,7 +841,8 @@ class NativeClaudeSession(BaseSession):
         assert type(msg) is dict
         with self.lock:
             self.history.append(msg)
-            trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
+            if self.auto_compact_enabled:
+                trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
             messages = [{"role": m["role"], "content": list(m["content"])} for m in self.history]
         content_blocks = None
         gen = self.raw_ask(messages)
