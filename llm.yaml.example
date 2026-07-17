@@ -71,24 +71,24 @@ models:
     # ── 能力声明（供程序查表决定发不发 thinking/cache/图片 字段）──
     supports: [thinking, prompt_cache]    # 合法值见文件末尾说明
     # ── 以下都是可选默认参数（能被 profile 覆盖）──
-    # context_window 是「模型物理上下文窗口」（token），是唯一的事实来源；两道压缩线
-    # 都从它按比率派生。不填则程序默认 400000。仅当模型窗口明显更小（如 32k 老模型）
-    # 时才必须写，把压缩阈值卡进模型真实容量内，否则攒太多历史会超窗被 API 拒。
+    # context_window 是「模型物理上下文窗口」（token），是唯一的事实来源。
+    # 不填则 Session 端用 DEFAULT_CONTEXT_WIN=400000 兜底——对小窗口模型不安全，
+    # 建议每个 model 都显式写。
     context_window: 400000
-    # 两道压缩线（token 口径，对齐 Codex 90%/95%）。都可不填，用默认值。
-    #   auto_compact_ratio 软线：达到 窗口×此值 → 摘要式压缩（保留信息，ink 前端）
-    #   hard_limit_ratio   硬线：达到 窗口×此值 → 裁剪兜底（丢最旧消息，所有前端安全网）
-    # 软线必须 < 硬线（先摘要、再兜底裁剪）。想让压缩更激进就调小 auto_compact_ratio。
-    auto_compact_ratio: 0.90
-    hard_limit_ratio: 0.95
-    # 想直接写死绝对 token 阈值（不用「窗口×比率」派生）就填这两个，优先级更高：
-    #   auto_compact_tokens 软线绝对值 / hard_limit_tokens 硬线绝对值（软 < 硬）。
-    # 对齐 Codex 的 model_auto_compact_token_limit。都不填才走上面的比率派生。
-    # auto_compact_tokens: 360000
-    # hard_limit_tokens: 380000
-    # 自动压缩总开关（对齐 Claude Code 的 DISABLE_AUTO_COMPACT）。默认 true。
-    # 设 false 则本 model 关闭软线摘要 + 硬线裁剪；手动 /compact 仍可用、不受影响。
+    # ── 压缩相关配置（对齐 Codex model_auto_compact_token_limit / CC 开关）──
+    # 阈值解析优先级（to_legacy_cfg → Session）：
+    #   1. 显式绝对值 auto_compact_tokens / hard_limit_tokens   ← 最高
+    #   2. 窗口 × 比率  round(context_window × auto_compact_ratio/hard_limit_ratio)
+    #   3. Session 端兜底  round(DEFAULT_CONTEXT_WIN × 0.90/0.95)
+    # 约束：软线 < 硬线；绝对值须为正整数。
+    # 总开关 auto_compact 与阈值独立：false 时阈值仍写入，但运行时跳过软线+硬线
+    # （手动 /compact 不受影响）。对齐 Claude Code 的 DISABLE_AUTO_COMPACT。
     auto_compact: true
+    auto_compact_ratio: 0.90      # 软线比率（默认 0.90，对齐 Codex）
+    hard_limit_ratio: 0.95        # 硬线比率（默认 0.95）
+    # 绝对值优先于上面的 ratio 派生（= 窗口×ratio 的结果，写死便于一眼看清）：
+    auto_compact_tokens: 360000   # 软线：摘要式压缩触发（ink 前端）
+    hard_limit_tokens: 380000     # 硬线：裁剪兜底触发（所有前端安全网）
     # 【推荐】统一思考级别：off | low | medium | high | max
     #   一个字段搞定所有 wire。配置层按 provider.wire_api 自动翻译：
     #     anthropic → thinking_type=adaptive + output_config.effort
@@ -101,6 +101,12 @@ models:
 
   gpt-5.4:
     provider: my-openai
+    context_window: 272000
+    auto_compact: true
+    auto_compact_ratio: 0.90
+    hard_limit_ratio: 0.95
+    auto_compact_tokens: 244800   # 272000×0.90
+    hard_limit_tokens: 258400     # 272000×0.95
     supports: [image_input]          # 支持图片输入的模型加 image_input（取代旧的 provider.native_image_input）
     thinking: high                   # 同一个统一字段，openai wire 会翻译成 reasoning_effort
     max_tokens: 8192
