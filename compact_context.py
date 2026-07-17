@@ -6,13 +6,19 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable
+
+import token_meter
 
 
 SummarizeFn = Callable[[str, str], str]
 
 DEFAULT_CONTEXT_WIN = 400_000
 MAX_COMPACT_SOURCE_CHARS = 800_000
+
+# 软线兜底比率：直接喂 legacy cfg（无 auto_compact_tokens）的老路径，从 context_win
+# 派生软线阈值时用。对齐 Codex 90%。
+_AUTO_COMPACT_RATIO_FALLBACK = 0.90
 
 
 @dataclass
@@ -24,49 +30,35 @@ class CompactResult:
     compacted_messages: int = 0
 
 
-def estimate_history_chars(history: list[dict[str, Any]], pending_text: str = "") -> int:
-    return sum(len(json.dumps(m, ensure_ascii=False)) for m in history or []) + len(str(pending_text or ""))
+def _soft_limit_tokens(backend: Any) -> int:
+    """软线（摘要式压缩触发）token 阈值。
 
-
-# 字符→token 的粗略换算系数：约 3 个字符 ≈ 1 token（与旧的 context_win*3 口径一致，
-# 反过来即 chars/3≈tokens）。只用于估算「尚未发出的 pending_text」这一小段增量。
-_CHARS_PER_TOKEN = 3
-
-
-def _real_total_tokens(backend: Any) -> Optional[int]:
-    """取上次成功请求 API 返回的真实上下文 token 总数（input+output）。
-
-    来自 llmcore `_record_usage` 写入的 `backend.last_usage_tokens`。没有成功请求过
-    （None）或结构不符时返回 None，调用方据此回退到字符估算。
+    优先读 backend.auto_compact_tokens（配置层派生或 Session 兜底）；缺失时从
+    context_win 按 0.90 兜底派生（直接喂 legacy cfg 的老路径）。
     """
-    usage = getattr(backend, "last_usage_tokens", None)
-    if not isinstance(usage, dict):
-        return None
-    total = usage.get("total_tokens")
-    if isinstance(total, (int, float)) and total > 0:
-        return int(total)
-    inp = usage.get("input_tokens") or 0
-    out = usage.get("output_tokens") or 0
-    if inp or out:
-        return int(inp) + int(out)
-    return None
+    explicit = getattr(backend, "auto_compact_tokens", None)
+    if explicit:
+        return int(explicit)
+    context_win = int(getattr(backend, "context_win", DEFAULT_CONTEXT_WIN) or DEFAULT_CONTEXT_WIN)
+    return round(context_win * _AUTO_COMPACT_RATIO_FALLBACK)
 
 
-def should_auto_compact_agent(agent: Any, pending_text: str = "", threshold: float = 0.75) -> bool:
+def should_auto_compact_agent(agent: Any, pending_text: str = "") -> bool:
+    """软线判断：估算「当前上下文 + 本次待发 pending_text」的 token 是否超软线阈值。
+
+    token 化后（对齐 Codex/CC）：当前 token 由 token_meter.estimate_context_tokens
+    给出（真实 usage 基准 + 增量估算，冷启动全量估算）；pending_text 是本次还没进
+    history 的新输入，按兜底比率折成 token 计入。阈值用软线 auto_compact_tokens。
+    """
     backend = _backend(agent)
-    history = getattr(backend, "history", []) if backend is not None else []
-    context_win = int(getattr(backend, "context_win", DEFAULT_CONTEXT_WIN) or DEFAULT_CONTEXT_WIN) if backend is not None else DEFAULT_CONTEXT_WIN
+    if backend is None:
+        return False
+    history = getattr(backend, "history", []) or []
+    last_usage = getattr(backend, "last_usage_tokens", None)
 
-    # 优先用真实 token：上次成功请求的上下文 token 总数 + 本次待发 pending_text 的估算增量，
-    # 与 context_win（真实 token 窗口）* threshold 比较。比字符 ÷3 的粗估准得多。
-    real_total = _real_total_tokens(backend) if backend is not None else None
-    if real_total is not None:
-        pending_tokens = len(str(pending_text or "")) // _CHARS_PER_TOKEN
-        return real_total + pending_tokens > context_win * threshold
-
-    # 回退：从未成功请求过（last_usage_tokens 仍为 None），用字符估算。
-    # 字符口径下窗口需 ×3（约 3 字符/token）才与 token 口径对齐。
-    return estimate_history_chars(history, pending_text) > context_win * 3 * threshold
+    current = token_meter.estimate_context_tokens(history, last_usage)
+    pending_tokens = int(len(str(pending_text or "")) / token_meter.CHARS_PER_TOKEN_FALLBACK)
+    return current + pending_tokens > _soft_limit_tokens(backend)
 
 
 def compact_agent_context(
