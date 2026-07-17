@@ -107,25 +107,26 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
         self.assertEqual(client.chat_calls, 0)
 
     def test_failed_mixin_config_is_not_left_as_default_client(self):
-        backend = type("Backend", (), {"history": [], "name": "native", "model": "gpt-test"})()
-        client = type("Client", (), {"backend": backend, "last_tools": ""})()
-        mykeys = {
-            "mixin_config": {"llm_nos": ["missing"]},
-            "native_oai_config": {"name": "native"},
-        }
+        # 阶段 3：load_llm_sessions 只走 llm.yaml；失败的 mixin 由
+        # load_clients_from_yaml 内部跳过，返回的 clients 里不应混入半残对象。
+        ok_client = type("Client", (), {
+            "backend": type("Backend", (), {"history": [], "name": "default", "model": "m"})(),
+            "last_tools": "",
+        })()
         agent = GenericAgent.__new__(GenericAgent)
         agent.llm_no = 0
-        globals_ref = GenericAgent.load_llm_sessions.__globals__
+        import agentmain as agentmain_mod
+        agentmain_mod._llm_yaml_path = None
+        agentmain_mod._llm_yaml_mtime_ns = None
 
-        with patch.dict(globals_ref, {
-            "reload_mykeys": lambda: (mykeys, True),
-            "resolve_client": lambda _cfg_name: client,
-            "MixinSession": type("FailingMixinSession", (), {"__init__": lambda self, *_args, **_kwargs: (_ for _ in ()).throw(Exception("missing mixin"))}),
-        }):
+        def fake_load(**_kwargs):
+            return [ok_client], 0, "llm.yaml", 1
+
+        with patch.object(agentmain_mod, "load_clients_from_yaml", side_effect=fake_load):
             agent.load_llm_sessions()
 
-        self.assertEqual(agent.llmclients, [client])
-        self.assertIs(agent.llmclient, client)
+        self.assertEqual(agent.llmclients, [ok_client])
+        self.assertIs(agent.llmclient, ok_client)
         self.assertFalse(isinstance(agent.llmclient, dict))
 
 

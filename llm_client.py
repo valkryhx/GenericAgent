@@ -123,12 +123,72 @@ def _resolve_model_directly(config: LLMConfig, model_key: str) -> ResolvedModel:
 
 
 def try_build_default_client(start_dir: Optional[str] = None):
-    """便捷入口：找到 llm.yaml 就构造 active_profile 的 client，否则返回 None。
-
-    agentmain 可先试这个；返回 None 时回退到现有 mykey.py 路径。
-    """
+    """便捷入口：找到 llm.yaml 就构造 active_profile 的 client，否则返回 None。"""
     path = find_llm_config(start_dir)
     if not path:
         return None
     config = load_llm_config(path)
     return build_client(config)
+
+
+def load_clients_from_yaml(path: Optional[str] = None, start_dir: Optional[str] = None):
+    """读 llm.yaml，按 profiles（+ mixin）构造全部 NativeToolClient。
+
+    返回 (clients, active_index, config_path, mtime_ns)：
+      clients       列表，顺序 = profiles 声明序，再接 mixin 项
+      active_index  active_profile 在 clients 中的下标（缺省 0）
+      config_path   实际加载的 yaml 路径
+      mtime_ns      文件 mtime（供 agentmain 热重载判断）
+
+    阶段 3：agentmain 只走这条路径，不再读 mykey.py。
+    """
+    import os
+
+    cfg_path = path or find_llm_config(start_dir)
+    if not cfg_path or not os.path.exists(cfg_path):
+        raise FileNotFoundError(
+            "未找到 llm.yaml / llm.yml。阶段 3 起 GA 只读 YAML 配置，"
+            "请在仓库根目录放置 llm.yaml（参见 llm.yaml.example）。"
+        )
+    config = load_llm_config(cfg_path)
+    if not config.profiles and not config.mixin:
+        raise ValueError(f"{cfg_path} 中没有任何 profiles / mixin，无法构造会话")
+
+    clients: list[Any] = []
+    names: list[str] = []
+    errors: list[str] = []
+
+    for profile_name in config.profiles:
+        try:
+            clients.append(build_client(config, profile_name))
+            names.append(profile_name)
+        except Exception as exc:
+            errors.append(f"profile '{profile_name}': {exc}")
+
+    for mixin_name in config.mixin:
+        try:
+            client = build_mixin_client(config, mixin_name)
+            # 显示名：让 /model 能看出是 mixin
+            try:
+                client.backend.name = f"mixin:{mixin_name}"
+            except Exception:
+                pass
+            clients.append(client)
+            names.append(f"mixin:{mixin_name}")
+        except Exception as exc:
+            errors.append(f"mixin '{mixin_name}': {exc}")
+
+    if not clients:
+        detail = "; ".join(errors) if errors else "无可用条目"
+        raise RuntimeError(f"llm.yaml 未能构造任何会话：{detail}")
+
+    if errors:
+        for e in errors:
+            print(f"[WARN] llm.yaml 跳过：{e}")
+
+    active_index = 0
+    if config.active_profile and config.active_profile in names:
+        active_index = names.index(config.active_profile)
+
+    mtime_ns = os.stat(cfg_path).st_mtime_ns
+    return clients, active_index, cfg_path, mtime_ns

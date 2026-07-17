@@ -11,7 +11,8 @@ def _configure_stdio_utf8():
 _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from llmcore import reload_mykeys, LLMSession, ToolClient, ClaudeSession, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession, resolve_client
+from llmcore import NativeOAISession
+from llm_client import load_clients_from_yaml
 from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
@@ -25,6 +26,9 @@ from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic
 from subagent_prompts import build_agent_role_usage_hint
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+# llm.yaml 热重载：记录上次成功加载的路径与 mtime，未变则跳过重建。
+_llm_yaml_path: str | None = None
+_llm_yaml_mtime_ns: int | None = None
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
 STREAM_FLUSH_CHARS = 16
 
@@ -185,32 +189,53 @@ class GenericAgent:
             print(f"[WARN] Failed to initialize session transcript: {e}")
 
     def load_llm_sessions(self):
-        mykeys, changed = reload_mykeys()
-        if not changed and hasattr(self, 'llmclients'): return
-        try: oldhistory = self.llmclient.backend.history
-        except: oldhistory = None
-        llm_sessions = []
-        for k, cfg in mykeys.items():
-            if not any(x in k for x in ['api', 'config', 'cookie']): continue
+        """阶段 3：只从 llm.yaml 构造会话列表（profiles + mixin），不再读 mykey.py。
+
+        /model 列表项名 = profile 名（backend.name）；默认选中 active_profile。
+        yaml 未变且已加载过则跳过重建，保留当前 llm_no 与 history。
+        """
+        global _llm_yaml_path, _llm_yaml_mtime_ns
+        # 热重载：文件未变则复用已有 clients。
+        if hasattr(self, "llmclients") and self.llmclients and _llm_yaml_path:
             try:
-                if 'mixin' in k: llm_sessions += [{'mixin_cfg': cfg}]
-                elif c := resolve_client(k): llm_sessions += [c]
-            except: pass
-        resolved_sessions = []
-        for i, s in enumerate(llm_sessions):
-            if isinstance(s, dict) and 'mixin_cfg' in s:
+                if os.path.exists(_llm_yaml_path) and os.stat(_llm_yaml_path).st_mtime_ns == _llm_yaml_mtime_ns:
+                    return
+            except OSError:
+                pass
+        try:
+            oldhistory = self.llmclient.backend.history
+        except Exception:
+            oldhistory = None
+        try:
+            old_name = self.get_llm_name() if hasattr(self, "llmclient") else None
+        except Exception:
+            old_name = None
+
+        clients, active_index, cfg_path, mtime_ns = load_clients_from_yaml(start_dir=script_dir)
+        _llm_yaml_path, _llm_yaml_mtime_ns = cfg_path, mtime_ns
+        self.llmclients = clients
+
+        # 尽量按「上次选中的 profile 名」恢复下标；首次加载用 active_profile。
+        index = active_index
+        if old_name:
+            for i, c in enumerate(clients):
                 try:
-                    mixin = MixinSession(llm_sessions, s['mixin_cfg'])
-                    if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): resolved_sessions.append(NativeToolClient(mixin))
-                    else: resolved_sessions.append(ToolClient(mixin))
-                except Exception as e: print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
-            else:
-                resolved_sessions.append(s)
-        if not resolved_sessions: raise Exception('[ERROR] No available LLM sessions: Check your mykey.py')
-        self.llmclients = resolved_sessions
-        self.llm_no %= len(self.llmclients)
-        self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
-        if oldhistory: self.llmclient.backend.history = oldhistory
+                    if self.get_llm_name(c) == old_name:
+                        index = i
+                        break
+                except Exception:
+                    pass
+        self.llm_no = index % len(self.llmclients)
+        self.llmclient = self.llmclients[self.llm_no]
+        if oldhistory:
+            try:
+                self.llmclient.backend.history = oldhistory
+            except Exception:
+                pass
+        print(
+            f"[Info] LLM sessions from {cfg_path}: "
+            f"{len(self.llmclients)} profile(s), active=#{self.llm_no} {self.get_llm_name()}"
+        )
     
     def next_llm(self, n=-1):
         self.load_llm_sessions()
@@ -247,7 +272,8 @@ class GenericAgent:
         self.llm_no = index
         self.llmclient = self.llmclients[self.llm_no]
         try: self.llmclient.backend.history = lastc.backend.history
-        except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
+        except Exception:
+            raise Exception('[ERROR] BAD session switch: history 无法迁移到新 backend')
         self.llmclient.last_tools = ''
         name = self.get_llm_name(model=True)
         if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn', include_mcp_tools=False)
