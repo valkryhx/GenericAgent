@@ -276,6 +276,46 @@ class LegacyCfgTest(unittest.TestCase):
         legacy = cfg.resolve("fast").to_legacy_cfg()
         self.assertEqual(legacy["model"], "gpt-5.4-2026-01-01")
 
+    def test_compaction_tokens_derived_from_window_and_ratios(self):
+        # claude 有 context_window=400000，默认 ratio 0.90/0.95 → 派生软/硬线。
+        cfg = _parse(BASE_YAML)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["auto_compact_tokens"], 360000)
+        self.assertEqual(legacy["hard_limit_tokens"], 380000)
+
+    def test_compaction_ratios_customizable(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact_ratio: 0.5\n    hard_limit_ratio: 0.8",
+        )
+        cfg = _parse(text)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["auto_compact_tokens"], 200000)
+        self.assertEqual(legacy["hard_limit_tokens"], 320000)
+
+    def test_compaction_tokens_absent_without_window(self):
+        # gpt-5.4 没有 context_window → 不派生 token 阈值（由 Session 端兜底）。
+        cfg = _parse(BASE_YAML)
+        legacy = cfg.resolve("fast").to_legacy_cfg()
+        self.assertNotIn("auto_compact_tokens", legacy)
+        self.assertNotIn("hard_limit_tokens", legacy)
+
+    def test_soft_ratio_must_be_below_hard_ratio(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    auto_compact_ratio: 0.95\n    hard_limit_ratio: 0.90",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(text)
+
+    def test_ratio_out_of_range_rejected(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000\n    hard_limit_ratio: 1.5",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(text)
+
     def test_channel_quirk_fields_carried(self):
         text = """
 providers:

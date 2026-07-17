@@ -181,6 +181,12 @@ class ModelCfg(_Strict):
     """model 表条目：绑定 provider，声明 capability 与默认参数。"""
     provider: str
     context_window: Optional[int] = None
+    # 两道压缩线相对 context_window 的比率（token 口径，对齐 Codex 90%/95%）。
+    #   auto_compact_ratio 软线：摘要式压缩触发（保留信息）
+    #   hard_limit_ratio   硬线：裁剪兜底触发（丢最旧消息）
+    # 不填则用默认；仅当 context_window 有值时 to_legacy_cfg 才派生出 token 阈值。
+    auto_compact_ratio: float = 0.90
+    hard_limit_ratio: float = 0.95
     supports: list[str] = Field(default_factory=list)
     # 【推荐】统一思考级别：off/low/medium/high/max，三种 wire 写法一致，
     # 由配置层按 wire 翻译成底层字段。日常只需写这一个。
@@ -215,6 +221,15 @@ class ModelCfg(_Strict):
         if self.thinking is not None and self.thinking not in THINKING_LEVELS:
             raise ValueError(
                 f"model 的 thinking={self.thinking!r} 非法；合法级别：{list(THINKING_LEVELS)}"
+            )
+        for name in ("auto_compact_ratio", "hard_limit_ratio"):
+            r = getattr(self, name)
+            if not (0 < r <= 1):
+                raise ValueError(f"model 的 {name}={r} 非法；须在 (0, 1] 区间内")
+        if self.auto_compact_ratio >= self.hard_limit_ratio:
+            raise ValueError(
+                f"auto_compact_ratio({self.auto_compact_ratio}) 必须小于 "
+                f"hard_limit_ratio({self.hard_limit_ratio})：软线应早于硬线触发"
             )
         return self
 
@@ -316,7 +331,13 @@ class ResolvedModel:
             if value is not None:
                 cfg[key] = value
 
-        put("context_win", m.context_window if m.context_window is not None else p.get("context_window"))
+        window = m.context_window if m.context_window is not None else p.get("context_window")
+        put("context_win", window)
+        # 两道压缩线：仅当 model 声明了 context_window 时才派生 token 阈值写入 cfg；
+        # 未声明则不写，交给 Session 端从 context_win 默认值兜底派生（行为等价）。
+        if m.context_window is not None:
+            put("auto_compact_tokens", round(m.context_window * m.auto_compact_ratio))
+            put("hard_limit_tokens", round(m.context_window * m.hard_limit_ratio))
         put("max_retries", p.get("max_retries"))
         put("timeout", p.get("timeout"))
         put("read_timeout", p.get("read_timeout"))

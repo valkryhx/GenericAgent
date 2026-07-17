@@ -71,7 +71,16 @@ models:
     # ── 能力声明（供程序查表决定发不发 thinking/cache/图片 字段）──
     supports: [thinking, prompt_cache]    # 合法值见文件末尾说明
     # ── 以下都是可选默认参数（能被 profile 覆盖）──
+    # context_window 是「模型物理上下文窗口」（token），是唯一的事实来源；两道压缩线
+    # 都从它按比率派生。不填则程序默认 400000。仅当模型窗口明显更小（如 32k 老模型）
+    # 时才必须写，把压缩阈值卡进模型真实容量内，否则攒太多历史会超窗被 API 拒。
     context_window: 400000
+    # 两道压缩线（token 口径，对齐 Codex 90%/95%）。都可不填，用默认值。
+    #   auto_compact_ratio 软线：达到 窗口×此值 → 摘要式压缩（保留信息，ink 前端）
+    #   hard_limit_ratio   硬线：达到 窗口×此值 → 裁剪兜底（丢最旧消息，所有前端安全网）
+    # 软线必须 < 硬线（先摘要、再兜底裁剪）。想让压缩更激进就调小 auto_compact_ratio。
+    auto_compact_ratio: 0.90
+    hard_limit_ratio: 0.95
     # 【推荐】统一思考级别：off | low | medium | high | max
     #   一个字段搞定所有 wire。配置层按 provider.wire_api 自动翻译：
     #     anthropic → thinking_type=adaptive + output_config.effort
