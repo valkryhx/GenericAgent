@@ -1,7 +1,8 @@
 """真实 API 自测：自动压缩（软线/硬线）+ 手动 /compact + 总开关。
 
-用 llm.yaml 的真实 provider 打真实 LLM API。为了容易触发，运行时把阈值调到
-~1000 token（不改 llm.yaml，不写任何 key）。
+用 llm.yaml 的真实 provider 打真实 LLM API。为了容易触发，运行时把阈值调小
+（软线 700、硬线 1000；不改 llm.yaml，不写任何 key）。软线场景在判断 True
+后会真正调用 compact_agent_context 做摘要（对齐 ink 自动压缩路径）。
 
 用法：
   python tests/real_compact_selftest.py            # active_profile
@@ -83,23 +84,60 @@ def main() -> int:
         f"backend={type(backend).__name__}  model={backend.model}"
     )
 
-    # ── 场景 A：软线自动压缩判断（should_auto_compact_agent）──────────────
-    sep("场景 A：软线判断 should_auto_compact_agent（真实 token 基准）")
-    backend.auto_compact_tokens = 1000
-    backend.hard_limit_tokens = 100_000  # 先抬高硬线，避免这一步被裁剪干扰
+    # 软线阈值调小，确保多轮后真实 token 会越过；硬线抬高，避免本场景被裁剪抢走。
+    # 对齐 ink_bridge._auto_compact_if_needed：判断 True → 真正调用 compact_agent_context。
+    SOFT = 700
+    HARD = 50_000
+
+    # ── 场景 A：软线自动压缩（判断 + 真实执行摘要）──────────────────────
+    sep(f"场景 A：软线自动压缩 should_auto_compact → compact_agent_context（软线={SOFT}）")
+    backend.history = []
+    backend.last_usage_tokens = None
+    backend.auto_compact_tokens = SOFT
+    backend.hard_limit_tokens = HARD
     backend.auto_compact_enabled = True
     before = compact_context.should_auto_compact_agent(agent, pending_text="hi")
     print(f"  空历史 + 短输入 → should_auto_compact = {before}（期望 False）")
-    run_turn(backend, "用一句话介绍你自己。")
-    print(f"  真实一轮后 last_usage_tokens = {getattr(backend, 'last_usage_tokens', None)}")
-    print(f"  history 条数 = {len(backend.history)}")
-    real = token_meter.real_total_tokens(getattr(backend, "last_usage_tokens", None))
-    est = token_meter.estimate_context_tokens(
-        backend.history, getattr(backend, "last_usage_tokens", None)
-    )
-    print(f"  real_total_tokens={real}  estimate_context_tokens={est}  软线阈值=1000")
-    after = compact_context.should_auto_compact_agent(agent, pending_text="")
-    print(f"  → should_auto_compact = {after}（真实 token {'超' if after else '未超'} 1000 软线）")
+
+    # 多轮真实对话，塞入可被摘要记住的事实 + 长文本，把真实 token 推过软线。
+    soft_prompts = [
+        "我叫小明，项目代号是 Falcon，住在杭州。请用一句话确认你记住了。",
+        "请写一段大约200字的关于海洋的科普。",
+        "请写一段大约200字的关于森林的科普。",
+        "请写一段大约200字的关于沙漠的科普。",
+        "请写一段大约200字的关于极地的科普。",
+        "请写一段大约200字的关于火山的科普。",
+    ]
+    triggered = False
+    for i, p in enumerate(soft_prompts, 1):
+        run_turn(backend, p)
+        real = token_meter.real_total_tokens(backend.last_usage_tokens)
+        est = token_meter.estimate_context_tokens(backend.history, backend.last_usage_tokens)
+        hit = compact_context.should_auto_compact_agent(agent, pending_text="")
+        print(
+            f"  轮 {i}: history={len(backend.history)}  real_total={real}  "
+            f"estimate={est}  soft={SOFT}  should_auto={hit}"
+        )
+        if hit:
+            triggered = True
+            n_before = len(backend.history)
+            # 对齐 ink 自动压缩：判断通过后真正执行摘要压缩。
+            result_auto = compact_context.compact_agent_context(
+                agent,
+                instructions="Automatic compact before the next user request. 保留用户姓名、项目代号、城市。",
+            )
+            print(
+                f"  ★ 软线触发：compact ok={result_auto.ok}  "
+                f"history {n_before}→{len(backend.history)}  message={result_auto.message}"
+            )
+            if result_auto.ok:
+                print(f"  摘要片段（前250字）：\n    {result_auto.summary[:250]}")
+                follow = run_turn(backend, "根据压缩后的上下文：我叫什么？项目代号？住哪？")
+                ans = getattr(follow, "content", "") if follow else ""
+                print(f"  压缩后追问回答：{ans[:220]}")
+            break
+    if not triggered:
+        print(f"  ⚠ 跑完 {len(soft_prompts)} 轮仍未越过软线 {SOFT}，请再降阈值或加长 prompt。")
 
     # ── 场景 B：硬线裁剪（trim_messages_history）多轮真实对话触发 ──────────
     sep("场景 B：硬线裁剪 trim_messages_history（多轮真实对话，丢最旧消息）")
