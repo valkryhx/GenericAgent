@@ -1,7 +1,8 @@
 # GA Slice D 方案：Compact 旧图 · 临时文件 GC
 
 日期：2026-07-20  
-状态：方案（未实施；**D1 焦点提示已取消**）  
+状态：**D2 + D3 已实施**（D1 焦点提示仍取消）  
+实施提交见仓库 `feat(image): Slice D2 compact strip + D3 image GC` 一带。  
 前置：
 
 - 调研：`docs/ga_image_input_research_2026-07-20.md`
@@ -369,17 +370,17 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ### D3 GC
 
-- [ ] 定 `resolve_ga_image_root()`（TS + Python 同规则）  
-- [ ] `clipboardImage.ts` 改默认根到 `temp/ga-images`  
-- [ ] `image_gc.py` + `tests/test_image_gc.py`  
-- [ ] `ink_bridge` / `agentmain` 启动调用 gc  
-- [ ] 兼容清理 `tmpdir()/ga-images`  
+- [x] 定 `resolve_ga_image_root()`（TS `clipboardImage.ts` + Python `image_gc.py`）  
+- [x] `clipboardImage.ts` 默认根 `temp/ga-images`（已有）  
+- [x] `image_gc.py` + `tests/test_image_gc.py`  
+- [x] `ink_bridge` / `GenericAgent.__init__` 启动调用 gc  
+- [x] 兼容清理 `tmpdir()/ga-images`  
 
 ### D2 Compact strip
 
-- [ ] `_content_to_text` 识别 `image` / `image_url` / `input_image` → `[image]`  
-- [ ] 单测巨 base64 不出现在 `_history_to_text`  
-- [ ] 文档注释指向 CC `stripImagesFromMessages`  
+- [x] `_content_to_text` 识别 `image` / `image_url` / `input_image` → `[image]`  
+- [x] 单测巨 base64 不出现在 `_history_to_text` / compact source  
+- [x] 注释指向 CC `stripImagesFromMessages`  
 
 ### D1 Focus hint
 

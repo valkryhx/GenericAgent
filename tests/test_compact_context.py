@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent  # noqa: E402
-from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget  # noqa: E402
+from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget, _content_to_text, _history_to_text  # noqa: E402
 
 
 class FakeBackend:
@@ -229,6 +229,80 @@ class CompactContextTest(unittest.TestCase):
         backend = type("Backend", (), {})()
 
         self.assertEqual(800_000, _source_char_budget(backend))
+
+    def test_content_to_text_strips_image_base64_to_placeholder(self):
+        # Slice D2 / CC stripImagesFromMessages：摘要源永不含 base64
+        huge = "A" * 50_000
+        content = [
+            {"type": "text", "text": "用户发了截图"},
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": huge},
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{huge}"},
+            },
+            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{huge}"},
+            {
+                "type": "tool_result",
+                "content": [
+                    {"type": "text", "text": "tool saw image"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+        ]
+        text = _content_to_text(content)
+        self.assertIn("用户发了截图", text)
+        self.assertIn("[image]", text)
+        self.assertIn("tool saw image", text)
+        self.assertNotIn(huge, text)
+        self.assertNotIn("base64," + huge[:20], text)
+        self.assertLess(len(text), 2000)
+
+    def test_history_to_text_with_huge_images_stays_small(self):
+        huge = "B" * 200_000
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看这两张图"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "好的"}]},
+        ]
+        source = _history_to_text(history, budget=50_000)
+        self.assertTrue("[image]" in source or "[image |" in source)
+        self.assertIn("看这两张图", source)
+        self.assertNotIn(huge, source)
+        self.assertLess(len(source), 10_000)
+
+    def test_manual_compact_source_strips_images_before_summarize(self):
+        huge = "C" * 80_000
+        agent = FakeAgent()
+        agent.llmclient.backend.history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "alpha with image"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "beta"}]},
+        ]
+        seen = {}
+
+        def summarize(source, instructions):
+            seen["source"] = source
+            self.assertNotIn(huge, source)
+            self.assertTrue("[image]" in source or "[image |" in source)
+            return "Summary notes user attached image and alpha/beta."
+
+        result = compact_agent_context(agent, summarize_fn=summarize)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue("[image]" in seen.get("source", "") or "[image |" in seen.get("source", ""))
 
     def test_replace_log_with_compact_history_archives_old_log_and_writes_restorable_pair(self):
         with tempfile.TemporaryDirectory() as tmp:

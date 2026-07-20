@@ -311,10 +311,16 @@ def get_system_prompt(agent=None):
 class GenericAgent:
     def __init__(self):
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
+        # Slice D3：进程内首次构造 agent 时 GC 自产图片缓存（best-effort）
+        try:
+            from image_gc import maybe_gc_ga_images_on_startup
+            maybe_gc_ga_images_on_startup(quiet=True)
+        except Exception:
+            pass
         self.lock = threading.Lock()
         self.task_dir = None
-        self.history = []; self.handler = None; 
-        self.task_queue = queue.Queue() 
+        self.history = []; self.handler = None;
+        self.task_queue = queue.Queue()
         self.is_running = False; self.stop_sig = False
         self.llm_no = 0;  self.inc_out = False; self.verbose = True
         self.peer_hint = True

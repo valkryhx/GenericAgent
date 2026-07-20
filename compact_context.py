@@ -128,7 +128,46 @@ def _history_to_text(history: list[dict[str, Any]], budget: int) -> str:
     return _middle_truncate(source, budget)
 
 
+def _is_image_block(block: dict[str, Any]) -> bool:
+    """Claude image / OAI image_url / Responses input_image（Slice D2 / CC stripImages）。"""
+    typ = block.get("type")
+    if typ in ("image", "input_image", "image_url"):
+        return True
+    # 少数适配：source.type=base64 且无 type 字段
+    src = block.get("source")
+    if isinstance(src, dict) and src.get("type") == "base64" and src.get("data") and typ not in ("text", "tool_use", "tool_result", "thinking"):
+        return True
+    return False
+
+
+def _image_placeholder_for_block(block: dict[str, Any]) -> str:
+    """摘要源中的图片标记；永不包含 base64。
+
+    一期对齐 CC stripImagesFromMessages → 固定 `[image]`。
+    若 block 旁有 path/sha 元数据（可选）再增强，否则保持简短。
+    """
+    meta_bits: list[str] = []
+    for key in ("path", "source_path", "file"):
+        val = block.get(key)
+        if isinstance(val, str) and val.strip():
+            meta_bits.append(f"path={val.strip()}")
+            break
+    src = block.get("source")
+    if isinstance(src, dict):
+        mt = src.get("media_type") or src.get("mediaType")
+        if mt:
+            meta_bits.append(f"media={mt}")
+    if meta_bits:
+        return "[image | " + " | ".join(meta_bits) + "]"
+    return "[image]"
+
+
 def _content_to_text(content: Any) -> str:
+    """把 message content 压成摘要用文本。
+
+    Slice D2：image / image_url / input_image → `[image]`，禁止 json.dumps 整段 base64
+   （对齐 Claude Code services/compact stripImagesFromMessages）。
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -146,8 +185,15 @@ def _content_to_text(content: Any) -> str:
                 parts.append(f"<tool_use>{json.dumps(block.get('input', {}), ensure_ascii=False)}</tool_use>")
             elif typ == "thinking":
                 parts.append("<thinking>[omitted]</thinking>")
+            elif _is_image_block(block):
+                parts.append(_image_placeholder_for_block(block))
             else:
-                parts.append(json.dumps(block, ensure_ascii=False, default=str))
+                # 仍可能有未知块：若看起来像带 data 的图，也 strip
+                raw = json.dumps(block, ensure_ascii=False, default=str)
+                if '"type": "image"' in raw or '"type":"image"' in raw or "base64" in raw and len(raw) > 2000:
+                    parts.append("[image]")
+                else:
+                    parts.append(raw)
         return "\n".join(p for p in parts if p)
     return json.dumps(content, ensure_ascii=False, default=str)
 
@@ -237,6 +283,8 @@ def _compact_prompt(source: str, instructions: str) -> str:
     return (
         "Summarize the previous GenericAgent conversation so the agent can continue without the original long context.\n"
         "Keep: user goal, current status, decisions, constraints, important files/paths, tool results, unresolved tasks, and next steps.\n"
-        "Do not include filler. Do not call tools. Return only the compact summary text."
+        "Do not include filler. Do not call tools. Return only the compact summary text. "
+        "If the conversation source contains [image] markers, note that the user attached image(s) "
+        "but do not invent pixel-level details that are not in the text."
         f"{extra}\n\nConversation to compact:\n{source}"
     )

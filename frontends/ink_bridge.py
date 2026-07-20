@@ -76,6 +76,14 @@ def default_agent_factory() -> Any:
     with backend_output_redirect():
         from agentmain import GenericAgent
 
+    # Slice D3：启动时清理过期/超量的 GA 自产剪贴板图（不碰用户原图）
+    try:
+        from image_gc import maybe_gc_ga_images_on_startup
+
+        maybe_gc_ga_images_on_startup(quiet=True)
+    except Exception:
+        pass
+
     agent = GenericAgent()
     agent.inc_out = True
     agent.verbose = True
