@@ -5,7 +5,12 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createPasteStore } from '../src/paste.ts'
 import { createImageAttachmentStore } from '../src/imageAttachments.ts'
-import { handleInput, isImagePasteShortcut } from '../src/inputController.ts'
+import {
+  handleInput,
+  isImagePasteShortcut,
+  applyClipboardImagePaste,
+  tryPasteClipboardImage,
+} from '../src/inputController.ts'
 import { parseTerminalInput } from '../src/terminalInput.ts'
 
 const dir = join(tmpdir(), 'ga-clip-selftest')
@@ -37,15 +42,22 @@ const imageStore = createImageAttachmentStore()
 const alt = parseTerminalInput('\x1bv')
 console.log('parsed alt+v', alt)
 console.log('isShortcut', isImagePasteShortcut(alt.key, alt.rawInput))
-const d = handleInput('', alt.rawInput, alt.key, 'idle', pasteStore, new Set(), 0, imageStore)
-console.log('decision value', JSON.stringify(d.value))
-if (!d.value.includes('[Image #1]')) {
-  console.error('FAIL no placeholder from alt+v')
+const pending = handleInput('', alt.rawInput, alt.key, 'idle', pasteStore, new Set(), 0, imageStore)
+console.log('pending decision', pending)
+if (!pending.pendingImagePaste) {
+  console.error('FAIL expected pendingImagePaste')
   process.exit(1)
 }
-console.log('OK alt+v ->', d.value)
 
-// re-set clipboard for second paste (previous capture may not clear it, but be explicit)
+const d = await applyClipboardImagePaste('', 0, imageStore)
+console.log('async paste', d)
+if (!d.ok || !d.value.includes('[Image #1]')) {
+  console.error('FAIL no placeholder from async alt+v path')
+  process.exit(1)
+}
+console.log('OK async alt+v ->', d.value)
+
+// re-set clipboard for second paste
 spawnSync(
   'powershell.exe',
   ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', setScript],
@@ -53,10 +65,17 @@ spawnSync(
 )
 
 const ctrl = parseTerminalInput('\x16')
-const d2 = handleInput(d.value, ctrl.rawInput, ctrl.key, 'idle', pasteStore, new Set(), d.value.length, imageStore)
+const pending2 = handleInput(d.value, ctrl.rawInput, ctrl.key, 'idle', pasteStore, new Set(), d.value.length, imageStore)
+if (!pending2.pendingImagePaste) {
+  console.error('FAIL expected pending for ctrl+v')
+  process.exit(1)
+}
+const d2 = await applyClipboardImagePaste(d.value, d.value.length, imageStore)
 console.log('ctrl+v second paste value', JSON.stringify(d2.value))
-if (!d2.value.includes('[Image #2]')) {
-  console.error('FAIL no second image from ctrl+v')
+if (!d2.ok || !d2.value.includes('[Image #2]')) {
+  // also allow sync fallback for diagnosis
+  const sync = tryPasteClipboardImage(d.value, d.value.length, imageStore)
+  console.error('async failed, sync=', sync)
   process.exit(1)
 }
 console.log('OK ctrl+v ->', d2.value)

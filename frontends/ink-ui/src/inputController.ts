@@ -7,7 +7,7 @@ import {
   type ImageAttachmentStore,
 } from './imageAttachments.js'
 import { asImageFilePath, extractImagePathCandidates } from './imagePathDetect.js'
-import { captureClipboardImage } from './clipboardImage.js'
+import { captureClipboardImage, captureClipboardImageAsync } from './clipboardImage.js'
 
 export type InputKey = {
   ctrl?: boolean
@@ -35,6 +35,8 @@ export type InputDecision = {
   cursorOffset?: number
   command?: BridgeCommand
   action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_theme' | 'clear' | 'help' | 'status' }
+  /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
+  pendingImagePaste?: boolean
   exit?: boolean
 }
 
@@ -206,12 +208,29 @@ export function isImagePasteShortcut(key: InputKey, rawInput: string): boolean {
   return false
 }
 
+/**
+ * 同步贴图（单测/脚本）。UI 热路径请走 handleInput 的 pendingImagePaste + applyClipboardImagePaste。
+ */
 export function tryPasteClipboardImage(
   value: string,
   cursorOffset: number,
   imageStore: ImageAttachmentStore,
 ): { value: string; cursorOffset: number; ok: boolean; error?: string } {
   const cap = captureClipboardImage()
+  if (!cap.ok) {
+    return { value, cursorOffset, ok: false, error: cap.error }
+  }
+  const inserted = insertImagePlaceholdersAtCursor(value, cursorOffset, [cap.path], imageStore, 'clipboard')
+  return { ...inserted, ok: true }
+}
+
+/** 异步贴图结果应用到当前输入（捕获完成后由 App 调用）。 */
+export async function applyClipboardImagePaste(
+  value: string,
+  cursorOffset: number,
+  imageStore: ImageAttachmentStore,
+): Promise<{ value: string; cursorOffset: number; ok: boolean; error?: string }> {
+  const cap = await captureClipboardImageAsync()
   if (!cap.ok) {
     return { value, cursorOffset, ok: false, error: cap.error }
   }
@@ -241,13 +260,9 @@ export function handleInput(
     return decision(value, offset, { command: { type: 'shutdown' }, exit: true })
   }
   // 剪贴板贴图：Ctrl+V / Alt+V / Ctrl+Alt+V（见 isImagePasteShortcut）
+  // UI 侧异步捕获（不 spawnSync），这里只声明 pending，避免卡死 Ink 事件循环与光标重绘。
   if (imageStore && isImagePasteShortcut(key, rawInput)) {
-    const pasted = tryPasteClipboardImage(value, offset, imageStore)
-    if (pasted.ok) {
-      return decision(pasted.value, pasted.cursorOffset)
-    }
-    // 无图或抓取失败：吞掉快捷键，避免插入字母 v；不阻断后续文本 bracketed-paste
-    return decision(value, offset)
+    return decision(value, offset, { pendingImagePaste: true })
   }
   if (key.escape) {
     return status === 'running' || status === 'stopping'

@@ -7,7 +7,7 @@ import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
 import { createImageAttachmentStore } from './imageAttachments.js'
 import type { SkillStatus } from './protocol.js'
-import { handleInput } from './inputController.js'
+import { handleInput, applyClipboardImagePaste } from './inputController.js'
 import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, workflowPanelWithRunUpdate, type WorkflowPanelState } from './workflowPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
@@ -332,9 +332,16 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
       {lines.map((line, index) => (
         <Box key={index} width="100%" overflow="hidden">
           <Text color={theme.accent} wrap="truncate-end">{line.gutter}</Text>
-          <Text color={theme.accent} wrap="truncate-end">
+          {/*
+            文本默认 muted，仅 caret 的 inverse 块用 accent。
+            旧实现父级 Text color=accent 会让 inverse 继承 cyan 前景/背景，
+            在 spawnSync 卡帧或多次贴图重绘时看起来像「蓝绿条」。
+          */}
+          <Text color={theme.muted} wrap="truncate-end">
             {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
-              <Text key={partIndex} inverse={part.inverse}>{part.text}</Text>
+              part.inverse
+                ? <Text key={partIndex} color={theme.accent} inverse>{part.text}</Text>
+                : <Text key={partIndex}>{part.text}</Text>
             ))}
           </Text>
         </Box>
@@ -460,8 +467,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
   const imageStore = useMemo(() => createImageAttachmentStore(), [])
+  const imagePasteInFlightRef = useRef(false)
+  const imagePasteSeqRef = useRef(0)
+  const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, workflowPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
+
+  useEffect(() => {
+    inputSnapshotRef.current = { value: input, cursorOffset }
+  }, [input, cursorOffset])
 
   const appendLocalCommandInput = (commandText: string) => {
     dispatch({ type: 'local_command_input', text: commandText })
@@ -505,6 +519,39 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }
 
   const applyInputDecision = (decision: ReturnType<typeof handleInput>) => {
+    if (decision.pendingImagePaste) {
+      // 异步剪贴板：立刻返回，不阻塞 stdin；完成后把 [Image #N] 插到当前光标处。
+      // 多次连按：in-flight 时忽略，避免并行 PowerShell 抢剪贴板。
+      if (imagePasteInFlightRef.current) return
+      imagePasteInFlightRef.current = true
+      const seq = ++imagePasteSeqRef.current
+      const baseValue = inputSnapshotRef.current.value
+      const baseOffset = inputSnapshotRef.current.cursorOffset
+      void applyClipboardImagePaste(baseValue, baseOffset, imageStore)
+        .then((pasted) => {
+          if (seq !== imagePasteSeqRef.current) return
+          if (!pasted.ok) return
+          const current = inputSnapshotRef.current
+          // await 期间输入未变：直接用捕获结果
+          if (current.value === baseValue) {
+            setInput(pasted.value)
+            setCursorOffset(pasted.cursorOffset)
+            return
+          }
+          // 用户已继续编辑：只把新 placeholder 插到「完成瞬间」的光标处
+          const last = [...imageStore.byId.values()].at(-1)
+          if (!last || current.value.includes(last.placeholder)) return
+          const insertAt = current.cursorOffset
+          const spacer = insertAt > 0 && !/\s$/.test(current.value.slice(0, insertAt)) ? ' ' : ''
+          const withPh = current.value.slice(0, insertAt) + spacer + last.placeholder + current.value.slice(insertAt)
+          setInput(withPh)
+          setCursorOffset(insertAt + spacer.length + last.placeholder.length)
+        })
+        .finally(() => {
+          if (seq === imagePasteSeqRef.current) imagePasteInFlightRef.current = false
+        })
+      return
+    }
     setInput(decision.value)
     setCursorOffset(decision.cursorOffset ?? decision.value.length)
     const localCommandText = commandTextForLocalDecision(decision)

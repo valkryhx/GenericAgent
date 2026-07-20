@@ -12,7 +12,7 @@
 import { mkdirSync, existsSync, statSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 
 /** 与 image_codec.MIN_DIMENSION / Grok 下限对齐 */
@@ -111,23 +111,27 @@ export function validateCapturedImageFile(path: string): ClipboardImageResult {
   return { ok: true, path }
 }
 
+/** 同步捕获（单测 / 脚本）；UI 热路径请用 captureClipboardImageAsync，避免 spawnSync 卡死事件循环。 */
 export function captureClipboardImage(): ClipboardImageResult {
   if (process.platform === 'win32') {
-    return captureClipboardImageWindows()
+    return captureClipboardImageWindowsSync()
   }
-  return captureClipboardImageUnix()
+  return captureClipboardImageUnixSync()
 }
 
-/**
- * Windows：优先 Get-Clipboard -Format Image（Codex/CC），Forms 兜底。
- * 必须 -STA；捕获后校验最小边 ≥8 且文件体积合理。
- */
-function captureClipboardImageWindows(): ClipboardImageResult {
-  const outPath = uniquePngPath()
+/** 异步捕获：对齐 Claude Code getImageFromClipboard().then(...)，不阻塞 stdin/Ink 渲染。 */
+export function captureClipboardImageAsync(): Promise<ClipboardImageResult> {
+  if (process.platform === 'win32') {
+    return captureClipboardImageWindowsAsync()
+  }
+  return captureClipboardImageUnixAsync()
+}
+
+function windowsClipboardScript(outPath: string): string {
   const outEsc = outPath.replace(/'/g, "''")
   // Codex WSL fallback 与 CC win32 均用 Get-Clipboard -Format Image；
   // Forms.GetImage 作兜底（部分应用只写 CF_BITMAP）。
-  const script = [
+  return [
     '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
     'Add-Type -AssemblyName System.Drawing',
     `$out = '${outEsc}'`,
@@ -160,19 +164,18 @@ function captureClipboardImageWindows(): ClipboardImageResult {
     '  exit 3',
     '}',
   ].join('; ')
+}
 
-  const r = spawnSync(
-    'powershell.exe',
-    ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-    { encoding: 'utf-8', windowsHide: true, timeout: 12000 },
-  )
+function interpretWindowsClipboardResult(
+  outPath: string,
+  r: { status: number | null; error?: Error | null; stdout?: string | null; stderr?: string | null },
+): ClipboardImageResult {
   if (r.error) {
     removeQuiet(outPath)
     return { ok: false, error: r.error.message }
   }
   if (r.status === 0) {
     const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || ''
-    // "path|w|h" 或 仅 path
     const pathPart = line.includes('|') ? line.split('|')[0] : line
     const candidate =
       pathPart && existsSync(pathPart) ? pathPart : existsSync(outPath) ? outPath : ''
@@ -193,7 +196,65 @@ function captureClipboardImageWindows(): ClipboardImageResult {
   return { ok: false, error: err || `powershell clipboard failed (exit ${r.status})` }
 }
 
-function captureClipboardImageUnix(): ClipboardImageResult {
+/**
+ * Windows：优先 Get-Clipboard -Format Image（Codex/CC），Forms 兜底。
+ * 必须 -STA；捕获后校验最小边 ≥8 且文件体积合理。
+ */
+function captureClipboardImageWindowsSync(): ClipboardImageResult {
+  const outPath = uniquePngPath()
+  const r: SpawnSyncReturns<string> = spawnSync(
+    'powershell.exe',
+    ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', windowsClipboardScript(outPath)],
+    { encoding: 'utf-8', windowsHide: true, timeout: 12000 },
+  )
+  return interpretWindowsClipboardResult(outPath, r)
+}
+
+function captureClipboardImageWindowsAsync(): Promise<ClipboardImageResult> {
+  const outPath = uniquePngPath()
+  return new Promise((resolve) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', windowsClipboardScript(outPath)],
+      { windowsHide: true },
+    )
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = (result: ClipboardImageResult) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* ignore */
+      }
+      removeQuiet(outPath)
+      finish({ ok: false, error: 'clipboard capture timed out' })
+    }, 12000)
+    child.stdout?.setEncoding('utf-8')
+    child.stderr?.setEncoding('utf-8')
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      finish(interpretWindowsClipboardResult(outPath, { status: null, error, stdout, stderr }))
+    })
+    child.on('close', (status) => {
+      clearTimeout(timer)
+      finish(interpretWindowsClipboardResult(outPath, { status, stdout, stderr }))
+    })
+  })
+}
+
+function captureClipboardImageUnixSync(): ClipboardImageResult {
   const outPath = uniquePngPath()
   let r = spawnSync('pngpaste', [outPath], { encoding: 'utf-8', timeout: 5000 })
   if (r.status === 0 && existsSync(outPath) && statSync(outPath).size > 0) {
@@ -216,4 +277,11 @@ function captureClipboardImageUnix(): ClipboardImageResult {
   }
   removeQuiet(outPath)
   return { ok: false, error: 'no image in clipboard' }
+}
+
+function captureClipboardImageUnixAsync(): Promise<ClipboardImageResult> {
+  // Unix 工具链仍较短；用 setImmediate 把同步 spawn 挪出当前 stdin 回调，避免重入卡顿。
+  return new Promise((resolve) => {
+    setImmediate(() => resolve(captureClipboardImageUnixSync()))
+  })
 }

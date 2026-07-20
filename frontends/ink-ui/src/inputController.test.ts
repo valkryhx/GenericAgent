@@ -448,12 +448,21 @@ test('parseTerminalInput maps alt+v and ctrl+v', async () => {
   assert.equal(ctrlV.key.ctrl, true)
 })
 
+test('handleInput image paste shortcut marks pendingImagePaste without inserting v', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
+  assert.equal(decision.value, 'hi')
+  assert.equal(decision.pendingImagePaste, true)
+  assert.notEqual(decision.value, 'hiv')
+})
+
 test('handleInput alt+v does not insert letter v (clipboard image or no-op)', async () => {
   const mod = await import('./inputController.js')
   const store = createPasteStore()
   const images = createImageAttachmentStore()
   const decision = mod.handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
-  // 有剪贴板图时插入 [Image #N]；无图时保持 'hi'。无论哪种都不应变成 'hiv'
+  // 异步路径：只标 pending，绝不插入字母 v
   assert.notEqual(decision.value, 'hiv')
-  assert.ok(decision.value === 'hi' || decision.value.includes('[Image #'))
+  assert.ok(decision.pendingImagePaste === true || decision.value === 'hi' || decision.value.includes('[Image #'))
 })
