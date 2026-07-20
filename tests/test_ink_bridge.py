@@ -784,12 +784,8 @@ class InkBridgeTest(unittest.TestCase):
 
         compact.assert_called_once()
         self.assertEqual({}, bridge._rewind_snapshots)
-        self.assertEqual({"type": "status", "status": "running"}, events[-6])
-        self.assertEqual({"type": "activity", "label": "Compacting conversation"}, events[-5])
-        self.assertEqual(
-            {"type": "local_command_output", "text": "Compacted 2 messages into summary context."},
-            events[-4],
-        )
+        self.assertEqual({"type": "status", "status": "running"}, events[-5])
+        self.assertEqual({"type": "activity", "label": "Compacting conversation"}, events[-4])
         self.assertEqual(
             {
                 "type": "history_replace",
@@ -799,6 +795,7 @@ class InkBridgeTest(unittest.TestCase):
             },
             events[-3],
         )
+        self.assertNotIn("local_command_output", {e.get("type") for e in events})
         self.assertEqual({"type": "activity", "label": None}, events[-2])
         self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 

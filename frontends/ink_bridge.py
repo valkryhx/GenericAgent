@@ -388,7 +388,9 @@ class GenericAgentBridge:
             self._record_compact_transcript(result.message)
             self._rewind_snapshots.clear()
             text = result.message
-            self.emit({"type": "local_command_output", "text": text})
+            # 成功结果只走 history_replace：同一文案再发 local_command_output 会在
+            # Ink Static 滚动区留下一份，history_replace 后再打一份 → 用户看到重复。
+            # 失败仍用 local_command_output（无 history_replace）。
             self.emit({"type": "history_replace", "messages": [
                 {"role": "system", "text": text},
             ]})
@@ -807,7 +809,7 @@ class GenericAgentBridge:
                 self._record_compact_transcript(result.message)
                 self._rewind_snapshots.clear()
                 text = "Auto " + result.message
-                self.emit({"type": "local_command_output", "text": text})
+                # 与手动 /compact 相同：成功只 emit history_replace，避免 Static 重复行。
                 self.emit({"type": "history_replace", "messages": [
                     {"role": "system", "text": text},
                 ]})

@@ -96,3 +96,41 @@ test('splitStaticAndActiveMessages with keepLatestTaskActive excludes finalized 
   assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1', 'u-2'])
   assert.deepEqual(split.activeMessages.map(message => message.id), ['a-2'])
 })
+
+test('mid-run /stop local commands stay live so Static cannot re-print Stop requested', () => {
+  // Regression: done local-command rows after an open assistant used to enter Static
+  // immediately; assistant_done then inserted finalized rows before them and Ink Static
+  // re-emitted the tail → a second "Stop requested" with only one "/stop".
+  const messages: ChatMessage[] = [
+    { id: 'u-1', role: 'user', text: 'old', done: true, taskId: 1 },
+    { id: 'a-1', role: 'assistant', text: 'old answer', done: true, taskId: 1 },
+    { id: 'u-2', role: 'user', text: 'hello', done: true, taskId: 2 },
+    { id: 'a-2', role: 'assistant', text: 'working...', done: false, taskId: 2 },
+    { id: 'lc-in-4', role: 'system', text: '/stop', done: true, localCommand: 'input' },
+    { id: 'lc-out-5', role: 'system', text: 'Stop requested', done: true, localCommand: 'output' },
+  ]
+
+  const split = splitStaticAndActiveMessages(messages, { keepLatestTaskActive: true })
+
+  assert.deepEqual(split.staticMessages.map(message => message.id), ['u-1', 'a-1', 'u-2'])
+  assert.deepEqual(split.activeMessages.map(message => message.id), ['a-2', 'lc-in-4', 'lc-out-5'])
+})
+
+test('after turn finalizes, stop local commands commit to static once with the turn', () => {
+  const messages: ChatMessage[] = [
+    { id: 'u-1', role: 'user', text: 'old', done: true, taskId: 1 },
+    { id: 'a-1', role: 'assistant', text: 'old answer', done: true, taskId: 1 },
+    { id: 'u-2', role: 'user', text: 'hello', done: true, taskId: 2 },
+    { id: 'a-2', role: 'assistant', text: 'working... aborted', done: true, taskId: 2 },
+    { id: 'lc-in-4', role: 'system', text: '/stop', done: true, localCommand: 'input' },
+    { id: 'lc-out-5', role: 'system', text: 'Stop requested', done: true, localCommand: 'output' },
+  ]
+
+  const split = splitStaticAndActiveMessages(messages)
+
+  assert.deepEqual(
+    split.staticMessages.map(message => message.id),
+    ['u-1', 'a-1', 'u-2', 'a-2', 'lc-in-4', 'lc-out-5'],
+  )
+  assert.deepEqual(split.activeMessages, [])
+})

@@ -425,6 +425,83 @@ test('handleInput attaches image path paste as [Image #N] and submits images', (
   }
 })
 
+test('handleInput joins split wechat image path paste without mid-filename replace', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const head = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2`
+  const tail = String.raw`048_89.jpg 这图是什么`
+  const full = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2048_89.jpg`
+
+  const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(first.value, head)
+  assert.equal(images.byId.size, 0)
+
+  const second = handleInput(first.value, tail, {}, 'idle', store, new Set(), first.value.length, images)
+  assert.equal(second.value, '[Image #1] 这图是什么')
+  assert.equal(images.byId.get(1)?.path, full)
+  assert.ok(!second.value.includes('048_89'))
+  assert.ok(!second.value.includes(String.raw`微信图片_20260720144105_2`))
+
+  const submitted = handleInput(second.value, '', { return: true }, 'idle', store, new Set(), second.value.length, images)
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1] 这图是什么')
+    assert.deepEqual(submitted.command.images, [
+      { path: full, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('handleInput attaches spaced screenshot path in one paste', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const pasted = handleInput('', `${path} 这图是什么`, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(pasted.value, '[Image #1] 这图是什么')
+  assert.equal(images.byId.get(1)?.path, path)
+
+  const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store, new Set(), pasted.value.length, images)
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1] 这图是什么')
+    assert.deepEqual(submitted.command.images, [
+      { path, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('handleInput PowerShell & quoted spaced path becomes clean [Image #N]', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const raw = `& '${path}'`
+  const pasted = handleInput('', raw, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(pasted.value, '[Image #1]')
+  assert.ok(!pasted.value.includes('&'))
+  assert.ok(!pasted.value.includes("'"))
+  assert.equal(images.byId.get(1)?.path, path)
+})
+
+test('handleInput joins spaced screenshot path split after space', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const head = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 `
+  const tail = String.raw`2026-07-15 124017.png 看看`
+  const full = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
+  const second = handleInput(first.value, tail, {}, 'idle', store, new Set(), first.value.length, images)
+  assert.equal(second.value, '[Image #1] 看看')
+  assert.equal(images.byId.get(1)?.path, full)
+})
+
+test('handleInput does not treat relative image-like suffix alone as attachment', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = handleInput('', '048_89.jpg', {}, 'idle', store, new Set(), 0, images)
+  assert.equal(decision.value, '048_89.jpg')
+  assert.equal(images.byId.size, 0)
+})
+
 test('isImagePasteShortcut accepts ctrl+v, alt+v, ctrl+alt+v', async () => {
   const { isImagePasteShortcut } = await import('./inputController.js')
   assert.equal(isImagePasteShortcut({ ctrl: true }, 'v'), true)

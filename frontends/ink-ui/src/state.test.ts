@@ -162,8 +162,8 @@ test('applyBridgeEvent replaces history after resume', () => {
 
 test('applyBridgeEvent compact replacement keeps only compact result rows', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  // 成功路径只发 history_replace（不再先 local_command_output），避免 Static 重复。
   state = applyBridgeEvent(state, { type: 'local_command_input', text: '/compact' })
-  state = applyBridgeEvent(state, { type: 'local_command_output', text: 'Compacted 8 messages into summary context.' })
   state = applyBridgeEvent(state, {
     type: 'history_replace',
     messages: [

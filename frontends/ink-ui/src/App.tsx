@@ -65,7 +65,11 @@ import {
   commandTextForLocalDecision,
   dismissedLocalCommandOutput,
 } from './localCommandTranscript.js'
-import { pendingLocalCommandAfterBridgeEvent } from './localCommandFlow.js'
+import {
+  nextStopEchoGate,
+  pendingLocalCommandAfterBridgeEvent,
+  stopEchoGateAfterStatus,
+} from './localCommandFlow.js'
 import {
   computeLayoutMetrics,
   terminalCanvasColumns,
@@ -462,6 +466,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const modelPanelPendingRef = useRef(false)
   const modelPanelOpenRef = useRef(false)
   const pendingLocalCommandRef = useRef<string | null>(null)
+  /** 同一 stop 周期内 /stop 回显只写一次（防双 Enter / 重入导致 Static 双份）。 */
+  const stopTranscriptEchoedRef = useRef(false)
   const pendingHistoryReplacementScrollRef = useRef(false)
   const scrollbarDragRef = useRef(false)
   const lastStdinAtRef = useRef(Date.now())
@@ -552,8 +558,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         })
       return
     }
+    const nextOffset = decision.cursorOffset ?? decision.value.length
     setInput(decision.value)
-    setCursorOffset(decision.cursorOffset ?? decision.value.length)
+    setCursorOffset(nextOffset)
+    // 立即同步快照：避免 React 重绘前二次 stdin 仍读到旧的 `/stop` 再提交一次。
+    inputSnapshotRef.current = { value: decision.value, cursorOffset: nextOffset }
     const localCommandText = commandTextForLocalDecision(decision)
     if (decision.action?.type === 'clear') {
       setFooterPanel(null)
@@ -566,8 +575,21 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (decision.exit) exitCleanly()
       return
     }
+    // /stop 闸门必须在任何 dispatch 前回写：abort 常在同一 tick 内连发两次
+    // （双 Enter / slash Enter 重入）；旧逻辑在 idle 重置闸门会让第二下再写一对 Static 行。
+    const isStopCommand = decision.command?.type === 'stop'
+    const stopGate = nextStopEchoGate({
+      alreadyEchoed: stopTranscriptEchoedRef.current,
+      isStopCommand,
+    })
+    if (isStopCommand) {
+      stopTranscriptEchoedRef.current = stopGate.nextEchoed
+    }
     if (localCommandText) {
-      appendLocalCommandInput(localCommandText)
+      // /stop 重复进入时不再追加第二份 `/stop` 行（与 compact 重复显示同类问题）
+      if (!isStopCommand || stopGate.echo) {
+        appendLocalCommandInput(localCommandText)
+      }
     }
     if (decision.command) {
       setFooterPanel(null)
@@ -582,9 +604,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
         setTranscriptScrollOffset(0)
       }
-      if (command.type === 'stop' && localCommandText) {
+      if (command.type === 'stop' && localCommandText && stopGate.echo) {
         appendLocalCommandOutput('Stop requested')
       }
+      // abort 可多次调用；transcript 只回显一次
       bridgeRef.current?.send(command)
     }
     if (decision.action?.type === 'open_resume') {
@@ -690,6 +713,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (event.type === 'ready') {
         bridgeRef.current?.send({ type: 'skill_status' })
       }
+      if (event.type === 'status') {
+        if (stopEchoGateAfterStatus(event.status) === 'reset') {
+          stopTranscriptEchoedRef.current = false
+        }
+      }
       if (event.type === 'skill_status') {
         setSkills(event.skills)
         return
@@ -733,9 +761,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         pendingHistoryReplacementScrollRef.current = true
         dispatch(event)
         resetStaticTranscriptOutput()
-        if (commandText) {
+        // /compact 成功结果已在 history_replace 的 system 文案里；再 append 会把
+        // 「/compact」插到结果后面，且 pending 若不清掉会影响后续 system 事件。
+        // resume 等仍回显触发命令。
+        if (commandText && !/^\/compact(?:\s|$)/i.test(commandText.trim())) {
           dispatch({ type: 'local_command_input', text: commandText })
         }
+        pendingLocalCommandRef.current = null
         return
       }
       if (event.type === 'local_command_output') {
@@ -1034,7 +1066,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setCursorOffset(result.value.length)
       return
     }
-    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames, cursorOffset, imageStore)
+    // 用同步快照而非 React state：同一 tick 内二次 stdin 不能再读到已提交的 `/stop`。
+    const snapshot = inputSnapshotRef.current
+    const decision = handleInput(
+      snapshot.value,
+      rawInput,
+      key,
+      state.status,
+      pasteStore,
+      skillNames,
+      snapshot.cursorOffset,
+      imageStore,
+    )
     applyInputDecision(decision)
   }
   terminalInputHandlerRef.current = handleTerminalInput

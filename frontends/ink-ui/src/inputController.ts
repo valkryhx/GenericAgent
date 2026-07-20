@@ -6,7 +6,12 @@ import {
   attachmentsForSubmit,
   type ImageAttachmentStore,
 } from './imageAttachments.js'
-import { asImageFilePath, extractImagePathCandidates } from './imagePathDetect.js'
+import {
+  asImageFilePath,
+  completeAbsoluteImagePathAtCursor,
+  extractImagePathCandidates,
+  replaceImagePathsInText,
+} from './imagePathDetect.js'
 import { captureClipboardImage, captureClipboardImageAsync } from './clipboardImage.js'
 
 export type InputKey = {
@@ -309,17 +314,22 @@ export function handleInput(
     }
     const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
     let expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
-    // 提交前：输入中的裸图片路径 → 转成附件芯片（并带上 images）
+    // 提交前：绝对图片路径 → 附件芯片（最长优先、边界安全，禁止子串误替换）
     if (imageStore && expanded) {
       const candidates = extractImagePathCandidates(expanded)
+      const replacements: Array<{ path: string; placeholder: string }> = []
       for (const p of candidates) {
         if (!expanded.includes(p)) continue
-        // 已有同 path 的 placeholder 则跳过 attach 重复
-        const already = [...imageStore.byId.values()].some(a => a.path === p)
-        if (!already) {
-          const att = attachImage(imageStore, p, 'path')
-          expanded = expanded.split(p).join(att.placeholder)
+        const existing = [...imageStore.byId.values()].find(a => a.path === p)
+        if (existing) {
+          replacements.push({ path: p, placeholder: existing.placeholder })
+          continue
         }
+        const att = attachImage(imageStore, p, 'path')
+        replacements.push({ path: p, placeholder: att.placeholder })
+      }
+      if (replacements.length) {
+        expanded = replaceImagePathsInText(expanded, replacements)
       }
     }
     if (!expanded) return decision(value, offset)
@@ -338,8 +348,25 @@ export function handleInput(
     })
   }
   if (rawInput) {
-    // 粘贴内容整体是图片路径 → 直接芯片
+    // 粘贴：绝对图片路径 → 芯片；分片粘贴时尝试与光标前文本拼成完整绝对路径
     if (imageStore) {
+      const completed = completeAbsoluteImagePathAtCursor(value, offset, rawInput)
+      if (completed) {
+        const before = value.slice(0, completed.start)
+        const after = value.slice(offset)
+        // rawInput 可能比路径尾部长（路径后还有说明文字）
+        const combined = value.slice(0, offset) + rawInput
+        const tail = combined.slice(completed.end)
+        const att = attachImage(imageStore, completed.path, 'path')
+        const spacerBefore = before.length > 0 && !/\s$/.test(before) ? ' ' : ''
+        const mid = spacerBefore + att.placeholder
+        const spacerAfter = tail && !/^\s/.test(tail) && !/^\s/.test(after) ? ' ' : ''
+        // after 是光标后原文；tail 含本次 chunk 中路径之后的新字符
+        // 光标后原文应保留，chunk 内路径后的文字用 tail
+        const nextValue = before + mid + (tail ? spacerAfter + tail : '') + after
+        const nextOffset = (before + mid + (tail ? spacerAfter + tail : '')).length
+        return decision(nextValue, nextOffset)
+      }
       const onlyPath = asImageFilePath(rawInput)
       if (onlyPath) {
         const inserted = insertImagePlaceholdersAtCursor(value, offset, [onlyPath], imageStore, 'path')
@@ -347,7 +374,16 @@ export function handleInput(
       }
       const paths = extractImagePathCandidates(rawInput)
       if (paths.length > 0 && paths.join('\n').length >= rawInput.trim().length * 0.5) {
-        const inserted = insertImagePlaceholdersAtCursor(value, offset, paths, imageStore, 'path')
+        // 整段粘贴以路径为主：先插入路径芯片，再附加剩余非路径文本
+        let rest = rawInput
+        const absPaths = [...paths].sort((a, b) => b.length - a.length)
+        const replacements = absPaths.map(p => {
+          const att = attachImage(imageStore, p, 'path')
+          return { path: p, placeholder: att.placeholder }
+        })
+        rest = replaceImagePathsInText(rest, replacements)
+        const inserted = insertLiteralTextAtCursor(value, offset, rest)
+        // 若 rest 仍是纯 placeholder 串，cursor 已在末尾
         return decision(inserted.value, inserted.cursorOffset)
       }
     }

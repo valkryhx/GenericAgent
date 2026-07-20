@@ -8,41 +8,33 @@ export type MessagePartition = {
 /**
  * Split transcript into terminal scrollback (static) vs live viewport (active).
  *
- * Single-channel rule:
- * - done → Static only (never re-enter live)
- * - !done → live only (open-turn user + streaming assistant)
+ * Ink `<Static>` only ever *appends* by `items.length`. If a later render inserts
+ * newly-done rows *before* already-printed static rows, Static re-emits the tail —
+ * classic symptom: mid-run `/stop` prints once, then `assistant_done` finalizes the
+ * open turn and a second gray `Stop requested` appears (often without a second `/stop`).
  *
- * P0-A running visibility: open-turn user is !done so it paints in live until
- * finalize, avoiding premature Static writes that the growing live dock can cover.
+ * Contract: `staticMessages` is always a strict prefix of the transcript.
+ * - done prefix → Static
+ * - from the first `!done` message through the end → live (including later done
+ *   local-command rows such as `/stop` / `Stop requested`)
+ * - all done → Static only
+ *
+ * P0-A running visibility: open-turn user is `!done`, so it stays live until finalize.
  */
 export function splitStaticAndActiveMessages(
   messages: ChatMessage[],
-  options: { keepLatestTaskActive?: boolean } = {},
+  _options: { keepLatestTaskActive?: boolean } = {},
 ): MessagePartition {
-  let latestTaskId: number | undefined
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const taskId = messages[index]?.taskId
-    if (taskId !== undefined) {
-      latestTaskId = taskId
-      break
+  const firstOpenIndex = messages.findIndex(message => !message.done)
+  if (firstOpenIndex === -1) {
+    return {
+      staticMessages: messages.filter(message => message.done),
+      activeMessages: [],
     }
   }
 
-  const staticMessages = messages.filter(message => message.done)
-  if (latestTaskId === undefined) {
-    return { staticMessages, activeMessages: [] }
+  return {
+    staticMessages: messages.slice(0, firstOpenIndex),
+    activeMessages: messages.slice(firstOpenIndex),
   }
-
-  const hasPendingMessage = messages.some(
-    message => message.taskId === latestTaskId && !message.done,
-  )
-  const holdActive = hasPendingMessage || Boolean(options.keepLatestTaskActive)
-  if (!holdActive) {
-    return { staticMessages, activeMessages: [] }
-  }
-
-  const activeMessages = messages.filter(
-    message => message.taskId === latestTaskId && !message.done,
-  )
-  return { staticMessages, activeMessages }
 }
