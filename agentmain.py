@@ -90,6 +90,138 @@ def _native_image_input_enabled(llmclient):
     return supports_image_input(llmclient)
 
 
+def _is_image_content_block(block) -> bool:
+    """Claude image / OAI image_url / Responses input_image 均算原生图。"""
+    if not isinstance(block, dict):
+        return False
+    t = block.get("type")
+    if t in ("image", "input_image"):
+        return True
+    if t == "image_url":
+        return True
+    # 少数适配器把图塞在 source.type=base64
+    src = block.get("source")
+    if isinstance(src, dict) and src.get("type") == "base64" and src.get("data"):
+        return True
+    return False
+
+
+def count_image_blocks_in_content(content) -> int:
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for b in content if _is_image_content_block(b))
+
+
+def content_has_native_images(content) -> bool:
+    return count_image_blocks_in_content(content) > 0
+
+
+def history_has_native_images(history, *, max_messages: int = 24) -> bool:
+    """扫描近期 history 是否已有原生 image block（用于「重试」等无新附件轮次）。"""
+    if not isinstance(history, list) or not history:
+        return False
+    for msg in history[-max_messages:]:
+        if not isinstance(msg, dict):
+            continue
+        if content_has_native_images(msg.get("content")):
+            return True
+    return False
+
+
+def history_native_image_count(history, *, max_messages: int = 24) -> int:
+    if not isinstance(history, list) or not history:
+        return 0
+    n = 0
+    for msg in history[-max_messages:]:
+        if isinstance(msg, dict):
+            n += count_image_blocks_in_content(msg.get("content"))
+    return n
+
+
+def backend_history(llmclient):
+    backend = getattr(llmclient, "backend", None)
+    backend = getattr(backend, "primary", backend)
+    hist = getattr(backend, "history", None) if backend is not None else None
+    return hist if isinstance(hist, list) else []
+
+
+_VISION_FOLLOWUP_RE = re.compile(
+    r"(?is)("
+    r"重试|再试|再看|重看|再描述|重新描述|"
+    r"这图|那图|截图|图片|图里|图中|附图|贴图|识图|看图|"
+    r"是什么|啥意思|描述|说说|看看|"
+    r"retry|again|describe|what(?:'s| is)? (?:in |on )?(?:the )?(?:image|screenshot|picture)|"
+    r"look at (?:the )?(?:image|screenshot|picture)"
+    r")"
+)
+
+
+def user_query_looks_like_vision_followup(text: str) -> bool:
+    """用户本轮像在追问已贴图片（含「重试」），而非新的纯代码任务。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _VISION_FOLLOWUP_RE.search(t):
+        return True
+    # 极短跟进（如「呢」「呢？」）且不含路径/代码气味
+    if len(t) <= 12 and not re.search(r"[\\/]|\.py\b|\.ts\b|def |class |import ", t):
+        return True
+    return False
+
+
+def build_vision_direct_answer_sys_prompt(*, image_count: int = 0, via: str = "current") -> str:
+    """强制 vision 直答的 system 补丁。
+
+    对齐：
+    - Codex view_image：仅当图「尚未」挂在 thread 时才用工具加载；已在上下文则直接看图
+      （view_image_spec: "only use if ... image isn't already attached to the thread context"）。
+    - Claude Code：粘贴图作为原生 image block 进入 user content，不先走 OCR/搜仓库。
+
+    via:
+      - current: 本轮 user content 新挂了 image block
+      - history: 本轮无新图，但近期 history 已有原生图（如用户只说「重试」）
+    """
+    n = max(0, int(image_count or 0))
+    n_bit = f"共约 {n} 张原生图片。" if n else "消息/历史中已有原生图片。"
+    where = (
+        "本条用户消息的 content 里已包含 type=image / image_url 的多模态块（文本里的 [Image #N] 只是 UI 占位符，不是要你去仓库搜索的符号）。"
+        if via == "current"
+        else "近期对话 history 里已包含原生多模态图片块；用户本轮可能只是「重试/再看/补充一句」，图仍在上下文中。"
+    )
+    return (
+        "\n[Native vision — direct answer]\n"
+        f"{where}{n_bit}\n"
+        "你必须优先用视觉能力直接阅读这些图片像素并回答用户，遵守：\n"
+        "1. 第一轮优先直接作答：描述/对比/回答图中问题；多图时按 [Image #1]、[Image #2]… 或出现顺序分别说明，勿合并成含糊一句。\n"
+        "2. 禁止为了「理解 [Image #N] 占位符是什么」而去 code_run / 搜索 ink-ui / 读 imageAttachments.ts；"
+        "那是前端附件标签，不等于图片内容。\n"
+        "3. 禁止优先 OCR、file_read 本地路径、vision_api、全屏截图；图已在上下文中（同 Codex："
+        "已在 thread 中的图不要再 view_image/重复加载）。\n"
+        "4. 仅当用户明确要求改代码/查实现，或图片完全无法辨认时，才改用工具；"
+        "无法辨认时先说明看不清，再问是否重传或改路径。\n"
+        "5. 不要假装看见图却去复述仓库代码；视觉结论必须来自图片本身。\n"
+    )
+
+
+def should_inject_vision_direct_answer(
+    *,
+    can_image: bool,
+    initial_content,
+    history,
+    user_text: str,
+) -> tuple[bool, str, int]:
+    """返回 (是否注入, via, image_count)。"""
+    if not can_image:
+        return False, "", 0
+    n_cur = count_image_blocks_in_content(initial_content)
+    if n_cur > 0:
+        return True, "current", n_cur
+    n_hist = history_native_image_count(history)
+    if n_hist > 0 and user_query_looks_like_vision_followup(user_text):
+        return True, "history", n_hist
+    return False, "", 0
+
+
 def should_flush_display_delta(full_resp, last_pos, chunk):
     return len(full_resp) - last_pos >= STREAM_FLUSH_CHARS or 'LLM Running' in chunk
 
@@ -424,17 +556,16 @@ class GenericAgent:
                         f"用户附件本地路径如下（可用 OCR/file_read 等工具，禁止假装已看见图内容）：\n"
                         f"{path_block}\n"
                     )
-            # 用户消息已带原生 image block 时，覆盖 vision_sop「优先 OCR」的默认，避免模型再去找文件/OCR。
-            if (
-                initial_content
-                and isinstance(initial_content, list)
-                and any(isinstance(b, dict) and b.get("type") == "image" for b in initial_content)
-            ):
-                sys_prompt += (
-                    "\n[Native image input] 本条用户消息已包含原生多模态图片内容（非仅路径文本）。"
-                    "请直接根据消息中的图片作答；禁止先找本地文件、禁止优先 OCR、禁止调用 vision_api 重复识图。"
-                    "仅当图片无法辨认时再说明看不清，并询问用户是否改传路径。\n"
-                )
+            # 原生图在「本轮 content」或「近期 history」（如用户只说重试）时，强制 vision 直答。
+            # 对齐 Codex：图已在 thread 则不要再工具加载；对齐 CC：粘贴图直接进多模态 user content。
+            _inject, _via, _n_img = should_inject_vision_direct_answer(
+                can_image=can_image,
+                initial_content=initial_content,
+                history=backend_history(self.llmclient),
+                user_text=raw_query,
+            )
+            if _inject:
+                sys_prompt += build_vision_direct_answer_sys_prompt(image_count=_n_img, via=_via)
             name = self.get_llm_name(model=True)
             from mcp_runtime import mcp_cancellation_scope
             with mcp_cancellation_scope(handler.code_stop_signal):
