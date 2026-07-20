@@ -1,10 +1,18 @@
 import type { BridgeCommand } from './protocol.js'
 import { compactPasteRefs, appendFoldedText, expandPastedTextRefs, flushPendingPaste, type PasteStore } from './paste.js'
 import { clampGraphemeOffset, nextGraphemeOffset, previousGraphemeOffset } from './terminalText.js'
+import {
+  attachImage,
+  attachmentsForSubmit,
+  type ImageAttachmentStore,
+} from './imageAttachments.js'
+import { asImageFilePath, extractImagePathCandidates } from './imagePathDetect.js'
+import { captureClipboardImage } from './clipboardImage.js'
 
 export type InputKey = {
   ctrl?: boolean
   meta?: boolean
+  alt?: boolean
   shift?: boolean
   return?: boolean
   tab?: boolean
@@ -148,6 +156,69 @@ function parseWorkflowPlanCommand(trimmed: string): BridgeCommand | null {
   return command
 }
 
+function insertImagePlaceholdersAtCursor(
+  value: string,
+  cursorOffset: number,
+  paths: string[],
+  imageStore: ImageAttachmentStore,
+  source: 'clipboard' | 'path' = 'path',
+): { value: string; cursorOffset: number } {
+  let nextValue = value
+  let nextOffset = cursorOffset
+  for (const path of paths) {
+    const att = attachImage(imageStore, path, source)
+    const piece = (nextOffset > 0 && !/\s$/.test(nextValue.slice(0, nextOffset)) ? ' ' : '') + att.placeholder
+    nextValue = nextValue.slice(0, nextOffset) + piece + nextValue.slice(nextOffset)
+    nextOffset += piece.length
+  }
+  return { value: nextValue, cursorOffset: nextOffset }
+}
+
+/**
+ * 是否「主动贴图」快捷键。
+ *
+ * - Ctrl+V：Codex 绑定；但 Windows 终端常拦截，应用可能收不到
+ * - Alt+V / Meta+V：Claude Code 在 Windows 的默认 imagePaste（规避系统 Ctrl+V）
+ * - Ctrl+Alt+V：Codex 在 WSL/拦截场景的备用
+ *
+ * 解析后 rawInput 对 Ctrl+V 常为 'v'（\x16 已映射），Alt+V 为 'v' 且 meta/alt。
+ */
+export function isImagePasteShortcut(key: InputKey, rawInput: string): boolean {
+  const seq = key.sequence ?? ''
+  const isVChar =
+    rawInput === 'v' ||
+    rawInput === 'V' ||
+    rawInput === '\x16' ||
+    seq === '\x16' ||
+    seq === 'v' ||
+    seq === 'V'
+  if (!isVChar) return false
+
+  const alt = Boolean(key.alt || key.meta)
+  const ctrl = Boolean(key.ctrl)
+
+  // Alt+V or Meta+V (CC Windows default)
+  if (alt && !ctrl) return true
+  // Ctrl+V (Codex primary; may not reach app on Win)
+  if (ctrl && !alt) return true
+  // Ctrl+Alt+V (Codex secondary)
+  if (ctrl && alt) return true
+  return false
+}
+
+export function tryPasteClipboardImage(
+  value: string,
+  cursorOffset: number,
+  imageStore: ImageAttachmentStore,
+): { value: string; cursorOffset: number; ok: boolean; error?: string } {
+  const cap = captureClipboardImage()
+  if (!cap.ok) {
+    return { value, cursorOffset, ok: false, error: cap.error }
+  }
+  const inserted = insertImagePlaceholdersAtCursor(value, cursorOffset, [cap.path], imageStore, 'clipboard')
+  return { ...inserted, ok: true }
+}
+
 export function handleInput(
   value: string,
   rawInput: string,
@@ -156,6 +227,7 @@ export function handleInput(
   pasteStore: PasteStore,
   skillNames: ReadonlySet<string> = new Set(),
   cursorOffset?: number,
+  imageStore?: ImageAttachmentStore,
 ): InputDecision {
   const includeCursorOffset = cursorOffset !== undefined
   const offset = clampCursorOffset(value, cursorOffset ?? value.length)
@@ -165,8 +237,17 @@ export function handleInput(
     extra: Omit<InputDecision, 'value' | 'cursorOffset'> = {},
   ) => makeDecision(nextValue, nextCursorOffset, includeCursorOffset, extra)
 
-  if (key.ctrl && rawInput === 'c') {
+  if (key.ctrl && (rawInput === 'c' || rawInput === '')) {
     return decision(value, offset, { command: { type: 'shutdown' }, exit: true })
+  }
+  // 剪贴板贴图：Ctrl+V / Alt+V / Ctrl+Alt+V（见 isImagePasteShortcut）
+  if (imageStore && isImagePasteShortcut(key, rawInput)) {
+    const pasted = tryPasteClipboardImage(value, offset, imageStore)
+    if (pasted.ok) {
+      return decision(pasted.value, pasted.cursorOffset)
+    }
+    // 无图或抓取失败：吞掉快捷键，避免插入字母 v；不阻断后续文本 bracketed-paste
+    return decision(value, offset)
   }
   if (key.escape) {
     return status === 'running' || status === 'stopping'
@@ -212,14 +293,49 @@ export function handleInput(
       return decision(nextValue, nextValue.length)
     }
     const prepared = flushPendingPaste(compactPasteRefs(value, pasteStore), pasteStore)
-    const expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
+    let expanded = expandPastedTextRefs(prepared, pasteStore).trimEnd()
+    // 提交前：输入中的裸图片路径 → 转成附件芯片（并带上 images）
+    if (imageStore && expanded) {
+      const candidates = extractImagePathCandidates(expanded)
+      for (const p of candidates) {
+        if (!expanded.includes(p)) continue
+        // 已有同 path 的 placeholder 则跳过 attach 重复
+        const already = [...imageStore.byId.values()].some(a => a.path === p)
+        if (!already) {
+          const att = attachImage(imageStore, p, 'path')
+          expanded = expanded.split(p).join(att.placeholder)
+        }
+      }
+    }
     if (!expanded) return decision(value, offset)
     const slash = parseSlashSubmit(expanded, skillNames)
     if (slash) return decision('', 0, slash)
     if (status === 'running' || status === 'stopping' || status === 'connecting') return decision(value, offset)
-    return decision('', 0, { command: { type: 'submit', text: expanded } })
+    const images = imageStore ? attachmentsForSubmit(imageStore, expanded) : []
+    // 清空 store 中已提交的引用（placeholder 会随 value 清空）
+    if (imageStore) {
+      for (const id of [...imageStore.byId.keys()]) imageStore.byId.delete(id)
+    }
+    return decision('', 0, {
+      command: images.length
+        ? { type: 'submit', text: expanded, images }
+        : { type: 'submit', text: expanded },
+    })
   }
   if (rawInput) {
+    // 粘贴内容整体是图片路径 → 直接芯片
+    if (imageStore) {
+      const onlyPath = asImageFilePath(rawInput)
+      if (onlyPath) {
+        const inserted = insertImagePlaceholdersAtCursor(value, offset, [onlyPath], imageStore, 'path')
+        return decision(inserted.value, inserted.cursorOffset)
+      }
+      const paths = extractImagePathCandidates(rawInput)
+      if (paths.length > 0 && paths.join('\n').length >= rawInput.trim().length * 0.5) {
+        const inserted = insertImagePlaceholdersAtCursor(value, offset, paths, imageStore, 'path')
+        return decision(inserted.value, inserted.cursorOffset)
+      }
+    }
     const inserted = insertFoldedTextAtCursor(value, offset, rawInput, pasteStore)
     return decision(inserted.value, inserted.cursorOffset)
   }

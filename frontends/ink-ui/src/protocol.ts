@@ -1,5 +1,11 @@
+export type BridgeImageAttachment = {
+  path: string
+  placeholder?: string
+  source?: string
+}
+
 export type BridgeCommand =
-  | { type: 'submit'; text: string }
+  | { type: 'submit'; text: string; images?: BridgeImageAttachment[] }
   | { type: 'stop' }
   | { type: 'new_session' }
   | { type: 'list_resume_sessions' }

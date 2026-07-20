@@ -5,6 +5,7 @@ import { moveThemeSelection, themeDescription, themePanelRows } from './themePan
 import { startBridge, type BridgeClient } from './bridgeClient.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { createPasteStore } from './paste.js'
+import { createImageAttachmentStore } from './imageAttachments.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput } from './inputController.js'
 import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, workflowPanelWithRunUpdate, type WorkflowPanelState } from './workflowPanel.js'
@@ -404,6 +405,12 @@ export function helpText(): string {
     '/model, /llm - show and switch AI models',
     '/stop - stop current backend task',
     '/exit, /quit - exit',
+    '',
+    'Image paste:',
+    'Alt+V - paste clipboard image as [Image #N] (recommended on Windows)',
+    'Ctrl+V - paste clipboard image when terminal does not intercept it',
+    'Ctrl+Alt+V - alternate paste-image binding (Codex-style)',
+    'Or paste a local image path (e.g. D:\\\\shots\\\\a.png)',
   ].join('\n')
 }
 
@@ -452,6 +459,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const scrollbarDragRef = useRef(false)
   const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
+  const imageStore = useMemo(() => createImageAttachmentStore(), [])
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, workflowPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
@@ -948,7 +956,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
             return
           }
         } else {
-          applyInputDecision(handleInput(action.value, '', { return: true }, state.status, pasteStore, skillNames))
+          applyInputDecision(handleInput(action.value, '', { return: true }, state.status, pasteStore, skillNames, undefined, imageStore))
           return
         }
       }
@@ -979,7 +987,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setCursorOffset(result.value.length)
       return
     }
-    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames, cursorOffset)
+    const decision = handleInput(input, rawInput, key, state.status, pasteStore, skillNames, cursorOffset, imageStore)
     applyInputDecision(decision)
   }
   terminalInputHandlerRef.current = handleTerminalInput

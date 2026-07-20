@@ -58,6 +58,13 @@ class EstimateMsgTokensTest(unittest.TestCase):
         toks = tm.estimate_msg_tokens(msg, 4.0)
         self.assertEqual(tm.IMAGE_BLOCK_TOKENS, toks)
 
+    def test_image_url_block_fixed_not_exploding(self):
+        big = "A" * 500_000
+        msg = {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big}"}},
+        ]}
+        self.assertEqual(tm.IMAGE_BLOCK_TOKENS, tm.estimate_msg_tokens(msg, 4.0))
+
     def test_image_plus_text(self):
         big = "A" * 500_000
         msg = {"role": "user", "content": [

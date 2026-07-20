@@ -10,9 +10,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import _build_user_content_with_images, _native_image_input_enabled  # noqa: E402
+from agentmain import (  # noqa: E402
+    _build_user_content_with_images,
+    _native_image_input_enabled,
+    supports_image_input,
+)
 from agent_loop import agent_runner_loop  # noqa: E402
-from llmcore import NativeOAISession, NativeToolClient, _msgs_claude2oai, _to_responses_input  # noqa: E402
+from llmcore import (  # noqa: E402
+    NativeClaudeSession,
+    NativeOAISession,
+    NativeToolClient,
+    _msgs_claude2oai,
+    _redact_image_payloads,
+    _to_responses_input,
+)
 
 
 class NativeImageInputTest(unittest.TestCase):
@@ -25,6 +36,7 @@ class NativeImageInputTest(unittest.TestCase):
         })
 
         self.assertTrue(_native_image_input_enabled(type("Client", (), {"backend": backend})()))
+        self.assertTrue(supports_image_input(type("Client", (), {"backend": backend})()))
 
         mixin_backend = type("MixinBackend", (), {"primary": backend})()
         self.assertTrue(_native_image_input_enabled(type("Client", (), {"backend": mixin_backend})()))
@@ -33,6 +45,14 @@ class NativeImageInputTest(unittest.TestCase):
         self.assertFalse(_native_image_input_enabled(type("Client", (), {"backend": backend})()))
 
         self.assertFalse(_native_image_input_enabled(type("Client", (), {"backend": object()})()))
+
+    def test_native_claude_supports_image_input_by_default(self):
+        backend = NativeClaudeSession({
+            "apikey": "sk-ant-test",
+            "apibase": "https://example.test",
+            "model": "claude-sonnet-4",
+        })
+        self.assertTrue(supports_image_input(type("Client", (), {"backend": backend})()))
 
     def test_agentmain_builds_native_image_blocks_from_path(self):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
@@ -86,6 +106,28 @@ class NativeImageInputTest(unittest.TestCase):
 
         responses = _to_responses_input(chat)
         self.assertEqual(responses[0]["content"][1]["type"], "input_image")
+
+        # Claude-style block 直接进 responses 转换也不丢
+        responses2 = _to_responses_input([msg])
+        self.assertTrue(
+            any(
+                isinstance(p, dict) and p.get("type") == "input_image"
+                for p in responses2[0]["content"]
+            )
+        )
+
+    def test_redact_image_payloads_strips_base64(self):
+        payload = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看图"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 500}},
+            ],
+        }
+        red = _redact_image_payloads(payload)
+        data = red["content"][1]["source"]["data"]
+        self.assertIn("redacted", data)
+        self.assertNotIn("A" * 50, data)
 
     def test_native_tool_client_keeps_non_text_content_blocks(self):
         class Backend:

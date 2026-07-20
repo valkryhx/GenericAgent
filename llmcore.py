@@ -578,6 +578,11 @@ def _to_responses_input(messages):
                 elif ptype == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     if url and role != "assistant": parts.append({"type": "input_image", "image_url": url})
+                elif ptype == "image":
+                    src = part.get("source") or {}
+                    if src.get("type") == "base64" and src.get("data") and role != "assistant":
+                        mt = src.get("media_type") or "image/png"
+                        parts.append({"type": "input_image", "image_url": f"data:{mt};base64,{src.get('data', '')}"})
         if len(parts) == 0: parts = [{"type": text_type, "text": str(content) if not isinstance(content, list) else '[empty]'}]
         result.append({"role": role, "content": parts})
         pending = []
@@ -1050,11 +1055,70 @@ def _ensure_text_block(blocks):
     blocks.insert(1, {"type": "text", "text": txt})
     return txt
 
+def _redact_image_payloads(obj, _depth=0):
+    """日志脱敏：去掉 base64 图数据，只保留类型与长度。"""
+    if _depth > 12:
+        return obj
+    if isinstance(obj, dict):
+        t = obj.get("type")
+        if t == "image":
+            src = obj.get("source") if isinstance(obj.get("source"), dict) else {}
+            data = src.get("data") if isinstance(src, dict) else None
+            n = len(data) if isinstance(data, str) else 0
+            return {
+                "type": "image",
+                "source": {
+                    "type": src.get("type", "base64"),
+                    "media_type": src.get("media_type", "image/png"),
+                    "data": f"<redacted base64 len={n}>",
+                },
+            }
+        if t == "image_url":
+            url = ""
+            iu = obj.get("image_url")
+            if isinstance(iu, dict):
+                url = str(iu.get("url") or "")
+            elif isinstance(iu, str):
+                url = iu
+            if url.startswith("data:"):
+                head, _, rest = url.partition(",")
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": f"{head},<redacted base64 len={len(rest)}>"},
+                }
+            return obj
+        if t == "input_image":
+            url = str(obj.get("image_url") or "")
+            if url.startswith("data:"):
+                head, _, rest = url.partition(",")
+                return {**obj, "image_url": f"{head},<redacted base64 len={len(rest)}>"}
+            return obj
+        return {k: _redact_image_payloads(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_image_payloads(x, _depth + 1) for x in obj]
+    return obj
+
+
 def _write_llm_log(label, content, log_path=None):
     if not log_path:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'temp/model_responses/model_responses_{os.getpid()}.txt')
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(content, (dict, list)):
+        try:
+            content = json.dumps(_redact_image_payloads(content), ensure_ascii=False, indent=2)
+        except Exception:
+            content = str(content)
+    elif isinstance(content, str) and ('"type": "image"' in content or 'data:image/' in content or '"type":"image"' in content):
+        try:
+            content = json.dumps(_redact_image_payloads(json.loads(content)), ensure_ascii=False, indent=2)
+        except Exception:
+            # 非完整 JSON 时粗暴截断超长 data URL 片段
+            content = re.sub(
+                r'(data:image/[^;]+;base64,)[A-Za-z0-9+/=\s]{200,}',
+                lambda m: m.group(1) + f"<redacted len≈{len(m.group(0))}>",
+                content,
+            )
     with open(log_path, 'a', encoding='utf-8', errors='replace') as f:
         f.write(f"=== {label} === {ts}\n{content}\n\n")
 
@@ -1205,7 +1269,7 @@ class NativeToolClient:
         final_content = tool_result_blocks + filtered_content
         if not final_content: final_content = [{"type": "text", "text": "."}]
         merged = {"role": "user", "content": final_content}
-        _write_llm_log('Prompt', json.dumps(merged, ensure_ascii=False, indent=2), self.log_path)
+        _write_llm_log('Prompt', merged, self.log_path)
         gen = self.backend.ask(merged)
         try:
             while True: 

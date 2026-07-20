@@ -67,7 +67,7 @@ def _msg_chars(msg: dict[str, Any]) -> int:
             chars += len(str(block))
             continue
         btype = block.get("type")
-        if btype == "image":
+        if btype in ("image", "image_url", "input_image"):
             continue  # 图片单独按 IMAGE_BLOCK_TOKENS 计，不算字符
         if btype == "text":
             chars += len(str(block.get("text", "")))
@@ -96,7 +96,7 @@ def _msg_image_count(msg: dict[str, Any]) -> int:
         return 0
     return sum(
         1 for b in content
-        if isinstance(b, dict) and b.get("type") == "image"
+        if isinstance(b, dict) and b.get("type") in ("image", "image_url", "input_image")
     )
 
 

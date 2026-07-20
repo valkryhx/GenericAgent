@@ -223,8 +223,8 @@ class FakeAgent:
     def run(self):
         return None
 
-    def put_task(self, text, source="user"):
-        self.prompts.append((text, source))
+    def put_task(self, text, source="user", images=None):
+        self.prompts.append((text, source, list(images or [])))
         self.history.append(f"[USER]: {text}")
         self.llmclient.backend.history.append({"role": "user", "content": text})
         dq = queue.Queue()
@@ -274,7 +274,7 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual(1, task_id)
         self.assertTrue(agent.inc_out)
-        self.assertEqual([("hello", "user")], agent.prompts)
+        self.assertEqual([("hello", "user", [])], agent.prompts)
         self.assertEqual(
             [
                 {"type": "user", "taskId": 1, "text": "hello"},
@@ -286,6 +286,19 @@ class InkBridgeTest(unittest.TestCase):
             ],
             events,
         )
+
+    def test_submit_forwards_images_to_put_task(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        images = [{"path": r"D:\shots\a.png", "placeholder": "[Image #1]", "source": "clipboard"}]
+
+        task_id = bridge.submit("看图 [Image #1]", images=images)
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertEqual(1, task_id)
+        self.assertEqual([("看图 [Image #1]", "user", images)], agent.prompts)
 
     def test_submit_emits_token_usage_when_backend_usage_changes(self):
         agent = FakeAgent()
@@ -315,7 +328,7 @@ class InkBridgeTest(unittest.TestCase):
         result = bridge.submit("second")
 
         self.assertEqual(-1, result)
-        self.assertEqual([("first", "user")], agent.prompts)
+        self.assertEqual([("first", "user", [])], agent.prompts)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
     def test_new_session_replaces_agent_and_resets_visible_state(self):
@@ -339,7 +352,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertTrue(old_agent.aborted)
         self.assertEqual(1, task_id)
         self.assertEqual([], old_agent.prompts[1:])
-        self.assertEqual([("second", "user")], bridge.agent.prompts)
+        self.assertEqual([("second", "user", [])], bridge.agent.prompts)
         self.assertEqual([
             {"type": "history_replace", "messages": []},
             {"type": "system", "text": "Started a new session."},
@@ -989,7 +1002,7 @@ class InkBridgeTest(unittest.TestCase):
             bridge.skill_invoke("demo", "中文 args with spaces", search_roots=[str(Path(tmp) / "skills")])
 
         self.assertEqual(1, len(agent.prompts))
-        prompt, source = agent.prompts[0]
+        prompt, source, images = agent.prompts[0]
         self.assertEqual("user", source)
         self.assertIn('The user invoked skill "demo"', prompt)
         self.assertIn("Use 中文 args with spaces from", prompt)

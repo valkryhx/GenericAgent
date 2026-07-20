@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPasteStore } from './paste.js'
+import { createImageAttachmentStore } from './imageAttachments.js'
 import { handleInput } from './inputController.js'
 
 test('handleInput submits expanded text when idle', () => {
@@ -405,4 +406,54 @@ test('handleInput turns Ctrl+C into shutdown and exit', () => {
     command: { type: 'shutdown' },
     exit: true,
   })
+})
+
+test('handleInput attaches image path paste as [Image #N] and submits images', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`D:\shots\demo.png`
+  const pasted = handleInput('', path, {}, 'idle', store, new Set(), undefined, images)
+  assert.equal(pasted.value, '[Image #1]')
+  const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store, new Set(), undefined, images)
+  assert.equal(submitted.value, '')
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1]')
+    assert.deepEqual(submitted.command.images, [
+      { path, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('isImagePasteShortcut accepts ctrl+v, alt+v, ctrl+alt+v', async () => {
+  const { isImagePasteShortcut } = await import('./inputController.js')
+  assert.equal(isImagePasteShortcut({ ctrl: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ ctrl: true, sequence: '\x16' }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ alt: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ meta: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ ctrl: true, alt: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({}, 'v'), false)
+  assert.equal(isImagePasteShortcut({ ctrl: true }, 'c'), false)
+})
+
+test('parseTerminalInput maps alt+v and ctrl+v', async () => {
+  const { parseTerminalInput } = await import('./terminalInput.js')
+  const altV = parseTerminalInput('\x1bv')
+  assert.equal(altV.rawInput, 'v')
+  assert.equal(altV.key.meta, true)
+  assert.equal(altV.key.alt, true)
+
+  const ctrlV = parseTerminalInput('\x16')
+  assert.equal(ctrlV.rawInput, 'v')
+  assert.equal(ctrlV.key.ctrl, true)
+})
+
+test('handleInput alt+v does not insert letter v (clipboard image or no-op)', async () => {
+  const mod = await import('./inputController.js')
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = mod.handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
+  // 有剪贴板图时插入 [Image #N]；无图时保持 'hi'。无论哪种都不应变成 'hiv'
+  assert.notEqual(decision.value, 'hiv')
+  assert.ok(decision.value === 'hi' || decision.value.includes('[Image #'))
 })

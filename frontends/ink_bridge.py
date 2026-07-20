@@ -155,9 +155,9 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent.run()
 
-    def submit(self, text: str, display_text: str | None = None) -> int:
+    def submit(self, text: str, display_text: str | None = None, images: list | None = None) -> int:
         text = str(text or "")
-        if not text.strip():
+        if not text.strip() and not images:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
         if getattr(self.agent, "is_running", False) or self._is_consuming():
@@ -173,7 +173,7 @@ class GenericAgentBridge:
         self.emit({"type": "user", "taskId": task_id, "text": visible_text})
         self.emit({"type": "status", "status": "running", "taskId": task_id})
         try:
-            display_queue = self.agent.put_task(text, source="user")
+            display_queue = self.agent.put_task(text, source="user", images=images or [])
         except Exception as exc:
             self.emit({"type": "error", "code": "put_task_failed", "message": str(exc), "taskId": task_id})
             self.emit({"type": "status", "status": "idle", "taskId": task_id})
@@ -1077,7 +1077,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             continue
         cmd_type = command.get("type")
         if cmd_type == "submit":
-            bridge.submit(str(command.get("text") or ""))
+            images = command.get("images")
+            if images is not None and not isinstance(images, list):
+                images = []
+            bridge.submit(str(command.get("text") or ""), images=images)
         elif cmd_type == "stop":
             bridge.stop()
         elif cmd_type == "new_session":

@@ -1,4 +1,4 @@
-import os, sys, threading, queue, time, json, re, random, locale, base64, mimetypes, copy
+import os, sys, threading, queue, time, json, re, random, locale, copy
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 def _configure_stdio_utf8():
     for name in ('stdout', 'stderr'):
@@ -11,12 +11,13 @@ def _configure_stdio_utf8():
 _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from llmcore import NativeOAISession
+from llmcore import NativeClaudeSession, NativeOAISession
 from llm_client import load_clients_from_yaml
 from agent_loop import agent_runner_loop
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from skills_runtime import build_skill_prompt
 import session_transcript
+import image_codec
 try:
     from compact_context import compact_agent_context, replace_log_with_compact_history
 except Exception:  # 压缩核心导入失败时降级：/compact 报不可用，不影响主流程
@@ -53,33 +54,40 @@ def _extract_image_paths(text):
 
 
 def _image_block(path):
-    media_type = mimetypes.guess_type(path)[0] or 'image/png'
-    with open(path, 'rb') as f:
-        data = base64.b64encode(f.read()).decode('ascii')
-    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+    """兼容旧调用：走有界 codec。"""
+    enc = image_codec.encode_image_for_prompt(path)
+    return image_codec.build_image_block(enc)
 
 
 def _build_user_content_with_images(text, images=None):
-    image_paths = []
-    for p in list(images or []) + _extract_image_paths(text):
-        path = p if os.path.isabs(str(p)) else os.path.join(script_dir, str(p))
-        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in _IMAGE_EXTS and path not in image_paths:
-            image_paths.append(path)
-    if not image_paths:
-        return None
-    content = [{"type": "text", "text": text or ""}]
-    for path in image_paths:
-        try:
-            content.append(_image_block(path))
-        except Exception as e:
-            content[0]["text"] += f"\n[图片附件读取失败: {path}: {e}]"
-    return content
+    extra = _extract_image_paths(text)
+    return image_codec.build_user_content_with_images(text, images=images, extra_paths=extra)
+
+
+def supports_image_input(llmclient):
+    """当前 backend 是否支持把本地图作为原生多模态 user content 发送。"""
+    backend = getattr(llmclient, 'backend', None)
+    backend = getattr(backend, 'primary', backend)
+    if backend is None:
+        return False
+    if bool(getattr(backend, 'native_image_input', False)):
+        return True
+    if bool(getattr(backend, 'supports_image_input', False)):
+        return True
+    # Native Claude Messages 原生支持 image block；OAI 仍要求显式 flag/capability
+    if isinstance(backend, NativeClaudeSession) and not isinstance(backend, NativeOAISession):
+        # 允许 cfg 显式关掉
+        if 'native_image_input' in getattr(backend, '__dict__', {}):
+            return bool(getattr(backend, 'native_image_input'))
+        return True
+    if isinstance(backend, NativeOAISession):
+        return bool(getattr(backend, 'native_image_input', False))
+    return False
 
 
 def _native_image_input_enabled(llmclient):
-    backend = getattr(llmclient, 'backend', None)
-    backend = getattr(backend, 'primary', backend)
-    return isinstance(backend, NativeOAISession) and bool(getattr(backend, 'native_image_input', False))
+    """兼容旧名；语义升级为 supports_image_input。"""
+    return supports_image_input(llmclient)
 
 
 def should_flush_display_delta(full_resp, last_pos, chunk):
@@ -374,7 +382,59 @@ class GenericAgent:
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
             transcript_history_before = session_transcript.current_backend_history(self)
-            initial_content = _build_user_content_with_images(raw_query, images) if _native_image_input_enabled(self.llmclient) else None
+            can_image = supports_image_input(self.llmclient)
+            initial_content = _build_user_content_with_images(raw_query, images) if can_image else None
+            if (images or _extract_image_paths(raw_query)) and not can_image:
+                # 门控关闭：不把 image block 发给 API（避免 400「不支持 image」）。
+                # 附件 path 若不在文本里（常见 [Image #N] 占位），补进 query 供工具/OCR，并给用户友好提示。
+                path_hints = []
+                for item in image_codec.normalize_image_attachments(images):
+                    p = item.get("path") or ""
+                    if p and os.path.isfile(p) and p not in path_hints:
+                        path_hints.append(p)
+                for p in _extract_image_paths(raw_query):
+                    if p not in path_hints:
+                        path_hints.append(p)
+                model_label = ""
+                try:
+                    model_label = self.get_llm_name(model=True) or ""
+                except Exception:
+                    model_label = ""
+                model_bit = f"「{model_label}」" if model_label else "当前模型"
+                try:
+                    if path_hints:
+                        display_queue.put(
+                            f"[image] {model_bit}不支持原生识图，图片未作为多模态内容发送。"
+                            f"已把本地路径写入文本，可用 OCR/工具读文件；或 /model 切换到支持 image_input 的模型。\n"
+                            f"  paths: {'; '.join(path_hints)}\n"
+                        )
+                    else:
+                        display_queue.put(
+                            f"[image] {model_bit}不支持原生识图，图片未发送。"
+                            f"请 /model 切换到支持 image_input 的模型，或用文字描述图片内容。\n"
+                        )
+                except Exception:
+                    pass
+                if path_hints:
+                    # 让模型看到真实路径，避免只剩 [Image #N] 占位却去瞎找文件
+                    path_block = "\n".join(f"- {p}" for p in path_hints)
+                    raw_query = (
+                        f"{raw_query}\n\n"
+                        f"[系统] {model_bit}无原生图片输入能力，上述 [Image #N] 仅是占位符，你看不到像素。"
+                        f"用户附件本地路径如下（可用 OCR/file_read 等工具，禁止假装已看见图内容）：\n"
+                        f"{path_block}\n"
+                    )
+            # 用户消息已带原生 image block 时，覆盖 vision_sop「优先 OCR」的默认，避免模型再去找文件/OCR。
+            if (
+                initial_content
+                and isinstance(initial_content, list)
+                and any(isinstance(b, dict) and b.get("type") == "image" for b in initial_content)
+            ):
+                sys_prompt += (
+                    "\n[Native image input] 本条用户消息已包含原生多模态图片内容（非仅路径文本）。"
+                    "请直接根据消息中的图片作答；禁止先找本地文件、禁止优先 OCR、禁止调用 vision_api 重复识图。"
+                    "仅当图片无法辨认时再说明看不清，并询问用户是否改传路径。\n"
+                )
             name = self.get_llm_name(model=True)
             from mcp_runtime import mcp_cancellation_scope
             with mcp_cancellation_scope(handler.code_stop_signal):
