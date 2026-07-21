@@ -192,6 +192,260 @@ class HandlerModeGateTest(unittest.TestCase):
         self.assertEqual({"status": "success"}, outcome.data)
         self.assertIn("tool:file_write", handler.calls)
 
+    def test_mid_session_switch_full_access_to_ask_requires_approval(self):
+        """默认 full_access 可直接写；中途切到 ask 后写操作须 accept 才执行。"""
+        from permission_runtime import PermissionRuntime
+
+        handler = SpyHandler()
+        # 与 agentmain 一致：先挂 full_access policy
+        handler.permission_mode_policy = build_permission_mode_policy(FULL_ACCESS)
+        handler.permission_runtime = None
+
+        # 1) full_access：file_write 直接执行
+        before_switch = exhaust(handler.dispatch("file_write", {"path": "a.txt"}, self.response()))
+        self.assertEqual({"status": "success"}, before_switch.data)
+        self.assertEqual(1, handler.calls.count("tool:file_write"))
+
+        # 2) 中途切档（模拟 /permissions 或 set_permission_mode 同步 live handler）
+        handler.permission_mode_policy = build_permission_mode_policy(ASK)
+
+        # 3a) 切到 ask 且无 runtime：fail-closed deny，工具 body 不跑
+        handler.permission_runtime = None
+        denied = exhaust(handler.dispatch("file_write", {"path": "b.txt"}, self.response()))
+        self.assertEqual("error", denied.data["status"])
+        self.assertEqual("deny", denied.data["permission"]["action"])
+        self.assertEqual(1, handler.calls.count("tool:file_write"))
+
+        # 3b) 挂 runtime 并 accept：才第二次执行 body
+        import threading
+        import time
+
+        runtime = PermissionRuntime()
+        events = []
+        runtime.set_emit(lambda ev: events.append(dict(ev)))
+        handler.permission_runtime = runtime
+
+        def auto_accept():
+            for _ in range(200):
+                reqs = [e for e in events if e.get("type") == "permission_request"]
+                if reqs:
+                    rid = reqs[-1].get("requestId")
+                    if rid:
+                        runtime.resolve(rid, "accept")
+                        return
+                time.sleep(0.01)
+
+        th = threading.Thread(target=auto_accept, daemon=True)
+        th.start()
+        accepted = exhaust(handler.dispatch("file_write", {"path": "c.txt"}, self.response()))
+        th.join(timeout=2)
+        self.assertEqual({"status": "success"}, accepted.data)
+        self.assertEqual(2, handler.calls.count("tool:file_write"))
+        self.assertTrue(any(e.get("type") == "permission_request" for e in events))
+
+
+class MidSessionSwitchViaAgentTest(unittest.TestCase):
+    """走 agent.set_permission_mode 同步 live handler 的路径（更接近 UI）。"""
+
+    def response(self):
+        return SimpleNamespace(content="")
+
+    def test_agent_set_permission_mode_switches_live_dispatch_gate(self):
+        from agentmain import GenericAgent
+        from permission_runtime import PermissionRuntime
+
+        agent = GenericAgent.__new__(GenericAgent)
+        agent.permission_mode = FULL_ACCESS
+        handler = SpyHandler()
+        handler.permission_mode_policy = build_permission_mode_policy(FULL_ACCESS)
+        agent.handler = handler
+
+        # full_access 直写
+        ok = exhaust(handler.dispatch("file_write", {}, self.response()))
+        self.assertEqual({"status": "success"}, ok.data)
+        self.assertIn("tool:file_write", handler.calls)
+
+        # UI 切 ask：set_permission_mode 更新 live handler.policy
+        agent.set_permission_mode(ASK)
+        self.assertEqual(ASK, agent.permission_mode)
+        self.assertEqual(ASK, handler.permission_mode_policy.mode)
+
+        # 未挂 runtime → ask fail-closed deny
+        handler.permission_runtime = None
+        denied = exhaust(handler.dispatch("file_write", {}, self.response()))
+        self.assertEqual("error", denied.data["status"])
+        self.assertEqual(1, handler.calls.count("tool:file_write"))
+
+        # 挂 runtime 并 accept
+        runtime = PermissionRuntime()
+        events = []
+        runtime.set_emit(lambda ev: events.append(dict(ev)))
+        handler.permission_runtime = runtime
+
+        import threading
+        import time
+
+        def auto_accept():
+            for _ in range(200):
+                for e in events:
+                    if e.get("type") == "permission_request" and e.get("requestId"):
+                        runtime.resolve(e["requestId"], "accept")
+                        return
+                time.sleep(0.01)
+
+        th = threading.Thread(target=auto_accept, daemon=True)
+        th.start()
+        accepted = exhaust(handler.dispatch("file_write", {}, self.response()))
+        th.join(timeout=2)
+        self.assertEqual({"status": "success"}, accepted.data)
+        self.assertEqual(2, handler.calls.count("tool:file_write"))
+
+    def test_multi_switch_ask_readonly_full_access_ask_cycle(self):
+        """多次切档：ask → read_only → full_access → ask，每段行为都要正确。
+
+        贴近用户连按 /permissions 的路径：始终走 agent.set_permission_mode，
+        并在各档下混合 file_read / file_write，验证：
+        - ask：读放行；写须 accept 才执行；deny 不执行
+        - read_only：读放行；写直接 deny（无 permission_request）
+        - full_access：读写直通，不弹审批
+        - 再切回 ask：写又要审批（不残留 full_access 放行）
+        """
+        import threading
+        import time
+
+        from agentmain import GenericAgent
+        from permission_runtime import PermissionRuntime
+
+        agent = GenericAgent.__new__(GenericAgent)
+        agent.permission_mode = FULL_ACCESS
+        handler = SpyHandler()
+        handler.permission_mode_policy = build_permission_mode_policy(FULL_ACCESS)
+        agent.handler = handler
+
+        runtime = PermissionRuntime()
+        events: list[dict] = []
+        runtime.set_emit(lambda ev: events.append(dict(ev)))
+        handler.permission_runtime = runtime
+        agent.permission_runtime = runtime
+
+        def write_count() -> int:
+            return handler.calls.count("tool:file_write")
+
+        def read_count() -> int:
+            return handler.calls.count("tool:file_read")
+
+        def request_count() -> int:
+            return sum(1 for e in events if e.get("type") == "permission_request")
+
+        def settle_count() -> int:
+            return sum(1 for e in events if e.get("type") == "permission_request_settled")
+
+        def auto_resolve(decision: str, after_n_requests: int):
+            """等第 after_n_requests 个 permission_request 出现后 resolve 最新 rid。"""
+
+            def _run():
+                for _ in range(400):
+                    reqs = [e for e in events if e.get("type") == "permission_request"]
+                    if len(reqs) >= after_n_requests:
+                        rid = reqs[-1].get("requestId")
+                        if rid:
+                            runtime.resolve(rid, decision)
+                            return
+                    time.sleep(0.01)
+
+            th = threading.Thread(target=_run, daemon=True)
+            th.start()
+            return th
+
+        # ── Phase 1: ask ─────────────────────────────────────────────
+        agent.set_permission_mode(ASK)
+        self.assertEqual(ASK, agent.permission_mode)
+        self.assertEqual(ASK, handler.permission_mode_policy.mode)
+
+        # 读：不审批
+        r1 = exhaust(handler.dispatch("file_read", {"path": "r1"}, self.response()))
+        self.assertEqual("read", r1.data)
+        self.assertEqual(1, read_count())
+        self.assertEqual(0, request_count())
+
+        # 写 + accept
+        th = auto_resolve("accept", after_n_requests=1)
+        w_accept = exhaust(handler.dispatch("file_write", {"path": "w1"}, self.response()))
+        th.join(timeout=2)
+        self.assertEqual({"status": "success"}, w_accept.data)
+        self.assertEqual(1, write_count())
+        self.assertEqual(1, request_count())
+        self.assertEqual(1, settle_count())
+
+        # 写 + deny：body 不再增加
+        th = auto_resolve("deny", after_n_requests=2)
+        w_deny = exhaust(handler.dispatch("file_write", {"path": "w2"}, self.response()))
+        th.join(timeout=2)
+        self.assertEqual("error", w_deny.data["status"])
+        self.assertEqual("deny", w_deny.data["permission"]["action"])
+        self.assertEqual(1, write_count())
+        self.assertEqual(2, request_count())
+
+        # ── Phase 2: read_only ───────────────────────────────────────
+        agent.set_permission_mode(READ_ONLY)
+        self.assertEqual(READ_ONLY, handler.permission_mode_policy.mode)
+
+        r2 = exhaust(handler.dispatch("file_read", {"path": "r2"}, self.response()))
+        self.assertEqual("read", r2.data)
+        self.assertEqual(2, read_count())
+
+        # 写：直接 deny，不走 permission_request（policy 层 deny，不是 ask wait）
+        req_before_ro = request_count()
+        w_ro = exhaust(handler.dispatch("file_write", {"path": "w3"}, self.response()))
+        self.assertEqual("error", w_ro.data["status"])
+        self.assertEqual("deny", w_ro.data["permission"]["action"])
+        self.assertEqual(READ_ONLY, w_ro.data["permission"]["profile"])
+        self.assertEqual(1, write_count())
+        self.assertEqual(req_before_ro, request_count())  # 无新 request
+
+        # ── Phase 3: full_access ─────────────────────────────────────
+        agent.set_permission_mode(FULL_ACCESS)
+        self.assertEqual(FULL_ACCESS, handler.permission_mode_policy.mode)
+
+        req_before_fa = request_count()
+        w_fa = exhaust(handler.dispatch("file_write", {"path": "w4"}, self.response()))
+        self.assertEqual({"status": "success"}, w_fa.data)
+        self.assertEqual(2, write_count())
+        self.assertEqual(req_before_fa, request_count())  # 直通，不弹窗
+
+        r3 = exhaust(handler.dispatch("file_read", {"path": "r3"}, self.response()))
+        self.assertEqual("read", r3.data)
+        self.assertEqual(3, read_count())
+
+        # ── Phase 4: 再切回 ask（不能残留 full_access）────────────────
+        agent.set_permission_mode(ASK)
+        self.assertEqual(ASK, agent.permission_mode)
+        self.assertEqual(ASK, handler.permission_mode_policy.mode)
+
+        # 4a) 临时摘掉 runtime：fail-closed deny（无 UI）
+        handler.permission_runtime = None
+        req_before_fc = request_count()
+        w_failclosed = exhaust(handler.dispatch("file_write", {"path": "w5"}, self.response()))
+        self.assertEqual("error", w_failclosed.data["status"])
+        self.assertEqual("deny", w_failclosed.data["permission"]["action"])
+        self.assertEqual(2, write_count())
+        self.assertEqual(req_before_fc, request_count())
+
+        # 4b) 挂回 runtime + accept：须再弹一次审批后才执行
+        handler.permission_runtime = runtime
+        th = auto_resolve("accept", after_n_requests=3)
+        w_ask_again = exhaust(handler.dispatch("file_write", {"path": "w6"}, self.response()))
+        th.join(timeout=2)
+        self.assertEqual({"status": "success"}, w_ask_again.data)
+        self.assertEqual(3, write_count())
+        self.assertEqual(3, request_count())
+        self.assertGreaterEqual(settle_count(), 3)
+
+        # 4c) 读在 ask 下仍始终放行
+        r4 = exhaust(handler.dispatch("file_read", {"path": "r4"}, self.response()))
+        self.assertEqual("read", r4.data)
+        self.assertEqual(4, read_count())
+
 
 if __name__ == "__main__":
     unittest.main()
