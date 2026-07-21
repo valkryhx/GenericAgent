@@ -18,6 +18,8 @@ export type BridgeCommand =
   | { type: 'mcp_disable'; server: string }
   | { type: 'model_status' }
   | { type: 'model_switch'; selector: string }
+  | { type: 'permission_status' }
+  | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
@@ -68,6 +70,8 @@ export type ModelStatus = {
   name: string
   current: boolean
 }
+
+export type PermissionMode = 'read_only' | 'ask' | 'full_access'
 
 export type SkillStatus = {
   name: string
@@ -230,6 +234,8 @@ export type BridgeEvent =
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
   | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'model_switch_result'; ok: boolean; message: string }
+  | { type: 'permission_status'; mode: PermissionMode | string; default: PermissionMode | string; modes: (PermissionMode | string)[] }
+  | { type: 'permission_switch_result'; ok: boolean; mode: PermissionMode | string }
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }

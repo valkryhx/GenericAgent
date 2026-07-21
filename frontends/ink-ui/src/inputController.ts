@@ -39,7 +39,7 @@ export type InputDecision = {
   value: string
   cursorOffset?: number
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_theme' | 'clear' | 'help' | 'status' }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' }
   /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
   pendingImagePaste?: boolean
   exit?: boolean
@@ -97,6 +97,25 @@ function parseSlashSubmit(
     return { command: { type: 'mcp_disable', server } }
   }
   if (/^\/(?:model|llm)$/.test(trimmed)) return { action: { type: 'open_model' } }
+  if (/^\/(?:permissions|permission|perms)$/.test(trimmed)) return { action: { type: 'open_permissions' } }
+  const permissionSwitch = /^\/(?:permissions|permission|perms)\s+(.+)$/.exec(trimmed)
+  if (permissionSwitch) {
+    const raw = permissionSwitch[1].trim().toLowerCase().replace(/[\s-]+/g, '_')
+    if (raw === '?' || raw === 'help' || raw === 'status') return { command: { type: 'permission_status' } }
+    const alias: Record<string, 'read_only' | 'ask' | 'full_access'> = {
+      read_only: 'read_only',
+      readonly: 'read_only',
+      read: 'read_only',
+      ask: 'ask',
+      approval: 'ask',
+      full_access: 'full_access',
+      full: 'full_access',
+      fullaccess: 'full_access',
+    }
+    const mode = alias[raw]
+    if (mode) return { command: { type: 'set_permission_mode', mode } }
+    return { command: { type: 'permission_status' } }
+  }
   if (trimmed === '/theme') return { action: { type: 'open_theme' } }
   const modelSwitch = /^\/(?:model|llm)\s+(.+)$/.exec(trimmed)
   if (modelSwitch) {

@@ -219,9 +219,16 @@ class FakeAgent:
         self.llmclient = FakeClient()
         self.llmclients = [self.llmclient]
         self.llm_no = 0
+        self.permission_mode = "full_access"
 
     def run(self):
         return None
+
+    def set_permission_mode(self, mode):
+        from permission_policy import normalize_permission_mode
+
+        self.permission_mode = normalize_permission_mode(mode)
+        return self.permission_mode
 
     def put_task(self, text, source="user", images=None):
         self.prompts.append((text, source, list(images or [])))
@@ -763,6 +770,53 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual(0, agent.llm_no)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+
+    def test_permission_status_reports_current_mode_and_options(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.permission_status()
+
+        status = events[-1]
+        self.assertEqual("permission_status", status["type"])
+        self.assertEqual("full_access", status["mode"])
+        self.assertEqual("full_access", status["default"])
+        self.assertEqual(["read_only", "ask", "full_access"], status["modes"])
+
+    def test_permission_switch_updates_mode_then_emits_status(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.permission_switch("read_only")
+
+        self.assertEqual("read_only", agent.permission_mode)
+        self.assertEqual({"type": "permission_switch_result", "ok": True, "mode": "read_only"}, events[-2])
+        self.assertEqual("permission_status", events[-1]["type"])
+        self.assertEqual("read_only", events[-1]["mode"])
+
+    def test_permission_switch_normalizes_unknown_mode_to_default(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.permission_switch("garbage")
+
+        self.assertEqual("full_access", agent.permission_mode)
+        self.assertEqual("full_access", events[-1]["mode"])
+
+    def test_permission_switch_allowed_while_running(self):
+        # 运行中也允许切档：set_permission_mode 会同步 live handler，下一次 dispatch 生效。
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        bridge.submit("busy")
+
+        bridge.permission_switch("read_only")
+
+        self.assertEqual("read_only", agent.permission_mode)
+        self.assertEqual("permission_status", events[-1]["type"])
 
     def test_compact_replaces_backend_history_and_clears_rewind_checkpoints(self):
         agent = FakeAgent()

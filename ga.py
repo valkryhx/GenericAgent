@@ -289,6 +289,9 @@ class GenericAgentHandler(BaseHandler):
         self.workflow_permission_context = {}
         self.workflow_permission_event_callback = None
         self._workflow_permission_profile_selected = False
+        # 主会话三档权限（read_only/ask/full_access）。默认 None = 全开（等价 full_access）。
+        # workflow 子 agent 的 workflow_permission_policy 优先级更高，两者都设时以 workflow 为准。
+        self.permission_mode_policy = None
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
         policy = getattr(self, 'workflow_permission_policy', None)
@@ -300,6 +303,16 @@ class GenericAgentHandler(BaseHandler):
                 ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
                 _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
                 return ret
+        else:
+            mode_policy = getattr(self, 'permission_mode_policy', None)
+            if mode_policy is not None:
+                decision = mode_policy.evaluate(tool_name, args or {})
+                if decision.action != 'allow':
+                    status = 'approval_required' if decision.action == 'ask' else 'error'
+                    yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
+                    ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                    return ret
         if str(tool_name).startswith('mcp__'):
             args = args or {}
             args['_index'] = index; args['_tool_num'] = tool_num

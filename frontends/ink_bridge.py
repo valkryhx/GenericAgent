@@ -313,6 +313,52 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
         self.model_status()
 
+    def permission_status(self) -> None:
+        '''上报当前权限档与可选档位列表，供 Ink 面板渲染。'''
+        try:
+            with backend_output_redirect():
+                from permission_policy import (
+                    DEFAULT_PERMISSION_MODE,
+                    PERMISSION_MODES,
+                    normalize_permission_mode,
+                )
+
+                current = normalize_permission_mode(getattr(self.agent, "permission_mode", None))
+            self.emit(
+                {
+                    "type": "permission_status",
+                    "mode": current,
+                    "default": DEFAULT_PERMISSION_MODE,
+                    "modes": list(PERMISSION_MODES),
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_status_failed", "message": str(exc)})
+
+    def permission_switch(self, mode: str, *, persist: bool = False) -> None:
+        '''切换主会话权限档（read_only / ask / full_access）。
+
+        允许运行中切换：set_permission_mode 会同步更新 live handler，下一次
+        dispatch 立即按新档评估。切换后回发 permission_status 让 UI 收敛。
+
+        persist 预留给后续「记住选择」的持久化设置层；当前 MVP 为 session-only，
+        接受该参数但不写盘（避免协议破坏），切换只影响本 session。
+        '''
+        _ = persist  # MVP：session-only，不做持久化
+        try:
+            with backend_output_redirect():
+                applied = self.agent.set_permission_mode(str(mode or ""))
+            self.emit(
+                {
+                    "type": "permission_switch_result",
+                    "ok": True,
+                    "mode": applied,
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_switch_failed", "message": str(exc)})
+        self.permission_status()
+
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
             with backend_output_redirect():
@@ -1115,6 +1161,13 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.model_status()
         elif cmd_type == "model_switch":
             bridge.model_switch(str(command.get("selector") or ""))
+        elif cmd_type == "permission_status":
+            bridge.permission_status()
+        elif cmd_type == "set_permission_mode":
+            bridge.permission_switch(
+                str(command.get("mode") or ""),
+                persist=bool(command.get("persist")),
+            )
         elif cmd_type == "skill_status":
             bridge.skill_status()
         elif cmd_type == "skill_invoke":

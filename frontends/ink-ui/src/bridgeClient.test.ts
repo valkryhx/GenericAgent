@@ -83,3 +83,42 @@ test('writeBridgeCommand serializes workflow_progress as one JSON line', () => {
     runId: 'wf_demo',
   })
 })
+
+test('writeBridgeCommand serializes set_permission_mode as one JSON line', () => {
+  const lines: string[] = []
+  const stdin = {
+    write(chunk: string) {
+      lines.push(chunk)
+      return true
+    },
+  }
+
+  writeBridgeCommand(stdin, {
+    type: 'set_permission_mode',
+    mode: 'read_only',
+    persist: false,
+  })
+
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0].endsWith('\n'), true)
+  assert.deepEqual(JSON.parse(lines[0]), {
+    type: 'set_permission_mode',
+    mode: 'read_only',
+    persist: false,
+  })
+})
+
+test('writeBridgeCommand serializes permission_status as one JSON line', () => {
+  const lines: string[] = []
+  const stdin = {
+    write(chunk: string) {
+      lines.push(chunk)
+      return true
+    },
+  }
+
+  writeBridgeCommand(stdin, { type: 'permission_status' })
+
+  assert.equal(lines.length, 1)
+  assert.deepEqual(JSON.parse(lines[0]), { type: 'permission_status' })
+})

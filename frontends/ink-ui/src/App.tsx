@@ -26,7 +26,7 @@ import {
   visibleSelectorRows,
   type SelectorState,
 } from './selectors.js'
-import type { BridgeEvent, ResumeSession, TokenUsage } from './protocol.js'
+import type { BridgeEvent, PermissionMode, ResumeSession, TokenUsage } from './protocol.js'
 import {
   loadingMcpPanel,
   mcpPanelRows,
@@ -38,6 +38,15 @@ import {
   type McpPanelState,
 } from './mcpPanel.js'
 import { modelPanelRows, moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
+import {
+  movePermissionSelection,
+  panelFromPermissionStatus,
+  permissionPanelOnEnter,
+  permissionPanelOnEscape,
+  permissionPanelRows,
+  shouldApplyPermissionStatus,
+  type PermissionPanelState,
+} from './permissionPanel.js'
 import {
   formatSlashSuggestionLine,
   moveSlashSelection,
@@ -246,6 +255,33 @@ function ModelPanelView({ panel, theme }: { panel: ModelPanelState; theme: InkTh
   )
 }
 
+function PermissionPanelView({ panel, theme }: { panel: PermissionPanelState; theme: InkTheme }) {
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <Text bold>Permission mode</Text>
+      {panel.options.map((option, index) => {
+        const isCurrent = option.mode === panel.current
+        const isSelected = index === panel.selected
+        return (
+          <Text key={option.mode} color={isSelected ? theme.accent : undefined}>
+            {isSelected ? '> ' : '  '}
+            <Text color={isCurrent ? theme.success : theme.muted}>{isCurrent ? '✓' : ' '}</Text>
+            {` ${option.title}`}
+            <Text color={theme.muted}>{`  ${option.description}`}</Text>
+          </Text>
+        )
+      })}
+      {panel.confirming ? (
+        <Text color={theme.warning}>
+          {`⚠ 切到 Full Access：所有工具将直接执行、不再询问。Enter 确认 - Esc 取消`}
+        </Text>
+      ) : (
+        <Text color={theme.muted}>Enter select - Up/Down move - Esc cancel</Text>
+      )}
+    </Box>
+  )
+}
+
 function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme }) {
   if (panel.type === 'status') {
     return (
@@ -414,6 +450,7 @@ export function helpText(): string {
     '/clear - clear display only',
     '/status - show current frontend status',
     '/model, /llm - show and switch AI models',
+    '/permissions - show and switch permission mode (read only / ask / full access)',
     '/stop - stop current backend task',
     '/exit, /quit - exit',
     '',
@@ -441,6 +478,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
+  const [permissionPanel, setPermissionPanel] = useState<PermissionPanelState | null>(null)
   const [themePanelSelected, setThemePanelSelected] = useState<number | null>(null)
   const [themeName, setThemeName] = useState<InkThemeName>('default')
   const theme = useMemo(() => getInkTheme(themeName), [themeName])
@@ -465,6 +503,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const mcpPanelOpenRef = useRef(false)
   const modelPanelPendingRef = useRef(false)
   const modelPanelOpenRef = useRef(false)
+  const permissionPanelPendingRef = useRef(false)
+  const permissionPanelOpenRef = useRef(false)
   const pendingLocalCommandRef = useRef<string | null>(null)
   /** 同一 stop 周期内 /stop 回显只写一次（防双 Enter / 重入导致 Static 双份）。 */
   const stopTranscriptEchoedRef = useRef(false)
@@ -476,7 +516,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const imagePasteInFlightRef = useRef(false)
   const imagePasteSeqRef = useRef(0)
   const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, themePanelSelected, footerPanel, workflowPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, themePanelSelected, footerPanel, workflowPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   useEffect(() => {
@@ -628,6 +668,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setFooterPanel(null)
       modelPanelPendingRef.current = true
       bridgeRef.current?.send({ type: 'model_status' })
+    } else if (decision.action?.type === 'open_permissions') {
+      setFooterPanel(null)
+      permissionPanelPendingRef.current = true
+      bridgeRef.current?.send({ type: 'permission_status' })
     } else if (decision.action?.type === 'open_theme') {
       setFooterPanel(null)
       setThemePanelSelected(Math.max(0, INK_THEME_NAMES.indexOf(themeName)))
@@ -652,6 +696,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   useEffect(() => {
     modelPanelOpenRef.current = modelPanel !== null
   }, [modelPanel])
+
+  useEffect(() => {
+    permissionPanelOpenRef.current = permissionPanel !== null
+  }, [permissionPanel])
 
   useEffect(() => {
     stdout.write(enterMainScreenTerminalSequenceForMode(mouseMode))
@@ -744,6 +792,28 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
           return
         }
         setFooterPanel({ type: 'model', text: modelSwitchPanelText(event.message) })
+        return
+      }
+      if (event.type === 'permission_status') {
+        // /permissions ? —— 直接把当前档与可选档位打到 transcript，不开面板
+        if (pendingLocalCommandRef.current === '/permissions ?') {
+          const rows = event.modes.map(mode => `${mode === event.mode ? '* ' : '  '}${mode}`)
+          appendLocalCommandOutput(
+            `Current permission mode: ${event.mode}\n${rows.join('\n')}`,
+          )
+          return
+        }
+        if (!shouldApplyPermissionStatus(permissionPanelPendingRef.current, permissionPanelOpenRef.current)) return
+        permissionPanelPendingRef.current = false
+        setPermissionPanel(panelFromPermissionStatus(event))
+        return
+      }
+      if (event.type === 'permission_switch_result') {
+        if (pendingLocalCommandRef.current) {
+          appendLocalCommandOutput(`Permission mode set to ${event.mode}`)
+          return
+        }
+        dispatch({ type: 'system', text: `Permission mode set to ${event.mode}` })
         return
       }
       if (event.type === 'resume_sessions') {
@@ -975,6 +1045,45 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         return
       }
     }
+    if (permissionPanel) {
+      if (key.escape) {
+        // 确认态：退回列表；列表态：关闭面板（permissionPanelOnEscape 返回 null）
+        const next = permissionPanelOnEscape(permissionPanel)
+        if (next === null) {
+          permissionPanelOpenRef.current = false
+          dismissPendingLocalCommand()
+        }
+        setPermissionPanel(next)
+        return
+      }
+      if (key.upArrow) {
+        // 确认态不移动光标（只有 Enter 确认 / Esc 退回）
+        if (permissionPanel.confirming) return
+        setPermissionPanel(panel => panel ? { ...panel, selected: movePermissionSelection(panel.selected, -1, panel.options.length) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        if (permissionPanel.confirming) return
+        setPermissionPanel(panel => panel ? { ...panel, selected: movePermissionSelection(panel.selected, 1, panel.options.length) } : panel)
+        return
+      }
+      if (key.return) {
+        const action = permissionPanelOnEnter(permissionPanel)
+        if (action.type === 'confirm') {
+          // 切到 Full Access：进入二次确认态，不关面板
+          setPermissionPanel(panel => panel ? { ...panel, confirming: action.mode } : panel)
+          return
+        }
+        if (action.type === 'apply') {
+          bridgeRef.current?.send({ type: 'set_permission_mode', mode: action.mode as PermissionMode })
+        }
+        // apply / noop 都收起面板
+        permissionPanelOpenRef.current = false
+        permissionPanelPendingRef.current = false
+        setPermissionPanel(null)
+        return
+      }
+    }
     if (themePanelSelected !== null) {
       if (key.escape) {
         setThemePanelSelected(null)
@@ -1103,7 +1212,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
@@ -1117,6 +1226,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
   const panelRows = modelPanel
     ? modelPanelRows(modelPanel)
+    : permissionPanel
+      ? permissionPanelRows(permissionPanel)
     : mcpPanel
       ? mcpPanelRows(mcpPanel)
     : themePanelSelected !== null
@@ -1272,6 +1383,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (section === 'panel') {
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
+      if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
       if (workflowPanel) return <WorkflowPanelView key={section} panel={workflowPanel} theme={theme} />

@@ -15,6 +15,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'Show and switch AI models' },
   { name: '/llm', description: 'Alias for /model' },
   { name: '/theme', description: 'Show and switch Ink themes' },
+  { name: '/permissions', description: 'Show and switch permission mode (read only / ask / full access)' },
   { name: '/compact', description: 'Summarize and replace long conversation context' },
   { name: '/clear', description: 'Clear the visible transcript' },
   { name: '/new', description: 'Start a fresh backend session' },

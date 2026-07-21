@@ -306,7 +306,35 @@ def get_system_prompt(agent=None):
     prompt += get_global_memory()
     prompt += build_skill_prompt()
     prompt += "\n" + build_agent_role_usage_hint(is_subagent=bool(getattr(agent, 'task_dir', None)), lang_suffix=lang_suffix) + "\n"
+    prompt += build_permission_mode_hint(getattr(agent, 'permission_mode', None))
     return prompt
+
+
+def build_permission_mode_hint(mode):
+    '''非 full_access 档时告知模型当前权限边界，避免反复调用会被拒的写/执行工具空转。
+
+    full_access（默认）不注入任何内容，保持历史「工具全开」提示词不变。
+    '''
+    try:
+        from permission_policy import ASK, FULL_ACCESS, READ_ONLY, normalize_permission_mode
+    except Exception:
+        return ""
+    mode = normalize_permission_mode(mode)
+    if mode == FULL_ACCESS:
+        return ""
+    if mode == READ_ONLY:
+        return (
+            "\n[Permission: Read Only] 当前为只读档。写文件 / 打补丁 / 执行代码 / 执行 JS 等"
+            "有副作用的工具会被拒绝（返回 permission deny）。只做读取、检索、分析并直接向用户"
+            "汇报；需要改动时说明将要做什么并请用户切换到 Ask 或 Full Access，不要反复重试被拒的工具。\n"
+        )
+    if mode == ASK:
+        return (
+            "\n[Permission: Ask for approval] 当前为审批档。读取类工具直接可用；写文件 / 打补丁 /"
+            "执行代码 / 执行 JS 等有副作用的工具需要用户逐次批准（返回 approval_required）。请一次"
+            "只提出一个明确的改动请求，等待批准结果，不要在未获批时反复重试同一工具。\n"
+        )
+    return ""
 
 class GenericAgent:
     def __init__(self):
@@ -324,6 +352,9 @@ class GenericAgent:
         self.is_running = False; self.stop_sig = False
         self.llm_no = 0;  self.inc_out = False; self.verbose = True
         self.peer_hint = True
+        # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
+        from permission_policy import DEFAULT_PERMISSION_MODE
+        self.permission_mode = DEFAULT_PERMISSION_MODE
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
         self.load_llm_sessions()
         self.session_id = None
@@ -437,6 +468,19 @@ class GenericAgent:
         mdl = getattr(b.backend, 'model', '') or ''
         return f"{profile}/{mdl}" if mdl else profile
 
+    def set_permission_mode(self, mode):
+        '''切换主会话权限档：read_only / ask / full_access（默认 full_access）。
+
+        下一轮 put_task 新建 handler 时生效；若当前已有 handler 也同步更新，
+        让运行中的会话立刻感知（下一次 dispatch 即按新档评估）。
+        '''
+        from permission_policy import build_permission_mode_policy, normalize_permission_mode
+        mode = normalize_permission_mode(mode)
+        self.permission_mode = mode
+        if self.handler is not None:
+            self.handler.permission_mode_policy = build_permission_mode_policy(mode)
+        return mode
+
     def abort(self):
         if not self.is_running: return
         print('Abort current task...')
@@ -517,6 +561,16 @@ class GenericAgent:
                 handler.working['key_info'] = ki
                 handler.working['passed_sessions'] = ps = self.handler.working.get('passed_sessions', 0) + 1
                 if ps > 0: handler.working['key_info'] += f'\n[SYSTEM] 此为 {ps} 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n'
+            # 三档权限（read_only/ask/full_access，默认 full_access）：给主会话 handler
+            # 挂上 mode policy，让 dispatch 在工具执行前按档位放行/拒绝/请求审批。
+            # workflow 子 agent 有独立的 workflow_permission_policy，优先级更高，互不影响。
+            try:
+                from permission_policy import build_permission_mode_policy
+                handler.permission_mode_policy = build_permission_mode_policy(
+                    getattr(self, 'permission_mode', None)
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to attach permission mode policy: {e}")
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
             transcript_history_before = session_transcript.current_backend_history(self)

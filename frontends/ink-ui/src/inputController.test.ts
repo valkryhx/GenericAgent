@@ -210,6 +210,35 @@ test('handleInput parses model slash commands', () => {
   })
 })
 
+test('handleInput parses permission slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/permissions', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_permissions' },
+  })
+  assert.deepEqual(handleInput('/perms', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_permissions' },
+  })
+  assert.deepEqual(handleInput('/permissions read only', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'read_only' },
+  })
+  assert.deepEqual(handleInput('/permissions ask', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'ask' },
+  })
+  assert.deepEqual(handleInput('/permissions full-access', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'full_access' },
+  })
+  assert.deepEqual(handleInput('/permissions ?', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'permission_status' },
+  })
+})
+
 test('handleInput opens the local theme picker for slash theme', () => {
   const store = createPasteStore()
 
