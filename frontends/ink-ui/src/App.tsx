@@ -48,6 +48,17 @@ import {
   type PermissionPanelState,
 } from './permissionPanel.js'
 import {
+  APPROVAL_OPTIONS,
+  approvalFromPermissionRequest,
+  approvalPanelOnEnter,
+  approvalPanelOnEscape,
+  approvalPanelOnSettled,
+  approvalPanelRows,
+  enqueueApprovalRequest,
+  moveApprovalSelection,
+  type ApprovalPanelState,
+} from './approvalPanel.js'
+import {
   formatSlashSuggestionLine,
   moveSlashSelection,
   shouldCompleteSlashCommand,
@@ -282,6 +293,28 @@ function PermissionPanelView({ panel, theme }: { panel: PermissionPanelState; th
   )
 }
 
+function ApprovalPanelView({ panel, theme }: { panel: ApprovalPanelState; theme: InkTheme }) {
+  const { current } = panel
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <Text bold color={theme.warning}>需要批准</Text>
+      <Text>{`工具: ${current.toolName}`}</Text>
+      <Text color={theme.muted} wrap="truncate-end">{`参数: ${current.argsPreview || '(none)'}`}</Text>
+      {current.reason ? <Text color={theme.muted} wrap="truncate-end">{`原因: ${current.reason}`}</Text> : null}
+      {APPROVAL_OPTIONS.map((option, index) => {
+        const isSelected = index === panel.selected
+        return (
+          <Text key={option.decision} color={isSelected ? theme.accent : undefined}>
+            {isSelected ? '> ' : '  '}
+            {option.title}
+          </Text>
+        )
+      })}
+      <Text color={theme.muted}>Enter 确认 · Esc 拒绝 · Up/Down 选择</Text>
+    </Box>
+  )
+}
+
 function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme }) {
   if (panel.type === 'status') {
     return (
@@ -479,6 +512,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
   const [permissionPanel, setPermissionPanel] = useState<PermissionPanelState | null>(null)
+  const [approvalPanel, setApprovalPanel] = useState<ApprovalPanelState | null>(null)
   const [themePanelSelected, setThemePanelSelected] = useState<number | null>(null)
   const [themeName, setThemeName] = useState<InkThemeName>('default')
   const theme = useMemo(() => getInkTheme(themeName), [themeName])
@@ -516,7 +550,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const imagePasteInFlightRef = useRef(false)
   const imagePasteSeqRef = useRef(0)
   const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, themePanelSelected, footerPanel, workflowPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   useEffect(() => {
@@ -808,6 +842,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setPermissionPanel(panelFromPermissionStatus(event))
         return
       }
+      if (event.type === 'permission_request') {
+        // 工具审批优先于切档面板
+        setPermissionPanel(null)
+        permissionPanelOpenRef.current = false
+        permissionPanelPendingRef.current = false
+        setApprovalPanel(panel => enqueueApprovalRequest(panel, approvalFromPermissionRequest(event)))
+        return
+      }
+      if (event.type === 'permission_request_settled') {
+        setApprovalPanel(panel => approvalPanelOnSettled(panel, event.requestId))
+        return
+      }
       if (event.type === 'permission_switch_result') {
         if (pendingLocalCommandRef.current) {
           appendLocalCommandOutput(`Permission mode set to ${event.mode}`)
@@ -1045,6 +1091,41 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         return
       }
     }
+    // 工具审批 overlay 优先于切档面板（安全关键路径抢焦点）
+    if (approvalPanel) {
+      if (key.escape) {
+        const action = approvalPanelOnEscape(approvalPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'permission_response',
+            requestId: action.requestId,
+            decision: action.decision,
+          })
+          setApprovalPanel(action.next)
+        }
+        return
+      }
+      if (key.upArrow) {
+        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, -1) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, 1) } : panel)
+        return
+      }
+      if (key.return) {
+        const action = approvalPanelOnEnter(approvalPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'permission_response',
+            requestId: action.requestId,
+            decision: action.decision,
+          })
+          setApprovalPanel(action.next)
+        }
+        return
+      }
+    }
     if (permissionPanel) {
       if (key.escape) {
         // 确认态：退回列表；列表态：关闭面板（permissionPanelOnEscape 返回 null）
@@ -1212,7 +1293,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || permissionPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
@@ -1224,7 +1305,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const inputRows = promptViewport.lines.length
   const errorRows = state.error ? 1 : 0
   const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
-  const panelRows = modelPanel
+  const panelRows = approvalPanel
+    ? approvalPanelRows(approvalPanel)
+    : modelPanel
     ? modelPanelRows(modelPanel)
     : permissionPanel
       ? permissionPanelRows(permissionPanel)
@@ -1381,6 +1464,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (section === 'hint') return <Box key={section} paddingX={1}><Text color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text></Box>
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'panel') {
+      if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
       if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />

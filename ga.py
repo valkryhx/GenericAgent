@@ -292,12 +292,15 @@ class GenericAgentHandler(BaseHandler):
         # 主会话三档权限（read_only/ask/full_access）。默认 None = 全开（等价 full_access）。
         # workflow 子 agent 的 workflow_permission_policy 优先级更高，两者都设时以 workflow 为准。
         self.permission_mode_policy = None
+        # ask 档阻塞审批 runtime（permission_request/response）；None = 无 UI 时 ask→deny。
+        self.permission_runtime = None
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
         policy = getattr(self, 'workflow_permission_policy', None)
         if policy is not None:
             decision = self._check_workflow_permission(tool_name, args or {})
             if decision.action != 'allow':
+                # workflow 内 ask 仍非阻塞（大件 #3）；主会话 ask 见下方 mode_policy 路径。
                 status = 'approval_required' if decision.action == 'ask' else 'error'
                 yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
                 ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
@@ -307,12 +310,42 @@ class GenericAgentHandler(BaseHandler):
             mode_policy = getattr(self, 'permission_mode_policy', None)
             if mode_policy is not None:
                 decision = mode_policy.evaluate(tool_name, args or {})
-                if decision.action != 'allow':
-                    status = 'approval_required' if decision.action == 'ask' else 'error'
-                    yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
-                    ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                if decision.action == 'deny':
+                    yield f"[Permission] deny: {tool_name} ({decision.reason})\n"
+                    ret = StepOutcome({"status": "error", "permission": decision.to_dict()}, next_prompt="\n")
                     _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
                     return ret
+                if decision.action == 'ask':
+                    # 阻塞审批：accept 后继续执行工具；deny / 无 UI / stop → 不执行。
+                    from permission_runtime import ACCEPT, DENY
+                    runtime = getattr(self, 'permission_runtime', None)
+                    yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})\n"
+                    user_decision = DENY
+                    if runtime is not None:
+                        parent = getattr(self, 'parent', None)
+                        def _stop_check():
+                            return bool(getattr(parent, 'stop_sig', False))
+                        user_decision = runtime.wait_for_decision(
+                            tool_name, args or {}, decision.reason, stop_check=_stop_check
+                        )
+                    if user_decision != ACCEPT:
+                        yield f"[Permission] deny: {tool_name} (user_or_headless)\n"
+                        denied = {
+                            "status": "error",
+                            "permission": {
+                                **decision.to_dict(),
+                                "action": "deny",
+                                "user_decision": user_decision if user_decision in (ACCEPT, DENY) else DENY,
+                                "message": (
+                                    f"User denied tool `{tool_name}` (or no approval UI / stopped). "
+                                    "Do not retry the same write/execute blindly; adjust the plan or ask the user."
+                                ),
+                            },
+                        }
+                        ret = StepOutcome(denied, next_prompt="\n")
+                        _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                        return ret
+                    yield f"[Permission] accept: {tool_name}\n"
         if str(tool_name).startswith('mcp__'):
             args = args or {}
             args['_index'] = index; args['_tool_num'] = tool_num

@@ -139,6 +139,13 @@ class GenericAgentBridge:
             self.agent.verbose = True
         raw_emit = emit or make_stdout_emitter(sys.stdout)
         self.emit = lambda event: raw_emit(sanitize(event))
+        # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is not None and hasattr(runtime, "set_emit"):
+                runtime.set_emit(self.emit)
+        except Exception:
+            pass
         self._task_seq = 0
         # 自动压缩熔断器：连续失败 N 次后本 session 停用自动压缩，避免摘要模型宕机
         # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
@@ -232,6 +239,12 @@ class GenericAgentBridge:
             self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is not None and hasattr(runtime, "set_emit"):
+                runtime.set_emit(self.emit)
+        except Exception:
+            pass
         self._task_seq = 0
         self._rewind_snapshots.clear()
         self._consume_thread = None
@@ -358,6 +371,31 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_switch_failed", "message": str(exc)})
         self.permission_status()
+
+    def permission_response(self, request_id: str, decision: str) -> None:
+        '''UI 对 permission_request 的应答：accept | deny。'''
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is None:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "permission_response_failed",
+                        "message": "permission_runtime unavailable",
+                    }
+                )
+                return
+            ok = bool(runtime.resolve(str(request_id or ""), decision))
+            if not ok:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "permission_response_unknown",
+                        "message": f"unknown or settled requestId: {request_id}",
+                    }
+                )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
 
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
@@ -1167,6 +1205,11 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.permission_switch(
                 str(command.get("mode") or ""),
                 persist=bool(command.get("persist")),
+            )
+        elif cmd_type == "permission_response":
+            bridge.permission_response(
+                str(command.get("requestId") or command.get("request_id") or ""),
+                str(command.get("decision") or ""),
             )
         elif cmd_type == "skill_status":
             bridge.skill_status()

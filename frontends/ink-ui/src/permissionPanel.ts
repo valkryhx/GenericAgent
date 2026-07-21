@@ -31,7 +31,7 @@ export const PERMISSION_MODE_META: Record<PermissionMode, { title: string; descr
   },
   ask: {
     title: 'Ask for approval',
-    description: '要改/跑先问我：只读放行，写/执行前请求批准',
+    description: '要改/跑先问我：写/执行前弹统一 accept/deny 面板',
   },
   full_access: {
     title: 'Full Access',

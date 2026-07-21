@@ -20,6 +20,7 @@ export type BridgeCommand =
   | { type: 'model_switch'; selector: string }
   | { type: 'permission_status' }
   | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
+  | { type: 'permission_response'; requestId: string; decision: 'accept' | 'deny' }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
@@ -236,6 +237,15 @@ export type BridgeEvent =
   | { type: 'model_switch_result'; ok: boolean; message: string }
   | { type: 'permission_status'; mode: PermissionMode | string; default: PermissionMode | string; modes: (PermissionMode | string)[] }
   | { type: 'permission_switch_result'; ok: boolean; mode: PermissionMode | string }
+  | {
+      type: 'permission_request'
+      requestId: string
+      toolName: string
+      argsPreview: string
+      reason: string
+      mode?: string
+    }
+  | { type: 'permission_request_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }

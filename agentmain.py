@@ -331,8 +331,8 @@ def build_permission_mode_hint(mode):
     if mode == ASK:
         return (
             "\n[Permission: Ask for approval] 当前为审批档。读取类工具直接可用；写文件 / 打补丁 /"
-            "执行代码 / 执行 JS 等有副作用的工具需要用户逐次批准（返回 approval_required）。请一次"
-            "只提出一个明确的改动请求，等待批准结果，不要在未获批时反复重试同一工具。\n"
+            "执行代码 / 执行 JS 等有副作用的工具会阻塞等待用户 accept/deny。"
+            "被拒绝时不要盲目重试同一写/执行；调整方案或请用户改用 Full Access。\n"
         )
     return ""
 
@@ -355,6 +355,12 @@ class GenericAgent:
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
         from permission_policy import DEFAULT_PERMISSION_MODE
         self.permission_mode = DEFAULT_PERMISSION_MODE
+        # ask 档阻塞审批 runtime（可无 emit = headless deny）；bridge 会 set_emit
+        try:
+            from permission_runtime import PermissionRuntime
+            self.permission_runtime = PermissionRuntime()
+        except Exception:
+            self.permission_runtime = None
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
         self.load_llm_sessions()
         self.session_id = None
@@ -485,6 +491,13 @@ class GenericAgent:
         if not self.is_running: return
         print('Abort current task...')
         self.stop_sig = True
+        # 解开 ask 档挂起的审批（按 deny 收尾），避免 stop 后工具线程永久 wait
+        runtime = getattr(self, 'permission_runtime', None)
+        if runtime is not None:
+            try:
+                runtime.cancel_all()
+            except Exception as e:
+                print(f"[WARN] permission_runtime.cancel_all failed: {e}")
         for target in (getattr(self, 'llmclient', None), getattr(getattr(self, 'llmclient', None), 'backend', None)):
             cancel = getattr(target, 'cancel_current_request', None)
             if cancel:
@@ -571,6 +584,8 @@ class GenericAgent:
                 )
             except Exception as e:
                 print(f"[WARN] Failed to attach permission mode policy: {e}")
+            # 共享 agent 级 runtime（含 bridge emit）；每轮 handler 都挂上同一实例
+            handler.permission_runtime = getattr(self, 'permission_runtime', None)
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
             transcript_history_before = session_transcript.current_backend_history(self)

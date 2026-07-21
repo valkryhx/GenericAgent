@@ -171,13 +171,15 @@ class HandlerModeGateTest(unittest.TestCase):
         self.assertEqual("read", outcome.data)
         self.assertIn("tool:file_read", handler.calls)
 
-    def test_ask_mode_returns_approval_required_for_mutating_tool(self):
+    def test_ask_mode_without_runtime_denies_mutating_tool(self):
+        # P1：无 approval UI / runtime 时 ask fail-closed → deny（不再返回 approval_required 空信号）
         handler = SpyHandler()
         handler.permission_mode_policy = build_permission_mode_policy(ASK)
+        handler.permission_runtime = None
         outcome = exhaust(handler.dispatch("file_write", {}, self.response()))
         self.assertNotIn("tool:file_write", handler.calls)
-        self.assertEqual("approval_required", outcome.data["status"])
-        self.assertEqual("ask", outcome.data["permission"]["action"])
+        self.assertEqual("error", outcome.data["status"])
+        self.assertEqual("deny", outcome.data["permission"]["action"])
 
     def test_workflow_policy_takes_precedence_over_mode_policy(self):
         # workflow child policy must win when both happen to be set

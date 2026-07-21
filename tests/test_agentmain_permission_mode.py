@@ -59,7 +59,7 @@ class PermissionModeHintTests(unittest.TestCase):
     def test_ask_hint_mentions_per_call_approval(self):
         hint = build_permission_mode_hint(ASK)
         self.assertIn("Ask for approval", hint)
-        self.assertIn("approval_required", hint)
+        self.assertIn("accept/deny", hint)
 
 
 if __name__ == "__main__":

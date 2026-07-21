@@ -18,7 +18,7 @@
 |------|-------------------|--------------|-----------------|
 | **Codex** | Read Only / Default / Full Access（Windows 含 Read Only；另有 Auto-review） | **二维**：`AskForApproval` × `PermissionProfile`/`SandboxPolicy` | `/permissions` 弹窗；CLI `--approval-mode` / `--sandbox` |
 | **Claude Code** | Default / Accept edits / Plan / Bypass Permissions（内部还有 Don’t Ask、Auto） | **一维 mode** + **规则表**（allow/deny/ask）+ 可选 classifier | `Shift+Tab` 循环；`/permissions` 管规则；settings `defaultMode` |
-| **GA 现状** | 主 agent **无**会话级权限档位 | 工具默认全开；**仅 workflow child** 有 `ToolPermissionPolicy` | workflow 的 draft/approve 是「脚本审批」，不是工具权限 |
+| **GA 现状（P0+P1 后，2026-07-21）** | 主 agent **有**三档：`read_only` / `ask` / `full_access`（默认 full_access） | 主路径 `PermissionModePolicy` + `dispatch` 门控 + **`permission_runtime` 阻塞审批**（accept/deny） | `/permissions` 切档；ask 行内统一审批 overlay；workflow 仍 inherit→allow；`workflow_approve` 仍是脚本级审批 |
 
 **对 GA 的建议（已收敛）**：产品三档对齐 Codex 主路径——**Read Only / Ask for approval / Full Access**；实现上用 **「策略档位 + 工具决策 allow|ask|deny」**，**不**做 OS 级 sandbox。审批 UI 复用 Ink panel/selector；门控挂在 `GenericAgentHandler.dispatch`（已有 workflow 钩子）。
 
@@ -418,6 +418,9 @@ CLI / 环境变量（后续）：
 
 **兼容策略（已拍板）**：默认 **`full_access`**（行为≈今天无门控）。用户主动切到 `ask` / `read_only` 才变严。默认改 `ask` 若要做，另开产品决策，不在 MVP 范围。
 
+**P0 实际交付（2026-07-21）**：上表 1–3、5–6 已落地。  
+**P1 实际交付（2026-07-21）**：第 4 点（ask 阻塞审批 + 统一 accept/deny UI）已落地；live 验证见 §14.4。完整「已交付 / 剩余大件」见 **§14**。
+
 ### Phase 2 — 规则与会话记忆
 
 - Allow once / session / always  
@@ -506,24 +509,24 @@ CLI / 环境变量（后续）：
 
 ## 11. 建议的下一步实现切片
 
-**Slice P0（可单独 PR，workflow 几乎不动）**
+**Slice P0（可单独 PR，workflow 几乎不动）** — **主路径已交付（2026-07-21）**；清单与缺口见 **§14**
 
-1. `permission_policy.py` + 单测（**三档** × 工具分类矩阵）  
-2. 主 handler 挂 policy；**默认 `full_access`**  
-3. bridge + Ink `/permissions` 三选一 + footer 指示  
-4. `read_only` 对写/exec **deny with message**（不依赖审批 UI 也能交付）  
-5. （可选同 PR）**P0b** inherit 真继承 + run 快照 `parentPermissionMode`  
+1. `permission_policy.py` + 单测（**三档** × 工具分类矩阵） ✅  
+2. 主 handler 挂 policy；**默认 `full_access`** ✅  
+3. bridge + Ink `/permissions` 三选一（footer 指示可选/未强调） ✅  
+4. `read_only` 对写/exec **deny with message**（不依赖审批 UI 也能交付） ✅  
+5. （可选同 PR）**P0b** inherit 真继承 + run 快照 `parentPermissionMode` ❌ 未做  
 
-**Slice P1**
+**Slice P1** — **已交付主路径（2026-07-21）**（大件 #1；验证见 §14.4）
 
-6. `permission_request` 阻塞审批 UI（主 agent `ask` 档真正可用）  
-7. 从其它档切入 Full Access 的确认（**默认启动 full_access 不弹**）  
-8. session allow 列表  
+6. `permission_request` 阻塞审批 UI（主 agent `ask` 档真正可用） ❌  
+7. 从其它档切入 Full Access 的确认（**默认启动 full_access 不弹**） ✅ 已随 P0  
+8. session allow 列表 ❌  
 
-**Slice P2**
+**Slice P2** — **未做**（大件 #2 / #3）
 
-9. 持久规则  
-10. workflow 内 ask 审批（§13 阶段 C，大）  
+9. 持久规则 / 档位持久化 ❌  
+10. workflow 内 ask 审批（§13 阶段 C，大） ❌  
  
 
 ---
@@ -695,11 +698,85 @@ MVP **不要**和三档切换绑在同一 PR。
 **推荐落地顺序**：
 
 ```
-P0  主 agent 三档（默认 full_access）+ /permissions UI
+P0  主 agent 三档（默认 full_access）+ /permissions UI          ← 已交付（见 §14）
 P0b inherit 真继承 + run 快照 parentMode     ← workflow 小改，强烈建议同里程碑
-P1  主 agent ask 阻塞审批 UI
-P2  workflow ask 审批 / 规则持久化 / 可选收紧默认
+P1  主 agent ask 阻塞审批 UI                 ← 已交付主路径 + 三级 live 验证（§14.4）
+P2  workflow ask 审批 / 规则持久化 / 可选收紧默认  ← 未做（大件 #2/#3）
 ```
+
+---
+
+## 14. 落地状态与剩余大件（2026-07-21 更新）
+
+> 本节把「已经合进仓库的」和「明确没做、须单独推进的」写死，避免调研正文里 Phase/Slice 与真实交付混淆。  
+> 代码入口：`permission_policy.py`、`permission_runtime.py`、`ga.py` `dispatch`、`agentmain.set_permission_mode`、`frontends/ink_bridge.py`、`frontends/ink-ui/src/permissionPanel.ts`、`frontends/ink-ui/src/approvalPanel.ts`。  
+> 相关提交示例：`feat(permission): 三档权限（read_only/ask/full_access，默认 full_access）`；P1 阻塞审批实现见同日变更（尚未强制要求单 commit）。
+
+### 14.1 P0 已交付（主会话纵切）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| 三档引擎 | ✅ | `read_only` / `ask` / `full_access`；默认 **`full_access`** |
+| 工具读/写分类 + evaluate | ✅ | `allow` / `deny` / `ask`；未知静态工具按 mutating |
+| 主 handler 门控 | ✅ | `permission_mode_policy`；workflow policy 优先 |
+| `read_only` 写/执行 deny | ✅ | 工具 body 不执行；结果 `status=error` + permission deny |
+| `ask` 写/执行（P0 时） | ✅→被 P1 替代 | 旧半交付 `approval_required` **已废弃为「等人」语义**；见 §14.4 |
+| `full_access` 全 allow | ✅ | 与历史「工具全开」兼容 |
+| 运行中切档 | ✅ | `set_permission_mode` 同步 live handler |
+| Ink `/permissions` 三选一 | ✅ | 列表 + 切到 Full Access 二次确认 |
+| bridge 协议（切档） | ✅ | `permission_status` / `set_permission_mode`（session-only） |
+| 非 full_access 系统提示 hint | ✅ | accept/deny 文案；避免模型空转重试被拒工具 |
+| OS sandbox | ❌ 非目标 | 产品决策明确不做 |
+
+### 14.2 P1 已交付（ask 行内阻塞审批，2026-07-21）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| `permission_runtime` | ✅ | Future 挂起 + `requestId`；`resolve` / `cancel_all`；未知 decision→deny |
+| `dispatch` 阻塞路径 | ✅ | ask → emit `permission_request` → wait → accept 执行 / deny 不执行 |
+| bridge 协议（审批） | ✅ | 事件 `permission_request` / `permission_request_settled`；命令 `permission_response`（仅 `accept`\|`deny`） |
+| Ink 统一审批 overlay | ✅ | `approvalPanel.ts` 二选一；Esc=deny；审批优先于切档面板 |
+| 无 UI / headless | ✅ | fail-closed **deny**（无 emit 不放行） |
+| `/stop` 与 pending | ✅ | `abort` → `cancel_all()` 按 deny 解开 pending 并停轮 |
+| session/always / 按工具特化页 | ❌ 明确不做 | 仍属后续可选；不进 P1 |
+
+细节与产品拍板：`docs/ga_permission_ask_blocking_approval_research_2026-07-21.md`（§0.1 / §0.2 / §12 验证进度）。
+
+### 14.3 仍未做的大件（原三大件 #2 / #3 + P0b）
+
+| # | 大件 | 当前行为（缺口） | 目标行为 | 体量 / 依赖 | 建议切片 |
+|---|------|------------------|----------|------------|----------|
+| **1** | **ask 档行内阻塞式审批 UI** | — | — | **已交付主路径**（§14.2 / §14.4） | **P1 ✅** |
+| **2** | **档位（与规则）持久化** | `persist` 预留但不写盘；重启回代码默认 **`full_access`** | ~~写盘记住上次档~~ → **产品取消（2026-07-21）**：不要写回、不记住 UI 切档；默认最高权限已由 `DEFAULT_PERMISSION_MODE=full_access` 满足。调研留底：`docs/ga_permission_mode_persistence_research_2026-07-21.md` | — | **取消 / 非目标** |
+| **3** | **workflow 子 agent 内 ask 审批** | child 默认 **full_access**（inherit→allow）；无 child 人审 UI | **产品拍板（2026-07-21）：不做**——workflow worker 必须可无人值守跑完；人审只在主会话。详见 `docs/ga_workflow_permission_inherit_research_2026-07-21.md` §0.1 | — | **取消 / 非目标** |
+
+**刻意区分（避免误读）**：
+
+- **已有**：`/permissions` 切**档位**、进 Full Access 的**二次确认** —— 这是 mode 切换 UI，**不是**单次工具审批。  
+- **已有**：ask 行内 **accept/deny** overlay —— 这是单次 tool call 审批（P1）。  
+- **已有**：`workflow_approve` —— **run 级脚本**审批，与工具级 `permission_request` **正交**。  
+- **ask 现语义（P1 后）**：主会话 ask ≈「写/执行前弹统一 accept/deny；同意才执行，拒绝/无 UI/`/stop` 均不执行」。
+
+### 14.4 验证进度（2026-07-21）
+
+| 层 | 手段 | 脚本 / 命令 | 结果 |
+|----|------|-------------|------|
+| 单测 | `unittest` permission / bridge / agentmain / ink approvalPanel | `python -m unittest …`；`npm run test`（ink-ui） | 相关用例已对齐阻塞语义 |
+| Live L1 | 同进程 `runtime.resolve` + 真模型 grok-4.5 | `PYTHONPATH=. python temp/_live_ask_approval_grok.py` | **PASSED** deny 不落盘 / accept 落盘 |
+| Live L2 | 同进程 `bridge.permission_response`（JSONL 同款命令，不直触 Future） | `PYTHONPATH=. python temp/_live_ask_approval_bridge_grok.py` | **PASSED** |
+| Live L3 | **真子进程** `ink_bridge.py` stdin/stdout JSONL 管道 | `PYTHONPATH=. python temp/_live_ask_approval_subprocess_jsonl_grok.py` | **PASSED**（最接近 Ink） |
+| 真 Ink 键盘 E2E | 人工 / 虚拟终端键入 | — | **未做**（非阻断；协议层 L3 已覆盖） |
+
+L3 要点：父进程只经 JSONL 发 `model_switch` / `set_permission_mode ask` / `submit` / `permission_response`；子进程 emit `permission_request` → fake-ink 回包；断言 deny 文件不存在、accept 内容为 `subproc-ask-accept`。
+
+### 14.5 后续推进原则
+
+1. **三大件现状（2026-07-21）**：#1 ask 阻塞审批 **已交付**；#2 档位持久化 **取消**（默认 full_access 已够，不写回/不记住）；#3 workflow child 人审 **取消**（child = full_access）。  
+2. 权限主路径可视为 **收口**：主会话三档 + P1 审批；默认 full_access；workflow 全权不弹窗。可选后续：workflow 启动提示、真 Ink 键盘 E2E、显式 read_only run 文档。  
+   - Workflow 拍板：`docs/ga_workflow_permission_inherit_research_2026-07-21.md`  
+   - 持久化调研（已取消实现）：`docs/ga_permission_mode_persistence_research_2026-07-21.md`  
+3. 主会话无 UI / headless：`ask` 必须 fail-closed（deny）。**workflow child** 不走 ask 人审。  
+4. 实现承诺仍以具体 PR 为准；本节固定 **范围边界与验证证据**。
 
 ---
 

@@ -7,6 +7,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -220,6 +221,9 @@ class FakeAgent:
         self.llmclients = [self.llmclient]
         self.llm_no = 0
         self.permission_mode = "full_access"
+        from permission_runtime import PermissionRuntime
+
+        self.permission_runtime = PermissionRuntime()
 
     def run(self):
         return None
@@ -817,6 +821,28 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual("read_only", agent.permission_mode)
         self.assertEqual("permission_status", events[-1]["type"])
+
+    def test_permission_response_resolves_pending_request(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        result = {}
+
+        def waiter():
+            result["d"] = agent.permission_runtime.wait_for_decision("file_write", {"path": "x"}, "need")
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        for _ in range(50):
+            reqs = [e for e in events if e.get("type") == "permission_request"]
+            if reqs:
+                break
+            time.sleep(0.02)
+        reqs = [e for e in events if e.get("type") == "permission_request"]
+        self.assertTrue(reqs)
+        bridge.permission_response(reqs[0]["requestId"], "accept")
+        t.join(timeout=2)
+        self.assertEqual("accept", result.get("d"))
 
     def test_compact_replaces_backend_history_and_clears_rewind_checkpoints(self):
         agent = FakeAgent()
