@@ -128,19 +128,20 @@ function parseSlashSubmit(
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
-  const workflowPlan = parseWorkflowPlanCommand(trimmed)
-  if (workflowPlan) return { command: workflowPlan }
-  const workflowAction = /^\/workflow\s+(detail|approve|resume|deny|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  // approve/deny were removed from the product path; swallow them so they are not sent as chat.
+  if (/^\/workflow\s+(approve|deny)\b/i.test(trimmed)) return {}
+  const workflowAction = /^\/workflow\s+(detail|resume|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (workflowAction) {
     const action = workflowAction[1]
     const runId = workflowAction[2]
     const reason = workflowAction[3]?.trim()
     if (action === 'detail') return { command: { type: 'workflow_detail', runId } }
-    if (action === 'approve') return { command: { type: 'workflow_approve', runId } }
     if (action === 'resume') return { command: { type: 'workflow_resume', runId } }
-    if (action === 'deny') return { command: { type: 'workflow_deny', runId, ...(reason ? { reason } : {}) } }
     return { command: { type: 'workflow_stop', runId, ...(reason ? { reason } : {}) } }
   }
+  // Single start path: /workflow <task> (and legacy /workflow plan <task>)
+  const workflowStart = parseWorkflowStartCommand(trimmed)
+  if (workflowStart) return { command: workflowStart }
   if (trimmed === '/clear') return { action: { type: 'clear' } }
   if (trimmed === '/help') return { action: { type: 'help' } }
   if (trimmed === '/status') return { action: { type: 'status' } }
@@ -153,19 +154,31 @@ function parseSlashSubmit(
   return null
 }
 
-function parseWorkflowPlanCommand(trimmed: string): BridgeCommand | null {
-  const prefix = '/workflow plan'
-  if (trimmed !== prefix && !trimmed.startsWith(`${prefix} `)) return null
-  const tokens = trimmed.slice(prefix.length).trim().split(/\s+/).filter(Boolean)
-  let autoApprove = true
+function parseWorkflowStartCommand(trimmed: string): BridgeCommand | null {
+  // Prefer bare /workflow <task>. Accept legacy "/workflow plan <task>" as the same start path.
+  let rest = ''
+  if (trimmed === '/workflow plan' || trimmed.startsWith('/workflow plan ')) {
+    rest = trimmed.slice('/workflow plan'.length).trim()
+  } else if (trimmed.startsWith('/workflow ')) {
+    rest = trimmed.slice('/workflow '.length).trim()
+  } else {
+    return null
+  }
+  if (!rest) {
+    return { type: 'workflow_plan', taskText: '', autoApprove: true }
+  }
+  // Reserved control verbs are handled above; never treat them as free-form tasks.
+  const first = rest.split(/\s+/, 1)[0] || ''
+  if (['list', 'detail', 'resume', 'stop', 'approve', 'deny', 'plan'].includes(first)) {
+    return null
+  }
+  const tokens = rest.split(/\s+/).filter(Boolean)
   let timeoutSeconds: number | undefined
   const taskParts: string[] = []
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]
-    if (token === '--manual') {
-      autoApprove = false
-      continue
-    }
+    // --manual is intentionally ignored: workflows always auto-start.
+    if (token === '--manual') continue
     if (token === '--timeout') {
       const rawTimeout = tokens[index + 1]
       const parsed = rawTimeout ? Number(rawTimeout) : NaN
@@ -177,7 +190,7 @@ function parseWorkflowPlanCommand(trimmed: string): BridgeCommand | null {
     }
     taskParts.push(token)
   }
-  const command: BridgeCommand = { type: 'workflow_plan', taskText: taskParts.join(' '), autoApprove }
+  const command: BridgeCommand = { type: 'workflow_plan', taskText: taskParts.join(' '), autoApprove: true }
   if (timeoutSeconds !== undefined) command.timeoutSeconds = timeoutSeconds
   return command
 }

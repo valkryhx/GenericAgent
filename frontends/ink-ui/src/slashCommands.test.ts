@@ -114,12 +114,13 @@ test('shouldCompleteSlashCommand does not complete exact commands on Enter', () 
   assert.equal(shouldCompleteSlashCommand('/mod', model), true)
 })
 
-test('slashSuggestions includes workflow plan command that completes before execution', () => {
-  const workflowPlan = slashSuggestions('/workflow p').find(command => command.name === '/workflow plan')!
+test('slashSuggestions includes /workflow start command that completes before execution', () => {
+  const workflow = slashSuggestions('/workflo').find(command => command.name === '/workflow')!
 
-  assert.equal(workflowPlan.description, 'Plan and run a dynamic workflow from task text')
-  assert.deepEqual(slashSelectionAction('/workflow p', workflowPlan, 'enter'), { type: 'complete', value: '/workflow plan ' })
-  assert.deepEqual(slashSelectionAction('/workflow p', workflowPlan, 'tab'), { type: 'complete', value: '/workflow plan ' })
+  assert.equal(workflow.description, 'Plan and run a dynamic workflow from task text')
+  assert.equal(workflow.requiresArgs, true)
+  assert.deepEqual(slashSelectionAction('/workflo', workflow, 'enter'), { type: 'complete', value: '/workflow ' })
+  assert.deepEqual(slashSelectionAction('/workflo', workflow, 'tab'), { type: 'complete', value: '/workflow ' })
 })
 
 test('slashSelectionAction executes built-in commands on Enter and completes skills', () => {

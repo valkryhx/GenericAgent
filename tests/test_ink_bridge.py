@@ -19,7 +19,13 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 
-from ink_bridge import GenericAgentBridge, encode_event, make_stdout_emitter, run_jsonl_loop  # noqa: E402
+from ink_bridge import (  # noqa: E402
+    GenericAgentBridge,
+    backend_output_redirect,
+    encode_event,
+    make_stdout_emitter,
+    run_jsonl_loop,
+)
 from workflow_child_agent import AgentResult  # noqa: E402
 from workflow_models import WorkflowJob  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
@@ -133,10 +139,12 @@ class StopThenResumeRunner:
 
 class PlannedRunFakeRuntime:
     started_run_ids = []
+    last_timeout_seconds = None
 
     def __init__(self, *, store, timeout_seconds=10.0):
         self.store = store
         self.timeout_seconds = timeout_seconds
+        self.__class__.last_timeout_seconds = timeout_seconds
 
     def run(self, run, *, args=None, resume_from_run_id=None):
         from workflow_models import WorkflowEvent
@@ -1140,6 +1148,33 @@ class InkBridgeTest(unittest.TestCase):
             event_types = [event["type"] for event in events]
             self.assertLess(event_types.index("workflow_run", event_types.index("workflow_event")), event_types.index("workflow_progress"))
             self.assertLess(event_types.index("workflow_progress"), event_types.index("workflow_final"))
+            self.assertEqual(2.0, PlannedRunFakeRuntime.last_timeout_seconds)
+
+    def test_workflow_plan_default_timeout_is_900_seconds_when_omitted(self):
+        from frontends.ink_bridge import DEFAULT_WORKFLOW_TIMEOUT_SECONDS
+
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        PlannedRunFakeRuntime.started_run_ids = []
+        PlannedRunFakeRuntime.last_timeout_seconds = None
+        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="默认超时"))
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
+                workflow_planner_factory=lambda: planner,
+            )
+
+            run_id = bridge.workflow_plan("默认超时")
+            bridge.wait_for_workflow_idle(run_id, timeout=2)
+
+            self.assertTrue(run_id.startswith("wf_"))
+            self.assertEqual([run_id], PlannedRunFakeRuntime.started_run_ids)
+            self.assertEqual(float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS), PlannedRunFakeRuntime.last_timeout_seconds)
+            self.assertEqual(900.0, PlannedRunFakeRuntime.last_timeout_seconds)
 
     def test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false(self):
         agent = FakeAgent()
@@ -2676,6 +2711,45 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
             self.assertIn("agents/agent_1/result.json", detail_text)
             self.assertNotIn(marker, detail_text)
             self.assertNotIn("huge", detail_text)
+
+    def test_backend_output_redirect_is_thread_safe_under_concurrent_enter_exit(self):
+        """Concurrent workflow_detail + child agent prints must not hit closed stdout.
+
+        Regression for skills-tdd-coding E2E failure:
+        ValueError: I/O operation on closed file.
+        Root cause: backend_output_redirect used per-call open()+redirect_stdout without
+        a lock, so nested/concurrent enter/exit could restore a closed log handle onto
+        sys.stdout while another thread still prints.
+        """
+        errors: list[str] = []
+        barrier = threading.Barrier(8)
+
+        def worker(worker_id: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+            except Exception as exc:  # pragma: no cover - setup failure
+                errors.append(f"barrier:{type(exc).__name__}:{exc}")
+                return
+            for i in range(60):
+                try:
+                    with backend_output_redirect():
+                        print(f"inside-{worker_id}-{i}", flush=True)
+                    print(f"outside-{worker_id}-{i}", flush=True)
+                except Exception as exc:
+                    errors.append(f"{type(exc).__name__}:{exc}")
+                    return
+
+        threads = [threading.Thread(target=worker, args=(n,), daemon=True) for n in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(20)
+        self.assertEqual(errors, [], msg=f"redirect race errors: {errors[:5]}")
+        # Protocol stdout must remain usable after concurrent redirects.
+        try:
+            print("post-redirect-ok", flush=True)
+        except Exception as exc:  # pragma: no cover
+            self.fail(f"sys.stdout unusable after concurrent redirects: {type(exc).__name__}: {exc}")
 
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(

@@ -358,22 +358,15 @@ test('workflowRawDetailPanelFromDetail exposes raw script and approval metadata 
     'Script:',
     'export const meta = { name: "demo" }',
     'return { ok: true }',
-    'Enter approve - d deny - s stop - Esc close',
+    'Esc close',
   ])
 })
 
-test('workflowPanelCommandForKey maps approval keyboard shortcuts', () => {
+test('workflowPanelCommandForKey maps stop and resume without approve/deny', () => {
   const panel = workflowRawDetailPanelFromDetail({ run: awaitingRun, script: 'return 1', events: [] })
 
-  assert.deepEqual(workflowPanelCommandForKey(panel, { return: true }, '')?.command, {
-    type: 'workflow_approve',
-    runId: 'wf_demo',
-  })
-  assert.deepEqual(workflowPanelCommandForKey(panel, {}, 'd')?.command, {
-    type: 'workflow_deny',
-    runId: 'wf_demo',
-    reason: 'denied from Ink UI',
-  })
+  assert.equal(workflowPanelCommandForKey(panel, { return: true }, '')?.command, undefined)
+  assert.equal(workflowPanelCommandForKey(panel, {}, 'd')?.command, undefined)
   assert.deepEqual(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 's')?.command, {
     type: 'workflow_stop',
     runId: 'wf_demo',
@@ -390,5 +383,5 @@ test('workflowPanelCommandForKey maps resume shortcut for completed or interrupt
   })
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 'r'), null)
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'cancelled' } }, {}, 'r'), null)
-  assert.equal(workflowPanelRows(panel).at(-1), 'Enter approve - r resume - d deny - s stop - Esc close')
+  assert.equal(workflowPanelRows(panel).at(-1), 'r resume - s stop - Esc close')
 })

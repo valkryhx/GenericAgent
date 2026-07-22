@@ -17,13 +17,11 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
   if (command.type === 'workflow_list') return '/workflows'
   if (command.type === 'workflow_plan') {
-    const flags = [command.autoApprove === false ? '--manual' : null, command.timeoutSeconds ? `--timeout ${command.timeoutSeconds}` : null].filter(Boolean).join(' ')
-    return `/workflow plan ${flags ? `${flags} ` : ''}${command.taskText}`.trimEnd()
+    const flags = [command.timeoutSeconds ? `--timeout ${command.timeoutSeconds}` : null].filter(Boolean).join(' ')
+    return `/workflow ${flags ? `${flags} ` : ''}${command.taskText}`.trimEnd()
   }
   if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
-  if (command.type === 'workflow_approve') return `/workflow approve ${command.runId}`
   if (command.type === 'workflow_resume') return `/workflow resume ${command.runId}`
-  if (command.type === 'workflow_deny') return `/workflow deny ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
   if (command.type === 'workflow_stop') return `/workflow stop ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
   if (command.type === 'stop') return '/stop'
   return null

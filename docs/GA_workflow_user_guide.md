@@ -1,10 +1,12 @@
 # GA Ink UI Workflow 用户使用说明
 
-本文面向想在 **GA Ink UI** 中亲自测试和使用 workflow 功能的用户。目标是让你可以从终端 UI 里通过 `/workflow plan ...` 发起动态工作流，查看计划、审批、执行、停止和复盘结果。
+本文面向想在 **GA Ink UI** 中亲自测试和使用 workflow 功能的用户。目标是让你从终端 UI 里用 **一个启动命令** 发起动态工作流，由智能体自动规划并执行，同时可查看列表、详情、停止和恢复。
 
 > 适用范围：GenericAgent 的 React/Ink 终端 UI，即 `ga` 或 `ga ink` 启动的界面。
 >
 > 安全提醒：不要把 API key、token、密码、`mykey.py`、`mykey.json`、`mcp.json` 内容粘贴进任务描述。需要真实 API / MCP 时，使用本地已有配置即可。
+>
+> 产品原则：workflow **不需要人手写 JS script**，也 **不需要人工 approve/deny**。`/workflow <任务>` 会让 planner 自动生成 plan/script 并立刻执行。
 
 ---
 
@@ -32,57 +34,53 @@ ga ink
 /workflows
 /workflow
 /workflow list
-/workflow plan [--manual] [--timeout SECONDS] TASK
+/workflow [--timeout SECONDS] TASK
 /workflow detail RUN_ID
-/workflow approve RUN_ID
 /workflow resume RUN_ID
-/workflow deny RUN_ID [reason]
 /workflow stop RUN_ID [reason]
 ```
-
-常用命令说明：
 
 | 命令 | 作用 |
 | --- | --- |
 | `/workflows` | 打开 workflow 列表，查看当前和历史 runs |
-| `/workflow plan <任务>` | 根据自然语言任务创建并默认自动执行 workflow |
-| `/workflow plan --manual <任务>` | 创建 workflow draft，但先等待人工审批 |
+| `/workflow` / `/workflow list` | 同上，打开列表 |
+| `/workflow <任务>` | **唯一启动入口**：根据自然语言任务自动规划并执行（默认超时 **900 秒 / 15 分钟**） |
+| `/workflow --timeout N <任务>` | 同上，并覆盖 runtime 超时（秒） |
 | `/workflow detail <runId>` | 查看某个 workflow 的详情、阶段和 agent 信息 |
-| `/workflow approve <runId>` | 批准等待审批的 workflow 执行 |
-| `/workflow deny <runId> <原因>` | 拒绝等待审批的 workflow |
-| `/workflow stop <runId> <原因>` | 停止正在运行的 workflow |
-| `/workflow resume <runId>` | 恢复可恢复的 workflow |
+| `/workflow stop <runId> [原因]` | 停止正在运行的 workflow |
+| `/workflow resume <runId>` | 从可恢复的终态 run 继续（cache 前缀可复用） |
+
+已移除的用户入口（不要再依赖）：
+
+- `/workflow plan ...`：仍兼容，会映射到 `/workflow ...` 自动执行
+- `/workflow plan --manual ...`：`--manual` 被忽略，仍会自动执行
+- `/workflow approve` / `/workflow deny`：已从产品路径删除
+- 人手写 JS draft：产品路径不再提供
 
 ---
 
 ## 3. 推荐的第一次测试流程
 
-第一次亲测建议使用 **manual 模式**，这样你可以先看 planner 生成的 workflow，再决定是否执行。
-
-### 步骤 1：发起一个只读审查 workflow
-
-在 Ink UI 输入：
+### 步骤 1：直接启动一个只读审查 workflow
 
 ```text
-/workflow plan --manual --timeout 600 请只读审查当前项目的 workflow UI 实现，重点检查 slash command 入口、workflow overview、agent detail、live status bar 和测试覆盖。不要修改文件，不要读取 mykey.py、mykey.json、mcp.json，不要提交。
+/workflow --timeout 600 请只读审查当前项目的 workflow UI 实现，重点检查 slash command 入口、workflow overview、agent detail、live status bar 和测试覆盖。不要修改文件，不要读取 mykey.py、mykey.json、mcp.json，不要提交。
 ```
 
 预期现象：
 
 - UI 会创建一个 workflow run；
-- 状态通常为 `awaiting_approval`；
-- 底部可能出现类似 `Enter review` 的 workflow status bar；
-- workflow 不会立刻执行，因为使用了 `--manual`。
+- planner 生成 plan/script 后 **自动进入 `running`**；
+- 底部可能出现 live status bar（`N/M agents done`）；
+- 不需要 approve。
 
 ### 步骤 2：查看 workflow 列表
-
-输入：
 
 ```text
 /workflows
 ```
 
-预期你会看到 workflow 列表，其中包含刚创建的 run。记下或复制它的 `runId`，形如：
+记下 `runId`，形如：
 
 ```text
 wf_abc123...
@@ -90,41 +88,27 @@ wf_abc123...
 
 ### 步骤 3：查看详情
 
-输入：
-
 ```text
 /workflow detail wf_abc123
 ```
 
-把 `wf_abc123` 替换成你实际看到的 runId。
-
-预期你会看到：
+预期：
 
 - workflow 名称和状态；
 - phases / agents overview；
 - 每个 agent 的标签、状态；
-- 如果进入 agent detail，可查看 Prompt / Activity / Outcome；
+- agent detail 中可查看 Prompt / Activity / Outcome；
 - 不应把 raw script 当作主界面展示。
 
-### 步骤 4：批准执行
-
-如果计划看起来合理，输入：
+### 步骤 4：运行中可停止
 
 ```text
-/workflow approve wf_abc123
+/workflow stop wf_abc123 用户停止测试
 ```
 
-预期 workflow 开始运行。运行过程中可能看到：
+或在 status bar 显示 running 时，输入框为空按 `x` 停止。
 
-- live workflow status bar；
-- 已完成 agent 数；
-- 当前 active agent；
-- token 用量摘要；
-- `/workflows` 中状态更新。
-
-### 步骤 5：查看最终结果
-
-执行完成后再次输入：
+### 步骤 5：结束后再看结果
 
 ```text
 /workflow detail wf_abc123
@@ -139,75 +123,51 @@ wf_abc123...
 
 ---
 
-## 4. `/workflow plan` 的参数详解
+## 4. `/workflow` 启动参数
 
-### 4.1 默认自动执行
+### 4.1 默认：自动规划并执行
 
 ```text
-/workflow plan 审查当前分支最近提交的风险，并给出修复建议
+/workflow 审查当前分支最近提交的风险，并给出修复建议
 ```
 
 含义：
 
-- planner 生成 workflow；
-- 如果通过校验，通常会自动开始执行；
-- 适合低风险、只读任务。
+- planner 根据自然语言生成 WorkflowPlan 并编译为 script；
+- 校验通过后自动开始执行；
+- subagent 使用主会话当前 `/model` 对应的 `llm.yaml` profile。
 
-### 4.2 `--manual`：先审批再执行
-
-```text
-/workflow plan --manual 设计一个多 agent 代码审查 workflow，分别检查安全、性能、测试缺口和回归风险
-```
-
-含义：
-
-- 只生成计划；
-- 状态进入 `awaiting_approval`；
-- 你需要 `/workflow approve <runId>` 后才执行。
-
-推荐在以下场景使用：
-
-- 任务复杂；
-- 涉及写文件；
-- 涉及 MCP / skill；
-- 想先看 planner 是否理解正确；
-- 想避免 workflow 立即开始消耗真实 API。
-
-### 4.3 `--timeout SECONDS`：设置超时
+### 4.2 `--timeout SECONDS`
 
 ```text
-/workflow plan --timeout 900 审查 workflow runtime 的调度、取消、恢复和错误处理
+/workflow --timeout 1800 审查 workflow runtime 的调度、取消、恢复和错误处理
 ```
 
-含义：
-
-- 设置 workflow runtime 的最长执行时间；
 - 单位是秒；
-- `900` 表示 15 分钟。
+- **不写 `--timeout` 时，产品默认是 900 秒（15 分钟）**；
+- 复杂 MCP / 多 agent 任务可显式加大，例如 `1800`。
 
-### 4.4 `--manual` 和 `--timeout` 可以一起用
+### 4.3 兼容旧写法
 
-```text
-/workflow plan --manual --timeout 900 审查当前 workflow UI，并在执行前让我确认计划
-```
-
-顺序互换也可以：
+下列写法仍可用，但语义都等价于自动启动：
 
 ```text
-/workflow plan --timeout 900 --manual 审查当前 workflow UI，并在执行前让我确认计划
+/workflow plan 审查 UI
+/workflow plan --manual 审查 UI
+/workflow --manual --timeout 600 审查 UI
 ```
+
+`--manual` 会被忽略，不会进入人工审批。
 
 ---
 
 ## 5. 复杂任务测试示例
 
-如果你想验证 GA workflow 是否真的具备多 agent 能力，可以使用下面这个复杂任务。建议先用 `--manual`。
-
 ```text
-/workflow plan --manual --timeout 1800 设计并执行一个复杂 GA workflow 验证：包含一个 research agent 负责只读调研，一个 coding agent 负责在临时目录中实现一个很小的安全函数和测试，一个 review agent 负责审查实现质量，一个 synthesis agent 负责汇总证据和风险。要求不要读取 mykey.py、mykey.json、mcp.json，不要提交，不要写临时目录以外的文件。
+/workflow --timeout 1800 设计并执行一个复杂 GA workflow 验证：包含一个 research agent 负责只读调研，一个 coding agent 负责在临时目录中实现一个很小的安全函数和测试，一个 review agent 负责审查实现质量，一个 synthesis agent 负责汇总证据和风险。要求不要读取 mykey.py、mykey.json、mcp.json，不要提交，不要写临时目录以外的文件。
 ```
 
-审批前检查重点：
+关注点：
 
 - 是否至少包含 research / coding / review / synthesis 之类阶段或 agent；
 - coding 是否限制在临时目录；
@@ -215,88 +175,51 @@ wf_abc123...
 - 是否有测试或验证步骤；
 - 是否有最终 synthesis。
 
-如果计划合理：
+涉及 MCP + skill 的例子：
 
 ```text
-/workflow approve <runId>
-```
-
-如果计划不合理：
-
-```text
-/workflow deny <runId> 计划没有限制写入范围，请重新规划
+/workflow --timeout 1800 设计一个复杂 GA workflow：一个 agent 使用可用的 MCP 搜索工具调研 2026 FIFA World Cup July 7 2026 matches results today，一个 agent 使用现有 using-superpowers skill 在临时 workspace 写入并读取一个小型 Python 函数，一个 synthesis agent 汇总结果。要求使用真实工具，不要读取 mykey.py、mykey.json、mcp.json，不要提交，所有写入必须限制在临时 workspace。
 ```
 
 ---
 
-## 6. 真实 MCP / Skill 复杂验证示例
+## 6. 列表、详情、停止、恢复
 
-如果你的环境已经配置好 MCP 和 skills，可以尝试更强的复杂任务。例如：
-
-```text
-/workflow plan --manual --timeout 1800 设计一个复杂 GA workflow：一个 agent 使用可用的 MCP 搜索工具调研 2026 FIFA World Cup July 7 2026 matches results today，一个 agent 使用现有 using-superpowers skill 在临时 workspace 写入并读取一个小型 Python 函数，一个 synthesis agent 汇总结果。要求使用真实工具，不要读取 mykey.py、mykey.json、mcp.json，不要提交，所有写入必须限制在临时 workspace。
-```
-
-注意：
-
-- 这个任务可能消耗真实 API；
-- 如果 MCP 没配置好，workflow 可能失败或 planner 生成的计划无法执行；
-- 建议先 `--manual` 查看 draft；
-- 真实搜索结果可能随时间变化。
-
----
-
-## 7. 查看 workflow 详情时如何操作
-
-### 7.1 打开列表
+### 列表
 
 ```text
 /workflows
 ```
 
-### 7.2 打开某个 run
+### 详情
 
 ```text
 /workflow detail <runId>
 ```
 
-### 7.3 在 overview 中查看 agent detail
+### 停止
 
-在 workflow detail/overview 面板中：
+```text
+/workflow stop <runId> 用户停止
+```
 
-- 使用 `Up` / `Down` 切换 phase；
-- 使用 `Enter` 进入选中 phase 的 agent detail；
-- 在 agent detail 中通常可以看到：
-  - `Prompt`
-  - `Activity`
-  - `Outcome`
-- 使用 `j` / `k` 滚动；
-- 使用 `Esc` 返回 overview。
+### 恢复
 
-> 具体按键表现取决于当前 panel 状态和终端输入支持。
+对 `succeeded` / `failed` / `killed` / `interrupted` 的 run：
+
+```text
+/workflow resume <runId>
+```
+
+会创建新的 run，并尽量 cache 前缀 agent 结果后继续执行。
 
 ---
 
-## 8. live workflow status bar
+## 7. Live status bar
 
-当 workflow 正在运行或等待审批，并且你没有打开其它 panel 时，底部可能出现 live workflow status bar。
+运行中底部可能显示：
 
-常见显示：
-
-```text
-Enter review · › ◌ xxx awaiting approval
-```
-
-或：
-
-```text
-Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
-```
-
-含义：
-
-- `Enter review`：打开等待审批 workflow 的详情；
-- `Enter view`：查看正在运行的 workflow；
+- `Enter view`：打开 detail；
 - `x stop`：停止正在运行的 workflow；
 - `N/M agents done`：已完成 agent 数；
 - `tok`：token 使用摘要。
@@ -304,27 +227,11 @@ Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
 注意：
 
 - 只有输入框为空时，`Enter` / `x` 才会作为 status bar 快捷键；
-- 如果你正在输入文字，`Enter` / `x` 不会被 workflow status bar 抢走；
-- `awaiting_approval` 状态不会显示 `x stop`。
+- 正在输入文字时不会被 status bar 抢走。
 
 ---
 
-## 9. 什么时候用自动执行，什么时候用 manual？
-
-推荐规则：
-
-| 场景 | 推荐 |
-| --- | --- |
-| 简单只读审查 | 可以直接 `/workflow plan ...` |
-| 涉及写文件 | 用 `--manual` |
-| 涉及 MCP / 网络搜索 | 用 `--manual` |
-| 涉及真实 API 成本较高 | 用 `--manual --timeout ...` |
-| 想先看 planner 是否理解任务 | 用 `--manual` |
-| 批量修复 / 复杂编码 | 强烈建议 `--manual` |
-
----
-
-## 10. 安全写法建议
+## 8. 安全写法建议
 
 在任务描述中明确写约束，例如：
 
@@ -332,93 +239,57 @@ Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
 不要读取 mykey.py、mykey.json、mcp.json，不要打印 API key/token/credential，不要提交，不要写临时目录以外的文件。
 ```
 
-如果是只读任务，建议加：
+只读任务建议加：
 
 ```text
 只读分析，不要修改文件。
 ```
 
-如果是编码任务，建议加：
+编码任务建议加：
 
 ```text
 先写测试，再实现；只修改与任务相关的文件；完成后运行测试并总结证据。
 ```
 
+因为产品路径会自动执行，**写操作 / MCP / 高成本任务** 请在 task text 里写清楚边界，而不是指望人工审批闸门。
+
 ---
 
-## 11. 常见问题排查
+## 9. 常见问题排查
 
-### 11.1 `/workflow plan` 没有执行
+### 9.1 `/workflow` 没有执行
 
 检查：
 
-- 是否输入了 task text；
-- 是否只是按 Tab/Enter 补全了 `/workflow plan `，但还没有输入任务；
+- 是否输入了 task text（单独 `/workflow` 只打开列表）；
+- 是否只是补全了 `/workflow `，还没输入任务；
 - 是否当前后端正忙；
-- 是否 planner/API 配置可用。
+- 是否 planner/API（`llm.yaml` 当前 profile）可用。
 
-### 11.2 状态一直是 `awaiting_approval`
+### 9.2 为什么没有 `awaiting_approval`？
 
-这是 `--manual` 的预期行为。你需要：
+当前产品路径固定 `autoApprove=true`。planner 校验通过后直接 `running`。  
+旧文档中的 `--manual` / approve / deny 已废弃。
 
-```text
-/workflow approve <runId>
-```
-
-或者拒绝：
-
-```text
-/workflow deny <runId> <原因>
-```
-
-### 11.3 workflow 失败
-
-查看详情：
+### 9.3 workflow 失败
 
 ```text
 /workflow detail <runId>
 ```
 
-重点看：
+查看 error、agent 失败原因、tool denied、progress。
 
-- 哪个 agent 失败；
-- 是否工具不可用；
-- 是否 MCP 未连接；
-- 是否 API 失败；
-- 是否权限或安全策略拒绝；
-- 是否 timeout。
-
-### 11.4 MCP 任务失败
-
-可能原因：
-
-- MCP server 未配置；
-- MCP server 未连接；
-- 对应 tool 名称不可用；
-- 网络或 API 不稳定；
-- planner 生成的任务没有正确指定工具使用方式。
-
-建议先用较简单的 MCP 任务测试，再上复杂任务。
-
-### 11.5 想停止正在运行的 workflow
-
-方式一：
+### 9.4 想中途停止
 
 ```text
-/workflow stop <runId> 用户主动停止
+/workflow stop <runId>
 ```
 
-方式二：
-
-- 如果底部 status bar 显示 `x stop`；
-- 并且输入框为空；
-- 直接按 `x`。
+或 status bar 上 `x`。
 
 ---
 
-## 12. 推荐亲测清单
-
-你可以按下面顺序逐步测试：
+## 10. 建议的自测清单
 
 ### 基础可用性
 
@@ -427,15 +298,11 @@ Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
 ```
 
 ```text
-/workflow plan --manual 请只读总结当前项目 workflow 功能的入口、状态展示和审批流程，不要修改文件
+/workflow --timeout 600 请只读总结当前项目 workflow 功能的入口和状态展示，不要修改文件
 ```
 
 ```text
 /workflow detail <runId>
-```
-
-```text
-/workflow approve <runId>
 ```
 
 ### UI 入口可发现性
@@ -443,49 +310,29 @@ Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
 输入：
 
 ```text
-/workflow p
+/workflo
 ```
 
 预期 slash suggestions 中能看到：
 
 ```text
-/workflow plan
+/workflow
 ```
 
-按 Tab 或 Enter 应补全为：
-
-```text
-/workflow plan 
-```
-
-不会在没有 task text 时直接执行。
-
-### manual 审批
-
-```text
-/workflow plan --manual --timeout 600 请设计一个两阶段 workflow：先分析当前仓库 workflow UI 的使用入口，再给出测试建议。只读，不要修改文件。
-```
-
-然后：
-
-```text
-/workflow approve <runId>
-```
+按 Tab/Enter 应补全为 `/workflow `（需要继续输入任务，不会空跑）。
 
 ### 复杂能力
 
 ```text
-/workflow plan --manual --timeout 1800 设计一个复杂 GA workflow：包含 research、coding、review、synthesis 四类 agent。coding 只能写临时目录，必须有测试或验证步骤；不要读取 mykey.py、mykey.json、mcp.json；不要提交。
+/workflow --timeout 1800 设计一个复杂 GA workflow：包含 research、coding、review、synthesis 四类 agent。coding 只能写临时目录，必须有测试或验证步骤；不要读取 mykey.py、mykey.json、mcp.json；不要提交。
 ```
 
 ---
 
-## 13. 一个完整示范会话
-
-下面是一个完整示例，你可以照着做：
+## 11. 完整示范会话
 
 ```text
-/workflow plan --manual --timeout 900 请只读审查 GA Ink UI workflow 功能是否可用。检查 /workflow plan 入口、/workflows 列表、workflow detail overview、agent detail、live status bar，以及相关测试覆盖。不要修改文件，不要读取 mykey.py、mykey.json、mcp.json，不要提交。
+/workflow --timeout 900 请只读审查 GA Ink UI workflow 功能是否可用。检查 /workflow 启动入口、/workflows 列表、workflow detail overview、agent detail、live status bar，以及相关测试覆盖。不要修改文件，不要读取 mykey.py、mykey.json、mcp.json，不要提交。
 ```
 
 然后：
@@ -494,143 +341,41 @@ Enter view · x stop · › ◌ xxx 1/3 agents done · current-agent · 12k tok
 /workflows
 ```
 
-假设看到：
-
 ```text
-wf_1234567890abcdef awaiting_approval
+/workflow detail <runId>
 ```
 
-查看详情：
+运行中可：
 
 ```text
-/workflow detail wf_1234567890abcdef
-```
-
-如果计划合理：
-
-```text
-/workflow approve wf_1234567890abcdef
-```
-
-运行中可再次查看：
-
-```text
-/workflow detail wf_1234567890abcdef
-```
-
-如果想停：
-
-```text
-/workflow stop wf_1234567890abcdef 用户停止测试
+/workflow stop <runId> 用户停止测试
 ```
 
 ---
 
-## 14. 判断测试是否成功
+## 12. 判断测试是否成功
 
 一个成功的 workflow 使用体验通常满足：
 
-- `/workflow plan ...` 能创建 run；
-- `--manual` 会进入 `awaiting_approval`；
+- `/workflow <任务>` 能创建 run 并自动执行；
 - `/workflows` 能看到 run；
 - `/workflow detail <runId>` 能看到结构化 overview；
-- approve 后 workflow 能运行；
 - 运行中 status bar 能显示摘要；
 - agent detail 能看到 Prompt / Activity / Outcome；
-- 结束后状态为 `succeeded`，或失败时能看到明确错误原因。
-
-如果以上都成立，说明 GA Ink UI 中的 workflow 入口和基本 UI 链路是可用的。
+- 结束后状态为 `succeeded`，或失败时能看到明确错误原因；
+- 不需要人手写 JS，也不需要 approve/deny。
 
 ---
 
-## 15. 真实回归验证记录（2026-07-07）
+## 13. 历史回归记录说明
 
-本节记录一次按本文命令从 slash 入口出发的真实回归验证。验证使用用户现有配置中的真实 `gpt-5.5`，未读取、打印或提交 `mykey.py` / `mykey.json` / `mcp.json`。
+2026-07-07 及更早文档中记录过 `/workflow plan --manual` + `/workflow approve` 的真实 bridge 回归。  
+**自 2026-07-22 起，产品入口收敛为单一自动启动**；那些审批步骤仅作为历史实现与底层 API 兼容说明，不再是用户操作路径。
 
-### 15.1 覆盖的 slash 命令
+底层 bridge 仍保留 `workflow_plan(auto_approve=...)`、`workflow_draft`、`workflow_approve` 等方法，主要供自动化测试与内部兼容使用，Ink UI 用户 slash 不再暴露它们。
 
-通过 `handleInput()` 从用户输入文本生成真实 `BridgeCommand`，再喂给 `frontends/ink_bridge.py` JSONL 协议，覆盖：
-
-```text
-/workflows
-/workflow
-/workflow list
-/workflow plan --manual --timeout 120 <生活场景任务>
-/workflow detail <runId>
-/workflow deny <runId> <reason>
-/workflow plan --timeout 180 <生活场景任务>
-/workflow stop <runId> <reason>
-/workflow resume <runId>
-```
-
-结果摘要：
+复杂 MCP + skill 真实 E2E 仍可用：
 
 ```text
-passed: true
-api: real gpt-5.5 via native_oai_config
-method: slash text -> handleInput -> BridgeCommand -> ink_bridge.py JSONL -> GA workflow
-/workflows, /workflow, /workflow list: 均返回 workflow_runs
-manual plan: status=awaiting_approval, draftValidationOk=true
-detail: 返回 workflow_detail 和 draft validation ok
-deny: 可把等待审批 run 取消
-auto plan: 能创建并启动真实 workflow；测试脚本 shutdown 会终止该 run，因此不作为成功执行结论
-stop: 命令可通过 bridge 分发并产生结构化状态事件
-resume: 对 cancelled run 返回结构化 workflow_resume_failed，而不是崩溃
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_WORKFLOW_LLM_PROFILE=grok GA_REAL_API_EXPECTED_MODEL=grok-4.5 GA_REAL_API_EXPECTED_NAME=grok python tests/real_complex_workflow_mcp_skill_coding_e2e.py
 ```
-
-### 15.2 持久 bridge 审批执行验证
-
-为了验证 approve 后 workflow 确实能在同一个 bridge 进程中真实执行，额外运行持久 JSONL bridge 测试：
-
-```text
-/workflow plan --manual --timeout 240 <健康晚餐生活场景>
-/workflow detail <runId>
-/workflow approve <runId>
-# 等待真实 runtime 到 terminal
-/workflow detail <runId>
-/workflows
-```
-
-结果摘要：
-
-```text
-passed: true
-api: real gpt-5.5 via native_oai_config
-method: slash text -> handleInput -> persistent ink_bridge JSONL -> approve -> real workflow runtime
-runId: wf_e6d99536ae304fa1afb4f81b721fb10e
-draftValidationOk: true
-terminalStatus: succeeded
-progressEntryCount: 2
-```
-
-这证明 `--manual` 创建的 run 可以通过 `/workflow approve <runId>` 在同一 bridge 会话中真实运行完成，并且最终 detail 中有 progress。
-
-### 15.3 MCP + skill 复杂真实 E2E
-
-另运行复杂真实 E2E，覆盖真实 `gpt-5.5` planner、真实 MCP、真实 skill、临时编码写读和 progress：
-
-```text
-GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_REAL_API_CONFIG=native_oai_config GA_REAL_API_EXPECTED_MODEL=gpt-5.5 GA_REAL_API_EXPECTED_NAME=gpt-native GA_COMPLEX_WORKFLOW_DETAIL_OUT=temp/ga-workflow-user-guide-complex-detail.json python tests/real_complex_workflow_mcp_skill_coding_e2e.py
-```
-
-结果摘要：
-
-```text
-passed: true
-profile: gpt-native / gpt-5.5
-mcpDiscovery.selectedTool: mcp__tavily__tavily_search
-status: succeeded
-runtimeStatus: succeeded
-jobCount: 3
-jobStatuses: succeeded, succeeded, succeeded
-toolCalls: mcp__tavily__tavily_search, load_skill, file_write, file_read
-mcpCalled: true
-mcpReturned: true
-usingSuperpowersLoaded: true
-codingFileWritten: true
-codingFileOk: true
-progressEntryCount: 3
-deniedTools: []
-```
-
-结论：按本指南操作的 workflow slash 入口链路可以在真实 `gpt-5.5` 下创建、查看、审批、执行、停止/恢复错误处理，并且 GA workflow runtime 在复杂场景下可以真实调用 MCP、加载 skill、写读临时编码文件并生成 progress。

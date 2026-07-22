@@ -42,6 +42,9 @@ EmitFn = Callable[[Event], None]
 AgentFactory = Callable[[], Any]
 
 _WORKFLOW_FINAL_PAYLOAD_MAX_BYTES = 64 * 1024
+# Product default for /workflow without --timeout. WorkflowRuntime itself still
+# defaults to 10s for unit tests that construct it directly.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 900.0
 
 
 def _backend_log_path() -> str:
@@ -50,11 +53,60 @@ def _backend_log_path() -> str:
     return path
 
 
+# Thread-safe backend log redirect.
+# Concurrent workflow runtime + workflow_detail/progress used to open/close a log
+# file per enter/exit via contextlib.redirect_stdout. Nested/racy exit restored a
+# *closed* handle onto sys.stdout; child-agent threads then crashed with
+# ValueError: I/O operation on closed file. Keep one long-lived log handle and
+# refcount nested redirects under a lock.
+_backend_io_lock = threading.RLock()
+_backend_redirect_depth = 0
+_backend_log_handle: TextIO | None = None
+_backend_saved_stdout: TextIO | None = None
+_backend_saved_stderr: TextIO | None = None
+
+
+def _ensure_backend_log_handle() -> TextIO:
+    global _backend_log_handle
+    handle = _backend_log_handle
+    if handle is None or getattr(handle, "closed", False):
+        handle = open(_backend_log_path(), "a", encoding="utf-8", errors="replace")
+        _backend_log_handle = handle
+    return handle
+
+
 @contextlib.contextmanager
 def backend_output_redirect():
-    with open(_backend_log_path(), "a", encoding="utf-8", errors="replace") as log:
-        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-            yield
+    """Redirect stdout/stderr to the bridge backend log (thread-safe, nestable)."""
+    global _backend_redirect_depth, _backend_saved_stdout, _backend_saved_stderr
+    with _backend_io_lock:
+        if _backend_redirect_depth == 0:
+            log = _ensure_backend_log_handle()
+            _backend_saved_stdout = sys.stdout
+            _backend_saved_stderr = sys.stderr
+            sys.stdout = log
+            sys.stderr = log
+        _backend_redirect_depth += 1
+    try:
+        yield
+    finally:
+        with _backend_io_lock:
+            _backend_redirect_depth = max(0, _backend_redirect_depth - 1)
+            if _backend_redirect_depth == 0:
+                if _backend_saved_stdout is not None:
+                    sys.stdout = _backend_saved_stdout
+                if _backend_saved_stderr is not None:
+                    sys.stderr = _backend_saved_stderr
+                _backend_saved_stdout = None
+                _backend_saved_stderr = None
+                # Do not close the log handle here: another thread may still be
+                # printing after a concurrent enter/exit race window. Flush only.
+                handle = _backend_log_handle
+                if handle is not None and not getattr(handle, "closed", False):
+                    try:
+                        handle.flush()
+                    except Exception:
+                        pass
 
 
 def encode_event(event: Event) -> str:
@@ -498,6 +550,7 @@ class GenericAgentBridge:
         if not task_text.strip():
             self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
             return ""
+        effective_timeout = self._effective_workflow_timeout(timeout_seconds)
         try:
             session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
             with backend_output_redirect():
@@ -518,7 +571,7 @@ class GenericAgentBridge:
             return run.run_id
         thread = threading.Thread(
             target=self._run_workflow_runtime,
-            args=(run.run_id, args, timeout_seconds, None),
+            args=(run.run_id, args, effective_timeout, None),
             daemon=True,
             name=f"ga-ink-workflow-{run.run_id}",
         )
@@ -560,7 +613,7 @@ class GenericAgentBridge:
             return False
         thread = threading.Thread(
             target=self._run_workflow_runtime,
-            args=(run.run_id, args, timeout_seconds, None),
+            args=(run.run_id, args, self._effective_workflow_timeout(timeout_seconds), None),
             daemon=True,
             name=f"ga-ink-workflow-{run.run_id}",
         )
@@ -603,7 +656,7 @@ class GenericAgentBridge:
             return ""
         thread = threading.Thread(
             target=self._run_workflow_runtime,
-            args=(resumed.run_id, args, timeout_seconds, source_run_id),
+            args=(resumed.run_id, args, self._effective_workflow_timeout(timeout_seconds), source_run_id),
             daemon=True,
             name=f"ga-ink-workflow-{resumed.run_id}",
         )
@@ -759,10 +812,22 @@ class GenericAgentBridge:
                 return build_workflow_planner_from_env(profile_name=binding.profile_name)
             return build_workflow_planner_from_env()
 
+    def _effective_workflow_timeout(self, timeout_seconds: float | None) -> float:
+        """Resolve product timeout: explicit value wins, else 900s (15 min)."""
+        if timeout_seconds is None:
+            return float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+        value = float(timeout_seconds)
+        if value <= 0:
+            return float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+        return value
+
     def _make_workflow_runtime(self, *, timeout_seconds: float | None):
-        kwargs = {"store": self.workflow_store}
-        if timeout_seconds is not None:
-            kwargs["timeout_seconds"] = float(timeout_seconds)
+        # Always pass an explicit timeout so product path never falls through to
+        # WorkflowRuntime's 10s unit-test default.
+        kwargs = {
+            "store": self.workflow_store,
+            "timeout_seconds": self._effective_workflow_timeout(timeout_seconds),
+        }
         if self.workflow_runtime_factory is not None:
             return self.workflow_runtime_factory(**kwargs)
         with backend_output_redirect():

@@ -288,48 +288,53 @@ test('handleInput parses workflow list and control slash commands', () => {
     value: '',
     command: { type: 'workflow_detail', runId: 'wf_demo' },
   })
-  assert.deepEqual(handleInput('/workflow approve wf_demo', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_approve', runId: 'wf_demo' },
-  })
   assert.deepEqual(handleInput('/workflow resume wf_demo', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'workflow_resume', runId: 'wf_demo' },
-  })
-  assert.deepEqual(handleInput('/workflow deny wf_demo no thanks', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_deny', runId: 'wf_demo', reason: 'no thanks' },
   })
   assert.deepEqual(handleInput('/workflow stop wf_demo user stop', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'workflow_stop', runId: 'wf_demo', reason: 'user stop' },
   })
+  // approve/deny are no longer user-facing slash commands (swallowed, not chat)
+  assert.deepEqual(handleInput('/workflow approve wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+  })
+  assert.deepEqual(handleInput('/workflow deny wf_demo no thanks', '', { return: true }, 'idle', store), {
+    value: '',
+  })
 })
 
-test('handleInput parses workflow plan slash commands', () => {
+test('handleInput parses single /workflow start path (auto plan+run)', () => {
   const store = createPasteStore()
 
+  assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  // legacy /workflow plan still maps to the same auto-start path
   assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
   })
-  assert.deepEqual(handleInput('/workflow plan --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
+  // --manual is ignored; workflows always auto-start
+  assert.deepEqual(handleInput('/workflow --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false },
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
   })
-  assert.deepEqual(handleInput('/workflow plan --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
+  assert.deepEqual(handleInput('/workflow --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
   })
   assert.deepEqual(handleInput('/workflow plan --manual --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false, timeoutSeconds: 120 },
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
   })
   assert.deepEqual(handleInput('/workflow plan --timeout 120 --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: false, timeoutSeconds: 120 },
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
   })
-  assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store, new Set(['workflow'])), {
+  assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store, new Set(['workflow'])), {
     value: '',
     command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
   })

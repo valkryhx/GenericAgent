@@ -53,7 +53,8 @@ function progressFromJobs(jobs: WorkflowJob[]): WorkflowProgressEntry[] {
 
 export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
   if (bar.status === 'awaiting_approval') {
-    return ['Enter review', `› ◌ ${bar.name}  awaiting approval`]
+    // Legacy status only; product path always auto-starts workflows.
+    return ['Enter view', `› ◌ ${bar.name}  awaiting approval`]
   }
   const pieces = [`${bar.completedAgents}/${bar.totalAgents} agents done`]
   if (bar.activeAgent) pieces.push(bar.lastActivity ? `${bar.activeAgent}: ${bar.lastActivity}` : bar.activeAgent)

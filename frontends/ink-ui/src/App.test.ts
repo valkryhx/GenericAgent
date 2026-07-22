@@ -814,8 +814,8 @@ test('App sticks composer near static history without a full-height empty live s
   }
 })
 
-test('App help documents workflow plan slash command entry', () => {
-  assert.match(helpText(), /\/workflow plan \[--manual\] \[--timeout SECONDS\] TASK - plan and run a dynamic workflow/)
+test('App help documents single /workflow start slash command entry', () => {
+  assert.match(helpText(), /\/workflow \[--timeout SECONDS\] TASK - plan and run a dynamic workflow \(default timeout 900s\)/)
 })
 
 test('App keeps the input composer visible when the tall help panel opens', async () => {

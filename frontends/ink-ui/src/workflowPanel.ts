@@ -463,8 +463,10 @@ export function workflowPanelRows(panel: WorkflowPanelState): string[] {
   const jobs = panel.run.jobs?.length ?? 0
   const scriptLines = panel.script.split('\n')
   const controls = resumeableWorkflowStatuses.has(panel.run.status)
-    ? 'Enter approve - r resume - d deny - s stop - Esc close'
-    : 'Enter approve - d deny - s stop - Esc close'
+    ? 'r resume - s stop - Esc close'
+    : panel.run.status === 'running'
+      ? 's stop - Esc close'
+      : 'Esc close'
   return [
     `Workflow ${panel.run.runId} - ${panel.run.status}`,
     `Permission: ${permission}`,
@@ -499,13 +501,7 @@ export function workflowPanelCommandForKey(
     if (lowered === 'k') return { panel: workflowAgentDetailPanelFromOverview({ mode: 'overview', overview: panel.overview, detailSource: panel.detailSource }, panel.phaseIndex, panel.agentIndex, Math.max(0, panel.scrollOffset - 1)) }
     return null
   }
-  if (key.return && panel.run.status === 'awaiting_approval') {
-    return { command: { type: 'workflow_approve', runId: panel.run.runId } }
-  }
   const lowered = rawInput.toLowerCase()
-  if ((lowered === 'd' || lowered === 'n') && panel.run.status === 'awaiting_approval') {
-    return { command: { type: 'workflow_deny', runId: panel.run.runId, reason: 'denied from Ink UI' } }
-  }
   if (lowered === 's' && panel.run.status === 'running') {
     return { command: { type: 'workflow_stop', runId: panel.run.runId, reason: 'stopped from Ink UI' } }
   }

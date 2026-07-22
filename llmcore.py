@@ -104,8 +104,10 @@ def _sanitize_leading_user_msg(msg):
 
 _oldprint = print
 def safeprint(*argv):
+    # ValueError: closed file can surface when a caller briefly redirects sys.stdout
+    # to a handle that another thread closes (bridge backend log race). Swallow both.
     try: _oldprint(*argv)
-    except OSError: pass
+    except (OSError, ValueError): pass
 print = safeprint
 
 def trim_messages_history(history, hard_limit_tokens, last_usage=None):

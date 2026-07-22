@@ -154,7 +154,7 @@ test('workflowStatusBarRows formats awaiting approval without stop shortcut', ()
   }))
 
   assert.deepEqual(workflowStatusBarRows(bar!), [
-    'Enter review',
+    'Enter view',
     '› ◌ review-workflow  awaiting approval',
   ])
 })
