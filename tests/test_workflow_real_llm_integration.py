@@ -17,19 +17,23 @@ class WorkflowRealLLMIntegrationTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail("real LLM child runner did not finish in time")
 
-    def test_native_oai_child_runner_completes_short_prompt(self):
-        from llmcore import resolve_session
-
+    def test_yaml_profile_child_runner_completes_short_prompt(self):
+        """Opt-in real child via llm.yaml profile (default grok / GA_WORKFLOW_LLM_PROFILE)."""
+        profile = (
+            os.environ.get("GA_WORKFLOW_LLM_PROFILE")
+            or os.environ.get("GA_REAL_API_PROFILE")
+            or "grok"
+        )
         runner = NativeGPTChildAgentRunner(
-            config_name="native_oai_config",
-            session_factory=resolve_session,
+            profile_name=profile,
+            enable_tools=False,
             max_tokens=64,
         )
         job = WorkflowJob(
             job_id="agent_real_1",
             prompt="Reply with the exact word OK and no other text.",
             phase="P3",
-            metadata={"runId": "wf_real_llm_test", "label": "real-native-oai"},
+            metadata={"runId": "wf_real_llm_test", "label": f"real-{profile}"},
         )
 
         runner.start(job)

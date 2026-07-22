@@ -21,9 +21,18 @@ from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
+PROFILE = (
+    os.environ.get("GA_WORKFLOW_LLM_PROFILE")
+    or os.environ.get("GA_REAL_API_PROFILE")
+    or os.environ.get("GA_REAL_API_CONFIG")
+    or "grok"
+)
+# Treat legacy mykey keys as grok profile default.
+if PROFILE.endswith("_config") or PROFILE.startswith("native_"):
+    PROFILE = "grok"
+CONFIG_NAME = PROFILE  # backward-compatible summary field
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "grok-4.5")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "grok")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 REAL_MCP_OPT_IN = os.environ.get("GA_RUN_REAL_MCP_E2E") == "1"
 OUTPUT_DETAIL = os.environ.get("GA_COMPLEX_WORKFLOW_DETAIL_OUT")
@@ -81,9 +90,10 @@ PLANNER_TASK = (
 class BoundedPlannerClient(RealPlannerClient):
     def complete(self, messages: list[dict]) -> dict:
         self.calls.append(messages)
-        from llmcore import resolve_session
+        from workflow_llm import binding_from_profile, make_session
 
-        session = resolve_session(self.config_name)
+        profile = getattr(self, "profile_name", None) or getattr(self, "config_name", None) or PROFILE
+        session = make_session(binding_from_profile(profile))
         prompt = messages[0]["content"] + """
 
 复杂 E2E planner 附加要求：
@@ -201,7 +211,7 @@ def main() -> int:
             status="running",
             metadata={"workflowName": "complex-mcp-skill-coding-real-e2e", "workflowTaskType": "mixed", "plannerMode": "prompt_guided+hand_checked_required_tools"},
         ))
-        runner = NativeGPTChildAgentRunner(config_name=CONFIG_NAME, max_tokens=1024, max_turns=14)
+        runner = NativeGPTChildAgentRunner(profile_name=PROFILE, max_tokens=1024, max_turns=14)
         start = time.time()
         outcome = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2, max_total=6), timeout_seconds=900.0).run(run, args={"workspacePath": str(workspace)})
         elapsed = time.time() - start

@@ -107,10 +107,23 @@ def _build_capability_snapshot(tools: list[dict], mcp_discovery: dict) -> dict:
 
 
 class NativeGPTChildAgentRunner:
+    """Real workflow child agent.
+
+    LLM resolution priority for each job start:
+      1. client_factory / session_factory (tests)
+      2. binding_provider() — typically main-session /model snapshot
+      3. profile_name — fixed llm.yaml profile
+      4. workflow_llm.binding_from_env() — GA_WORKFLOW_LLM_PROFILE or active_profile
+
+    Does **not** default to mykey resolve_client("native_oai_config").
+    """
+
     def __init__(
         self,
         *,
-        config_name: str = "native_oai_config",
+        config_name: str | None = None,
+        profile_name: str | None = None,
+        binding_provider=None,
         session_factory=None,
         client_factory=None,
         tools_schema_factory=None,
@@ -119,7 +132,10 @@ class NativeGPTChildAgentRunner:
         enable_tools: bool = True,
         max_turns: int = 40,
     ):
-        self.config_name = config_name
+        # config_name kept for factory call signature / legacy tests; not used for mykey resolve by default.
+        self.config_name = config_name if config_name is not None else (profile_name or "")
+        self.profile_name = profile_name
+        self.binding_provider = binding_provider
         self.session_factory = session_factory
         self.client_factory = client_factory
         self.tools_schema_factory = tools_schema_factory
@@ -128,11 +144,12 @@ class NativeGPTChildAgentRunner:
         self.enable_tools = bool(enable_tools)
         self.max_turns = int(max_turns)
         self.last_capability_snapshot: dict = {}
+        self.last_llm_binding: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     def start(self, job) -> None:
-        executable, is_tool_client = self._new_executable()
+        executable, is_tool_client, llm_meta = self._new_executable()
         target = getattr(executable, "backend", executable)
         if self.max_tokens is not None and hasattr(target, "max_tokens"):
             target.max_tokens = self.max_tokens
@@ -142,6 +159,7 @@ class NativeGPTChildAgentRunner:
             "executable": executable,
             "session": target,
             "is_tool_client": is_tool_client,
+            "llm_meta": dict(llm_meta or {}),
             "handler": None,
             "cancelled": False,
             "result": None,
@@ -149,6 +167,7 @@ class NativeGPTChildAgentRunner:
         }
         with self._lock:
             self._states[job.job_id] = state
+            self.last_llm_binding = dict(llm_meta or {})
         thread = threading.Thread(target=self._run_job, args=(job, state), daemon=True)
         state["thread"] = thread
         thread.start()
@@ -175,21 +194,38 @@ class NativeGPTChildAgentRunner:
             handler.cancel()
 
     def _new_executable(self):
+        """Return (executable, is_tool_client, llm_meta_dict)."""
+        factory_key = self.config_name or self.profile_name or "workflow"
         if self.client_factory is not None:
             try:
-                return self.client_factory(self.config_name), True
+                return self.client_factory(factory_key), True, {"llmProfile": str(factory_key), "llmModel": "", "llmSource": "client_factory"}
             except TypeError:
-                return self.client_factory(), True
+                return self.client_factory(), True, {"llmProfile": str(factory_key), "llmModel": "", "llmSource": "client_factory"}
         if self.session_factory is not None:
             try:
-                return self.session_factory(self.config_name), False
+                return self.session_factory(factory_key), False, {"llmProfile": str(factory_key), "llmModel": "", "llmSource": "session_factory"}
             except TypeError:
-                return self.session_factory(), False
+                return self.session_factory(), False, {"llmProfile": str(factory_key), "llmModel": "", "llmSource": "session_factory"}
+
+        from workflow_llm import (
+            binding_from_env,
+            binding_from_profile,
+            make_session,
+            make_tool_client,
+        )
+
+        if self.binding_provider is not None:
+            binding = self.binding_provider()
+        elif self.profile_name:
+            binding = binding_from_profile(self.profile_name)
+        else:
+            binding = binding_from_env()
+        meta = binding.as_metadata()
+        # Keep config_name in sync for any code reading it (progress / debug).
+        self.config_name = binding.profile_name
         if self.enable_tools:
-            from llmcore import resolve_client
-            return resolve_client(self.config_name), True
-        from llmcore import resolve_session
-        return resolve_session(self.config_name), False
+            return make_tool_client(binding), True, meta
+        return make_session(binding), False, meta
 
     def _run_job(self, job, state: dict) -> None:
         executable = state["executable"]
@@ -200,6 +236,7 @@ class NativeGPTChildAgentRunner:
         started_at = time.time()
         profile = self._permission_profile(job)
         version = self._permission_policy_version(job)
+        llm_meta = dict(state.get("llm_meta") or {})
         transcript_events.append(
             {
                 "type": "metadata",
@@ -210,7 +247,10 @@ class NativeGPTChildAgentRunner:
                 "options": copy.deepcopy(job.metadata.get("options") or {}),
                 "permissionProfile": profile,
                 "permissionPolicyVersion": version,
-                "configName": self.config_name,
+                "configName": llm_meta.get("llmProfile") or self.config_name,
+                "llmProfile": llm_meta.get("llmProfile") or self.config_name or "",
+                "llmModel": llm_meta.get("llmModel") or "",
+                "llmSource": llm_meta.get("llmSource") or "",
                 "startedAt": started_at,
             }
         )

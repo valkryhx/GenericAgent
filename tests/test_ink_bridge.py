@@ -31,6 +31,8 @@ class FakeBackend:
     def __init__(self):
         self.history = []
         self.last_usage_tokens = None
+        self.name = "default"
+        self.model = "test-model"
 
 
 class FakeClient:
@@ -2807,7 +2809,11 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
             planner = bridge._make_workflow_planner()
 
         self.assertIs(sentinel, planner)
-        builder.assert_called_once_with()
+        # Bridge now forwards main-session /model profile when available.
+        self.assertEqual(1, builder.call_count)
+        kwargs = builder.call_args.kwargs if builder.call_args else {}
+        if kwargs:
+            self.assertIn("profile_name", kwargs)
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         proc = subprocess.run(

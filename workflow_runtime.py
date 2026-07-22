@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_child_agent import AgentResult, FakeChildAgentRunner
+from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
 from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
@@ -50,19 +50,53 @@ class WorkflowRuntime:
         scheduler_config: SchedulerConfig | None = None,
         worker_path: str | Path | None = None,
         timeout_seconds: float = 10.0,
+        llm_binding_provider=None,
     ):
         self.store = store or WorkflowStore()
-        self.runner = runner or FakeChildAgentRunner()
+        self.llm_binding_provider = llm_binding_provider
+        # Production default: real child via llm.yaml (or binding_provider).
+        # Unit tests must pass runner=FakeChildAgentRunner() explicitly.
+        if runner is not None:
+            self.runner = runner
+        else:
+            self.runner = self._default_runner()
         self.scheduler_config = scheduler_config or SchedulerConfig()
         self.worker_path = Path(worker_path) if worker_path else Path(__file__).resolve().with_name("workflow_js_worker.js")
         self.timeout_seconds = float(timeout_seconds)
         self._logs: list[str] = []
         self._phases: list[str] = []
 
+    def _default_runner(self):
+        kwargs = {"enable_tools": True}
+        if self.llm_binding_provider is not None:
+            kwargs["binding_provider"] = self.llm_binding_provider
+        return NativeGPTChildAgentRunner(**kwargs)
+
     def run(self, run: WorkflowRun, *, args: Any = None, resume_from_run_id: str | None = None) -> WorkflowRuntimeResult:
         self._scan_script(run.script)
         self._logs = []
         self._phases = []
+        # Record LLM binding snapshot for audit (best-effort; no secrets).
+        try:
+            from workflow_llm import binding_from_env, resolve_binding
+
+            if self.llm_binding_provider is not None:
+                binding = resolve_binding(binding_provider=self.llm_binding_provider)
+            elif hasattr(self.runner, "binding_provider") and getattr(self.runner, "binding_provider", None):
+                binding = resolve_binding(binding_provider=self.runner.binding_provider)
+            elif hasattr(self.runner, "profile_name") and getattr(self.runner, "profile_name", None):
+                binding = resolve_binding(profile_name=self.runner.profile_name)
+            elif isinstance(self.runner, FakeChildAgentRunner):
+                binding = None
+            else:
+                binding = binding_from_env()
+            if binding is not None:
+                meta = run.metadata if isinstance(run.metadata, dict) else {}
+                meta = dict(meta)
+                meta.update(binding.as_metadata())
+                run.metadata = meta
+        except Exception:
+            pass
         if not run.artifact_dir:
             run = self.store.create_run(run)
         if run.status in {"draft", "awaiting_approval"}:

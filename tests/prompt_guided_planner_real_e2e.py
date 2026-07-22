@@ -22,9 +22,16 @@ from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
+CONFIG_NAME = (
+    os.environ.get("GA_WORKFLOW_LLM_PROFILE")
+    or os.environ.get("GA_REAL_API_PROFILE")
+    or os.environ.get("GA_REAL_API_CONFIG")
+    or "grok"
+)
+if CONFIG_NAME.endswith("_config") or CONFIG_NAME.startswith("native_"):
+    CONFIG_NAME = "grok"
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "grok-4.5")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "grok")
 OPT_IN = os.environ.get("GA_RUN_REAL_PROMPT_PLANNER_E2E") == "1"
 
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})")
@@ -64,14 +71,16 @@ SCENARIOS = [
 
 class RealPlannerClient:
     def __init__(self, config_name: str):
+        # config_name is llm.yaml profile name (e.g. grok)
         self.config_name = config_name
+        self.profile_name = config_name
         self.calls: list[list[dict]] = []
         self.raw_outputs: list[str] = []
 
     def complete(self, messages: list[dict]) -> dict:
-        from llmcore import resolve_session
+        from workflow_llm import binding_from_profile, make_session
 
-        session = resolve_session(self.config_name)
+        session = make_session(binding_from_profile(self.profile_name or self.config_name))
         self.calls.append(messages)
         prompt = messages[0]["content"] + """
 
@@ -122,21 +131,27 @@ def sanitize(value: Any) -> Any:
 
 
 def check_profile(summary: dict) -> bool:
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
+    from workflow_llm import binding_from_profile
 
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
-    profile = {
-        "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode", "chat_completions"),
-        "loadLogChars": len(captured.getvalue()),
-    }
-    summary["profile"] = profile
-    summary["profileOk"] = profile["model"] == EXPECTED_MODEL and (not EXPECTED_NAME or profile["name"] == EXPECTED_NAME)
-    return summary["profileOk"]
+    try:
+        binding = binding_from_profile(CONFIG_NAME)
+        profile = {
+            "configName": CONFIG_NAME,
+            "profileName": binding.profile_name,
+            "name": binding.profile_name,
+            "model": binding.model_id,
+            "apiMode": "yaml",
+            "loadLogChars": 0,
+        }
+        summary["profile"] = profile
+        summary["profileOk"] = profile["model"] == EXPECTED_MODEL and (
+            not EXPECTED_NAME or profile["name"] == EXPECTED_NAME
+        )
+        return bool(summary["profileOk"])
+    except Exception as exc:
+        summary["profile"] = {"error": f"{type(exc).__name__}: {exc}", "configName": CONFIG_NAME}
+        summary["profileOk"] = False
+        return False
 
 
 def phase_titles(plan: dict) -> list[str]:

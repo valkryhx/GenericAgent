@@ -197,12 +197,26 @@ class WorkflowPlanner:
 
 
 class NativeWorkflowPlannerClient:
-    def __init__(self, config_name: str = "native_oai_config"):
-        self.config_name = str(config_name or "native_oai_config")
+    """LLM planner client using llm.yaml profile (not mykey config keys).
+
+    Prefer profile_name / binding_provider. legacy `config_name` is treated as a
+    profile name when it does not look like a mykey *_config key.
+    """
+
+    def __init__(
+        self,
+        config_name: str | None = None,
+        *,
+        profile_name: str | None = None,
+        binding_provider=None,
+    ):
+        self.profile_name = profile_name or config_name
+        self.config_name = self.profile_name  # backward-compatible attribute for tests
+        self.binding_provider = binding_provider
         self.raw_outputs: list[str] = []
 
     def complete(self, messages: list[dict]) -> dict:
-        session = resolve_session(self.config_name)
+        session = self._open_session()
         prompt = str((messages or [{}])[0].get("content") or "") + """
 
 硬性输出要求：
@@ -215,6 +229,17 @@ class NativeWorkflowPlannerClient:
         raw = "".join(str(chunk) for chunk in session.ask({"role": "user", "content": [{"type": "text", "text": prompt}]}))
         self.raw_outputs.append(raw)
         return parse_json_object(raw)
+
+    def _open_session(self):
+        from workflow_llm import make_session, resolve_binding
+
+        binding = resolve_binding(
+            profile_name=self.profile_name,
+            binding_provider=self.binding_provider,
+        )
+        self.config_name = binding.profile_name
+        self.profile_name = binding.profile_name
+        return make_session(binding)
 
 
 def parse_json_object(raw: str) -> dict:
@@ -235,26 +260,46 @@ def parse_json_object(raw: str) -> dict:
 
 
 def resolve_session(config_name: str):
-    from llmcore import resolve_session as _resolve_session
+    """Open a planner session for a llm.yaml *profile* name.
 
-    return _resolve_session(config_name)
+    Legacy name kept for tests that patch ``workflow_planner.resolve_session``.
+    """
+    from workflow_llm import binding_from_env, binding_from_profile, make_session
+
+    name = str(config_name or "").strip()
+    if name and not name.endswith("_config") and not name.startswith("native_"):
+        return make_session(binding_from_profile(name))
+    # Fall back to env/active_profile rather than mykey.
+    return make_session(binding_from_env())
 
 
-def build_workflow_planner_from_env() -> WorkflowPlanner | LLMWorkflowPlanner:
+def build_workflow_planner_from_env(
+    *,
+    profile_name: str | None = None,
+) -> WorkflowPlanner | LLMWorkflowPlanner:
     mode = str(os.environ.get("GA_WORKFLOW_PLANNER_MODE") or "deterministic").strip().lower()
     if mode not in {"prompt_guided", "llm", "real"}:
         return WorkflowPlanner()
-    config_name = (
-        os.environ.get("GA_WORKFLOW_PLANNER_CONFIG")
+    chosen = (
+        profile_name
+        or os.environ.get("GA_WORKFLOW_LLM_PROFILE")
+        or os.environ.get("GA_REAL_API_PROFILE")
+        or os.environ.get("GA_WORKFLOW_PLANNER_CONFIG")
         or os.environ.get("GA_REAL_API_CONFIG")
-        or "native_oai_config"
-    )
+        or ""
+    ).strip()
+    # Drop legacy mykey-style keys so we use yaml active_profile via client default.
+    if chosen.endswith("_config") or chosen.startswith("native_"):
+        chosen = ""
     try:
         repair_attempts = int(os.environ.get("GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS") or "1")
     except ValueError:
         repair_attempts = 1
+    client_kwargs: dict[str, Any] = {}
+    if chosen:
+        client_kwargs["profile_name"] = chosen
     return LLMWorkflowPlanner(
-        client=NativeWorkflowPlannerClient(config_name=config_name),
+        client=NativeWorkflowPlannerClient(**client_kwargs),
         fallback=WorkflowPlanner(),
         max_repair_attempts=repair_attempts,
     )

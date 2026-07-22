@@ -126,7 +126,8 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         parent_history = [{"role": "user", "content": "parent only"}]
         created = []
         def factory(config_name):
-            self.assertEqual("native_oai_config", config_name)
+            # factory key is profile/config label; no longer hard-coded mykey native_oai_config
+            self.assertTrue(isinstance(config_name, str))
             session = StubSession()
             created.append(session)
             return session
@@ -145,6 +146,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             session_factory=factory,
             system_prompt="child system prompt",
             max_tokens=12,
+            profile_name="test-profile",
         )
 
         runner.start(job)

@@ -747,7 +747,17 @@ class GenericAgentBridge:
             return self.workflow_planner_factory()
         with backend_output_redirect():
             from workflow_planner import build_workflow_planner_from_env
-        return build_workflow_planner_from_env()
+            from workflow_llm import binding_from_agent
+
+            # Prefer main-session /model profile when agent is available.
+            agent = self.agent
+            try:
+                binding = binding_from_agent(agent) if agent is not None else None
+            except Exception:
+                binding = None
+            if binding is not None:
+                return build_workflow_planner_from_env(profile_name=binding.profile_name)
+            return build_workflow_planner_from_env()
 
     def _make_workflow_runtime(self, *, timeout_seconds: float | None):
         kwargs = {"store": self.workflow_store}
@@ -756,8 +766,22 @@ class GenericAgentBridge:
         if self.workflow_runtime_factory is not None:
             return self.workflow_runtime_factory(**kwargs)
         with backend_output_redirect():
+            from workflow_child_agent import NativeGPTChildAgentRunner
+            from workflow_llm import binding_from_agent
             from workflow_runtime import WorkflowRuntime
-        return WorkflowRuntime(**kwargs)
+
+            agent = self.agent
+
+            def _binding_provider():
+                return binding_from_agent(agent)
+
+            runner = NativeGPTChildAgentRunner(
+                binding_provider=_binding_provider,
+                enable_tools=True,
+            )
+            kwargs["runner"] = runner
+            kwargs["llm_binding_provider"] = _binding_provider
+            return WorkflowRuntime(**kwargs)
 
     def _emit_workflow_events(self, run_id: str) -> None:
         seen = self._workflow_emitted_sequences.setdefault(run_id, set())

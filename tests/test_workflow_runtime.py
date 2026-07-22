@@ -339,7 +339,7 @@ log('HTTP 200 Authorization: Bearer sk-log-secret; x-api-key: xkey-log-secret; C
 return { ok: true }
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             outcome = runtime.run(run)
 
@@ -364,7 +364,7 @@ return {
 }
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             outcome = runtime.run(run)
 
@@ -387,7 +387,7 @@ return {
 throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secret; Cookie: sid=cookie_secret; request_id=req_123')
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaisesRegex(RuntimeError, "HTTP 500") as raised:
                 runtime.run(run)
@@ -407,7 +407,7 @@ throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secr
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return process.env", status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaises(ValueError):
                 runtime.run(run)
@@ -418,7 +418,7 @@ throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secr
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="throw new Error('boom')", status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaises(RuntimeError):
                 runtime.run(run)
@@ -436,7 +436,7 @@ const results = await parallel([
 return results
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaisesRegex(RuntimeError, "GA_P8_PARALLEL_THUNK_THROW"):
                 runtime.run(run)
@@ -447,7 +447,7 @@ return results
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return 1n", status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaisesRegex(RuntimeError, "BigInt"):
                 runtime.run(run)
@@ -463,7 +463,7 @@ value.self = value
 return value
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
             with self.assertRaisesRegex(RuntimeError, "circular"):
                 runtime.run(run)
@@ -1339,7 +1339,7 @@ return [first.summary, second.summary, third.summary]
             store = WorkflowStore(root=tmp)
             script = "return await new Promise(() => {})"
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, timeout_seconds=0.2)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=0.2)
 
             started_at = time.monotonic()
             with self.assertRaisesRegex(RuntimeError, "(?i)(timeout|deadline)"):
@@ -1358,7 +1358,7 @@ return [first.summary, second.summary, third.summary]
             store = WorkflowStore(root=tmp)
             script = "while (true) {}"
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, timeout_seconds=0.2)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=0.2)
 
             started_at = time.monotonic()
             with self.assertRaisesRegex(RuntimeError, "(?i)deadline"):
@@ -1517,7 +1517,7 @@ log('ready for external kill')
 return await new Promise(() => {})
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, timeout_seconds=5.0)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
             errors = []
 
             thread = threading.Thread(target=lambda: self._run_and_capture(runtime, run, errors), daemon=True)
@@ -1555,7 +1555,7 @@ return await new Promise(() => {})
                     jobs=[WorkflowJob(job_id="agent_1", prompt="work", status="running")],
                 )
             )
-            runtime = WorkflowRuntime(store=store, timeout_seconds=0.1)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=0.1)
             scheduler = AgentScheduler(store=store, run=run, runner=runtime.runner, manage_run_completion=False)
             killed = store.load_run("wf_test")
             killed.status = "killed"
@@ -1571,7 +1571,7 @@ return await new Promise(() => {})
 
     def test_runtime_terminate_escalates_to_kill_and_waits(self):
         process = FakeProcessForTerminate()
-        runtime = WorkflowRuntime()
+        runtime = WorkflowRuntime(runner=FakeChildAgentRunner())
 
         runtime._terminate(process)
 

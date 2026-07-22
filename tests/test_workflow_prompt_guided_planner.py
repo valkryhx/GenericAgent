@@ -331,7 +331,7 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
         self.assertEqual("review", parsed["taskType"])
         self.assertEqual([], parsed["phases"])
 
-    def test_native_client_uses_resolve_session_and_parses_json_without_markdown(self):
+    def test_native_client_uses_yaml_session_and_parses_json_without_markdown(self):
         class FakeSession:
             def __init__(self):
                 self.messages = []
@@ -341,12 +341,13 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
                 return ['```json\n', json.dumps(review_plan(), ensure_ascii=False), '\n```']
 
         fake_session = FakeSession()
-        with patch("workflow_planner.resolve_session", return_value=fake_session) as resolve:
-            client = NativeWorkflowPlannerClient(config_name="planner_config")
+        with patch("workflow_llm.make_session", return_value=fake_session) as make_sess:
+            client = NativeWorkflowPlannerClient(profile_name="grok")
             response = client.complete([{"role": "system", "content": "planner prompt"}])
 
         self.assertEqual(review_plan()["taskType"], response["taskType"])
-        resolve.assert_called_once_with("planner_config")
+        make_sess.assert_called_once()
+        self.assertEqual("grok", client.profile_name)
         self.assertEqual("user", fake_session.messages[0]["role"])
         text = fake_session.messages[0]["content"][0]["text"]
         self.assertIn("planner prompt", text)
@@ -366,7 +367,7 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
             os.environ,
             {
                 "GA_WORKFLOW_PLANNER_MODE": "prompt_guided",
-                "GA_WORKFLOW_PLANNER_CONFIG": "planner_config",
+                "GA_WORKFLOW_LLM_PROFILE": "grok",
                 "GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS": "1",
             },
             clear=False,
@@ -375,15 +376,32 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
 
         self.assertIsInstance(planner, LLMWorkflowPlanner)
         self.assertIsInstance(planner.client, NativeWorkflowPlannerClient)
-        self.assertEqual("planner_config", planner.client.config_name)
+        self.assertEqual("grok", planner.client.profile_name or planner.client.config_name)
         self.assertEqual(1, planner.max_repair_attempts)
 
     def test_build_workflow_planner_from_env_accepts_real_api_alias(self):
-        with patch.dict(os.environ, {"GA_WORKFLOW_PLANNER_MODE": "real", "GA_REAL_API_CONFIG": "native_oai_config"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"GA_WORKFLOW_PLANNER_MODE": "real", "GA_WORKFLOW_LLM_PROFILE": "grok"},
+            clear=False,
+        ):
             planner = build_workflow_planner_from_env()
 
         self.assertIsInstance(planner, LLMWorkflowPlanner)
-        self.assertEqual("native_oai_config", planner.client.config_name)
+        self.assertEqual("grok", planner.client.profile_name or planner.client.config_name)
+
+    def test_build_workflow_planner_from_env_ignores_legacy_mykey_config(self):
+        with patch.dict(
+            os.environ,
+            {"GA_WORKFLOW_PLANNER_MODE": "real", "GA_REAL_API_CONFIG": "native_oai_config"},
+            clear=False,
+        ):
+            os.environ.pop("GA_WORKFLOW_LLM_PROFILE", None)
+            planner = build_workflow_planner_from_env()
+
+        self.assertIsInstance(planner, LLMWorkflowPlanner)
+        # legacy mykey key dropped → client has empty profile (uses binding_from_env at complete-time)
+        self.assertFalse(str(planner.client.profile_name or "").startswith("native_"))
 
 
 if __name__ == "__main__":
