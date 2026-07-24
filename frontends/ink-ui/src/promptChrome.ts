@@ -1,4 +1,5 @@
 import stringWidth from 'string-width'
+import { clampGraphemeOffset, terminalSegments, terminalTextWidth, wrapTerminalText } from './terminalText.js'
 
 export const inputFrameBorderStyle = {
   topLeft: '',
@@ -16,17 +17,6 @@ export const inputGutterColumns = 2
 export const inputRightReserveColumns = 1
 export const inputLeftPaddingColumns = 1
 
-export function inputPrompt(input: string): string {
-  return `> ${input}`
-}
-
-export function inputPromptLines(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS): string[] {
-  const rows = input.split('\n')
-  const visibleRows = Math.max(1, Math.floor(maxRows))
-  const start = Math.max(0, rows.length - visibleRows)
-  return rows.slice(start).map((line, index) => `${start + index === 0 ? '> ' : '  '}${line}`)
-}
-
 export type InputLineItem = {
   gutter: string
   text: string
@@ -37,53 +27,55 @@ export type InputLinePart = {
   text: string
   inverse?: boolean
 }
+export type InputViewport = {
+  lines: InputLineItem[]
+  totalRows: number
+  startRow: number
+  cursorLine: number
+  cursorColumn: number
+}
 
 export function inputContentColumns(columns: number): number {
   return Math.max(1, Math.floor(columns) - inputLeftPaddingColumns - inputGutterColumns - inputRightReserveColumns)
 }
 
-function clampCursorOffset(input: string, cursorOffset: number): number {
-  return Math.max(0, Math.min(input.length, Math.floor(cursorOffset)))
-}
-
 function graphemes(text: string): string[] {
-  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
-    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-    return Array.from(segmenter.segment(text), part => part.segment)
+  return terminalSegments(text).map(segment => segment.text)
+}
+
+export function inputViewport(
+  input: string,
+  options: { columns: number; maxRows?: number; cursorOffset?: number },
+): InputViewport {
+  const wrapped = wrapTerminalText(input, options.columns)
+  const totalRows = wrapped.length
+  const visibleRows = Math.max(1, Math.floor(options.maxRows ?? DEFAULT_MAX_INPUT_ROWS))
+  const cursorOffset = clampGraphemeOffset(input, options.cursorOffset ?? input.length)
+  let cursorRow = 0
+
+  for (let index = 0; index < wrapped.length; index += 1) {
+    if (wrapped[index]!.startOffset <= cursorOffset) cursorRow = index
   }
-  return Array.from(text)
-}
 
-function textBeforeOffset(text: string, offset: number): string {
-  return text.slice(0, Math.max(0, Math.min(text.length, offset)))
-}
-
-export function inputPromptLineItems(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS, cursorOffset = input.length): InputLineItem[] {
-  const rows = input.split('\n')
-  const visibleRows = Math.max(1, Math.floor(maxRows))
-  const offset = clampCursorOffset(input, cursorOffset)
-  let rowStart = 0
-  let cursorRow = rows.length - 1
-  let cursorColumnInRow = rows[cursorRow]?.length ?? 0
-
-  for (let index = 0; index < rows.length; index += 1) {
-    const rowEnd = rowStart + rows[index].length
-    if (offset <= rowEnd || index === rows.length - 1) {
-      cursorRow = index
-      cursorColumnInRow = offset - rowStart
-      break
+  const cursorVisualRow = wrapped[cursorRow]!
+  const cursorColumn = Math.min(
+    cursorVisualRow.width,
+    terminalTextWidth(input.slice(cursorVisualRow.startOffset, Math.min(cursorOffset, cursorVisualRow.endOffset))),
+  )
+  const maxStartRow = Math.max(0, totalRows - visibleRows)
+  const startRow = Math.min(Math.max(0, cursorRow - visibleRows + 1), maxStartRow)
+  const visible = wrapped.slice(startRow, startRow + visibleRows)
+  const cursorLine = cursorRow - startRow
+  const lines = visible.map((line, index): InputLineItem => {
+    const visualRow = startRow + index
+    return {
+      gutter: visualRow === 0 ? '> ' : '  ',
+      text: line.text,
+      ...(visualRow === cursorRow ? { cursorColumn } : {}),
     }
-    rowStart = rowEnd + 1
-  }
-
-  const maxStart = Math.max(0, rows.length - visibleRows)
-  const start = Math.min(Math.max(0, cursorRow - visibleRows + 1), maxStart)
-  return rows.slice(start, start + visibleRows).map((line, index) => {
-    const logicalRow = start + index
-    const item: InputLineItem = { gutter: logicalRow === 0 ? '> ' : '  ', text: line }
-    if (logicalRow === cursorRow) item.cursorColumn = stringWidth(textBeforeOffset(line, cursorColumnInRow))
-    return item
   })
+
+  return { lines, totalRows, startRow, cursorLine, cursorColumn }
 }
 
 export function renderInputLine(line: string, showCursor: boolean, cursorColumn = line.length): InputLinePart[] {
@@ -133,8 +125,4 @@ export function fixedInputLine(line: string, columns: number): string {
     width += segmentWidth
   }
   return rendered + ' '.repeat(Math.max(0, targetWidth - width))
-}
-
-export function inputVisibleRowCount(input: string, maxRows = DEFAULT_MAX_INPUT_ROWS): number {
-  return Math.min(input.split('\n').length, Math.max(1, Math.floor(maxRows)))
 }

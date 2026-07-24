@@ -9,10 +9,12 @@ export function inputChromeSections({
   hasPanel: boolean
   hasSlashSuggestions: boolean
 }): InputChromeSection[] {
+  // Codex-aligned: composer first, popup (slash/panel) below.
+  // Layout::vertical([composer, popup]) in chat_composer.rs.
   return [
     ...(hasError ? ['error' as const] : []),
-    ...(hasPanel ? ['panel' as const] : hasSlashSuggestions ? ['slashSuggestions' as const] : []),
     'hint',
     'input',
+    ...(hasPanel ? ['panel' as const] : hasSlashSuggestions ? ['slashSuggestions' as const] : []),
   ]
 }

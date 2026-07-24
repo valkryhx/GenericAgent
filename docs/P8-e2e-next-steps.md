@@ -1,0 +1,1010 @@
+# P8 Dynamic Workflows E2E 覆盖分析、缺口与下一步执行计划
+
+> 由动态工作流（7 个并行智能体）分析生成
+> 基于: `docs/P8-e2e-todo.md` + 完整代码库交叉对照
+> 生成日期: 2026-06-05
+
+---
+
+## 1. P8 当前状态总览
+
+### 1.1 目标回顾
+
+P8 的目标是实现 Dynamic Workflows 的 Resume / Cache Replay 机制。核心能力：
+
+- 基于 JS Worker 的 workflow 脚本运行时 (`WorkflowRuntime`)
+- 真实 child agent 启动 (`NativeGPTChildAgentRunner`)
+- 最长成功前缀缓存复用 (`resume_from_run_id` + `cache_key` + 前缀匹配)
+- Ink bridge 完整生命周期（draft → approve → running → final）
+- Child agent 的 result/transcript artifact 隔离
+- Secret 扫描安全门
+- Permission profile/policy version 进入 cache key
+
+### 1.2 交付提交
+
+P8 分布在以下提交（branch `feat/dynamic-workflows-foundation`）：
+
+| 提交 | 说明 |
+|---|---|
+| `c71da39` | Foundation models and store |
+| `4a26e1d` | Scheduler foundation |
+| `41eab7b` | 纵向集成测试 |
+| `7b7f5b5` | 真实子智能体运行器 |
+| `bdf84a2` | 工作流工具权限门 |
+| `b0f0bb8` | 记录工具权限事件到工作流日志 |
+| `389deed` | JS 运行时最小切片 |
+| `426ab2c` | 并发和超时边界测试 |
+| `0a3b330` | 接入 Ink 工作流协议 |
+| `f840926` | 增加 Ink 工作流审批界面 |
+| **`aa0a2b0`** | **实现 P8 resume 缓存复用（关键交付提交）** |
+| `93c635e` | 补充 P8 failed 和 killed resume 真实 E2E |
+| `fa2954d` | 补充 P8 权限继承 deterministic E2E |
+| `0eee3ef` | 补完 Native child 工具继承验证 |
+| `4f4e04f` | 补充真实 API 工具继承 E2E |
+| `42b0b6c` | 增加真实 MCP 诊断 E2E |
+| `9e00a05` | 补充 bridge 非成功终态覆盖 |
+| `f8b1850` | 补充 interrupted resume 前缀复用覆盖 |
+| `1c8933f` | 增强真实 API 失败诊断 |
+| `d13bde5` | 补充 bridge timeout 终态覆盖 |
+| `c7616ce` | 补充真实 API timeout 诊断覆盖 |
+| `7aa318b` | 补充 parallel 部分失败 E2E 覆盖 |
+| `394070b` | 补充 bridge stop resume 诊断覆盖 |
+| `cd662fb` | 补充 real provider mid-call stop diagnostic-only 覆盖 |
+| `1370d08` | 补充真实 API stability 诊断 harness |
+| `cc057a3` | 补充 Rate Limit / 429 deterministic 覆盖与真实 API stress diagnostic harness |
+| `b28c3b8` | 补充 P8 bridge cache hit/miss 半集成覆盖 |
+| `2d6a943` | 增加 provider 错误全链路脱敏 |
+| `c3c0231` | 补齐 P8 脱敏完整性覆盖 |
+| `85f9b2d` | 收紧 resume cache permission/tools/MCP 上下文边界 |
+| `6848a67` | 避免大 transcript 内联到 workflow event，并将 cached transcript copy 改为 streaming |
+
+### 1.3 按层覆盖总结
+
+| 层 | 当前覆盖 | 文件 | 用例数 |
+|---|---|---|---|
+| **Unit (Runtime)** | 完整 — phase/log/agent/parallel/pipeline/timeout/cancel/resume/kill/parallel partial failure/provider 429/worker exception/non-serializable return/agent options/provider anomaly artifact 边界 | `test_workflow_runtime.py` | 34 |
+| **Unit (Scheduler)** | 完整 — register/cache_key/permission/failure_policy/stop/options 防御校验 | `test_workflow_scheduler.py` | 18 |
+| **Unit (Store)** | 完整 — create/event/write_result/transcript/resume_projection/permission | `test_workflow_store.py` | 9 |
+| **Unit (Bridge)** | 正常路径 + resume 拒绝路径 + stop + 非成功终态事件覆盖 + timeout failed/final/error/idle + 真实 `WorkflowRuntime` JS 异常脚本/options failed/final/error/idle + parallel partial failure/provider 429/provider anomaly final/error/idle + stop/resume prefix 覆盖 | `test_ink_bridge.py` | 59 |
+| **Semi-real P8 E2E** | provider anomaly 半真实 E2E 已覆盖 empty content、usage missing、no text block、SDK-like exception 的 runtime artifact/transcript/final 与 bridge final/error/idle；默认不烧真实 API | `test_p8_provider_anomaly_e2e.py` | 8 |
+| **Real API E2E** | 正常主路径 + failed/killed/interrupted resume + 权限 metadata smoke + 真实 Native child file/skill/stub MCP tool calling + 真实 API timeout bridge diagnostic + parallel partial failure diagnostic + bridge stop/resume diagnostic + real provider mid-call stop diagnostic + stability diagnostic harness + stress diagnostic harness + 真实 MCP diagnostic（opt-in）；真实 native GPT 主套件已通过 | `p8_real_api_e2e.py` / `p8_real_api_stability_e2e.py` / `p8_real_api_stress_e2e.py` | 6 main cases + 5 diagnostics + 1 stability harness + 1 stress harness |
+| **Bridge E2E** | succeeded 主路径已覆盖；failed/killed/interrupted 终态已有 bridge 单元/半集成覆盖；timeout failed/final/error/idle 已有近真实 bridge 覆盖并补充真实 API diagnostic；parallel partial failure bridge final/error/idle 已补；provider 429 bridge final/error/idle 已补；bridge workflow_stop + resume prefix 串联已补；real provider mid-call stop diagnostic 已补为观察项 | `p8_real_api_e2e.py` / `test_ink_bridge.py` | 1 real bridge case + bridge unit coverage + timeout/parallel/429/stop-resume/mid-call diagnostics |
+
+### 1.4 总体覆盖度估算
+
+**按 TODO 文档的 12 项评估（更新至 `6848a67` 及后续 bridge cache、provider 脱敏、resume cache context、大 transcript 隔离补强）：**
+
+- ✅ 完全或主路径充分覆盖：8 项（正常主路径、failed/killed/interrupted resume 前缀复用、权限/MCP/Skills/Tools 继承、parallel 部分失败 deterministic/diagnostic 覆盖、bridge cache hit/miss 半集成、provider anomaly 半真实 contract、provider error/redaction 完整性、大 transcript 隔离 deterministic/runtime + bridge 核心覆盖）
+- 🔶 单元/半集成覆盖充分但真实 API E2E 仍有限：2 项（bridge 非成功终态真实 API 变体、cache key 真实 API 成本代理 diagnostic）
+- 🔶 观察/扩展项：2 项（真实 API timeout/stability/stress 长期观察、Bridge final/detail artifact fallback robustness）
+- ❌ 仍基本未覆盖：0 项；网络抖动/稳定性已有基础 harness，rate limit/429 已补 deterministic + stress diagnostic 基础覆盖，真实 API 返回格式异常已补默认可跑的半真实 E2E characterization，resume cache permission/tools/MCP context invalidation 已完成
+
+**粗估百分比：**
+- 单元测试覆盖率：~90%（核心 runtime/scheduler/store/bridge 路径基本覆盖，bridge 非成功终态与 timeout final/error/idle 已补）
+- 真实 API E2E 覆盖率：~70%（正常路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承、timeout bridge diagnostic、parallel partial failure diagnostic、bridge stop/resume diagnostic、real provider mid-call stop diagnostic、真实 native GPT 主套件通过）
+- Bridge 覆盖率：~70%（succeeded 主路径、resume 拒绝、stop、非成功终态事件、timeout failed/final/error/idle、parallel partial failure final/error/idle、workflow_stop + resume prefix 串联已覆盖；real provider mid-call stop 已有 diagnostic-only 观察项）
+- P0 阻塞缺口：0
+
+---
+
+## 2. 已验证完成项
+
+### 2.1 正常主路径真实 API E2E（已提交 `aa0a2b0`）
+
+**文件：** `tests/p8_real_api_e2e.py`
+**用例：** `run_runtime_real_api_case()` + `run_bridge_real_api_case()`
+
+| 验收点 | 结果 |
+|---|---|
+| 使用 `native_oai_config` / `gpt-native` / `gpt-5.5` | `check_profile()` 验证通过 |
+| `agent()` 正常执行 | script 包含 `agent('Reply...GA_P8_SINGLE')` |
+| `parallel()` 正常执行 | script 包含 2-agent parallel |
+| `pipeline()` 正常执行 | script 包含 4-agent pipeline |
+| source run 7 个 child agent 全部 succeeded | `len(runner.started_job_ids) == 7`，全部 `status == "succeeded"` |
+| resumed run 复用 7 个 cached job | `resume_runner.started_job_ids == []`，全部 `status == "cached"` |
+| `resumeResultEqualsSource: true` | `resume_outcome.result == outcome.result` |
+| result/transcript artifact 存在 | `resultExists` 和 `transcriptExists` 均为 true |
+| result JSON 不内联完整 transcriptEvents | `resultJsonOmitsTranscriptEvents` 为 true |
+| result JSON 包含 transcriptRef | `result_data["transcriptRef"]` 指向 `agents/agent_1/transcript.jsonl` |
+| parallel job 全部在第一个 completion 前已注册 | `assert_parallel_started_before_first_completion()` 通过 |
+| 连续 3 轮全部通过 | `runtime_case` + `failed_resume_case` + `killed_resume_case` + `bridge_case` 全部 `passed == True` |
+| `secretScan: []` | `scan_for_secret_material()` 返回空列表 |
+
+### 2.2 Failed Source Run Resume（已由 `93c635e` 提交）
+
+**用例：** `run_failed_source_resume_real_api_case()`
+
+| 验收点 | 结果 |
+|---|---|
+| Source run `agent_1` 成功 | `source_runner.started_job_ids == ["agent_1"]` |
+| Source run 最终状态为 `failed` | `source_loaded.status == "failed"` |
+| 错误信息包含 `GA_P8_FORCED_SOURCE_FAILURE` | 确认 |
+| `agent_1` result/transcript artifact 保留 | 均为 true |
+| Resumed run `agent_1` 为 `cached` | `resumed_jobs[0]["status"] == "cached"` |
+| `cachedFromRunId` / `cachedFromJobId` 正确 | 指向 source run 的 `agent_1` |
+| Resumed run `agent_2` 为 fresh job | `resume_runner.started_job_ids == ["agent_2"]` |
+| Resumed run 最终 `succeeded` | `resumed_loaded.status == "succeeded"` |
+| Event 计数正确 | `agent_cached: 1`, `agent_started: 1`, `agent_completed: 1` |
+| Result marker 正确 | `"GA_P8_FAILED_RESUME_DONE"` |
+
+### 2.3 Killed Source Run Resume（已由 `93c635e` 提交）
+
+**用例：** `run_killed_source_resume_real_api_case()`
+
+| 验收点 | 结果 |
+|---|---|
+| Source run `agent_1` 成功 | `source_jobs[0]["status"] == "succeeded"` |
+| Source run `agent_2` 被取消 | `source_jobs[1]["status"] == "cancelled"` |
+| Source run 被外部 kill | `source_loaded.status == "killed"` |
+| Source error 包含 `GA_P8_FORCED_SOURCE_KILL` | 确认 |
+| `workflow_killed` 事件存在 | 在 source event 中 |
+| Resumed run `agent_1` 为 `cached` | `resumed_jobs[0]["status"] == "cached"` |
+| Resumed run `agent_2` 为 fresh job | `resume_runner.started_job_ids == ["agent_2"]` |
+| Resumed run 最终 `succeeded` | 确认 |
+| Result marker 正确 | `"GA_P8_KILLED_RESUME_DONE"` |
+
+### 2.4 Interrupted Source Run Resume（已由 `f8b1850` 补充）
+
+**用例：** `run_interrupted_source_resume_real_api_case()` 及配套 deterministic/bridge 单元覆盖
+
+| 验收点 | 结果 |
+|---|---|
+| Source run 中已完成 job 可作为成功前缀 | 确认 |
+| Source run 中 running/interrupted job 不被错误复用 | 确认 |
+| Resume 后仅复用最长成功前缀 | 确认 |
+| Stale / interrupted 后续 job 重新执行 | 确认 |
+| Resumed run 最终成功 | 确认 |
+| Prefix cache metadata 指向 source run/job | 确认 |
+| Cached artifact/transcript/event metadata 保持可追踪 | 确认 |
+
+### 2.5 权限 / MCP / Skills / Tools 继承（已补 Native child 执行链路 + 真实 API + 真实 MCP diagnostic）
+
+**文件：** `tests/test_workflow_permission_inheritance_e2e.py` + `tests/test_workflow_child_agent.py` + `tests/p8_real_api_e2e.py` + `tests/test_p8_real_api_e2e_diagnostic.py`
+
+| 验收点 | 结果 |
+|---|---|
+| 默认 permission profile 为 `inherit-current-permissions` | deterministic E2E 断言 run/job/cacheKey；真实 API smoke 断言 metadata/cacheKey |
+| policy version 为 `inherit-current-v1` | deterministic E2E 与真实 API smoke 均断言 metadata/cacheKey |
+| Native child 接入工具执行链路 | `0eee3ef` 让 `NativeGPTChildAgentRunner` 通过 `agent_runner_loop -> GenericAgentHandler.dispatch -> ToolPermissionPolicy` 执行工具 |
+| Child 通过 dispatch 使用内置工具 | deterministic E2E 覆盖 `file_write`；Native child 测试覆盖 `file_read`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read` |
+| Child 加载临时 skill | deterministic E2E 与 Native child 测试覆盖 `load_skill`；真实 API case 验证真实模型主动调用并 `skillLoadOk=true` |
+| Child 调用受控 MCP 工具 | deterministic/Native child 测试覆盖 stub MCP；真实 API case 验证真实模型主动调用 `mcp__p8_stub__read_marker` 且 `mcpReadOk=true` |
+| 真实 MCP 非 mock 调用 | `42b0b6c` 新增 `GA_RUN_REAL_MCP_E2E=1` diagnostic-only case；实际调用 `mcp__fetch__fetch` 读取 `https://example.com`，返回 `Example Domain` |
+| read_only 反事实 | 同一 runner 下 `file_write` 与非只读 MCP 被 deny；只读命名 MCP 可按策略放行 |
+| Permission events 落盘 | child transcript 与 workflow journal 包含 `permission_profile_selected` / `tool_allowed` / `tool_denied` |
+| Result artifact 隔离 | `result.json` 不内联 `transcriptEvents`，只保留 `transcriptRef` / `toolSummary` / payload |
+| Parent transcript 隔离 | parent session transcript 不包含 child tool marker、skill marker、MCP marker 或 permission events |
+| Profile/version cache miss | profile 或 policy version 改变时不命中 source cache；完全相同时命中并复制 transcript |
+| 默认不烧真实 API/MCP | `python tests/p8_real_api_e2e.py` 默认 skip；真实 API 用 `GA_RUN_REAL_API_E2E=1`；真实 MCP 诊断另需 `GA_RUN_REAL_MCP_E2E=1` |
+| 真实 native GPT 主套件通过 | 6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]` |
+
+当前限制：真实 MCP diagnostic 是 diagnostic-only，不纳入主 `summary.passed` 门禁；结果依赖本机 MCP 配置、网络和外部 MCP 服务状态。Context7 未出现在 GenericAgent 当前 `mcp_runtime` discovery 列表中，当前真实 MCP 诊断覆盖的是已配置可用的 `fetch` MCP。
+
+真实 native GPT 主套件已通过，说明该链路不只是 deterministic/stub 覆盖，主流程在真实模型调用下也已验证。
+
+### 2.6 Bridge Draft/Approve/Final 成功（已提交）
+
+**用例：** `run_bridge_real_api_case()`
+
+| 验收点 | 结果 |
+|---|---|
+| `workflow_draft` 返回有效 runId | 是 |
+| `workflow_approve` 返回 true | `approved == True` |
+| 状态流正确 | `awaiting_approval → running → succeeded` |
+| `workflow_final` 事件存在 | `final_events` 非空 |
+| `final_result.status == "succeeded"` | 确认 |
+| Runtime 实际启动了 child agent | `runtime_started_jobs == ["agent_1"]` |
+| Event 完整性 | 关键事件全部出现 |
+
+### 2.7 Bridge 非成功终态事件覆盖（已由 `9e00a05` 补充）
+
+**文件：** `tests/test_ink_bridge.py`
+
+| 验收点 | 结果 |
+|---|---|
+| failed 终态事件流 | 已覆盖 |
+| killed 终态事件流 | 已覆盖 |
+| interrupted 终态事件流 | 已覆盖 |
+| 非成功终态仍 emit `workflow_final` | 已覆盖 |
+| failed final fallback | 已覆盖 |
+| runtime exception / fallback final payload | 已覆盖 |
+| failed/killed/interrupted source resume bridge 允许路径 | 已覆盖 |
+| killed stop `workflow_final(status=killed)` | 已覆盖 |
+| 运行结束后 activity/status 清理 | 已覆盖 |
+
+### 2.8 单元测试覆盖的核心实现细节
+
+| 实现细节 | 文件 | 测试方法 |
+|---|---|---|
+| 安全扫描拒绝不安全脚本 | `test_workflow_runtime.py` | `test_runtime_rejects_forbidden_script_tokens_before_worker_starts` |
+| Worker 脚本抛异常 → run failed | `test_workflow_runtime.py` | `test_runtime_marks_run_failed_when_worker_errors` |
+| 超时取消 child agent | `test_workflow_runtime.py` | `test_runtime_timeout_cancels_running_child_agents` |
+| Worker error 后 parallel cancel pending | `test_workflow_runtime.py` | `test_runtime_worker_error_after_parallel_cancels_pending_jobs` |
+| 外部 kill 检测 | `test_workflow_runtime.py` | `test_runtime_observes_external_kill_state` |
+| Terminate → kill → stdio close 逐级升级 | `test_workflow_runtime.py` | `test_runtime_terminate_escalates_to_kill_and_waits` |
+| 缓存只复用最长未变前缀 | `test_workflow_runtime.py` | `test_runtime_reuses_longest_unchanged_agent_prefix_after_script_changes` |
+| args 类型变化不 cache | `test_workflow_runtime.py` | `test_runtime_does_not_reuse_cached_agent_when_resume_args_change_type_only` |
+| 跨 session 不 cache | `test_workflow_runtime.py` | `test_runtime_does_not_reuse_cached_agent_across_sessions` |
+| Cache key 包含 permission 字段 | `test_workflow_scheduler.py` | `test_registers_job_with_cache_key_permission_fields_and_journal_event` |
+| Permission profile 变化 → cache key 不同 | `test_workflow_scheduler.py` | `test_cache_key_changes_when_permission_profile_or_policy_version_changes` |
+| Permission 事件 journal 写入（成功/失败） | `test_workflow_scheduler.py` | 两个 test 方法 |
+| Continue 策略保持其他 job 运行 | `test_workflow_scheduler.py` | `test_continue_failure_policy_keeps_other_jobs_running` |
+| Fail-fast 策略取消全部 | `test_workflow_scheduler.py` | `test_fail_fast_failure_policy_cancels_queued_and_running_jobs_and_fails_run` |
+| Stop 取消 queue 和 running | `test_workflow_scheduler.py` | `test_stop_cancels_queued_jobs_and_requests_cancellation_for_running_jobs` |
+| Resume 投影将 running 标记为 stale | `test_workflow_store.py` | `test_mark_running_jobs_stale_on_resume_projection` |
+| Bridge 层 blank runId 拒绝 | `test_ink_bridge.py` | `test_workflow_resume_rejects_blank_run_id_with_protocol_error` |
+| Bridge 层未完成 source resume 拒绝 | `test_ink_bridge.py` | `test_workflow_resume_rejects_unfinished_source_run` |
+| Bridge 层已取消 source resume 拒绝 | `test_ink_bridge.py` | `test_workflow_resume_rejects_denied_cancelled_source_run` |
+| Bridge 层 stop 正在运行的 workflow | `test_ink_bridge.py` | `test_stop_stops_active_running_workflow_instead_of_reporting_idle` |
+
+---
+
+## 3. 剩余缺口详细分析
+
+### 项目 1：真实 API 超时边界 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 真实 API 主路径仍使用大 timeout（420/360/240/180），不会把 timeout 作为主门禁触发；这是为了避免真实网络波动影响主套件稳定性。 |
+| **当前覆盖** | Runtime timeout 单元、JS worker timeout 单元、`d13bde5` 近真实 bridge timeout failed/final/error/idle 覆盖，以及 `realApiTimeoutBridgeFinalDiagnostic` 真实 API diagnostic-only 覆盖。 |
+| **剩余内容** | ① 长期观察真实 API timeout diagnostic 的稳定性；② 真实网络慢响应统计；③ 若后续证明稳定，再考虑更细粒度的资源回收指标。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **观察项 / P2 稳定性诊断** |
+
+### 项目 2：真实 API 网络抖动 / 慢响应持续 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 原缺口是没有任何统计稳定性测试。当前已新增独立 opt-in stability diagnostic harness，可连续多轮执行低成本真实 API workflow 并聚合延迟/失败摘要。 |
+| **当前覆盖** | 新增独立 opt-in diagnostic harness `tests/p8_real_api_stability_e2e.py`，通过 `GA_RUN_REAL_API_E2E=1` + `GA_RUN_REAL_API_STABILITY=1` 二级 opt-in 执行；默认 skip，且不纳入 `tests/p8_real_api_e2e.py` 主门禁。支持 `GA_REAL_API_STABILITY_ROUNDS` 配置轮数并限制 1..10；每轮执行 1 个 single agent + 2 个 parallel agent，真实 child agent 显式 `enable_tools=False`，记录 elapsed/status/jobs/tokenUsage/error，并输出 passedRounds/failedRounds、P50/P95/max/min/avg、observedErrorTypes 和 secretScan。真实 native GPT 3 轮已通过，`passedRounds=3`、`failedRounds=0`、`secretScan=[]`。 |
+| **缺失内容** | ① 单次 10 轮或跨多次运行累计更多轮的稳定性统计；② P99 延迟属于后续扩展指标，需要更多轮次才有意义；③ 偶发 5xx/429/空响应需要长期运行收集；④ 自动生成独立脱敏稳定性报告文件 |
+| **风险评级** | 中 |
+| **建议优先级** | **P2** |
+
+### 项目 3：Rate Limit / 429 边界 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 原缺口是没有任何 workflow 层 provider 429 / rate-limit 覆盖，也没有压力测试通过增大 `parallel()` fan-out 观察真实 rate limit。当前已补 deterministic runtime/bridge 429 覆盖和独立真实 API stress diagnostic harness。 |
+| **当前覆盖** | Runtime 新增 provider 429 deterministic 覆盖：parallel 中一个 child 成功、另一个 child 返回 `HTTP 429 Too Many Requests`，断言 workflow failed、`agent_failed`/`workflow_failed`、成功/失败 artifact/transcript 保留、failed payload 包含 `statusCode=429` 与 `category=rate_limit`。Bridge 新增 provider 429 覆盖：断言 `workflow_final(status=failed)`、`error(code=workflow_run_failed)`、activity/status idle、artifact 保留。新增独立 `tests/p8_real_api_stress_e2e.py`，通过 `GA_RUN_REAL_API_E2E=1` + `GA_RUN_REAL_API_STRESS=1` 二级 opt-in 执行真实 fan-out stress diagnostic；默认 skip，真实 child agent 显式 `enable_tools=False`。已用真实 native GPT 跑 `fanout=8`、`rounds=1`，8 个 child 全部 succeeded，`rateLimitDetected=false`，`secretScan=[]`。该 harness 区分 `contractPassedRounds` / `contractFailedRounds`（诊断是否收敛）、`cleanSuccessRounds`（无 rate-limit 的成功轮）和 `rateLimitRounds`（观测到 429/rate-limit 的轮次）；`summary.passed=true` 表示 diagnostic contract 收敛，不等价于没有出现 rate limit。 |
+| **缺失内容** | ① 更高 fan-out（16/32）和更多轮真实 stress 观察；② 长期运行收集自然 429/5xx/空响应；③ provider 特定限流策略、retry-after 行为和恢复策略；④ 若真实 429 出现，持续验证 failed job 与成功 artifact 保留、workflow final/failure policy 一致性 |
+| **风险评级** | 中-高 |
+| **建议优先级** | **已完成基础覆盖 / P2 扩展观察**（真实 stress 仍需 opt-in + 单独 env var 控制成本） |
+
+### 项目 4：Parallel 部分失败 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 原缺口是没有真实/半真实 E2E 验证 parallel 中部分 child agent 真实失败。当前已补 runtime deterministic、bridge 半集成和真实 API diagnostic-only 三层覆盖。 |
+| **当前覆盖** | Scheduler 层 `continue`/`fail_fast` 单元测试；`test_runtime_worker_error_after_parallel_cancels_pending_jobs`；新增 runtime `test_runtime_parallel_partial_failure_preserves_success_artifact_and_failed_result`；新增 bridge `test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts`；新增 `realApiParallelPartialFailureDiagnostic`。 |
+| **剩余内容** | ① 真实 provider 自然 API error / 429 / timeout 的压力场景仍归入 rate limit/网络抖动专项；② fail_fast runtime 真实 DSL 变体后续可作为扩展；③ diagnostic 稳定性持续观察。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **已完成核心覆盖 / P2 扩展观察** |
+
+### 项目 5：Failed / Killed / Interrupted Run Resume E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | Failed/killed/interrupted source resume 的核心前缀复用路径已覆盖。剩余缺口主要是 bridge 层真实 API 场景、更多 options/args/permission profile 组合，以及异常恢复后的 UI 端到端确认。 |
+| **当前覆盖** | Failed source resume 与 killed source resume 已有真实 API E2E；`f8b1850` 已补充 interrupted resume 前缀复用覆盖；Store 层 `test_mark_running_jobs_stale_on_resume_projection` 覆盖 running job stale 投影；`9e00a05` 已补 failed/killed/interrupted source resume bridge 允许路径。 |
+| **剩余内容** | ① Bridge 层对 failed/killed/interrupted source resume 的完整真实 API E2E；② Prompt/options/args/permission profile 变体下的 resume；③ interrupted 场景 artifact 与 parent transcript 隔离的更大规模验证。 |
+| **风险评级** | 中 |
+| **建议优先级** | **P2** |
+
+### 项目 6：Kill / Stop / Interrupted 真实 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 原缺口是 workflow_stop / kill 期间 completed prefix、running child cancel、killed final/idle 与 resume 前缀复用没有串成完整链路。当前已补 bridge 半集成、真实 API diagnostic-only 以及 real provider mid-call stop diagnostic-only 覆盖；后续重点是持续观察 provider cancel 稳定性。 |
+| **当前覆盖** | 单元测试 `test_runtime_observes_external_kill_state`、Scheduler stop 单元、Bridge `test_stop_stops_active_running_workflow`、`9e00a05` killed final；新增 `test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix` 串联 workflow_stop + completed prefix + running child cancel + killed final + resume cached prefix；新增 `realApiBridgeStopResumeDiagnostic` 以真实 native GPT prefix + 受控 running child 验证 bridge stop/resume 诊断链路；新增 `realApiMidCallStopDiagnostic` 使用真实 native provider job 触发 mid-call stop，并验证 cancel 请求、killed/final/idle、cached prefix 与 fresh rerun。 |
+| **剩余内容** | ① 持续观察 provider 真实 streaming/mid-call cancel 的稳定性；② 当前不强断言 SDK 网络流一定即时中断，只把 cancel 请求、runtime/bridge 收敛和 resume 语义作为诊断指标；③ UI 层快捷键/面板触发 stop 的完整前端 E2E；④ 更多 stop reason / permission / args 变体。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **核心覆盖已完成 / P2 真实 streaming 诊断观察** |
+
+### 项目 7：Bridge 非成功终态 / 超时后的 Final/Error 事件 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | Bridge failed/killed/interrupted 非成功终态事件已补覆盖；timeout failed/final/error/idle 也已补近真实覆盖和真实 API diagnostic-only 覆盖。剩余重点转为真实 API bridge failed/killed/interrupted 路径、`_workflow_final_payload` fallback 在 artifact 缺失/损坏时的行为，以及 `_run_workflow_runtime` runtime exception 分支的真实/完整链路。 |
+| **当前覆盖** | `9e00a05` 已补充 bridge 非成功终态覆盖；`d13bde5` 已补充 timeout 后 bridge event 流；新增 `realApiTimeoutBridgeFinalDiagnostic` 覆盖真实 API timeout 诊断路径；既有 bridge succeeded 主路径、resume 拒绝、stop fake runtime、failed final fallback、runtime exception final/error/idle、killed stop final 均已有覆盖。 |
+| **剩余内容** | ① 真实 API bridge failed/killed/interrupted 路径；② result.json 缺失/损坏时 fallback payload 的更完整验证；③ runtime exception 后 error event 与 idle 恢复的端到端补强；④ timeout diagnostic 的持续稳定性观察。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **P2** |
+
+### 项目 8：真实 API 返回格式异常 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 原缺口是没有任何测试注入 provider 返回格式异常或 SDK-like exception。当前已补默认可跑、无真实 API 的半真实 provider anomaly E2E，用 fake runner / fake session 固定 runtime、artifact、transcript、bridge final/error/idle contract。 |
+| **当前覆盖** | 新增 `tests/test_p8_provider_anomaly_e2e.py` 覆盖 empty content、usage missing、no text block、SDK-like exception 四类 anomaly 的 runtime artifact/transcript/final-result 与 bridge final/error/idle；`tests/test_workflow_child_agent.py` 补 Native runner empty content / missing usage characterization；`tests/test_workflow_runtime.py` 补 Native runner empty content artifact 与 SDK exception failed artifact contract。 |
+| **剩余内容** | ① 真实 provider 自然 malformed stream / malformed JSON 仍只能作为 opt-in diagnostic 长期观察；② 是否将 empty content 从 succeeded 改为 failed/degraded 需要产品语义决策；③ runner.poll 直接异常是否合成 failed result artifact 仍待单独 contract 设计。provider error 全链路脱敏与 redaction completeness pass 已完成，不再作为待办安全任务。 |
+| **风险评级** | 中 |
+| **建议优先级** | **基础半真实覆盖与脱敏完整性已完成 / P2 扩展观察** |
+
+### 项目 9：权限 / MCP / Skills / Tools 继承 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 该项原缺口是默认 workflow/child agent 不能退化为 read-only，且真实 Native child 要能使用工具/skills/MCP。当前已补默认 deterministic、Native child 本体、真实 API tool-calling、真实 MCP diagnostic 四层覆盖。 |
+| **当前覆盖** | Cache key 包含 permission 字段和 policy version；Permission 事件 journal 写入；Store 层默认 profile 为 `"inherit-current-permissions"`；deterministic E2E 覆盖内置工具、临时 skill、stub MCP、toolSummary artifact、child transcript/journal 和 parent transcript 隔离；`NativeGPTChildAgentRunner` 已接入 `GenericAgentHandler.dispatch`；真实 API `nativeToolCallingFileSkillMcp` 覆盖真实模型主动调用 `file_read`/`load_skill`/stub MCP；`realMcpDiagnostic` 覆盖非 mock 真实 MCP `mcp__fetch__fetch`。真实 native GPT 主套件已通过，说明该链路不只是 deterministic/stub 覆盖，主流程在真实模型调用下也已验证。 |
+| **剩余边界** | ① explicit approval 工作流内审批闭环仍缺失；② Context7 未出现在当前 GenericAgent MCP discovery 中，若本机后续配置 Context7，可补 Context7 专项 diagnostic；③ 真实 MCP diagnostic 是报告型，不纳入主门禁。 |
+| **风险评级** | **低-中** |
+| **建议优先级** | **P3（扩展/专项诊断）** |
+
+### 项目 10：大 Artifact / Transcript 隔离 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 核心 artifact/transcript 结构和隔离已验证，且大量 child transcript（1000+ 行）、多 job 大 transcript、resume copy 与 bridge final/detail 不内联 child transcript 的 deterministic/runtime + bridge 核心覆盖已完成。 |
+| **当前覆盖** | 单元测试覆盖 artifact 写入、transcript ref、JSON 不内联完整 transcriptEvents；真实 API E2E 验证 artifact 存在且结构正确；`6848a67` 进一步补充大 transcript 隔离回归，并将 cached transcript copy 改为 streaming。 |
+| **剩余内容** | ① 更大规模性能/磁盘占用长期观察；② 真实 UI 前端大 artifact 体验；③ 合法超大 `final-result.json` 的 bridge 有界 fallback，已拆分为 Bridge final/detail artifact fallback robustness 专项，而非 child transcript 隔离缺口。 |
+| **风险评级** | 低-中 |
+| **建议优先级** | **核心覆盖已完成 / P2 fallback 专项与 P3 性能观察** |
+
+### 项目 11：Workflow JS Worker 异常脚本 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 单元测试覆盖了 worker error 后的 parallel cancel。但脚本自身 throw、pipeline/parallel thunk throw、非法 options、不可序列化返回值、桥接层错误事件未覆盖。 |
+| **当前覆盖** | `test_runtime_marks_run_failed_when_worker_errors`（`throw new Error('boom')`）、`test_runtime_rejects_forbidden_script_tokens_before_worker_starts` |
+| **缺失内容** | ① Pipeline stage throw；② Parallel thunk throw；③ Agent options 非法；④ 返回值不可 JSON 序列化；⑤ 安全扫描拒绝后 bridge 行为 |
+| **风险评级** | 中 |
+| **建议优先级** | **P2** |
+
+### 项目 12：Cache Key 真实变体 E2E
+
+| 维度 | 详情 |
+|---|---|
+| **缺口描述** | 单元测试覆盖非常广泛。但没有任何真实 API E2E 验证 cache hit/miss 与真实 API 成本挂钩。Bridge 层 cache 验证完全缺失。 |
+| **当前覆盖** | 单元测试覆盖：args 类型、跨 session、prefix 匹配、permission 变化、argsHash 计算、JSON 与字符串区分（共 7 个测试方法） |
+| **缺失内容** | ① 同 script 不同 args 的真实 API E2E；② 同 args prompt 改动的真实 E2E；③ Options 改动的真实 E2E；④ Permission profile/version 改动的真实 E2E；⑤ Bridge 层 cache 验证 |
+| **风险评级** | 低（cache key 是确定性计算，单元测试已非常充分） |
+| **建议优先级** | **P3** |
+
+---
+
+## 4. 推荐下一步（按优先级排序）
+
+### Priority P0（当前无阻塞项）
+
+截至 `9e00a05`、`f8b1850`、`1c8933f`，原 P0 中的 interrupted resume 前缀复用与 bridge 非成功终态核心覆盖已补齐，权限 / MCP / Skills / Tools 继承核心验收也已完成。P8 当前不再存在必须立即阻塞合入的 P0 E2E 缺口。
+
+保留的高价值工作转入 P1/P2：
+
+- parallel 部分失败真实/半真实 E2E。
+- mid-call kill/stop 真实 E2E。
+- bridge 非成功终态真实 API 端到端补强。
+- timeout diagnostic 持续稳定性观察。
+
+---
+
+### Priority P1（次优先）
+
+---
+
+#### 4.1 Timeout + Bridge Final/Error E2E
+
+**目标：** 验证 `timeout_seconds` 极短值时 workflow 正确终止，child/worker 被回收，bridge emit failed/final/error 事件，activity/status 恢复 idle。
+
+**前置条件：**
+- Runtime 层 timeout 逻辑已实现（`WorkflowRuntime.__init__` 接受 `timeout_seconds`）
+- JS worker 超时 escalate 逻辑已单元测试
+- Bridge 层接受 `timeout_seconds` 参数
+
+**覆盖核查结论：**
+
+本项当前已进入收尾状态：
+
+- Runtime timeout 单元层已覆盖：`test_runtime_timeout_kills_never_resolving_async_script`、`test_runtime_timeout_uses_configured_deadline_for_sync_infinite_loop`、`test_runtime_timeout_cancels_running_child_agents`、`test_runtime_terminate_escalates_to_kill_and_waits`。
+- Bridge 非成功终态基础覆盖已由 `9e00a05` 补齐：failed/killed/interrupted/fallback/exception 的 final/error/idle 路径已有单元/半集成覆盖。
+- Bridge timeout 参数传递已有覆盖：approve/resume/JSONL 能把 `timeoutSeconds` 传到 runtime factory。
+- 真实 API bridge succeeded 主路径已覆盖，但使用大 timeout，不触发 timeout。
+- 第一阶段已由 `d13bde5` 完成：`test_workflow_approve_timeout_emits_failed_final_error_and_idle` 使用真实 `WorkflowRuntime`、永不 resolve 的 JS Promise 与 `workflow_approve(..., timeout_seconds=0.2)`，验证 runtime deadline 后 run failed、`final-result.json`、`workflow_final(status=failed)`、`workflow_failed`、`error(code=workflow_run_failed)` 与最终 idle 收敛。
+- 第二阶段已补强到真实 API harness：`tests/p8_real_api_e2e.py` 中新增 diagnostic-only `realApiTimeoutBridgeFinalDiagnostic`，在 `GA_RUN_REAL_API_E2E=1` 下运行，但不纳入主 `summary["passed"]` 门禁，输出 case 级脱敏摘要：run status、finalSeen、workflowFailedSeen、errorSeen、idleSeen、activityCleared、threadAliveAfterWait 等；顶层 `summary["secretScan"]` 统一报告 artifact secret 扫描结果。
+
+**后续仅剩观察项：** 真实 API timeout diagnostic 受本机网络、provider 响应速度和真实模型流式取消时机影响，应作为诊断报告持续观察；不要把它升级为默认门禁，除非后续证明足够稳定。
+
+**关键验收点：**
+- 不挂死，不遗留 running run，不遗留僵尸子进程
+- 超时后 bridge 发出明确 terminal run 与 `workflow_final(status=failed)`
+- 超时后 error 表达清晰：`workflow_failed` event 或 `error(code=workflow_run_failed)` 至少其一可见
+- activity 清空，status 恢复 idle
+- final-result artifact 可读，错误信息脱敏
+- 不污染 parent transcript
+
+**状态：** 第一阶段 deterministic/近真实 bridge 覆盖已完成；第二阶段真实 API diagnostic-only 覆盖已补充。
+
+---
+
+#### 4.2 Parallel 部分失败 E2E
+
+**目标：** 验证 parallel 中部分 child agent 真实失败时其他 job 的状态处理。
+
+**前置条件：**
+- Scheduler 层 failure_policy 已实现并单元测试
+- Worker error + parallel cancel 逻辑已单元测试
+
+**已实现方式：**
+- Runtime deterministic：`parallel()` 中一个 child 成功后另一个 child 返回 failed，验证成功/失败 job artifact、transcript、`agent_completed`/`agent_failed`、`final-result.json(status=failed)`。
+- Bridge 半集成：通过真实 `WorkflowRuntime` + 受控 runner 验证 bridge 看到 `workflow_run(status=failed)`、`workflow_final(status=failed)`、`error(code=workflow_run_failed)`，并最终 activity/status idle。
+- 真实 API diagnostic-only：`realApiParallelPartialFailureDiagnostic` 使用真实 native GPT 执行成功 child，另一个 child 由受控 runner 注入失败；输出成功/失败 job、artifact、event、final 状态摘要，不纳入主门禁。
+
+**关键验收点：**
+- 成功 job 不被失败 job 污染
+- Failed job 有明确 error payload 和 result artifact
+- Workflow 终态与当前 runtime continue/failure 行为一致：整体 failed，已完成 job artifact 保留
+- Bridge 不挂死，final/error/idle 收敛
+
+**状态：** 核心 deterministic/bridge/真实 API diagnostic 覆盖已完成；provider 自然 429/timeout 归入 P2 rate limit/网络抖动专项。
+
+---
+
+#### 4.3 Mid-Call Kill / Stop E2E
+
+**目标：** 验证 workflow 在真实 LLM API 调用进行中被 kill/stop 后的状态和 artifact 处理。
+
+**前置条件：**
+- Runtime 层检测外部 kill 的逻辑已实现
+- Scheduler stop 逻辑已实现
+- Bridge stop 逻辑已实现
+
+**已实现方式：**
+- Bridge 半集成：`test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix` 使用真实 `WorkflowRuntime` 和受控 runner，验证 `workflow_stop` 发生在 `agent_1` 成功、`agent_2` running 后；source run killed，`agent_2` cancelled，`workflow_final(status=killed)`，随后 `workflow_resume` 中 `agent_1` cached、`agent_2` fresh succeeded。
+- 真实 API diagnostic-only：`realApiBridgeStopResumeDiagnostic` 使用真实 native GPT 产出 prefix job，第二个 job 受控 gate/hang，通过 bridge `workflow_stop` 停止并 resume，验证 cached prefix、fresh rerun、final/idle 和 artifact。
+- Real provider mid-call diagnostic-only：`realApiMidCallStopDiagnostic` 让第二个 job 真实进入 native provider 调用后触发 `workflow_stop`，验证 cancel 请求已发出、source killed/final/idle 收敛、resume 复用 prefix 并 fresh rerun 第二个 job；该诊断不强断言 SDK 网络流一定即时中断。
+
+**关键验收点：**
+- 不挂死，不遗留 running workflow：已覆盖 source/resumed thread 退出与 idle 收敛
+- 已完成结果可恢复：已覆盖 source `agent_1` artifact/transcript 与 resumed cached artifact
+- Resume 不重复执行已完成 job：已覆盖 `cachedPrefix=true` 与后续 fresh job
+
+**状态：** 核心 bridge/runtime/真实 API diagnostic 覆盖已完成；真实 provider mid-call/streaming cancel 已新增 diagnostic-only 观察项，后续继续观察稳定性。
+
+---
+
+### Priority P2（后续关注）
+
+| 项目 | 说明 | 前置条件 |
+|---|---|---|
+| JS Worker 异常脚本 Bridge E2E | pipeline/parallel throw、非法 options、不可序列化返回值等异常脚本桥接收敛 | 现有单元测试模式 |
+| Failed/killed/interrupted resume bridge 真实 API 与变体组合 | runtime/基础 bridge 已覆盖，剩余完整链路与参数矩阵 | P1 稳定后 |
+| Rate Limit / 429 边界 E2E | 已有 deterministic runtime/bridge 429 覆盖 + 基础真实 stress harness；剩余为 fanout 16/32、更多轮和 provider 自然 429 长期观察 | stress harness 已可用，扩展观察需单独 opt-in |
+| 网络抖动 / 稳定性 E2E | 已有基础 opt-in diagnostic harness；剩余为更多轮次/长期统计/压力专项 | stability harness 已可用，压力专项另行 opt-in |
+| 返回格式异常 E2E | 需 semi-real runner/mock 基础设施 | P9/P10 阶段 |
+
+### Priority P3（低优先级）
+
+| 项目 | 说明 |
+|---|---|
+| Cache Key 真实变体 E2E | 单元测试已非常充分，可在其他测试中自然覆盖 |
+| 大 Artifact / Transcript 隔离 | 核心覆盖已完成；仅保留更大规模性能/真实 UI 体验观察 |
+| Bridge final/detail artifact fallback robustness | 当前推荐离线 P2：缺失/损坏/过大/越界 final artifact 的有界脱敏 fallback |
+| Context7 专项 diagnostic | 仅在本机 GenericAgent MCP discovery 出现 Context7 后补充 |
+| Explicit approval 审批闭环 | 工作流内审批专项扩展 |
+
+---
+
+## 5. 历史去重后的下一步实施计划（2026-06-09 动态工作流审计后）
+
+本节基于一次面向提交历史、现有测试和文档的 dynamic workflow 审计，用于避免把已经完成的 P8 覆盖重复实施。结论是：P8 当前不应再重复补 runtime-only worker throw、deterministic cache key、基础 artifact/transcript 隔离、429、timeout、stop/resume 或 parallel partial failure；下一轮应收窄到 bridge + 真实 `WorkflowRuntime` 异常脚本、provider anomaly、bridge cache 可观测性、大 transcript 边界和少量 opt-in diagnostic。
+
+### 5.1 明确不要重复的历史覆盖
+
+| 已覆盖方向 | 证据 | 后续避免重复 |
+|---|---|---|
+| Runtime-only JS worker 基础异常 | `tests/test_workflow_runtime.py::test_runtime_marks_run_failed_when_worker_errors`、`test_runtime_rejects_forbidden_script_tokens_before_worker_starts`；相关提交 `389deed`、`426ab2c` | 不再新增单纯 runtime-only 顶层 throw 或 forbidden token 拒绝测试 |
+| Bridge stub runtime exception / timeout final/error/idle | `tests/test_ink_bridge.py::test_workflow_runtime_exception_emits_error_final_and_idle`、`test_workflow_approve_timeout_emits_failed_final_error_and_idle`；提交 `9e00a05`、`d13bde5` | 不再用 fake `ExplodingRuntime` 重测 bridge exception；不把 timeout 当异常脚本覆盖 |
+| Provider 429 / rate limit 基础覆盖 | `tests/test_workflow_runtime.py::test_runtime_provider_429_rate_limit_failure_preserves_artifacts_and_events`、`tests/test_ink_bridge.py::test_workflow_approve_provider_429_rate_limit_emits_failed_final_error_and_preserves_artifacts`、`tests/p8_real_api_stress_e2e.py`；提交 `cc057a3` | 不再补 deterministic 429 或基础 bridge 429 final/error/idle；真实 stress 仅作为 opt-in 观察 |
+| Parallel partial failure 基础覆盖 | `tests/test_ink_bridge.py::test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts`、`realApiParallelPartialFailureDiagnostic`；提交 `7aa318b` | 不再重复成功/失败 job artifact 与 failed final/error/idle 基础断言 |
+| Stop/resume prefix 与 mid-call stop | `test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix`、`realApiBridgeStopResumeDiagnostic`、`realApiMidCallStopDiagnostic`；提交 `394070b`、`cd662fb` | 不再重复 stop 后 cached prefix / fresh rerun 基础路径 |
+| Failed/killed/interrupted resume 基础矩阵 | `tests/test_workflow_runtime.py` 的 args/cache/prefix/interrupted/stale/running middle 测试；`tests/test_ink_bridge.py` 的 `workflow_resume` 允许/拒绝路径；`tests/p8_real_api_e2e.py` failed/killed 真实 API E2E；提交 `aa0a2b0`、`93c635e`、`f8b1850` | 不再重复 `workflow_resume` 参数转发、failed/killed 是否允许 resume、unfinished/cancelled 拒绝、interrupted deterministic stale/running middle 矩阵 |
+| Artifact/transcript 基础隔离 | `tests/test_workflow_store.py::test_write_agent_result_persists_result_artifact_and_updates_job_ref`、`tests/test_workflow_runtime.py::test_runtime_cached_agent_transcript_ref_points_to_resumed_artifact`、`tests/test_workflow_permission_inheritance_e2e.py::test_inherit_current_child_records_tool_skill_mcp_events_without_polluting_parent_transcript` | 不再重复 `result.json` 不内联 `transcriptEvents`、单 job `transcriptRef`、小规模 parent transcript marker 隔离 |
+| Cache key deterministic 正确性 | `tests/test_workflow_scheduler.py` 的 permission/profile/argsHash/JSON-like string 测试、`tests/test_workflow_runtime.py` 的 args/type/cross-session/prefix 测试、`test_permission_profile_and_version_partition_runtime_resume_cache` | 不再写 cacheKey 字段存在性、argsHash deterministic、JSON 值 vs 字符串、permission profile/version deterministic 分区测试 |
+
+### 5.2 新实施优先级
+
+#### P0：Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵
+
+**为什么不是重复：** 历史覆盖的是 runtime-only 顶层 throw、bridge stub runtime exception、bridge timeout、parallel child failure；缺口是测试真实 `WorkflowRuntime` 执行异常 JS script 后，经 `GenericAgentBridge.workflow_approve()` 收敛为 `workflow_final(status=failed)`、`error(code=workflow_run_failed)`、activity/status idle 的完整链路。
+
+**目标文件：** `tests/test_ink_bridge.py`、`frontends/ink_bridge.py`
+
+**第一批高确定性场景（已实现）：**
+
+1. top-level script throw：`throw new Error('GA_P8_TOP_LEVEL_THROW')`。
+2. pipeline stage throw：`pipeline()` 某 stage 抛 `GA_P8_PIPELINE_STAGE_THROW`。
+3. forbidden token preflight：脚本包含 `process.env` 并被安全扫描拒绝。
+
+**已补测试：**
+
+- `test_workflow_approve_real_runtime_script_throw_emits_failed_final_error_and_idle`
+- `test_workflow_approve_real_runtime_pipeline_throw_emits_failed_final_error_and_idle`
+- `test_workflow_approve_forbidden_script_emits_failed_final_error_and_idle`
+
+**已修复问题：** forbidden token preflight 原本会在 runtime 启动前抛错，bridge 异常兜底只能 emit error/fallback，但 run 可能保持 `running`。`frontends/ink_bridge.py::_run_workflow_runtime` 现会在 runtime 抛错且 run 尚非终态时，将 run 落盘为 `failed`、写入 `final-result.json`、追加 `workflow_failed` event，再 emit `workflow_final(status=failed)` 与 `error(code=workflow_run_failed)`，最终恢复 idle。
+
+**共用验收：** bridge thread 退出；run terminal status 为 `failed`；events 包含 `workflow_final(status=failed)` 与 `error(code=workflow_run_failed)`；journal/workflow events 包含 `workflow_failed`；`final-result.json` 存在且 status 为 `failed`；activity 清空；status 回到 idle；错误消息含场景 marker 且不泄露 secret。
+
+**第二批场景（已按 contract 审计落地）：**
+
+- `parallel()` thunk sync throw：新增 runtime-only `test_runtime_parallel_thunk_sync_throw_fails_without_agent_jobs` 与 bridge `test_workflow_approve_real_runtime_parallel_thunk_throw_emits_failed_final_error_and_idle`。
+- non-serializable return：新增 runtime-only BigInt / circular return 失败测试，以及 bridge BigInt return failed/final/error/idle 测试。
+- invalid agent options：新增 runtime 当前行为快照，覆盖 falsy options 归一为 `{}`、plain object options 保留 label/options、truthy non-object options 失败且不注册 job。
+- bridge helper reuse：`parallel partial failure` 与 provider `429` bridge 测试复用 `assert_workflow_failed_final_error_and_idle`，保留各自 artifact / payload 专属断言。
+
+**options contract 生产修复（已实现）：** JS worker 侧新增 `normalizeAgentOptions()`，`agent(prompt, options)` 现在只接受 plain object；`undefined`/`null`/`false`/`0`/空字符串等 falsy options 归一为 `{}`；数组、字符串、数字和数组键值对 options 均以稳定错误 `agent options must be a plain object` 拒绝。Python runtime 与 Scheduler 侧同步增加防御校验，防止非 JS 入口绕过；runtime 同时要求 `label` 如果存在必须是字符串。新增 bridge invalid options failed/final/error/idle 覆盖，以及 Scheduler 非 dict options 拒绝测试。
+
+**仍暂缓：** 是否支持 class instance / null-prototype object 等非普通对象的扩展语义；当前 contract 明确为用户脚本普通 object。
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_ink_bridge
+python -m unittest tests.test_workflow_runtime
+```
+
+#### P1：半真实 provider anomaly E2E
+
+**为什么不是重复：** 429、timeout、stop/resume、parallel partial failure 都不是 provider 返回格式异常。本项用默认可跑、无真实 API 的半真实 E2E 固定 empty content、no text block、usage missing、SDK-like exception 的 workflow artifact/transcript/final/error contract。
+
+**目标文件：** `tests/test_p8_provider_anomaly_e2e.py`、`tests/test_workflow_child_agent.py`、`tests/test_workflow_runtime.py`。
+
+**已实现覆盖：**
+
+- `test_runtime_provider_empty_content_preserves_success_artifact_and_readable_transcript`
+- `test_runtime_provider_missing_usage_does_not_fail_and_records_empty_token_usage`
+- `test_runtime_provider_no_text_block_preserves_success_artifact_without_inline_transcript`
+- `test_runtime_provider_sdk_like_exception_preserves_failed_result_transcript_and_final_failure`
+- `test_bridge_provider_empty_content_emits_success_final_and_idle`
+- `test_bridge_provider_missing_usage_emits_success_final_without_workflow_error`
+- `test_bridge_provider_sdk_like_exception_emits_failed_final_error_and_idle`
+- `test_bridge_provider_no_text_block_emits_success_final_and_preserves_readable_transcript`
+- Native runner characterization：empty content 成功、missing usage 不写 token_usage transcript event。
+- Native runner + runtime 半真实链路：empty content artifact 与 SDK exception failed artifact/transcript/final。
+
+**当前 contract：** empty content / no text block / missing usage 保持 succeeded characterization；SDK-like exception 经 failed `AgentResult` 进入 runtime 后落盘 failed result/transcript/final，并在 bridge 层收敛为 failed final/error/idle。`result.json` 不内联 `transcriptEvents`，`transcript.jsonl` 必须逐行 JSON 可读。
+
+**仍暂缓：** runner.poll 直接异常是否合成 failed result artifact、empty content 是否改为 failed/degraded、真实 malformed stream / malformed JSON opt-in diagnostic。provider error 全链路脱敏与 redaction completeness pass 已完成，不再作为本项待办。
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_p8_provider_anomaly_e2e
+python -m unittest tests.test_workflow_child_agent tests.test_workflow_runtime tests.test_ink_bridge
+```
+
+#### P2：Bridge cache hit/miss 半集成矩阵（已完成）
+
+Bridge 层 same args cache hit 与 different args cache miss 主干已由 `b28c3b8` 完成，不再作为下一步任务重复实施。
+
+**已补测试：**
+
+- `test_workflow_resume_cache_hit_replays_prefix_without_restarting_cached_child`
+- `test_workflow_resume_cache_miss_when_args_change_starts_fresh_child`
+
+**后续说明：** permission/tools/MCP context 变体也已由 `85f9b2d` 的上下文失效专项覆盖；真实 API cache key args variant 仍可作为 opt-in diagnostic，而不是默认离线门禁。
+
+#### P3：大 artifact / transcript 隔离 deterministic E2E（已完成核心覆盖）
+
+大 child transcript（1000+ 行）、多 job transcript、resume copy 与 bridge final/detail 不内联 child transcript 的 deterministic/runtime + bridge 核心覆盖已由 `6848a67` 完成，不再作为 P3 最小待做重复实施。
+
+**已补测试：**
+
+- `test_runtime_large_child_transcripts_stay_out_of_result_and_journal`
+- `test_runtime_resume_copies_large_transcript_to_resumed_artifact`
+- `test_workflow_final_and_detail_do_not_inline_large_child_transcripts`
+
+**后续说明：** 合法超大 `final-result.json` 的有界输出不属于 child transcript 隔离本体，已拆分为 Bridge final/detail artifact fallback robustness 专项。
+
+
+#### P4：真实 API interrupted source resume 独立 diagnostic（已实现，待/可 opt-in 真实运行验证）
+
+**为什么不是重复：** runtime deterministic interrupted prefix/stale/running middle 已覆盖，bridge 允许 interrupted source resume 已覆盖，failed/killed 真实 API E2E 已覆盖；本项补齐像 failed/killed 一样可独立审计的真实 API interrupted source resume diagnostic。
+
+**目标文件：** `tests/p8_real_api_e2e.py`、`tests/test_p8_real_api_e2e_diagnostic.py`
+
+**已实现范围：** opt-in diagnostic-only。source run 完成 `agent_1`/`agent_2` 后让 `agent_3` 进入 interrupted/stale 源状态；resume 后 `agent_1`/`agent_2` cached、`agent_3` fresh、resumed final succeeded；校验 `agent_cached` 事件数、metadata `cachedFromRunId`/`cachedFromJobId`、artifact/transcript 存在、diagnostic summary 脱敏。该 diagnostic 写入 `summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"]`，不进入主 `summary["cases"]`，不影响 required cases 门禁。
+
+**已补测试：**
+
+- `test_interrupted_source_resume_diagnostic_is_non_gating_and_reported`
+- `test_interrupted_source_resume_diagnostic_exception_is_sanitized_and_non_gating`
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_p8_real_api_e2e_diagnostic
+GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
+```
+
+#### P5：真实 API cache key args variant diagnostic
+
+**为什么不是重复：** 已有 deterministic argsHash miss 与真实 API permission metadata smoke；缺的是真实 API 下 cache hit/miss 是否实际避免或触发真实 child 调用。
+
+**目标文件：** `tests/p8_real_api_e2e.py`、`tests/test_p8_real_api_e2e_diagnostic.py`
+
+**范围：** opt-in diagnostic-only、最小成本。source run 使用 script + args A 并真实 child 成功；resume with args A 断言 `agent_cached` 且没有 fresh child started；resume with args B 断言无 `agent_cached` 且 fresh child started；用 `agent_cached` event、started job IDs、artifact copy/fresh marker 作为成本代理，不依赖 provider 账单。
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_p8_real_api_e2e_diagnostic
+GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
+```
+
+#### P6：真实 API stability/stress 扩展观察
+
+**为什么不是重复：** 基础 stability/stress harness、deterministic/bridge 429 已存在；剩余只是长期/高 fanout/provider 自然异常观察，不应变成默认门禁。
+
+**目标文件：** `tests/p8_real_api_stability_e2e.py`、`tests/p8_real_api_stress_e2e.py`、对应 unit tests 与本文件。
+
+**范围：** 仅增强 summary 聚合：observed 5xx count、observed empty response count、observed SDK exception count、retry-after / rate-limit hint、更明确的 high fanout / rounds 配置说明。真实运行继续要求二级 opt-in。
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_p8_real_api_stability_e2e
+python -m unittest tests.test_p8_real_api_stress_e2e
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STABILITY=1 python tests/p8_real_api_stability_e2e.py
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_API_STRESS=1 GA_REAL_API_STRESS_FANOUT=16 GA_REAL_API_STRESS_ROUNDS=2 python tests/p8_real_api_stress_e2e.py
+```
+
+### 5.3 推荐下一步
+
+P0 **Bridge + 真实 `WorkflowRuntime` 的 JS 异常脚本收敛矩阵** 已完成第一批、第二批主要可测场景和 options plain-object contract 生产修复。P1 **半真实 provider anomaly E2E** 已完成默认可跑的 runtime + bridge characterization。此前建议的 **P2 Bridge cache hit/miss 半集成矩阵**、**provider error 全链路脱敏专项**、**P8 redaction completeness pass**、**resume cache permission/tools/MCP context invalidation**、**大 transcript 隔离与 cached transcript streaming copy**、**Bridge final/detail artifact fallback robustness** 均已完成并提交；真实 API interrupted source resume 独立 diagnostic 也已实现为 diagnostic-only，等待/可进行 opt-in 真实运行验证。后续不再重复 same args/different args cache 主干、provider anomaly 基础链路、JS 异常矩阵、脱敏基础完整性、cache context 安全边界、child transcript 大规模隔离或 bridge final artifact fallback 主干。
+
+#### 当前推荐 P1：真实 API interrupted source resume diagnostic opt-in 验证
+
+**结论：** 下一步应在用户明确允许真实 API 的前提下，运行 `tests/p8_real_api_e2e.py`，验证新增 `realApiInterruptedSourceResumeDiagnostic` 在本机 `mykey` profile 下的真实 provider 表现。执行时只通过 profile 名启用本地配置，不读取、不打印、不提交 `mykey.py` / `mykey.json` / `mcp.json`，并保持 `GA_RUN_REAL_MCP_E2E` 关闭。
+
+**建议命令：**
+
+```powershell
+$env:GA_RUN_REAL_API_E2E = '1'; $env:GA_REAL_API_CONFIG = 'native_oai_config'; $env:GA_REAL_API_EXPECTED_NAME = 'gpt-native'; $env:GA_REAL_API_EXPECTED_MODEL = 'gpt-5.5'; Remove-Item Env:\GA_RUN_REAL_MCP_E2E -ErrorAction SilentlyContinue; python "D:\git_codes\GenericAgent\tests\p8_real_api_e2e.py"
+```
+
+**验收重点：** required cases 全部 passed；`summary["diagnostics"]["realApiInterruptedSourceResumeDiagnostic"]` 存在；该 diagnostic 不进入 `summary["cases"]`；`secretScan=[]`；interrupted source 中 `agent_1`/`agent_2` 可作为 cached prefix，`agent_3` fresh rerun；输出不包含真实 key 或未脱敏 provider 响应。
+
+#### 已完成离线 P2：Bridge final/detail artifact fallback robustness
+
+**结论：** Bridge 对 workflow final/detail artifact 异常的 fallback 行为已收敛。即使 `final-result.json` 缺失、损坏、过大、包含敏感内容，或 `run.result_ref` 被污染为越界路径，Bridge 也会稳定 emit 有界、脱敏、可消费的 `workflow_final`，并最终恢复 `activity=None` / `status=idle`。`workflow_detail` 已明确保持只返回 refs，不展开 `agents/*/result.json` 或 child transcript 正文。
+
+**为什么优先：**
+
+1. **不重复历史任务：** cache、脱敏、大 transcript、JS 异常、provider anomaly 主干都已完成；本切片覆盖新的 artifact fallback 安全边界。
+2. **用户可见性强：** final/detail 是 Ink UI 消费 workflow 结果的关键协议出口，artifact 异常时不能挂死、不能输出大 body、不能泄漏 secret。
+3. **默认离线可跑：** 可用 fake runtime / deterministic bridge 测试，不需要真实 API 或真实 MCP。
+4. **承接最近工作：** `6848a67` 已避免 child transcript 进入事件；本切片继续防止合法超大 final artifact 或损坏 artifact 破坏 bridge 协议。
+
+**最小切片：**
+
+1. `final-result.json missing -> bounded fallback`：runtime 设置 `result_ref` 后文件缺失，仍 emit `workflow_final`，payload 包含 `runId/status/resultRef/artifactError=missing`，尾部 idle。
+2. `final-result.json corrupt -> bounded fallback`：非法 JSON 不泄漏 `JSONDecodeError` 堆栈或损坏文件正文，尾部 idle。
+3. `final-result.json too large -> bounded fallback`：超过 bridge 上限时不完整 `json.load` / emit，大 marker 不进入事件，payload 包含 `artifactError=too_large` / `artifactTruncated=true`。
+4. `fallback helper redaction`：fallback 中的 `run.error` 在 helper 层也脱敏，不只依赖最终 emit。
+5. `result_ref path guard`：绝对路径、`../`、跨 drive/UNC 等越界引用不能读取 artifact 目录外文件，返回 `artifactError=invalid_result_ref`。
+6. `workflow_detail refs-only contract`：损坏或巨大 `agents/{job_id}/result.json` 不影响 `workflow_detail`，detail 只含 `resultRef` / `transcriptRef` 等引用，不展开 result body。
+
+**建议目标文件：**
+
+- `frontends/ink_bridge.py`
+- `tests/test_ink_bridge.py`
+- `docs/P8-e2e-next-steps.md`
+
+**建议测试名：**
+
+- `test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime`
+- `test_workflow_final_emits_fallback_and_idle_when_final_result_json_is_corrupt`
+- `test_workflow_final_large_result_uses_bounded_sanitized_fallback`
+- `test_workflow_final_corrupt_or_large_payload_does_not_leak_secrets`
+- `test_workflow_final_rejects_result_ref_outside_artifact_dir_with_fallback`
+- `test_workflow_detail_keeps_result_refs_only_and_never_reads_agent_result_artifacts`
+
+**可能生产修复点：**
+
+- 在 `frontends/ink_bridge.py::_workflow_final_payload()` 中拆出安全 artifact 读取 helper。
+- 校验 `result_ref` 必须是 artifact_dir 内的相对路径。
+- 增加 bridge 局部 final payload 文件大小上限，例如 64 KiB。
+- 对缺失、损坏、过大、越界、非 dict payload 统一返回稳定 fallback：`runId/status/error/resultRef/artifactError`。
+- fallback helper 级别调用 `redact_sensitive_text()` / `sanitize()`，避免未来绕过 emit 时泄漏。
+- `workflow_detail` 先锁定 refs-only 安全语义，不新增无界 artifact 展开。
+
+**验证命令：**
+
+```bash
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_emits_fallback_and_idle_when_final_result_json_is_corrupt
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_large_result_uses_bounded_sanitized_fallback
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_corrupt_or_large_payload_does_not_leak_secrets
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_final_rejects_result_ref_outside_artifact_dir_with_fallback
+python -m unittest tests.test_ink_bridge.InkBridgeTest.test_workflow_detail_keeps_result_refs_only_and_never_reads_agent_result_artifacts
+python -m unittest tests.test_ink_bridge
+python -m py_compile frontends/ink_bridge.py
+```
+
+**非目标：**
+
+- 不重复 Bridge same args/different args cache 主干。
+- 不重复 JS 异常、provider anomaly、429/timeout/parallel partial failure、stop/resume prefix、redaction completeness、cache context invalidation、大 child transcript 隔离。
+- 不运行真实 API、真实 MCP、stress/stability、mid-call streaming cancel。
+- 不读取、打印或提交 `mykey.py`、`mykey.json`、`mcp.json`。
+- 不把完整 tool schema、MCP schema、agent result body 或 child transcript 正文写入 final/detail/event。
+- 不改变 workflow runtime 调度、resume cache、permission profile 或 MCP 行为。
+
+#### 已完成真实 E2E：单 agent + 真实 MCP 搜集 + 中文报告
+
+**执行目标：** 使用 `native_oai_config / gpt-native / gpt-5.5`，让 GA workflow 真实执行用户级任务：
+
+```text
+听说 openai 会大幅度降价来跟 anthropic 抢市场，请你分析对开源模型的影响和对 AI 发展的影响 你可以使用 mcp 搜集然后撰写报告
+```
+
+**执行方式：** 临时 opt-in 脚本位于 `temp/run_p5_real_workflow_mcp_report_e2e.py`，通过 `WorkflowRuntime + NativeGPTChildAgentRunner` 直接运行，不读取、不打印、不提交 `mykey.py`、`mykey.json`、`mcp.json`；真实配置由现有 `llmcore` / `mcp_runtime` 机制加载。
+
+**真实运行结果：**
+
+- `passed=true`
+- `profileOk=true`
+- `configName=native_oai_config`
+- `name=gpt-native`
+- `model=gpt-5.5`
+- `status=succeeded`
+- `finalStatus=succeeded`
+- `selectedMcpTool=mcp__tavily__tavily_search`
+- `mcpCalled=true`
+- `mcpReturned=true`
+- 实际 MCP 调用 5 次 Tavily search，随后 `no_tool` 输出中文报告
+- `reportLength=6376`
+- `markerFound=true`，包含 `GA_P5_REAL_WORKFLOW_MCP_REPORT_DONE`
+- `secretScan=[]`
+- `issues=[]`
+
+**验证通过的链路：**
+
+- 真实 gpt-5.5 provider 调用
+- 真实 MCP discovery 与 tool schema 注入
+- 真实 MCP tool_call / tool_result
+- workflow `phase()` / `log()` / `agent()` 编排
+- permission profile 选择与 `tool_allowed` 事件
+- child result / transcript artifact 分离
+- final-result 正常落盘
+- 中文结构化报告生成
+- artifact secret scan 通过
+
+**暴露的非阻断问题：**
+
+真实运行中出现一次 provider streaming transient error：
+
+```text
+ChunkedEncodingError: Response ended prematurely
+```
+
+该异常没有导致 workflow 失败：child agent 后续继续 turn，继续 MCP 搜索并最终输出报告。因此本次 E2E 判定为通过。该现象应作为稳定性观察项记录：后续可将 streaming transient error 结构化为 warning/diagnostic，例如 `providerTransientErrorCount`、`streamingErrorWarnings`，避免只混入 transcript/report preview。
+
+#### 推荐下一步：Level 1 真实多 agent sandbox 代码开发 E2E
+
+**结论：** 单 agent + 真实 MCP 长任务已经通过，下一步建议升级为真实 gpt-5.5 的多 agent workflow，但先限制在临时 sandbox 内完成代码开发，不直接修改仓库源码。目标是验证 4-5 个 child agent 的编排、并发/串行组合、文件工具使用、artifact 分离、测试执行和最终聚合能力。
+
+**推荐任务：** 在 sandbox 中实现一个小型 Python 工具包，例如：
+
+```text
+实现一个 URL / Markdown 链接处理 mini package：
+- url_utils.py
+- test_url_utils.py
+- README.md 或 REVIEW.md
+要求支持 URL 规范化、域名提取、查询参数脱敏、Markdown 链接提取。
+```
+
+**推荐 workflow 结构：**
+
+1. `design` agent：分析需求，输出模块设计、函数签名、边界条件。
+2. `implementation` agent：根据设计在 sandbox 写入实现文件。
+3. `tests` agent：根据设计和实现写入 `unittest` 测试。
+4. `review` agent：读取实现和测试，审查 bug/security/edge cases。
+5. `final` agent：汇总设计、实现、测试、审查，输出最终报告。
+
+可先采用 `phase + agent + parallel + agent + agent`：
+
+```js
+phase('Design');
+const design = await agent('分析需求并输出设计', { label: 'design' });
+
+phase('Build');
+const [impl, tests] = await parallel([
+  () => agent('根据设计实现代码，写入 sandbox 文件', { label: 'implementation' }),
+  () => agent('根据设计生成 unittest 测试，写入 sandbox 文件', { label: 'tests' })
+]);
+
+phase('Review');
+const review = await agent('读取 sandbox 代码和测试并审查', { label: 'review' });
+
+phase('Finalize');
+const final = await agent('汇总设计、实现、测试、审查，输出最终报告', { label: 'final' });
+
+return {
+  marker: 'GA_P5_MULTI_AGENT_CODE_E2E_DONE',
+  designLength: String(design.summary || '').length,
+  implementationLength: String(impl.summary || '').length,
+  testsLength: String(tests.summary || '').length,
+  reviewLength: String(review.summary || '').length,
+  finalLength: String(final.summary || '').length
+};
+```
+
+**Level 1 验收标准：**
+
+Workflow 层：
+
+- `workflow_phase >= 4`
+- `workflow_log >= 4`
+- `agent_registered >= 4`
+- `agent_started >= 4`
+- `agent_completed >= 4`
+- final status 为 `succeeded`
+
+Agent / artifact 层：
+
+- `jobs.length >= 4`
+- 所有 jobs `status == succeeded`
+- 所有 jobs `resultExists == true`
+- 所有 jobs `transcriptExists == true`
+- 所有 result JSON 不内联 `transcriptEvents`
+
+工具 / sandbox 层：
+
+- 至少出现 `file_write` 与 `file_read`
+- 不出现 `tool_denied`
+- 只允许写入指定 sandbox，例如 `temp/p5_multi_agent_code_e2e/<run_id>/workspace`
+- 不读取、不写入 `mykey.py`、`mykey.json`、`mcp.json`
+- 不修改仓库源码
+
+产物层：
+
+- sandbox 中存在 `url_utils.py`
+- sandbox 中存在 `test_url_utils.py`
+- sandbox 中存在 README 或 review/final 报告
+- `python -m unittest discover -s <sandbox>` 通过
+
+安全层：
+
+- `secretScan=[]`
+- artifact 不包含真实 API key / Bearer token / sk-* / JWT
+- 真实 API 产物不提交 git
+
+质量层：
+
+- final report 包含 `GA_P5_MULTI_AGENT_CODE_E2E_DONE`
+- 包含设计摘要、实现摘要、测试结果、审查结论、已知问题
+
+**真实执行记录（2026-06-11，Level 1 多 agent sandbox code E2E）：**
+
+临时 opt-in 脚本：`temp/run_p5_multi_agent_code_e2e.py`。执行时使用 `GA_RUN_REAL_WORKFLOW_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5`；不启用真实 MCP，不读取、不打印、不提交 `mykey.py`、`mykey.json`、`mcp.json`。
+
+已完成三轮真实自测：
+
+1. **第一轮：被 workflow 安全预检拒绝。**
+   - `profileOk=true`，真实 profile 为 `gpt-native / gpt-5.5`。
+   - `secretScan=[]`。
+   - 失败原因：workflow 脚本文本含 `WorkflowRuntime.FORBIDDEN_SCRIPT_TOKENS` 中的保留词，触发 `workflow script uses forbidden token`。
+   - 结论：这不是 provider 失败，也不是多 agent 执行失败；暴露的是 workflow prompt/脚本文本需要避开 runtime 安全扫描保留词。
+
+2. **第二轮：workflow 编排成功，但产物验收失败。**
+   - `status=succeeded`，`finalStatus=succeeded`。
+   - `startedJobIds=[agent_1, agent_2, agent_3, agent_4, agent_5]`。
+   - `agent_completed=5`、`agent_registered=5`、`agent_started=5`、`workflow_phase=4`、`workflow_log=4`。
+   - `tool_allowed=22`，`deniedTools=[]`。
+   - 生成 `url_utils.py`、`test_url_utils.py`、`README.md`、`REVIEW.md`。
+   - `markerFound=true`，final result 包含 `GA_P5_MULTI_AGENT_CODE_E2E_DONE`。
+   - 所有 job `status=succeeded`，所有 job 的 `result.json` / `transcript.jsonl` 存在，且 result JSON 不内联 `transcriptEvents`。
+   - 失败原因：`python -m unittest discover -s <workspace>` 失败。implementation agent 与 tests agent 并行工作，契约未锁死：实现返回三字段 `MarkdownLink`，测试期望二元 tuple；实现参数名为 `params_to_redact`，测试调用 `sensitive_keys`；URL normalization 的 query 排序、fragment、trailing slash 预期不一致。
+   - review agent 实际在 `REVIEW.md` 中发现并指出该问题，但 workflow 没有 `review -> repair -> retest` 闭环，final agent 只做汇总。
+   - 另有 `secretScan` 命中 URL 脱敏测试 fixture 中的 `api_key` / `token` 示例，说明 secret scan 对测试样例存在误报风险；真实密钥未泄漏。
+
+3. **第三轮：统一 API contract 后 workflow 仍成功，但仍未达到产物门禁。**
+   - `status=succeeded`，`finalStatus=succeeded`。
+   - `startedJobIds=[agent_1, agent_2, agent_3, agent_4, agent_5]`。
+   - `agent_completed=5`、`agent_registered=5`、`agent_started=5`、`workflow_phase=4`、`workflow_log=4`。
+   - `tool_allowed=17`，`deniedTools=[]`。
+   - `markerFound=true`。
+   - 生成文件齐全：`url_utils.py`、`test_url_utils.py`、`README.md`、`REVIEW.md`。
+   - artifact 隔离继续通过：所有 job result/transcript 存在，result JSON 不内联 `transcriptEvents`。
+   - `unitTest.returncode=1`，剩余 2 个失败：
+     - `extract_domain("Example.COM:8080/path")` 返回空字符串，原因是实现把 `Example.COM:` 误判为 URL scheme，而不是 schemeless `host:port`。
+     - `normalize_url("https://example.com/path//")` 返回 `https://example.com/path`，测试期望只去掉一个尾部 slash 后保留 `https://example.com/path/`。
+   - review agent 再次成功识别 blocking correctness bug，指出 schemeless `host:port` 解析问题，并建议增加 `localhost:8000/path` 等测试。
+   - `secretScan` 仍命中 `workspace/test_url_utils.py` 与 `workspace/url_utils.py` 中的 URL 参数脱敏示例，说明扫描规则需要更精确地区分真实凭据和安全占位 fixture，或让测试 fixture 完全避开 `api_key=...` 形态。
+
+**结论：** Level 1 真实多 agent sandbox code E2E 对 GA workflow runtime 的核心链路验证是正向的：真实 gpt-5.5、多 agent、parallel、工具调用、权限事件、artifact/transcript 分离、final-result 落盘、marker 汇总均按预期工作。当前未通过的是“代码开发 workflow 产品形态”的质量门禁，而非 P8 runtime 基础能力：并行实现/测试后需要强制 repair/retest 闭环，且 secret scan 需要 fixture-aware 规则或更安全的测试样例。
+
+**暴露问题与后续修正建议：**
+
+- **P1：增加 `Review -> Repair -> Retest -> Finalize` 闭环。** review agent 的发现必须驱动 repair agent 修改 sandbox 文件，然后 harness 再运行 unittest；失败时至少允许一次修复迭代，否则 review 只能发现问题不能改变最终验收。
+- **P1：测试 agent 不应与 implementation 完全并行生成最终测试。** 更稳妥形态是 design 后并行生成 implementation draft 与 test plan，implementation 落盘后由 tests agent 读取实际实现再写测试，或由 repair agent 统一收敛 API contract。
+- **P1：将外部 unittest 结果反馈回 workflow。** 当前 harness 在 workflow 结束后才跑 unittest，child agents 无法看到失败结果。建议新增 `test-runner/repair` 阶段，把测试输出作为 args 或 sandbox 文件输入给 repair agent。
+- **P2：优化 secret scan fixture 策略。** 真实 key 扫描仍必须严格，但 URL 脱敏代码/测试天然会出现 `token`、`api_key` 等参数名；建议测试 fixture 使用不触发密钥正则的占位名，或扫描器跳过明确 placeholder/demo 值与 `.pyc`。
+- **P2：将 provider transient warning 结构化。** 此轮未见 provider 终止性失败，但此前单 agent MCP E2E 出现过 streaming transient error；建议继续把这类 provider 5xx/断流统计为 diagnostic warning，而不与 workflow 语义失败混淆。
+- **P3：再升级 Level 2 前先让 Level 1 闭环通过。** 在 Level 1 达到 `workflow succeeded + unittest passed + secretScan=[]` 前，不建议叠加 MCP research，否则问题归因会变复杂。
+
+**分阶段升级建议：**
+
+- **Level 1：多 agent + sandbox file tools**。4-5 个真实 gpt-5.5 child agent，允许 `file_read` / `file_write`，不启用 MCP。优先验证多 agent 编排、代码产物、artifact 和测试执行。
+- **Level 2：多 agent + MCP research + sandbox code**。在 Level 1 通过后，增加 1 个 research agent 使用 MCP 查询 Python URL/Markdown 处理资料，其余 agent 负责实现、测试、审查。
+- **Level 3：多 agent + resume/cache**。制造 source run 部分完成后 resume，验证已完成 agent cache hit，未完成 agent fresh rerun，覆盖复杂 workflow 下的 P8 核心能力。
+
+**推荐下一步执行：** 先做 Level 1。它比单 agent MCP 报告更复杂，但比“多 agent + MCP + 代码写入”风险低；能更清晰暴露 GA workflow 的并发、工具权限、artifact、文件写入和测试执行问题。
+
+---
+
+## 6. 执行约束与安全注意事项
+
+### 6.1 真实 API 测试的安全门
+
+```bash
+GA_RUN_REAL_API_E2E=1 python tests/p8_real_api_e2e.py
+```
+
+- 所有真实 API E2E 必须通过 `GA_RUN_REAL_API_E2E` 环境变量 opt-in
+- 默认 unittest 和 pytest 不得烧真实 API
+- 压力测试（rate limit / 大并发）必须使用单独的环境变量 `GA_RUN_REAL_API_STRESS=1`
+- 绝不读取、打印、提交真实 API key
+- 文档更新不得读取或打印 `mykey.py`、`mykey.json`、`mcp.json`
+- case 级诊断输出只能包含脱敏摘要、case 名称、状态、耗时和错误类型，不得输出 provider key、完整原始请求或未脱敏响应
+
+### 6.2 真实 native GPT 主套件状态
+
+- 最新状态：真实 native GPT 主套件已通过。
+- 执行环境：`GA_RUN_REAL_API_E2E=1`、`GA_REAL_API_CONFIG=native_oai_config`、`GA_REAL_API_EXPECTED_NAME=gpt-native`、`GA_REAL_API_EXPECTED_MODEL=gpt-5.5`。
+- 结果：6 个主 case 全部 `passed`，`diagnostics={}`（真实 MCP diagnostic 关闭），`secretScan=[]`。
+- 该状态只表示 opt-in 环境下主套件通过，不代表压力测试、rate limit、网络抖动、timeout/fallback 等专项场景已覆盖。
+- 文档更新不得读取或打印 `mykey.py`、`mykey.json`、`mcp.json`。
+
+### 6.3 脱敏处理
+
+- 所有 E2E 输出必须经 `sanitize()` 函数脱敏（`SECRET_PATTERNS` 覆盖 bearer token、api_key、sk-*、JWT 等）
+- 脱敏格式：匹配到 secret 的部分替换为 `[REDACTED]`
+
+### 6.4 Secret 扫描
+
+- 所有工作完成时必须调用 `scan_for_secret_material()` 扫描 artifact 目录
+- 发现 secret 时测试必须 FAIL（`secretScan: []` 为必要条件）
+
+### 6.5 不提交 artifact
+
+- 真实 API 调用产生的 artifact 不得提交到 git
+- 测试使用 `tempfile.mkdtemp()` 创建临时目录后自动清理
+- `temp/` 目录已在 `.gitignore` 中
+
+### 6.6 默认权限约束
+
+- Child agent 默认 permission profile 必须为 `"inherit-current-permissions"`
+- Permission policy version 默认必须为 `"inherit-current-v1"`
+- 默认权限必须是非 read-only，继承 GenericAgent 当前 agent 的工具/skill/MCP 权限
+
+### 6.7 架构约束提醒
+
+| 项目 | 说明 |
+|---|---|
+| `scriptHash` | 由 `_cache_key()` 计算但**不在匹配逻辑中比较** — resume 使用同一 script 时由最长前缀匹配覆盖，这是设计选择 |
+| `failure_policy` | 运行时只使用 `"continue"`，Scheduler 支持的 `fail_fast` 未被运行时使用 |
+| transcript 复制 | cached transcript copy 已改为 streaming 物理复制（非软链接），大量 artifact 场景仍需关注磁盘使用 |
+
+### 6.8 后续阶段参考（P9 / P10）
+
+- **P9（Saved workflow registry）**：需要将 workflow script 的持久化和版本化纳入范围，可能影响 cache key 设计
+- **P10（Planner/trigger integration）**：需要 workflow 与 GenericAgent 的 planner/trigger 机制集成，child agent 的工具继承变得更加关键
+- 当前 E2E 测试框架（`p8_real_api_e2e.py`）应设计为易于扩展，后续 P9/P10 E2E 建议遵循同样的 opt-in + 脱敏 + secret 扫描模式
+
+---
+
+## 附录：关键文件路径
+
+| 文件 | 说明 |
+|---|---|
+| `tests/p8_real_api_e2e.py` | P8 真实 API E2E 主文件，覆盖正常主路径、failed/killed/interrupted resume、权限/工具/skill/MCP 继承等 opt-in 场景 |
+| `tests/test_workflow_runtime.py` | Runtime 层单元测试（14 个用例，按当前实际测试数维护） |
+| `tests/test_workflow_scheduler.py` | Scheduler 层单元测试（14 个用例，按当前实际测试数维护） |
+| `tests/test_workflow_store.py` | Store 层单元测试（9 个用例，按当前实际测试数维护） |
+| `tests/test_ink_bridge.py` | Bridge 层单元/半集成测试，覆盖 workflow succeeded、resume 拒绝、stop、非成功终态事件等 |
+| `frontends/ink_bridge.py` | Ink bridge 实现（`_run_workflow_runtime` 第 518-541 行，`_workflow_final_payload` 第 568-576 行） |
+| `docs/P8-e2e-todo.md` | P8 E2E TODO 文档（本分析起点） |
+| `docs/dynamic-workflows-implementation-roadmap.md` | 完整实施路线图（P1-P10） |

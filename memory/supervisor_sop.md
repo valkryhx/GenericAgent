@@ -19,7 +19,7 @@
 
 ## 监控循环
 
-持续轮询 `temp/{task_name}/output.txt` 的新增内容（sleep间隔读取），每发现新输出：
+优先使用 `subagent_manager.py` 的 `wait_agents()` 观察 `temp/{task_name}/state.json` / `events.jsonl` 变化；兼容旧目录时再轮询 `temp/{task_name}/output.txt`。每发现新状态或新输出：
 
 1. 判断工作agent当前在哪一步，对照约束清单检查（约束记不清时重读SOP原文，禁凭印象）
 2. 可读环境信息（文件/网页/进程）补充判断依据
@@ -40,3 +40,4 @@
 - **沉默为主**：没问题不说话
 - **一句话**：像用户一样直接说，禁长篇解释
 - **`_keyinfo`只用于提前预注入**：在工作agent到达该步之前塞细节。已经犯错的一律用`_intervene`纠正
+- **收尾优先 close_agent**：cleanup 前先读 `state.json`，再用 `close_agent()` 收尾，不能只按 PID 统一杀掉

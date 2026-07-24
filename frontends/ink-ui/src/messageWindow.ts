@@ -2,7 +2,7 @@ import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
-import stringWidth from 'string-width'
+import { terminalSegments, terminalTextWidth } from './terminalText.js'
 
 export type TranscriptPart = MarkdownPart & {
   backgroundColor?: string
@@ -125,7 +125,35 @@ export function visibleTranscriptLines(
 }
 
 export function liveTranscriptViewportLines(lines: TranscriptLine[], maxRows: number): TranscriptLine[] {
-  return visibleTranscriptLines(lines, { maxRows, scrollOffset: 0 }).lines
+  const max = Math.max(1, Math.floor(maxRows))
+  if (lines.length <= max) return lines
+
+  // Pin the *last* user-prompt block (open/current turn question) so a long assistant
+  // tail cannot hide it — without re-pinning older historical user lines.
+  let pinStart = -1
+  let pinEnd = -1
+  for (let i = 0; i < lines.length; ) {
+    if (lines[i]!.id.startsWith('u-')) {
+      const start = i
+      while (i < lines.length && lines[i]!.id.startsWith('u-')) i += 1
+      pinStart = start
+      pinEnd = i
+    } else {
+      i += 1
+    }
+  }
+
+  if (pinStart < 0) {
+    return visibleTranscriptLines(lines, { maxRows: max, scrollOffset: 0 }).lines
+  }
+
+  const pinned = lines.slice(pinStart, pinEnd)
+  const after = lines.slice(pinEnd)
+  const pinnedCount = Math.min(pinned.length, Math.max(0, max - 1))
+  const keptPinned = pinned.slice(0, pinnedCount)
+  const restBudget = Math.max(0, max - keptPinned.length)
+  const restTail = after.length <= restBudget ? after : after.slice(after.length - restBudget)
+  return [...keptPinned, ...restTail]
 }
 
 export function clampTranscriptScrollOffset(offset: number, totalRows: number, maxRows: number): number {
@@ -163,14 +191,31 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
   const body = formatAssistantText(message.text, { expanded: expandedTools }) || ' '
   const markdownLines = renderMarkdownLines(body, theme)
   markdownLines.forEach((line, index) => {
-    const prefix = index === 0 ? '✻ ' : '  '
+    // No per-line "continuation indent". Stream-commit splits one logical turn into
+    // many a-*-c* messages; indenting every non-first line of each segment made
+    // [Action] (segment start) and [Status] (continuation) look misaligned.
+    const styled = styleAssistantTranscriptLine(line.parts ?? [{ text: line.text }], theme)
     rows.push({
       id: `${message.id}-${index}`,
-      text: `${prefix}${line.text}`,
-      parts: [{ text: prefix }, ...line.parts],
+      text: styled.map(part => part.text).join('') || ' ',
+      parts: styled,
     })
   })
   rows.push(blankLine(`${message.id}-blank`))
+}
+
+/** Keep GA tool progress lines left-aligned and consistently muted (not code cyan). */
+function styleAssistantTranscriptLine(parts: TranscriptPart[], theme?: InkTheme): TranscriptPart[] {
+  const text = parts.map(part => part.text).join('')
+  // Match even when markdown left a blockquote marker or residual indent:
+  //   "  [Status] ...", "| [Action] ...", "  | [Status] ..."
+  if (/^\s*(?:\|\s*)?\[(?:Action|Status)\]/.test(text)) {
+    const cleaned = text
+      .replace(/^\s*(?:\|\s*)+/, '')
+      .replace(/^\s+/, '')
+    return [{ text: cleaned || text.trim() || ' ', color: theme?.muted ?? 'gray', dimColor: true }]
+  }
+  return parts
 }
 
 function appendPlainLines(
@@ -200,7 +245,7 @@ function lineParts(line: TranscriptLine): TranscriptPart[] {
 }
 
 function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
-  if (stringWidth(line.text) <= width) return [line]
+  if (terminalTextWidth(line.text) <= width) return [line]
   const wrapped: TranscriptLine[] = []
   let currentText = ''
   let currentWidth = 0
@@ -219,11 +264,12 @@ function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
   }
 
   for (const part of lineParts(line)) {
-    for (const char of part.text) {
-      const charWidth = Math.max(1, stringWidth(char))
-      if (currentText && currentWidth + charWidth > width) flush()
-      currentText += char
-      currentWidth += charWidth
+    for (const segment of terminalSegments(part.text)) {
+      const segmentText = segment.width > width ? '…' : segment.text
+      const segmentWidth = segment.width > width ? 1 : segment.width
+      if (currentText && currentWidth + segmentWidth > width) flush()
+      currentText += segmentText
+      currentWidth += segmentWidth
       const last = currentParts[currentParts.length - 1]
       const sameStyle = last
         && last.color === part.color
@@ -233,9 +279,9 @@ function wrapStyledLine(line: TranscriptLine, width: number): TranscriptLine[] {
         && last.underline === part.underline
         && last.dimColor === part.dimColor
       if (sameStyle) {
-        last.text += char
+        last.text += segmentText
       } else {
-        currentParts.push({ ...part, text: char })
+        currentParts.push({ ...part, text: segmentText })
       }
     }
   }

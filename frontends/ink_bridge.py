@@ -22,6 +22,8 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
+from sensitive_redaction import sanitize, redact_sensitive_text
+
 
 def _configure_protocol_stdio() -> None:
     for name in ("stdin", "stdout", "stderr"):
@@ -39,6 +41,11 @@ Event = dict[str, Any]
 EmitFn = Callable[[Event], None]
 AgentFactory = Callable[[], Any]
 
+_WORKFLOW_FINAL_PAYLOAD_MAX_BYTES = 64 * 1024
+# Product default for /workflow without --timeout. WorkflowRuntime itself still
+# defaults to 10s for unit tests that construct it directly.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 900.0
+
 
 def _backend_log_path() -> str:
     path = os.path.join(PROJECT_DIR, "temp", "ink_bridge_backend.log")
@@ -46,11 +53,60 @@ def _backend_log_path() -> str:
     return path
 
 
+# Thread-safe backend log redirect.
+# Concurrent workflow runtime + workflow_detail/progress used to open/close a log
+# file per enter/exit via contextlib.redirect_stdout. Nested/racy exit restored a
+# *closed* handle onto sys.stdout; child-agent threads then crashed with
+# ValueError: I/O operation on closed file. Keep one long-lived log handle and
+# refcount nested redirects under a lock.
+_backend_io_lock = threading.RLock()
+_backend_redirect_depth = 0
+_backend_log_handle: TextIO | None = None
+_backend_saved_stdout: TextIO | None = None
+_backend_saved_stderr: TextIO | None = None
+
+
+def _ensure_backend_log_handle() -> TextIO:
+    global _backend_log_handle
+    handle = _backend_log_handle
+    if handle is None or getattr(handle, "closed", False):
+        handle = open(_backend_log_path(), "a", encoding="utf-8", errors="replace")
+        _backend_log_handle = handle
+    return handle
+
+
 @contextlib.contextmanager
 def backend_output_redirect():
-    with open(_backend_log_path(), "a", encoding="utf-8", errors="replace") as log:
-        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-            yield
+    """Redirect stdout/stderr to the bridge backend log (thread-safe, nestable)."""
+    global _backend_redirect_depth, _backend_saved_stdout, _backend_saved_stderr
+    with _backend_io_lock:
+        if _backend_redirect_depth == 0:
+            log = _ensure_backend_log_handle()
+            _backend_saved_stdout = sys.stdout
+            _backend_saved_stderr = sys.stderr
+            sys.stdout = log
+            sys.stderr = log
+        _backend_redirect_depth += 1
+    try:
+        yield
+    finally:
+        with _backend_io_lock:
+            _backend_redirect_depth = max(0, _backend_redirect_depth - 1)
+            if _backend_redirect_depth == 0:
+                if _backend_saved_stdout is not None:
+                    sys.stdout = _backend_saved_stdout
+                if _backend_saved_stderr is not None:
+                    sys.stderr = _backend_saved_stderr
+                _backend_saved_stdout = None
+                _backend_saved_stderr = None
+                # Do not close the log handle here: another thread may still be
+                # printing after a concurrent enter/exit race window. Flush only.
+                handle = _backend_log_handle
+                if handle is not None and not getattr(handle, "closed", False):
+                    try:
+                        handle.flush()
+                    except Exception:
+                        pass
 
 
 def encode_event(event: Event) -> str:
@@ -62,7 +118,7 @@ def make_stdout_emitter(stdout: TextIO) -> EmitFn:
 
     def emit(event: Event) -> None:
         with lock:
-            stdout.write(encode_event(event))
+            stdout.write(encode_event(sanitize(event)))
             stdout.flush()
 
     return emit
@@ -71,6 +127,14 @@ def make_stdout_emitter(stdout: TextIO) -> EmitFn:
 def default_agent_factory() -> Any:
     with backend_output_redirect():
         from agentmain import GenericAgent
+
+    # Slice D3：启动时清理过期/超量的 GA 自产剪贴板图（不碰用户原图）
+    try:
+        from image_gc import maybe_gc_ga_images_on_startup
+
+        maybe_gc_ga_images_on_startup(quiet=True)
+    except Exception:
+        pass
 
     agent = GenericAgent()
     agent.inc_out = True
@@ -84,6 +148,11 @@ except Exception:  # pragma: no cover - compact core import failures are reporte
     compact_agent_context = None
     replace_log_with_compact_history = None
     should_auto_compact_agent = None
+
+
+# 自动压缩熔断器：连续失败这么多次后，本 session 停用自动压缩，避免摘要模型宕机时
+# 每次用户请求都空打一次 API。对齐 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES。
+MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 
 try:
@@ -107,16 +176,45 @@ except Exception:  # pragma: no cover - transcript resume falls back to legacy r
 
 
 class GenericAgentBridge:
-    def __init__(self, agent_factory: AgentFactory = default_agent_factory, emit: EmitFn | None = None) -> None:
+    def __init__(
+        self,
+        agent_factory: AgentFactory = default_agent_factory,
+        emit: EmitFn | None = None,
+        workflow_root: str | os.PathLike[str] | None = None,
+        workflow_runtime_factory: Callable[..., Any] | None = None,
+        workflow_planner_factory: Callable[[], Any] | None = None,
+    ) -> None:
         self.agent_factory = agent_factory
         with backend_output_redirect():
             self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
-        self.emit = emit or make_stdout_emitter(sys.stdout)
+        raw_emit = emit or make_stdout_emitter(sys.stdout)
+        self.emit = lambda event: raw_emit(sanitize(event))
+        # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is not None and hasattr(runtime, "set_emit"):
+                runtime.set_emit(self.emit)
+        except Exception:
+            pass
         self._task_seq = 0
+        # 自动压缩熔断器：连续失败 N 次后本 session 停用自动压缩，避免摘要模型宕机
+        # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
+        self._auto_compact_failures = 0
+        self._auto_compact_disabled = False
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
+        self._workflow_threads: dict[str, threading.Thread] = {}
+        self._workflow_emitted_sequences: dict[str, set[int]] = {}
+        self.workflow_runtime_factory = workflow_runtime_factory
+        self.workflow_planner_factory = workflow_planner_factory
+        with backend_output_redirect():
+            from workflow_controller import WorkflowController
+            from workflow_store import WorkflowStore
+
+        self.workflow_store = WorkflowStore(root=workflow_root)
+        self.workflow_controller = WorkflowController(store=self.workflow_store)
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
 
@@ -124,9 +222,9 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent.run()
 
-    def submit(self, text: str, display_text: str | None = None) -> int:
+    def submit(self, text: str, display_text: str | None = None, images: list | None = None) -> int:
         text = str(text or "")
-        if not text.strip():
+        if not text.strip() and not images:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
         if getattr(self.agent, "is_running", False) or self._is_consuming():
@@ -142,7 +240,7 @@ class GenericAgentBridge:
         self.emit({"type": "user", "taskId": task_id, "text": visible_text})
         self.emit({"type": "status", "status": "running", "taskId": task_id})
         try:
-            display_queue = self.agent.put_task(text, source="user")
+            display_queue = self.agent.put_task(text, source="user", images=images or [])
         except Exception as exc:
             self.emit({"type": "error", "code": "put_task_failed", "message": str(exc), "taskId": task_id})
             self.emit({"type": "status", "status": "idle", "taskId": task_id})
@@ -163,6 +261,20 @@ class GenericAgentBridge:
                     self.agent.abort()
             finally:
                 self.emit({"type": "status", "status": "stopping"})
+            return
+        stopped_workflow = False
+        for run_id, thread in list(self._workflow_threads.items()):
+            if not thread.is_alive():
+                continue
+            try:
+                with backend_output_redirect():
+                    run = self.workflow_store.load_run(run_id)
+                if run.status in {"running", "interrupted"}:
+                    stopped_workflow = self.workflow_stop(run_id, reason="stopped from Ink bridge") or stopped_workflow
+            except Exception:
+                continue
+        if stopped_workflow:
+            self.emit({"type": "status", "status": "stopping"})
         else:
             self.emit({"type": "status", "status": "idle"})
 
@@ -179,6 +291,12 @@ class GenericAgentBridge:
             self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is not None and hasattr(runtime, "set_emit"):
+                runtime.set_emit(self.emit)
+        except Exception:
+            pass
         self._task_seq = 0
         self._rewind_snapshots.clear()
         self._consume_thread = None
@@ -260,6 +378,77 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
         self.model_status()
 
+    def permission_status(self) -> None:
+        '''上报当前权限档与可选档位列表，供 Ink 面板渲染。'''
+        try:
+            with backend_output_redirect():
+                from permission_policy import (
+                    DEFAULT_PERMISSION_MODE,
+                    PERMISSION_MODES,
+                    normalize_permission_mode,
+                )
+
+                current = normalize_permission_mode(getattr(self.agent, "permission_mode", None))
+            self.emit(
+                {
+                    "type": "permission_status",
+                    "mode": current,
+                    "default": DEFAULT_PERMISSION_MODE,
+                    "modes": list(PERMISSION_MODES),
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_status_failed", "message": str(exc)})
+
+    def permission_switch(self, mode: str, *, persist: bool = False) -> None:
+        '''切换主会话权限档（read_only / ask / full_access）。
+
+        允许运行中切换：set_permission_mode 会同步更新 live handler，下一次
+        dispatch 立即按新档评估。切换后回发 permission_status 让 UI 收敛。
+
+        persist 预留给后续「记住选择」的持久化设置层；当前 MVP 为 session-only，
+        接受该参数但不写盘（避免协议破坏），切换只影响本 session。
+        '''
+        _ = persist  # MVP：session-only，不做持久化
+        try:
+            with backend_output_redirect():
+                applied = self.agent.set_permission_mode(str(mode or ""))
+            self.emit(
+                {
+                    "type": "permission_switch_result",
+                    "ok": True,
+                    "mode": applied,
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_switch_failed", "message": str(exc)})
+        self.permission_status()
+
+    def permission_response(self, request_id: str, decision: str) -> None:
+        '''UI 对 permission_request 的应答：accept | deny。'''
+        try:
+            runtime = getattr(self.agent, "permission_runtime", None)
+            if runtime is None:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "permission_response_failed",
+                        "message": "permission_runtime unavailable",
+                    }
+                )
+                return
+            ok = bool(runtime.resolve(str(request_id or ""), decision))
+            if not ok:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "permission_response_unknown",
+                        "message": f"unknown or settled requestId: {request_id}",
+                    }
+                )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
+
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
             with backend_output_redirect():
@@ -335,7 +524,9 @@ class GenericAgentBridge:
             self._record_compact_transcript(result.message)
             self._rewind_snapshots.clear()
             text = result.message
-            self.emit({"type": "local_command_output", "text": text})
+            # 成功结果只走 history_replace：同一文案再发 local_command_output 会在
+            # Ink Static 滚动区留下一份，history_replace 后再打一份 → 用户看到重复。
+            # 失败仍用 local_command_output（无 history_replace）。
             self.emit({"type": "history_replace", "messages": [
                 {"role": "system", "text": text},
             ]})
@@ -343,8 +534,442 @@ class GenericAgentBridge:
             self.emit({"type": "activity", "label": None})
             self.emit({"type": "status", "status": "idle"})
 
+    def workflow_plan(
+        self,
+        task_text: str,
+        *,
+        context: dict | None = None,
+        auto_approve: bool = True,
+        args: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        task_text = str(task_text or "")
+        if not task_text.strip():
+            self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
+            return ""
+        effective_timeout = self._effective_workflow_timeout(timeout_seconds)
+        try:
+            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+            with backend_output_redirect():
+                planner = self._make_workflow_planner()
+                run = self.workflow_controller.create_planned_run(
+                    session_id=session_id,
+                    task_text=task_text,
+                    planner=planner,
+                    context=context if isinstance(context, dict) else {},
+                    auto_approve=bool(auto_approve),
+                )
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
+            return ""
+        if run.status != "running":
+            return run.run_id
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, effective_timeout, None),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        return run.run_id
+
+    def workflow_draft(self, script: str) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        try:
+            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+            with backend_output_redirect():
+                run = self.workflow_controller.create_draft(session_id=session_id, script=str(script or ""))
+                run = self.workflow_controller.request_approval(run.run_id)
+            self.emit({"type": "workflow_draft", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return run.run_id
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_draft_failed", "message": str(exc)})
+            return ""
+
+    def workflow_approve(self, run_id: str, *, args: Any = None, timeout_seconds: float | None = None) -> bool:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return False
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_controller.approve(run_id)
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_approve_failed", "message": str(exc)})
+            return False
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, self._effective_workflow_timeout(timeout_seconds), None),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        return True
+
+    def workflow_resume(self, run_id: str, *, args: Any = None, timeout_seconds: float | None = None) -> str:
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        source_run_id = str(run_id or "")
+        if not source_run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return ""
+        try:
+            with backend_output_redirect():
+                from workflow_models import WorkflowEvent
+
+                source = self.workflow_store.load_run(source_run_id)
+                if source.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                    raise ValueError(f"cannot resume workflow {source_run_id} from {source.status}")
+                resumed = self.workflow_controller.create_draft(session_id=source.session_id, script=source.script)
+                resumed.status = "running"
+                resumed.metadata["resumeFromRunId"] = source_run_id
+                self.workflow_store.save_run(resumed)
+                self.workflow_store.append_event(
+                    resumed,
+                    WorkflowEvent(
+                        run_id=resumed.run_id,
+                        session_id=resumed.session_id,
+                        event_type="workflow_started",
+                        sequence=max((event.sequence for event in self.workflow_store.replay_events(resumed.run_id)), default=0) + 1,
+                        payload={"resumeFromRunId": source_run_id},
+                    ),
+                )
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(resumed)})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_resume_failed", "message": str(exc)})
+            return ""
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(resumed.run_id, args, self._effective_workflow_timeout(timeout_seconds), source_run_id),
+            daemon=True,
+            name=f"ga-ink-workflow-{resumed.run_id}",
+        )
+        self._workflow_threads[resumed.run_id] = thread
+        thread.start()
+        return resumed.run_id
+
+    def workflow_list(self) -> None:
+        try:
+            runs = self._list_workflow_runs()
+            self.emit({"type": "workflow_runs", "runs": [self._workflow_run_payload(run) for run in runs]})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
+
+    def workflow_detail(self, run_id: str) -> None:
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(str(run_id or ""))
+                events = self.workflow_store.replay_events(run.run_id)
+                draft = self._workflow_artifact_payload(run, run.metadata.get("workflowDraftRef"))
+                progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            self.emit(
+                {
+                    "type": "workflow_detail",
+                    "run": self._workflow_run_payload(run),
+                    "script": run.script,
+                    "events": [event.to_dict() for event in events],
+                    "draft": draft,
+                    "progress": progress,
+                }
+            )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
+
+    def workflow_progress(self, run_id: str) -> None:
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(str(run_id or ""))
+                progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            if progress is None:
+                self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
+                return
+            self.emit({"type": "workflow_progress", "progress": progress})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_progress_failed", "message": str(exc)})
+
+    def workflow_deny(self, run_id: str, *, reason: str = "") -> bool:
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_controller.deny(run_id, reason=reason or "denied from Ink bridge")
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return True
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_deny_failed", "message": str(exc)})
+            return False
+
+    def workflow_stop(self, run_id: str, *, reason: str = "") -> bool:
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(run_id)
+                if run.status in {"draft", "awaiting_approval", "interrupted"}:
+                    run = self.workflow_controller.cancel(run.run_id, reason=reason or "stopped from Ink bridge")
+                elif run.status == "running":
+                    run = self.workflow_controller.stop(run.run_id, reason=reason or "stopped from Ink bridge")
+                else:
+                    self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+                    return True
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+            self._emit_workflow_events(run.run_id)
+            return True
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_stop_failed", "message": str(exc)})
+            return False
+
+    def wait_for_workflow_idle(self, run_id: str, timeout: float | None = None) -> None:
+        thread = self._workflow_threads.get(str(run_id or ""))
+        if thread is not None:
+            thread.join(timeout=timeout)
+
+    def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
+        try:
+            self.emit({"type": "status", "status": "running"})
+            self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(run_id)
+                runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
+                runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
+                current = self.workflow_store.load_run(run_id)
+            self._emit_workflow_events(run_id)
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+            self.workflow_progress(run_id)
+            self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+        except Exception as exc:
+            try:
+                current = self.workflow_store.load_run(run_id)
+                if current.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                    from workflow_models import WorkflowEvent
+
+                    reason = redact_sensitive_text(str(exc))
+                    current.status = "failed"
+                    current.error = reason
+                    self.workflow_store.write_final_result(
+                        current,
+                        {"runId": run_id, "status": "failed", "error": reason},
+                    )
+                    self.workflow_store.save_run(current)
+                    existing_events = self.workflow_store.replay_events(run_id)
+                    self.workflow_store.append_event(
+                        current,
+                        WorkflowEvent(
+                            run_id=current.run_id,
+                            session_id=current.session_id,
+                            event_type="workflow_failed",
+                            sequence=max((event.sequence for event in existing_events), default=0) + 1,
+                            payload={"error": reason},
+                        ),
+                    )
+                    current = self.workflow_store.load_run(run_id)
+                self._emit_workflow_events(run_id)
+                self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
+                self.workflow_progress(run_id)
+                self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+            except Exception:
+                pass
+            self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
+        finally:
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
+
+    def _make_workflow_planner(self):
+        if self.workflow_planner_factory is not None:
+            return self.workflow_planner_factory()
+        with backend_output_redirect():
+            from workflow_planner import build_workflow_planner_from_env
+            from workflow_llm import binding_from_agent
+
+            # Prefer main-session /model profile when agent is available.
+            agent = self.agent
+            try:
+                binding = binding_from_agent(agent) if agent is not None else None
+            except Exception:
+                binding = None
+            if binding is not None:
+                return build_workflow_planner_from_env(profile_name=binding.profile_name)
+            return build_workflow_planner_from_env()
+
+    def _effective_workflow_timeout(self, timeout_seconds: float | None) -> float:
+        """Resolve product timeout: explicit value wins, else 900s (15 min)."""
+        if timeout_seconds is None:
+            return float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+        value = float(timeout_seconds)
+        if value <= 0:
+            return float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+        return value
+
+    def _make_workflow_runtime(self, *, timeout_seconds: float | None):
+        # Always pass an explicit timeout so product path never falls through to
+        # WorkflowRuntime's 10s unit-test default.
+        kwargs = {
+            "store": self.workflow_store,
+            "timeout_seconds": self._effective_workflow_timeout(timeout_seconds),
+        }
+        if self.workflow_runtime_factory is not None:
+            return self.workflow_runtime_factory(**kwargs)
+        with backend_output_redirect():
+            from workflow_child_agent import NativeGPTChildAgentRunner
+            from workflow_llm import binding_from_agent
+            from workflow_runtime import WorkflowRuntime
+
+            agent = self.agent
+
+            def _binding_provider():
+                return binding_from_agent(agent)
+
+            runner = NativeGPTChildAgentRunner(
+                binding_provider=_binding_provider,
+                enable_tools=True,
+            )
+            kwargs["runner"] = runner
+            kwargs["llm_binding_provider"] = _binding_provider
+            return WorkflowRuntime(**kwargs)
+
+    def _emit_workflow_events(self, run_id: str) -> None:
+        seen = self._workflow_emitted_sequences.setdefault(run_id, set())
+        with backend_output_redirect():
+            events = self.workflow_store.replay_events(run_id)
+        for event in events:
+            if event.sequence in seen:
+                continue
+            seen.add(event.sequence)
+            self.emit({"type": "workflow_event", "event": event.to_dict()})
+
+    def _workflow_run_payload(self, run) -> dict[str, Any]:
+        data = run.to_dict()
+        data.pop("script", None)
+        return data
+
+    def _workflow_artifact_payload(self, run, artifact_ref: Any) -> dict[str, Any] | None:
+        if not run.artifact_dir or not artifact_ref:
+            return None
+        artifact_dir = os.path.abspath(os.fspath(run.artifact_dir))
+        ref = os.fspath(artifact_ref)
+        if os.path.isabs(ref):
+            return None
+        path = os.path.abspath(os.path.join(artifact_dir, ref))
+        try:
+            if os.path.commonpath([artifact_dir, path]) != artifact_dir:
+                return None
+        except ValueError:
+            return None
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return sanitize(payload)
+
+    def _workflow_final_payload(self, run) -> dict[str, Any]:
+        if not run.artifact_dir or not run.result_ref:
+            return self._workflow_final_fallback(run, "missing_ref")
+        result_path, artifact_error = self._workflow_result_path(run)
+        if artifact_error:
+            return self._workflow_final_fallback(run, artifact_error)
+        try:
+            size = os.path.getsize(result_path)
+        except Exception:
+            return self._workflow_final_fallback(run, "read_failed")
+        if size > _WORKFLOW_FINAL_PAYLOAD_MAX_BYTES:
+            return self._workflow_final_fallback(
+                run,
+                "too_large",
+                artifact_truncated=True,
+                artifact_size=size,
+            )
+        try:
+            with open(result_path, "r", encoding="utf-8", errors="replace") as fh:
+                payload = json.load(fh)
+        except json.JSONDecodeError:
+            return self._workflow_final_fallback(run, "invalid_json")
+        except Exception:
+            return self._workflow_final_fallback(run, "read_failed")
+        if not isinstance(payload, dict):
+            return self._workflow_final_fallback(run, "invalid_payload")
+        return sanitize(payload)
+
+    def _workflow_result_path(self, run) -> tuple[str | None, str | None]:
+        artifact_dir = os.path.abspath(os.fspath(run.artifact_dir))
+        result_ref = os.fspath(run.result_ref)
+        if os.path.isabs(result_ref):
+            return None, "invalid_result_ref"
+        result_path = os.path.abspath(os.path.join(artifact_dir, result_ref))
+        try:
+            if os.path.commonpath([artifact_dir, result_path]) != artifact_dir:
+                return None, "invalid_result_ref"
+        except ValueError:
+            return None, "invalid_result_ref"
+        if not os.path.isfile(result_path):
+            return result_path, "missing"
+        return result_path, None
+
+    def _workflow_final_fallback(
+        self,
+        run,
+        artifact_error: str,
+        *,
+        artifact_truncated: bool = False,
+        artifact_size: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "runId": run.run_id,
+            "status": run.status,
+            "error": redact_sensitive_text(str(run.error)) if run.error is not None else None,
+            "resultRef": run.result_ref,
+            "artifactError": artifact_error,
+        }
+        if artifact_truncated:
+            payload["artifactTruncated"] = True
+        if artifact_size is not None:
+            payload["artifactSize"] = artifact_size
+        return sanitize(payload)
+
+    def _list_workflow_runs(self):
+        root = self.workflow_store.root
+        runs = []
+        with backend_output_redirect():
+            for state_path in root.glob("*/workflows/*/state.json"):
+                try:
+                    runs.append(self.workflow_store.load_run(state_path.parent.name))
+                except Exception:
+                    pass
+        runs.sort(key=lambda run: str(run.run_id))
+        return runs
+
     def _auto_compact_if_needed(self, pending_text: str) -> bool:
         if compact_agent_context is None or should_auto_compact_agent is None:
+            return True
+        # 熔断器：连续失败达上限后，本 session 停用自动压缩，避免摘要模型宕机时
+        # 每次请求都空打一发（对齐 Claude Code）。放行请求（返回 True），让用户
+        # 仍能继续对话（硬裁剪安全网在 llmcore 层仍生效）。
+        if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             return True
         try:
             if not should_auto_compact_agent(self.agent, pending_text=pending_text):
@@ -352,20 +977,29 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
             if result.ok:
+                self._auto_compact_failures = 0
                 self._replace_compact_log()
                 self._record_compact_transcript(result.message)
                 self._rewind_snapshots.clear()
                 text = "Auto " + result.message
-                self.emit({"type": "local_command_output", "text": text})
+                # 与手动 /compact 相同：成功只 emit history_replace，避免 Static 重复行。
                 self.emit({"type": "history_replace", "messages": [
                     {"role": "system", "text": text},
                 ]})
                 return True
             else:
+                self._auto_compact_failures += 1
                 self.emit({"type": "error", "code": "auto_compact_failed", "message": result.message})
+                if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+                    self.emit({"type": "local_command_output",
+                               "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
                 return False
         except Exception as exc:
+            self._auto_compact_failures += 1
             self.emit({"type": "error", "code": "auto_compact_failed", "message": str(exc)})
+            if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+                self.emit({"type": "local_command_output",
+                           "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
             return False
 
     def _replace_compact_log(self) -> None:
@@ -626,7 +1260,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             continue
         cmd_type = command.get("type")
         if cmd_type == "submit":
-            bridge.submit(str(command.get("text") or ""))
+            images = command.get("images")
+            if images is not None and not isinstance(images, list):
+                images = []
+            bridge.submit(str(command.get("text") or ""), images=images)
         elif cmd_type == "stop":
             bridge.stop()
         elif cmd_type == "new_session":
@@ -651,12 +1288,59 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.model_status()
         elif cmd_type == "model_switch":
             bridge.model_switch(str(command.get("selector") or ""))
+        elif cmd_type == "permission_status":
+            bridge.permission_status()
+        elif cmd_type == "set_permission_mode":
+            bridge.permission_switch(
+                str(command.get("mode") or ""),
+                persist=bool(command.get("persist")),
+            )
+        elif cmd_type == "permission_response":
+            bridge.permission_response(
+                str(command.get("requestId") or command.get("request_id") or ""),
+                str(command.get("decision") or ""),
+            )
         elif cmd_type == "skill_status":
             bridge.skill_status()
         elif cmd_type == "skill_invoke":
             bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
         elif cmd_type == "compact":
             bridge.compact(str(command.get("instructions") or ""))
+        elif cmd_type == "workflow_plan":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            auto_approve = command.get("autoApprove")
+            if auto_approve is None:
+                auto_approve = command.get("auto_approve")
+            if auto_approve is None:
+                auto_approve = True
+            bridge.workflow_plan(
+                str(command.get("taskText") or command.get("task_text") or ""),
+                context=command.get("context") if isinstance(command.get("context"), dict) else {},
+                auto_approve=bool(auto_approve),
+                args=command.get("args"),
+                timeout_seconds=timeout_seconds,
+            )
+        elif cmd_type == "workflow_draft":
+            bridge.workflow_draft(str(command.get("script") or ""))
+        elif cmd_type == "workflow_approve":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            bridge.workflow_approve(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
+        elif cmd_type == "workflow_resume":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            bridge.workflow_resume(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
+        elif cmd_type == "workflow_list":
+            bridge.workflow_list()
+        elif cmd_type == "workflow_detail":
+            bridge.workflow_detail(str(command.get("runId") or command.get("run_id") or ""))
+        elif cmd_type == "workflow_progress":
+            bridge.workflow_progress(str(command.get("runId") or command.get("run_id") or ""))
+        elif cmd_type == "workflow_deny":
+            bridge.workflow_deny(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
+        elif cmd_type == "workflow_stop":
+            bridge.workflow_stop(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "shutdown":
             bridge.stop()
             try:

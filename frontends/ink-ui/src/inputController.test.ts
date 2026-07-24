@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPasteStore } from './paste.js'
+import { createImageAttachmentStore } from './imageAttachments.js'
 import { handleInput } from './inputController.js'
 
 test('handleInput submits expanded text when idle', () => {
@@ -69,6 +70,24 @@ test('handleInput moves cursor and edits at cursor offset', () => {
   assert.deepEqual(handleInput('hello', '', { delete: true }, 'idle', store, new Set(), 2), {
     value: 'helo',
     cursorOffset: 2,
+  })
+})
+
+test('handleInput moves and deletes whole grapheme clusters', () => {
+  const store = createPasteStore()
+  const value = 'A👨‍💻e\u0301Z'
+  const afterEmoji = 'A👨‍💻'.length
+  const afterAccent = 'A👨‍💻e\u0301'.length
+
+  assert.equal(handleInput(value, '', { leftArrow: true }, 'idle', store, new Set(), afterAccent).cursorOffset, afterEmoji)
+  assert.equal(handleInput(value, '', { rightArrow: true }, 'idle', store, new Set(), 1).cursorOffset, afterEmoji)
+  assert.deepEqual(handleInput(value, '', { backspace: true }, 'idle', store, new Set(), afterEmoji), {
+    value: 'Ae\u0301Z',
+    cursorOffset: 1,
+  })
+  assert.deepEqual(handleInput(value, '', { delete: true }, 'idle', store, new Set(), afterEmoji), {
+    value: 'A👨‍💻Z',
+    cursorOffset: afterEmoji,
   })
 })
 
@@ -191,6 +210,35 @@ test('handleInput parses model slash commands', () => {
   })
 })
 
+test('handleInput parses permission slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/permissions', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_permissions' },
+  })
+  assert.deepEqual(handleInput('/perms', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_permissions' },
+  })
+  assert.deepEqual(handleInput('/permissions read only', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'read_only' },
+  })
+  assert.deepEqual(handleInput('/permissions ask', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'ask' },
+  })
+  assert.deepEqual(handleInput('/permissions full-access', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'set_permission_mode', mode: 'full_access' },
+  })
+  assert.deepEqual(handleInput('/permissions ?', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'permission_status' },
+  })
+})
+
 test('handleInput opens the local theme picker for slash theme', () => {
   const store = createPasteStore()
 
@@ -218,6 +266,81 @@ test('handleInput parses known skill slash commands without using args as the sk
   assert.deepEqual(handleInput('/imagegen 生成 一张图', '', { return: true }, 'idle', store, new Set(['imagegen'])), {
     value: '',
     command: { type: 'skill_invoke', skill: 'imagegen', args: '生成 一张图' },
+  })
+})
+
+test('handleInput parses workflow list and control slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/workflows', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow list', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list' },
+  })
+  assert.deepEqual(handleInput('/workflow detail wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_detail', runId: 'wf_demo' },
+  })
+  assert.deepEqual(handleInput('/workflow resume wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_resume', runId: 'wf_demo' },
+  })
+  assert.deepEqual(handleInput('/workflow stop wf_demo user stop', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_stop', runId: 'wf_demo', reason: 'user stop' },
+  })
+  // approve/deny are no longer user-facing slash commands (swallowed, not chat)
+  assert.deepEqual(handleInput('/workflow approve wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+  })
+  assert.deepEqual(handleInput('/workflow deny wf_demo no thanks', '', { return: true }, 'idle', store), {
+    value: '',
+  })
+})
+
+test('handleInput parses single /workflow start path (auto plan+run)', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  // legacy /workflow plan still maps to the same auto-start path
+  assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  // --manual is ignored; workflows always auto-start
+  assert.deepEqual(handleInput('/workflow --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  assert.deepEqual(handleInput('/workflow --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow plan --manual --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow plan --timeout 120 --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
+  })
+  assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store, new Set(['workflow'])), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+  })
+  assert.deepEqual(handleInput('/workflow plan', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_plan', taskText: '', autoApprove: true },
   })
 })
 
@@ -317,4 +440,140 @@ test('handleInput turns Ctrl+C into shutdown and exit', () => {
     command: { type: 'shutdown' },
     exit: true,
   })
+})
+
+test('handleInput attaches image path paste as [Image #N] and submits images', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`D:\shots\demo.png`
+  const pasted = handleInput('', path, {}, 'idle', store, new Set(), undefined, images)
+  assert.equal(pasted.value, '[Image #1]')
+  const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store, new Set(), undefined, images)
+  assert.equal(submitted.value, '')
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1]')
+    assert.deepEqual(submitted.command.images, [
+      { path, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('handleInput joins split wechat image path paste without mid-filename replace', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const head = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2`
+  const tail = String.raw`048_89.jpg 这图是什么`
+  const full = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2048_89.jpg`
+
+  const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(first.value, head)
+  assert.equal(images.byId.size, 0)
+
+  const second = handleInput(first.value, tail, {}, 'idle', store, new Set(), first.value.length, images)
+  assert.equal(second.value, '[Image #1] 这图是什么')
+  assert.equal(images.byId.get(1)?.path, full)
+  assert.ok(!second.value.includes('048_89'))
+  assert.ok(!second.value.includes(String.raw`微信图片_20260720144105_2`))
+
+  const submitted = handleInput(second.value, '', { return: true }, 'idle', store, new Set(), second.value.length, images)
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1] 这图是什么')
+    assert.deepEqual(submitted.command.images, [
+      { path: full, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('handleInput attaches spaced screenshot path in one paste', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const pasted = handleInput('', `${path} 这图是什么`, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(pasted.value, '[Image #1] 这图是什么')
+  assert.equal(images.byId.get(1)?.path, path)
+
+  const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store, new Set(), pasted.value.length, images)
+  assert.equal(submitted.command?.type, 'submit')
+  if (submitted.command?.type === 'submit') {
+    assert.equal(submitted.command.text, '[Image #1] 这图是什么')
+    assert.deepEqual(submitted.command.images, [
+      { path, placeholder: '[Image #1]', source: 'path' },
+    ])
+  }
+})
+
+test('handleInput PowerShell & quoted spaced path becomes clean [Image #N]', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const raw = `& '${path}'`
+  const pasted = handleInput('', raw, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(pasted.value, '[Image #1]')
+  assert.ok(!pasted.value.includes('&'))
+  assert.ok(!pasted.value.includes("'"))
+  assert.equal(images.byId.get(1)?.path, path)
+})
+
+test('handleInput joins spaced screenshot path split after space', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const head = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 `
+  const tail = String.raw`2026-07-15 124017.png 看看`
+  const full = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
+  const second = handleInput(first.value, tail, {}, 'idle', store, new Set(), first.value.length, images)
+  assert.equal(second.value, '[Image #1] 看看')
+  assert.equal(images.byId.get(1)?.path, full)
+})
+
+test('handleInput does not treat relative image-like suffix alone as attachment', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = handleInput('', '048_89.jpg', {}, 'idle', store, new Set(), 0, images)
+  assert.equal(decision.value, '048_89.jpg')
+  assert.equal(images.byId.size, 0)
+})
+
+test('isImagePasteShortcut accepts ctrl+v, alt+v, ctrl+alt+v', async () => {
+  const { isImagePasteShortcut } = await import('./inputController.js')
+  assert.equal(isImagePasteShortcut({ ctrl: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ ctrl: true, sequence: '\x16' }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ alt: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ meta: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({ ctrl: true, alt: true }, 'v'), true)
+  assert.equal(isImagePasteShortcut({}, 'v'), false)
+  assert.equal(isImagePasteShortcut({ ctrl: true }, 'c'), false)
+})
+
+test('parseTerminalInput maps alt+v and ctrl+v', async () => {
+  const { parseTerminalInput } = await import('./terminalInput.js')
+  const altV = parseTerminalInput('\x1bv')
+  assert.equal(altV.rawInput, 'v')
+  assert.equal(altV.key.meta, true)
+  assert.equal(altV.key.alt, true)
+
+  const ctrlV = parseTerminalInput('\x16')
+  assert.equal(ctrlV.rawInput, 'v')
+  assert.equal(ctrlV.key.ctrl, true)
+})
+
+test('handleInput image paste shortcut marks pendingImagePaste without inserting v', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
+  assert.equal(decision.value, 'hi')
+  assert.equal(decision.pendingImagePaste, true)
+  assert.notEqual(decision.value, 'hiv')
+})
+
+test('handleInput alt+v does not insert letter v (clipboard image or no-op)', async () => {
+  const mod = await import('./inputController.js')
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const decision = mod.handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
+  // 异步路径：只标 pending，绝不插入字母 v
+  assert.notEqual(decision.value, 'hiv')
+  assert.ok(decision.pendingImagePaste === true || decision.value === 'hi' || decision.value.includes('[Image #'))
 })

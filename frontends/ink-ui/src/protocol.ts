@@ -1,5 +1,11 @@
+export type BridgeImageAttachment = {
+  path: string
+  placeholder?: string
+  source?: string
+}
+
 export type BridgeCommand =
-  | { type: 'submit'; text: string }
+  | { type: 'submit'; text: string; images?: BridgeImageAttachment[] }
   | { type: 'stop' }
   | { type: 'new_session' }
   | { type: 'list_resume_sessions' }
@@ -12,9 +18,21 @@ export type BridgeCommand =
   | { type: 'mcp_disable'; server: string }
   | { type: 'model_status' }
   | { type: 'model_switch'; selector: string }
+  | { type: 'permission_status' }
+  | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
+  | { type: 'permission_response'; requestId: string; decision: 'accept' | 'deny' }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
+  | { type: 'workflow_draft'; script: string }
+  | { type: 'workflow_plan'; taskText: string; context?: Record<string, unknown>; autoApprove?: boolean; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_resume'; runId: string; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_deny'; runId: string; reason?: string }
+  | { type: 'workflow_list' }
+  | { type: 'workflow_detail'; runId: string }
+  | { type: 'workflow_progress'; runId: string }
+  | { type: 'workflow_stop'; runId: string; reason?: string }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -54,6 +72,8 @@ export type ModelStatus = {
   current: boolean
 }
 
+export type PermissionMode = 'read_only' | 'ask' | 'full_access'
+
 export type SkillStatus = {
   name: string
   description: string
@@ -65,6 +85,136 @@ export type TokenUsage = {
   inputTokens: number
   outputTokens: number
   totalTokens: number
+}
+
+
+export type WorkflowRunStatus =
+  | 'draft'
+  | 'awaiting_approval'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'killed'
+  | 'interrupted'
+  | string
+
+export type WorkflowJobStatus =
+  | 'registered'
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'killed'
+  | 'cached'
+  | 'skipped'
+  | 'stale'
+  | string
+
+export type WorkflowJob = {
+  jobId: string
+  prompt?: string
+  status: WorkflowJobStatus
+  phase?: string | null
+  resultRef?: string | null
+  error?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export type WorkflowRun = {
+  version?: number
+  runId: string
+  sessionId: string
+  status: WorkflowRunStatus
+  artifactDir?: string | null
+  permissionProfile?: string
+  permissionPolicyVersion?: string
+  jobs?: WorkflowJob[]
+  resultRef?: string | null
+  error?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export type WorkflowEvent = {
+  version?: number
+  type: string
+  runId: string
+  sessionId?: string | null
+  jobId?: string | null
+  sequence: number
+  payload?: Record<string, unknown>
+}
+
+export type WorkflowPlanAgent = {
+  label?: string
+  prompt?: string
+  dependsOn?: string[]
+  role?: string
+  schemaRef?: string
+  [key: string]: unknown
+}
+
+export type WorkflowPlanPhase = {
+  title?: string
+  agents?: WorkflowPlanAgent[]
+  [key: string]: unknown
+}
+
+export type WorkflowPlanPayload = {
+  taskType?: string
+  meta?: { name?: string; description?: string; [key: string]: unknown }
+  phases?: WorkflowPlanPhase[]
+  schemas?: Record<string, unknown>
+  artifacts?: unknown[]
+  constraints?: string[]
+  [key: string]: unknown
+}
+
+export type WorkflowDraftPayload = {
+  taskText: string
+  classification: Record<string, unknown>
+  plan: WorkflowPlanPayload
+  validation: Record<string, unknown>
+  script?: string
+  context?: Record<string, unknown>
+}
+
+export type WorkflowProgressEntry = {
+  type?: string
+  index?: number
+  agentId?: string
+  jobId?: string
+  label?: string | null
+  phase?: string | null
+  phaseTitle?: string | null
+  state?: WorkflowJobStatus
+  resultRef?: string | null
+  transcriptRef?: string | null
+  lastToolName?: string | null
+  lastToolSummary?: string | null
+  toolCalls?: string[]
+  skillToolCalls?: number
+  skillLoadEvents?: unknown[]
+  allowedTools?: string[]
+  deniedTools?: string[]
+  loadedSkills?: string[]
+  missingRequiredSkills?: string[]
+  capability?: Record<string, unknown>
+  capabilities?: Record<string, unknown>
+  tokenUsage?: Record<string, unknown>
+  promptPreview?: string | null
+  resultPreview?: string | null
+  error?: string | null
+  schemaValidation?: Record<string, unknown>
+}
+
+export type WorkflowProgressPayload = {
+  runId: string
+  sessionId?: string | null
+  status: WorkflowRunStatus
+  workflowIssues?: unknown[]
+  workflowProgress: WorkflowProgressEntry[]
 }
 
 export type BridgeEvent =
@@ -85,7 +235,25 @@ export type BridgeEvent =
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
   | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'model_switch_result'; ok: boolean; message: string }
+  | { type: 'permission_status'; mode: PermissionMode | string; default: PermissionMode | string; modes: (PermissionMode | string)[] }
+  | { type: 'permission_switch_result'; ok: boolean; mode: PermissionMode | string }
+  | {
+      type: 'permission_request'
+      requestId: string
+      toolName: string
+      argsPreview: string
+      reason: string
+      mode?: string
+    }
+  | { type: 'permission_request_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
   | { type: 'skill_status'; skills: SkillStatus[] }
+  | { type: 'workflow_draft'; run: WorkflowRun }
+  | { type: 'workflow_run'; run: WorkflowRun }
+  | { type: 'workflow_runs'; runs: WorkflowRun[] }
+  | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
+  | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
+  | { type: 'workflow_event'; event: WorkflowEvent }
+  | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'error'; code: string; message: string; taskId?: number }
 
 export type ChatMessage = {

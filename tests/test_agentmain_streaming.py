@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import should_flush_display_delta  # noqa: E402
+from agentmain import normalize_display_assistant_text, should_flush_display_delta  # noqa: E402
 
 
 class AgentMainStreamingTest(unittest.TestCase):
@@ -24,6 +24,20 @@ class AgentMainStreamingTest(unittest.TestCase):
                 "\n\n**LLM Running (Turn 1) ...**\n\n",
             )
         )
+
+    def test_normalize_display_assistant_text_is_idempotent_for_summary(self):
+        raw = "<summary>need clock</summary>\nbody"
+        once = normalize_display_assistant_text(raw)
+        twice = normalize_display_assistant_text(once)
+        self.assertEqual(once, twice)
+        self.assertIn("</summary>\n\n", once)
+
+    def test_normalize_display_assistant_text_wraps_file_content_once(self):
+        raw = "<file_content>hello</file_content>"
+        once = normalize_display_assistant_text(raw)
+        twice = normalize_display_assistant_text(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("````"), 2)
 
 
 if __name__ == "__main__":

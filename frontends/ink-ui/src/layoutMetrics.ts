@@ -7,11 +7,14 @@ export type LayoutMetricInput = {
   hasSlashSuggestions: boolean
   panelRows?: number
   inputRows?: number
+  /** When 0, no title/status header band (default inline scrollback). */
+  headerRows?: number
 }
 
 export type LayoutMetrics = {
   rows: number
-  columns: number
+  terminalColumns: number
+  canvasColumns: number
   headerRows: number
   bottomRows: number
   messageRows: number
@@ -25,10 +28,24 @@ export function terminalColumns(columns?: number, fallback = 80): number {
   return Math.max(1, Math.floor(columns || fallback))
 }
 
+export function terminalCanvasColumns(columns?: number, fallback = 80): number {
+  const physicalColumns = terminalColumns(columns, fallback)
+  return physicalColumns > 1 ? physicalColumns - 1 : 1
+}
+
+export function transcriptScrollbarColumns(canvasColumns: number): number {
+  return Math.floor(canvasColumns) >= 8 ? 1 : 0
+}
+
+export function transcriptContentColumns(canvasColumns: number): number {
+  return Math.max(1, Math.floor(canvasColumns) - transcriptScrollbarColumns(canvasColumns) - 2)
+}
+
 export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const rows = Math.max(1, terminalRows(input.rows) - 1)
-  const columns = terminalColumns(input.columns)
-  const headerRows = 1
+  const terminalColumnCount = terminalColumns(input.columns)
+  const canvasColumns = terminalCanvasColumns(terminalColumnCount)
+  const headerRows = Math.max(0, Math.floor(input.headerRows ?? 1))
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
   const baseBottomRows = 3 + inputRows
   const activityRows = 1
@@ -43,5 +60,12 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const bottomRows = Math.min(requestedBottomRows, Math.max(1, rows - headerRows - 1))
   const messageRows = Math.max(1, rows - headerRows - bottomRows)
 
-  return { rows, columns, headerRows, bottomRows, messageRows }
+  return {
+    rows,
+    terminalColumns: terminalColumnCount,
+    canvasColumns,
+    headerRows,
+    bottomRows,
+    messageRows,
+  }
 }

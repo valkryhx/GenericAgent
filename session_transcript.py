@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import os
 import uuid
@@ -11,6 +12,13 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
+
+# Process-monotonic write counter. Persisted per event as ``seq`` so
+# ``list_sessions`` can break filesystem-mtime ties deterministically: on
+# platforms with coarse timestamp resolution (e.g. Windows ~15ms) several
+# rapid appends can share the same mtime, and glob order is not creation
+# order. The seq reflects true write order within a process run.
+_event_seq = itertools.count(1)
 
 
 @dataclass
@@ -33,6 +41,7 @@ class LoadedSession:
     backend_history: list
     turns: list[TranscriptTurn] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    last_seq: int = 0
 
 
 @dataclass
@@ -65,6 +74,8 @@ def is_transcript_path(path):
 def append_event(path, event):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    event = dict(event)
+    event.setdefault("seq", next(_event_seq))
     with p.open("a", encoding="utf-8", errors="replace") as fh:
         fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
 
@@ -121,6 +132,22 @@ def record_rewind(path, *, session_id, keep_turns, backend_history_after):
     })
 
 
+def record_workflow_event(path, *, session_id, run_id, event_type, artifact_dir, result_ref=None, error=None):
+    event = {
+        "version": 1,
+        "type": event_type,
+        "session_id": session_id,
+        "created_at": _now_iso(),
+        "run_id": run_id,
+        "artifact_dir": artifact_dir,
+    }
+    if result_ref is not None:
+        event["result_ref"] = result_ref
+    if error is not None:
+        event["error"] = error
+    append_event(path, event)
+
+
 def _history_equal(left, right):
     return (left or []) == (right or [])
 
@@ -161,6 +188,7 @@ def load_session(path):
     turns = []
     ui_messages = []
     backend_history = []
+    last_seq = 0
     if not p.exists():
         raise FileNotFoundError(str(path))
     for lineno, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
@@ -175,6 +203,9 @@ def load_session(path):
             warnings.append(f"line {lineno}: unsupported event")
             continue
         session_id = event.get("session_id") or session_id
+        seq = event.get("seq")
+        if isinstance(seq, int) and seq > last_seq:
+            last_seq = seq
         if event.get("type") == "turn":
             turn = TranscriptTurn(
                 turn_id=int(event.get("turn_id") or len(turns) + 1),
@@ -208,6 +239,7 @@ def load_session(path):
         backend_history=backend_history,
         turns=turns,
         warnings=warnings,
+        last_seq=last_seq,
     )
 
 
@@ -226,7 +258,11 @@ def list_sessions(root=None, exclude_session_id=None, include_empty=False):
         if not include_empty and loaded.rounds <= 0:
             continue
         out.append(loaded)
-    out.sort(key=lambda item: item.mtime, reverse=True)
+    # Sort newest-first. mtime is the primary key so genuinely newer files win.
+    # last_seq breaks mtime ties by true write order (coarse-resolution clocks
+    # can collapse rapid appends to the same mtime), and session_id is a final
+    # deterministic tiebreaker for legacy files that predate the seq field.
+    out.sort(key=lambda item: (item.mtime, item.last_seq, item.session_id), reverse=True)
     return out
 
 

@@ -88,24 +88,40 @@ def _install_import_stubs():
     llmcore = types.ModuleType("llmcore")
     llmcore.mykeys = {}
 
-    sys.modules.update(
-        {
-            "telegram": telegram,
-            "telegram.constants": constants,
-            "telegram.error": error,
-            "telegram.ext": ext,
-            "telegram.helpers": helpers,
-            "telegram.request": request,
-            "agentmain": agentmain,
-            "chatapp_common": chatapp_common,
-            "continue_cmd": continue_cmd,
-            "llmcore": llmcore,
-        }
-    )
+    stubs = {
+        "telegram": telegram,
+        "telegram.constants": constants,
+        "telegram.error": error,
+        "telegram.ext": ext,
+        "telegram.helpers": helpers,
+        "telegram.request": request,
+        "agentmain": agentmain,
+        "chatapp_common": chatapp_common,
+        "continue_cmd": continue_cmd,
+        "llmcore": llmcore,
+    }
+    # 返回被覆盖前的真实模块（可能为 None），供导入 tgapp 后还原——否则 agentmain/
+    # llmcore 等真实模块会被 stub 永久顶掉，污染后续测试（如 test_agentmain_compact）。
+    saved = {name: sys.modules.get(name) for name in stubs}
+    sys.modules.update(stubs)
+    return saved
 
 
-_install_import_stubs()
-tgapp = importlib.import_module("tgapp")
+def _restore_modules(saved):
+    for name, module in saved.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
+
+# 装 stub → 导入 tgapp（此时 tgapp 已绑定 stub 引用）→ 立即还原 sys.modules，
+# 使 stub 只对 tgapp 内部可见，不外泄污染其它测试模块。
+_saved_modules = _install_import_stubs()
+try:
+    tgapp = importlib.import_module("tgapp")
+finally:
+    _restore_modules(_saved_modules)
 
 
 class FakeChat:

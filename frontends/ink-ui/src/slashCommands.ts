@@ -5,6 +5,7 @@ export type SlashCommand = {
   description: string
   kind?: 'builtin' | 'skill'
   source?: string
+  requiresArgs?: boolean
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -14,11 +15,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/model', description: 'Show and switch AI models' },
   { name: '/llm', description: 'Alias for /model' },
   { name: '/theme', description: 'Show and switch Ink themes' },
+  { name: '/permissions', description: 'Show and switch permission mode (read only / ask / full access)' },
   { name: '/compact', description: 'Summarize and replace long conversation context' },
   { name: '/clear', description: 'Clear the visible transcript' },
   { name: '/new', description: 'Start a fresh backend session' },
   { name: '/reset', description: 'Alias for /new' },
   { name: '/stop', description: 'Stop the current backend task' },
+  { name: '/workflows', description: 'Show workflow runs' },
+  { name: '/workflow', description: 'Plan and run a dynamic workflow from task text', requiresArgs: true },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },
   { name: '/continue', description: 'Alias for /resume' },
@@ -69,7 +73,7 @@ export function slashSelectionAction(
   command: SlashCommand,
   trigger: 'enter' | 'tab',
 ): { type: 'complete' | 'execute'; value: string } {
-  if (trigger === 'enter' && command.kind !== 'skill') {
+  if (trigger === 'enter' && command.kind !== 'skill' && !command.requiresArgs) {
     return { type: 'execute', value: command.name }
   }
   return { type: 'complete', value: completeSlashCommand(command) }

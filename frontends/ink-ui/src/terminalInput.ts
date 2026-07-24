@@ -28,6 +28,8 @@ export function parseTerminalInput(input: string): { rawInput: string; key: Inpu
     ctrl: parsed.ctrl,
     shift: parsed.shift,
     meta: parsed.meta || parsed.name === 'escape',
+    // 终端里 Alt 常编码为 ESC 前缀 → meta；同时暴露 alt 便于快捷键语义（CC Alt+V）
+    alt: parsed.meta,
     upArrow: parsed.name === 'up',
     downArrow: parsed.name === 'down',
     leftArrow: parsed.name === 'left',

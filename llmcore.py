@@ -1,8 +1,12 @@
 import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
+import token_meter
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 DEFAULT_CONTEXT_WIN = 400_000
+# 硬裁剪触发后，回收到的目标 token 水位（相对硬线的比例）。保留旧的「压到 6 成」
+# 手感，但以 token 计而非字符。
+_HARD_TRIM_RECOVER_RATIO = 0.6
 
 def expand_llm_profile_configs(mykeys):
     expanded = dict(mykeys or {})
@@ -100,23 +104,39 @@ def _sanitize_leading_user_msg(msg):
 
 _oldprint = print
 def safeprint(*argv):
+    # ValueError: closed file can surface when a caller briefly redirects sys.stdout
+    # to a handle that another thread closes (bridge backend log race). Swallow both.
     try: _oldprint(*argv)
-    except OSError: pass
+    except (OSError, ValueError): pass
 print = safeprint
 
-def trim_messages_history(history, context_win):
+def trim_messages_history(history, hard_limit_tokens, last_usage=None):
+    """硬裁剪兜底：估算当前上下文 token 超硬线时，丢最旧消息压回目标水位。
+
+    token 化后（对齐 Codex/CC）：
+      - 触发判断用 token_meter.estimate_context_tokens（真实 usage 基准 + 增量估算），
+        而非旧的 len(json.dumps)×3 字符估算。
+      - 裁剪收敛时已 mutate、真实基准失效，用本会话校准出的 chars/token 比率把每条
+        消息折成 token（calibrated_cpt），pop 到低于目标 token 水位。
+
+    hard_limit_tokens：硬线 token 阈值（BaseSession 从 context_win 派生或由配置给定）。
+    last_usage：上次成功请求的真实 usage dict（backend.last_usage_tokens），可为 None。
+    """
     compress_history_tags(history)
-    cost = sum(len(json.dumps(m, ensure_ascii=False)) for m in history) 
-    print(f'[Debug] Current context: {cost} chars, {len(history)} messages.')
-    if cost > context_win * 3: 
+    tokens = token_meter.estimate_context_tokens(history, last_usage)
+    print(f'[Debug] Current context: ~{tokens} tokens, {len(history)} messages.')
+    if tokens > hard_limit_tokens:
         compress_history_tags(history, keep_recent=4, force=True)   # trim breaks cache, so compress more btw
-        target = context_win * 3 * 0.6
+        # 裁剪过程中无新 API 调用，用校准比率把消息折成 token 来收敛。
+        cpt = token_meter.calibrated_cpt(history, last_usage)
+        target = hard_limit_tokens * _HARD_TRIM_RECOVER_RATIO
+        cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
         while len(history) > 5 and cost > target:
             history.pop(0)
             while history and history[0].get('role') != 'user': history.pop(0)
             if history and history[0].get('role') == 'user': history[0] = _sanitize_leading_user_msg(history[0])
-            cost = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
-        print(f'[Debug] Trimmed context, current: {cost} chars, {len(history)} messages.')
+            cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
+        print(f'[Debug] Trimmed context, current: ~{cost} tokens, {len(history)} messages.')
 
 def auto_make_url(base, path):
     b, p = base.rstrip('/'), path.strip('/')
@@ -283,8 +303,11 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             except: continue
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
-            if delta.get("reasoning_content"):
-                reasoning_text += delta["reasoning_content"]
+            # reasoning_content 是标准字段；部分 vLLM/内部端点（如九天 GLM-5.2）
+            # 流式思考在 reasoning 字段，回退兼容之。
+            delta_reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if delta_reasoning:
+                reasoning_text += delta_reasoning
             if delta.get("content"):
                 text = delta["content"]; content_text += text; yield text
             for tc in (delta.get("tool_calls") or []):
@@ -376,7 +399,9 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     else:
         _record_usage(data.get("usage") or {}, api_mode, sess)
         msg = (data.get("choices") or [{}])[0].get("message", {})
-        reasoning = msg.get("reasoning_content", "")
+        # reasoning_content 是标准字段名；部分 vLLM/内部端点（如九天 GLM-5.2）
+        # 把思考放在 reasoning 字段，回退兼容之。
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
         if reasoning:
             blocks.append({"type": "thinking", "thinking": reasoning})
         content = msg.get("content", "")
@@ -555,6 +580,11 @@ def _to_responses_input(messages):
                 elif ptype == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     if url and role != "assistant": parts.append({"type": "input_image", "image_url": url})
+                elif ptype == "image":
+                    src = part.get("source") or {}
+                    if src.get("type") == "base64" and src.get("data") and role != "assistant":
+                        mt = src.get("media_type") or "image/png"
+                        parts.append({"type": "input_image", "image_url": f"data:{mt};base64,{src.get('data', '')}"})
         if len(parts) == 0: parts = [{"type": text_type, "text": str(content) if not isinstance(content, list) else '[empty]'}]
         result.append({"role": role, "content": parts})
         pending = []
@@ -622,6 +652,15 @@ class BaseSession:
         self.api_base = cfg['apibase'].rstrip('/')
         self.model = cfg.get('model', '')
         self.context_win = cfg.get('context_win', DEFAULT_CONTEXT_WIN)
+        # 两道压缩线（token 口径，对齐 Codex 90%/95%）。配置层（to_legacy_cfg）会直接
+        # 派生好写入 cfg；直接喂 legacy cfg 的老路径则从 context_win 兜底派生，行为等价。
+        #   auto_compact_tokens 软线：摘要式压缩触发（保留信息，ink 前端用）
+        #   hard_limit_tokens   硬线：裁剪兜底触发（丢最旧消息，所有前端的安全网）
+        self.auto_compact_tokens = int(cfg.get('auto_compact_tokens') or round(self.context_win * 0.90))
+        self.hard_limit_tokens = int(cfg.get('hard_limit_tokens') or round(self.context_win * 0.95))
+        # 自动压缩总开关（对齐 Claude Code 的 DISABLE_AUTO_COMPACT）。False 时软线摘要
+        # 与硬线裁剪都跳过；手动 /compact 不受此开关影响，仍可触发。
+        self.auto_compact_enabled = bool(cfg.get('auto_compact_enabled', True))
         self.history = []
         self.lock = threading.Lock()
         self.system = ""
@@ -687,7 +726,8 @@ class BaseSession:
         def _ask_gen():
             with self.lock:
                 self.history.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-                trim_messages_history(self.history, self.context_win)
+                if self.auto_compact_enabled:
+                    trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
                 messages = self.make_messages(self.history)
             content_blocks = None; content = ''
             gen = self.raw_ask(messages)
@@ -808,7 +848,8 @@ class NativeClaudeSession(BaseSession):
         assert type(msg) is dict
         with self.lock:
             self.history.append(msg)
-            trim_messages_history(self.history, self.context_win)
+            if self.auto_compact_enabled:
+                trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
             messages = [{"role": m["role"], "content": list(m["content"])} for m in self.history]
         content_blocks = None
         gen = self.raw_ask(messages)
@@ -1016,11 +1057,70 @@ def _ensure_text_block(blocks):
     blocks.insert(1, {"type": "text", "text": txt})
     return txt
 
+def _redact_image_payloads(obj, _depth=0):
+    """日志脱敏：去掉 base64 图数据，只保留类型与长度。"""
+    if _depth > 12:
+        return obj
+    if isinstance(obj, dict):
+        t = obj.get("type")
+        if t == "image":
+            src = obj.get("source") if isinstance(obj.get("source"), dict) else {}
+            data = src.get("data") if isinstance(src, dict) else None
+            n = len(data) if isinstance(data, str) else 0
+            return {
+                "type": "image",
+                "source": {
+                    "type": src.get("type", "base64"),
+                    "media_type": src.get("media_type", "image/png"),
+                    "data": f"<redacted base64 len={n}>",
+                },
+            }
+        if t == "image_url":
+            url = ""
+            iu = obj.get("image_url")
+            if isinstance(iu, dict):
+                url = str(iu.get("url") or "")
+            elif isinstance(iu, str):
+                url = iu
+            if url.startswith("data:"):
+                head, _, rest = url.partition(",")
+                return {
+                    "type": "image_url",
+                    "image_url": {"url": f"{head},<redacted base64 len={len(rest)}>"},
+                }
+            return obj
+        if t == "input_image":
+            url = str(obj.get("image_url") or "")
+            if url.startswith("data:"):
+                head, _, rest = url.partition(",")
+                return {**obj, "image_url": f"{head},<redacted base64 len={len(rest)}>"}
+            return obj
+        return {k: _redact_image_payloads(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_image_payloads(x, _depth + 1) for x in obj]
+    return obj
+
+
 def _write_llm_log(label, content, log_path=None):
     if not log_path:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'temp/model_responses/model_responses_{os.getpid()}.txt')
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(content, (dict, list)):
+        try:
+            content = json.dumps(_redact_image_payloads(content), ensure_ascii=False, indent=2)
+        except Exception:
+            content = str(content)
+    elif isinstance(content, str) and ('"type": "image"' in content or 'data:image/' in content or '"type":"image"' in content):
+        try:
+            content = json.dumps(_redact_image_payloads(json.loads(content)), ensure_ascii=False, indent=2)
+        except Exception:
+            # 非完整 JSON 时粗暴截断超长 data URL 片段
+            content = re.sub(
+                r'(data:image/[^;]+;base64,)[A-Za-z0-9+/=\s]{200,}',
+                lambda m: m.group(1) + f"<redacted len≈{len(m.group(0))}>",
+                content,
+            )
     with open(log_path, 'a', encoding='utf-8', errors='replace') as f:
         f.write(f"=== {label} === {ts}\n{content}\n\n")
 
@@ -1171,7 +1271,7 @@ class NativeToolClient:
         final_content = tool_result_blocks + filtered_content
         if not final_content: final_content = [{"type": "text", "text": "."}]
         merged = {"role": "user", "content": final_content}
-        _write_llm_log('Prompt', json.dumps(merged, ensure_ascii=False, indent=2), self.log_path)
+        _write_llm_log('Prompt', merged, self.log_path)
         gen = self.backend.ask(merged)
         try:
             while True: 

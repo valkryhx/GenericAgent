@@ -16,7 +16,8 @@ class AgentMainMcpToolsTest(unittest.TestCase):
         import agentmain
 
         try:
-            with patch("mcp_runtime.discover_mcp_tools") as discover:
+            # load_tool_schema 走的是 discover_mcp_tools_cached（带缓存），patch 它才有效。
+            with patch("mcp_runtime.discover_mcp_tools_cached") as discover:
                 agentmain.load_tool_schema(include_mcp_tools=False)
                 discover.assert_not_called()
                 names = {tool["function"]["name"] for tool in agentmain.TOOLS_SCHEMA}
@@ -39,11 +40,12 @@ class AgentMainMcpToolsTest(unittest.TestCase):
         }
 
         try:
-            with patch("mcp_runtime.discover_mcp_tools", return_value=[fake_tool]):
+            # load_tool_schema 走的是 discover_mcp_tools_cached（带缓存），patch 它才有效。
+            with patch("mcp_runtime.discover_mcp_tools_cached", return_value=[fake_tool]):
                 agentmain.load_tool_schema()
                 names = {tool["function"]["name"] for tool in agentmain.TOOLS_SCHEMA}
         finally:
-            with patch("mcp_runtime.discover_mcp_tools", return_value=[]):
+            with patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
                 agentmain.load_tool_schema()
             os.environ.pop("GA_MCP_CONFIG", None)
 

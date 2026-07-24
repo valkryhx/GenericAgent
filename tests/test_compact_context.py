@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent  # noqa: E402
-from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget  # noqa: E402
+from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget, _content_to_text, _history_to_text  # noqa: E402
 
 
 class FakeBackend:
@@ -139,26 +139,170 @@ class CompactContextTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("native summary", agent.llmclient.backend.history[0]["content"][0]["text"])
 
-    def test_auto_compact_threshold_uses_pending_input_budget(self):
+    def test_auto_compact_soft_line_derived_from_context_win(self):
+        # 无显式 auto_compact_tokens → 软线从 context_win × 0.90 派生（对齐 Codex）。
         agent = FakeAgent()
-        agent.llmclient.backend.context_win = 10_000
+        agent.llmclient.backend.context_win = 10_000  # 软线 9000
+        # 冷启动全量估算，短历史 + 短 pending 远低于软线
         self.assertFalse(should_auto_compact_agent(agent, pending_text="short"))
 
-        agent.llmclient.backend.context_win = 20
+        agent.llmclient.backend.context_win = 20  # 软线 18
         self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 200))
 
-    def test_auto_compact_default_budget_matches_400k_token_models(self):
+    def test_auto_compact_default_soft_line_uses_400k_window(self):
+        # 连 context_win 都没有 → 用 DEFAULT_CONTEXT_WIN，软线 = 400k × 0.90 = 360k tokens。
         agent = FakeAgent()
         delattr(agent.llmclient.backend, "context_win")
-
         self.assertEqual(400_000, DEFAULT_CONTEXT_WIN)
-        self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 890_000))
-        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 910_000))
+        # 冷启动按 chars/4 估算：pending 100 万字符 ≈ 25 万 token < 36 万 → 不触发
+        self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 1_000_000))
+        # 160 万字符 ≈ 40 万 token > 36 万 → 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 1_600_000))
+
+    def test_auto_compact_prefers_explicit_soft_limit(self):
+        # backend 有显式 auto_compact_tokens（配置层派生）→ 直接用它当软线，
+        # 不再从 context_win 派生。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 1_000_000  # 大窗口，证明不被采用
+        agent.llmclient.backend.auto_compact_tokens = 50
+        # 冷启动短历史 ~27 token < 50 → 不触发
+        self.assertFalse(should_auto_compact_agent(agent, pending_text=""))
+        # + pending 400 字符 ≈ 100 token → 超 50 → 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 400))
+
+    def test_auto_compact_switch_off_never_triggers(self):
+        # auto_compact_enabled=False（对齐 CC DISABLE_AUTO_COMPACT）：无论上下文多大都不自动摘要。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 20  # 软线 18，正常必触发
+        agent.llmclient.backend.auto_compact_enabled = False
+        self.assertFalse(should_auto_compact_agent(agent, pending_text="x" * 10_000))
+        # 打开开关 → 恢复触发，证明前者确实是被开关拦下
+        agent.llmclient.backend.auto_compact_enabled = True
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 10_000))
+
+    def test_auto_compact_uses_real_token_baseline(self):
+        # 有 last_usage_tokens（真实 token）→ 用它当基准（history 末尾是 assistant，
+        # 其后无新增，delta=0）。软线 900。
+        agent = FakeAgent()
+        agent.llmclient.backend.auto_compact_tokens = 900
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 850, "output_tokens": 0, "total_tokens": 850,
+        }
+        # 850 + 0 = 850 < 900 → 不触发
+        self.assertFalse(should_auto_compact_agent(agent, pending_text=""))
+        # 850 + 400/4=100 = 950 > 900 → 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text="x" * 400))
+
+    def test_auto_compact_real_token_ignores_char_estimate_magnitude(self):
+        # 真实 token 路径下，即便历史字符数很大（旧字符口径会误判），只要真实 token 低
+        # 就不触发——证明确实用 token 而非字符。history 末尾放 assistant 走真实基准路径。
+        agent = FakeAgent()
+        agent.llmclient.backend.auto_compact_tokens = 90_000
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 10, "output_tokens": 10, "total_tokens": 20,
+        }
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "x" * 500_000}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        ]
+        # 真实基准 20 + delta 0 = 20 << 90000 → 不触发（字符估算会是 ~12 万 token）
+        self.assertFalse(should_auto_compact_agent(agent, pending_text=""))
+
+    def test_auto_compact_cold_start_full_char_estimate(self):
+        # 无 last_usage_tokens（从未成功请求）→ 冷启动全量字符估算（chars/4）。
+        agent = FakeAgent()
+        agent.llmclient.backend.context_win = 20  # 软线 18
+        # 短历史 ~27 token > 18 → 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text=""))
+
+    def test_auto_compact_total_derived_from_input_output(self):
+        # last_usage_tokens 只有 input/output、没 total_tokens → 由二者求和当基准。
+        agent = FakeAgent()
+        agent.llmclient.backend.auto_compact_tokens = 900
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 500, "output_tokens": 450,
+        }
+        # 500+450=950 > 900（history 末尾 assistant，delta=0）→ 触发
+        self.assertTrue(should_auto_compact_agent(agent, pending_text=""))
 
     def test_compact_source_budget_scales_for_large_default_context(self):
         backend = type("Backend", (), {})()
 
         self.assertEqual(800_000, _source_char_budget(backend))
+
+    def test_content_to_text_strips_image_base64_to_placeholder(self):
+        # Slice D2 / CC stripImagesFromMessages：摘要源永不含 base64
+        huge = "A" * 50_000
+        content = [
+            {"type": "text", "text": "用户发了截图"},
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": huge},
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{huge}"},
+            },
+            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{huge}"},
+            {
+                "type": "tool_result",
+                "content": [
+                    {"type": "text", "text": "tool saw image"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+        ]
+        text = _content_to_text(content)
+        self.assertIn("用户发了截图", text)
+        self.assertIn("[image]", text)
+        self.assertIn("tool saw image", text)
+        self.assertNotIn(huge, text)
+        self.assertNotIn("base64," + huge[:20], text)
+        self.assertLess(len(text), 2000)
+
+    def test_history_to_text_with_huge_images_stays_small(self):
+        huge = "B" * 200_000
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看这两张图"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "好的"}]},
+        ]
+        source = _history_to_text(history, budget=50_000)
+        self.assertTrue("[image]" in source or "[image |" in source)
+        self.assertIn("看这两张图", source)
+        self.assertNotIn(huge, source)
+        self.assertLess(len(source), 10_000)
+
+    def test_manual_compact_source_strips_images_before_summarize(self):
+        huge = "C" * 80_000
+        agent = FakeAgent()
+        agent.llmclient.backend.history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "alpha with image"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": huge}},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "beta"}]},
+        ]
+        seen = {}
+
+        def summarize(source, instructions):
+            seen["source"] = source
+            self.assertNotIn(huge, source)
+            self.assertTrue("[image]" in source or "[image |" in source)
+            return "Summary notes user attached image and alpha/beta."
+
+        result = compact_agent_context(agent, summarize_fn=summarize)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue("[image]" in seen.get("source", "") or "[image |" in seen.get("source", ""))
 
     def test_replace_log_with_compact_history_archives_old_log_and_writes_restorable_pair(self):
         with tempfile.TemporaryDirectory() as tmp:

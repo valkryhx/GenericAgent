@@ -360,6 +360,56 @@ class SessionTranscriptTest(unittest.TestCase):
             self.assertEqual("hello", loaded.ui_messages[0]["content"])
             self.assertEqual("hi", loaded.ui_messages[1]["content"])
 
+    def test_record_workflow_event_appends_reference_without_counting_as_conversation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            history = [{"role": "user", "content": "hello"}]
+            session_transcript.record_turn(
+                path,
+                session_id="session_test",
+                turn_id=1,
+                source="user",
+                user_text="hello",
+                assistant_text="hi",
+                backend_history_before=[],
+                backend_history_after=history,
+            )
+
+            session_transcript.record_workflow_event(
+                path,
+                session_id="session_test",
+                run_id="wf_test",
+                event_type="workflow_started",
+                artifact_dir="temp/sessions/session_test/workflows/wf_test",
+            )
+            session_transcript.record_workflow_event(
+                path,
+                session_id="session_test",
+                run_id="wf_test",
+                event_type="workflow_completed",
+                artifact_dir="temp/sessions/session_test/workflows/wf_test",
+                result_ref="temp/sessions/session_test/workflows/wf_test/final-result.json",
+            )
+
+            loaded = session_transcript.load_session(path)
+            events = [
+                json.loads(line)
+                for line in Path(path).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+            self.assertEqual(1, loaded.rounds)
+            self.assertEqual(1, len(loaded.turns))
+            self.assertEqual([
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ], loaded.ui_messages)
+            self.assertEqual(history, loaded.backend_history)
+            self.assertEqual(["workflow_started", "workflow_completed"], [event["type"] for event in events[-2:]])
+            self.assertEqual("wf_test", events[-1]["run_id"])
+            self.assertEqual("temp/sessions/session_test/workflows/wf_test", events[-1]["artifact_dir"])
+            self.assertEqual("temp/sessions/session_test/workflows/wf_test/final-result.json", events[-1]["result_ref"])
+
 
 if __name__ == "__main__":
     unittest.main()

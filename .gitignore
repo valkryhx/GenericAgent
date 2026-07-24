@@ -28,6 +28,8 @@ model_responses.txt
 
 # Sensitive files (API keys, credentials)
 mykey.py
+llm.yaml
+llm.yml
 
 tasks/
 
@@ -132,3 +134,56 @@ docs/superpowers/plans/2026-05-14-codex-llm-distill-refactor.md
 docs/superpowers/plans/2026-05-18-mcp-persistent-manager.md
 屏幕截图 2026-05-13 122835.png
 屏幕截图 2026-05-20 154551.png
+
+# ---------------------------------------------------------------------------
+# Local workspace / scratch (never track)
+# Hard-reset can surface these if this block is missing from committed ignore.
+# ---------------------------------------------------------------------------
+1/
+1/1.md
+调研/
+截图/
+周报/
+专利/
+sessions/
+slides/
+原始会话jsonl和导出会话/
+动态工作流原理分析与子智能体会话存储的细节与ga复刻路线图/
+
+# Local notes / exports / dumps
+CLAUDE-FABLE-5.md
+mcp.json
+workflow_ui.md
+新feat实现.md
+编码过程情况核查.md
+understand-anything-ink-ui-用法.md
+截至20260623的workflow开发进度_ink_ui需要接入workflow.md
+skill-overlay-sidecar-migration.patch
+网研中心2026年AI辅助编码考核.pptx
+2026-05-25-161911-this-session-is-being-continued-from-a-previous-co.txt
+20260528_l1_考试导出会话.txt
+屏幕截图*.png
+
+# Local tool caches
+**/.understand-anything/
+
+# Ad-hoc docs / research notes kept only on this machine
+docs/1
+docs/agnes_planner_safety_boundary_issue.md
+docs/codex_adversarial_review_2783a01.md
+docs/codex_adversarial_review_2783a01_code_verification.md
+docs/ga_codex_vs_ink_stdout_ownership_2026-07-15.md
+docs/ga_subagent_ui_scrollbar_diagnosis_2026-07-13.md
+docs/ga_ui_input_stability_codex_safe_fix_2026-07-15.md
+docs/recent_workflow_commit_review.md
+docs/workflow_progress_analysis_2026-06-25.md
+docs/多智能体编码任务演示.md
+docs/superpowers/papers/
+docs/superpowers/plans/2026-05-21-ink-ui-stable-layout.md
+docs/superpowers/plans/2026-05-27-skill-self-evolution-adoption.md
+docs/superpowers/plans/2026-05-28-claude-md-conservative-init.md
+docs/superpowers/plans/2026-05-28-skill-overlay-sidecar.md
+docs/superpowers/plans/2026-07-10-ink-terminal-layout.md
+docs/superpowers/plans/2026-07-15-ga-ink-input-stability.md
+docs/superpowers/specs/2026-07-10-ink-terminal-layout-design.md
+docs/superpowers/specs/2026-07-15-ga-self-managed-terminal-design.md

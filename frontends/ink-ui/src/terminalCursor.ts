@@ -3,6 +3,9 @@ export type TerminalCursorPosition = {
   column: number
 }
 
+export const saveCursorPosition = '\x1b[s'
+export const restoreCursorPosition = '\x1b[u'
+
 export type InputCursorPositionInput = {
   headerRows: number
   messageRows: number

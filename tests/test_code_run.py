@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -77,6 +78,45 @@ class CodeRunTest(unittest.TestCase):
 
         self.assertEqual("success", result["status"])
         self.assertIs(ga.subprocess.DEVNULL, popen_kwargs.get("stdin"))
+
+    def test_python_temp_script_exists_during_execution_and_removed_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            code = """
+from pathlib import Path
+p = Path(__file__)
+print('exists_during=' + str(p.exists()))
+print('suffix=' + ''.join(p.suffixes))
+"""
+
+            result = exhaust_generator(code_run(code, "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd)))
+
+            self.assertEqual("success", result["status"])
+            self.assertIn("exists_during=True", result["stdout"])
+            self.assertIn("suffix=.ai.py", result["stdout"])
+            self.assertEqual([], list(code_cwd.glob("*.ai.py")))
+
+    def test_python_missing_code_cwd_returns_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_code_cwd = Path(tmp) / "missing"
+
+            result = exhaust_generator(code_run('print("test")', "python", timeout=5, cwd=tmp, code_cwd=str(missing_code_cwd)))
+
+            self.assertEqual("error", result["status"])
+            self.assertIn("code_cwd does not exist", result["msg"])
+            self.assertIn(str(missing_code_cwd), result["msg"])
+
+    def test_py_alias_removes_temporary_script_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+
+            result = exhaust_generator(code_run('print("alias")', "py", timeout=5, cwd=tmp, code_cwd=str(code_cwd)))
+
+            self.assertEqual("success", result["status"])
+            self.assertIn("alias", result["stdout"])
+            self.assertEqual([], list(code_cwd.glob("*.ai.py")))
 
 
 if __name__ == "__main__":
