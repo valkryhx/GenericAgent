@@ -1,11 +1,11 @@
 # GA Ink UI — Running 时本轮内容被“刷没”诊断
 
-**日期：** 2026-07-14  
-**状态：** **阶段 1+2+3 已落地** — P0-A / 增量 commit / viewport 几何（`insertHistory.ts`）；见 `docs/ga_ui_running_visibility_implementation_progress_2026-07-14.md`  
-**范围：** 默认 inline scrollback（`ga` / `ga ink`，`mouseMode !== 'full'`）  
-**相关：**  
-- 用户双显修复：`docs/ga_ui_user_input_duplicate_display_diagnosis_2026-07-14.md`  
-- 输入框锚点 / content-desired：`docs/ga_ui_composer_position_jump_diagnosis_2026-07-14.md`  
+**日期：** 2026-07-14
+**状态：** **阶段 1+2+3 已落地** — P0-A / 增量 commit / viewport 几何（`insertHistory.ts`）；见 `docs/ga_ui_running_visibility_implementation_progress_2026-07-14.md`
+**范围：** 默认 inline scrollback（`ga` / `ga ink`，`mouseMode !== 'full'`）
+**相关：**
+- 用户双显修复：`docs/ga_ui_user_input_duplicate_display_diagnosis_2026-07-14.md`
+- 输入框锚点 / content-desired：`docs/ga_ui_composer_position_jump_diagnosis_2026-07-14.md`
 **Codex 参考：** `codex-rs/tui` — `insert_history.rs`、`chatwidget/streaming.rs`、`chatwidget/rendering.rs`、`bottom_pane` status indicator、`AppEvent::InsertHistory*`
 
 ---
@@ -94,13 +94,13 @@ BottomChrome 始终在：`ActivityView`（Running）+ input。
 
 Ink / 终端行为叠加：
 
-1. **Static 只追加**：本轮 `> user` 被写到 **当前输出位置** 的 scrollback。  
-2. **live `Box` 每帧从 dock 顶重绘**：header +（可选）MessageViewport + BottomChrome。  
-3. **stream 时 live 高度变大** → dock 占用更多行 → 相对“刚写完 Static 的光标邻域”做 **向上擦除/重画**。  
-4. 用户肉眼看到：  
-   - 刚出现的 **本轮 user** 被 dock 顶上来盖住；  
-   - 或 Running 行本身在矮 dock 与增高之间 **闪没**；  
-   - 流式字只在 live 里，被盖/被裁后像“没输出”；  
+1. **Static 只追加**：本轮 `> user` 被写到 **当前输出位置** 的 scrollback。
+2. **live `Box` 每帧从 dock 顶重绘**：header +（可选）MessageViewport + BottomChrome。
+3. **stream 时 live 高度变大** → dock 占用更多行 → 相对“刚写完 Static 的光标邻域”做 **向上擦除/重画**。
+4. 用户肉眼看到：
+   - 刚出现的 **本轮 user** 被 dock 顶上来盖住；
+   - 或 Running 行本身在矮 dock 与增高之间 **闪没**；
+   - 流式字只在 live 里，被盖/被裁后像“没输出”；
 5. **`assistant_done` 后** assistant 整段进 Static，live 塌成 none，Static 尾一次性露出 → **“突然全部显示”**。
 
 这不是 `messages` 丢了，而是 **渲染通道时序 + 高度变化** 造成的 **可见性 bug**。
@@ -119,8 +119,8 @@ if area.bottom() < screen_size.height {
 
 GA：
 
-- Static 追加 **不** 同步 `viewport.y +=`；  
-- live dock 仍按 Ink 的 inline 帧逻辑在 **底部区域原地增高**；  
+- Static 追加 **不** 同步 `viewport.y +=`；
+- live dock 仍按 Ink 的 inline 帧逻辑在 **底部区域原地增高**；
 - 结果：**盖住邻近的 Static 尾（往往就是本轮 user）**，而不是把“整个多轮会话 + dock”当作一体下移。
 
 ---
@@ -151,8 +151,8 @@ on_agent_message_delta
 
 要点：
 
-1. **已稳定的流式行** 会通过 commit 动画进 history（scrollback），不是等整轮结束一次性倒出。  
-2. **dock 里只保留 tail**，高度 content-desired，且插入 history 时 **下移 viewport**，tail 始终贴在 history 下方。  
+1. **已稳定的流式行** 会通过 commit 动画进 history（scrollback），不是等整轮结束一次性倒出。
+2. **dock 里只保留 tail**，高度 content-desired，且插入 history 时 **下移 viewport**，tail 始终贴在 history 下方。
 3. Status/Running 属于 **bottom_pane**，与 history 插入的 scroll region 分离。
 
 ### 3.3 用户消息（`input_submission` / history）
@@ -186,9 +186,9 @@ Flex:
 
 ### 4.1 主因（充分条件组合）
 
-1. **本轮 user 在 running 前就进 Static**（双显修复正确方向，但缺 Codex 的 viewport 下移）。  
-2. **live dock 在 Static 输出邻域增高/重绘**，Ink 无 `insert_history` 式 scroll region 保护。  
-3. **stream 只在 live 攒全文**，`assistant_done` 才整段 Static → 过程不可见、结束突然可见。  
+1. **本轮 user 在 running 前就进 Static**（双显修复正确方向，但缺 Codex 的 viewport 下移）。
+2. **live dock 在 Static 输出邻域增高/重绘**，Ink 无 `insert_history` 式 scroll region 保护。
+3. **stream 只在 live 攒全文**，`assistant_done` 才整段 Static → 过程不可见、结束突然可见。
 4. **content-desired** 使 running 初 live=0、随后长高，**高度变化更剧烈**，覆盖更明显。
 
 ### 4.2 放大因素
@@ -215,16 +215,16 @@ Flex:
 
 ### 5.1 目标
 
-1. **running 全程**能看到：本轮 user（或明确在 scrollback 尾）、Running/Thinking 状态、**当前 stream 尾**。  
-2. 旧多轮 history 正常进 scrollback；推进方式是 **整体上移/viewport 下移**，不是盖住本轮。  
-3. 输出结束不应“从空白突然蹦出整段”（过程中应已逐步可见）。  
-4. **不回退** 用户双显修复的正确语义（同一 user 不得 Static+live 双画）。  
+1. **running 全程**能看到：本轮 user（或明确在 scrollback 尾）、Running/Thinking 状态、**当前 stream 尾**。
+2. 旧多轮 history 正常进 scrollback；推进方式是 **整体上移/viewport 下移**，不是盖住本轮。
+3. 输出结束不应“从空白突然蹦出整段”（过程中应已逐步可见）。
+4. **不回退** 用户双显修复的正确语义（同一 user 不得 Static+live 双画）。
 5. 尽量保持 content-desired（composer 贴内容），不要回到满高 spacer。
 
 ### 5.2 非目标（本轮文档）
 
-- 完整移植 Codex commit 动画每一细节  
-- full mouse 模式重做  
+- 完整移植 Codex commit 动画每一细节
+- full mouse 模式重做
 - 改 LLM / bridge 协议语义（除非选方案时需要事件序微调）
 
 ---
@@ -245,16 +245,16 @@ Flex:
 
 **阶段 1（快，对症“Running 时看不见”）**
 
-1. **running / 有 `!done` assistant 时**：保证 live 至少 N 行（status 占位 + tail），避免 `none` 与突变。  
-2. **本轮 user 可见性**：  
-   - 要么 hold user 在 live 直到 turn 结束再 Static（P0-A）；  
-   - 要么 user Static 后 **禁止** live 区向上侵占 Static 尾（P1 简化：固定 dock 顶在终端底、用 ANSI 预留）。  
+1. **running / 有 `!done` assistant 时**：保证 live 至少 N 行（status 占位 + tail），避免 `none` 与突变。
+2. **本轮 user 可见性**：
+   - 要么 hold user 在 live 直到 turn 结束再 Static（P0-A）；
+   - 要么 user Static 后 **禁止** live 区向上侵占 Static 尾（P1 简化：固定 dock 顶在终端底、用 ANSI 预留）。
 3. Activity/Running **始终**在 BottomChrome 可见（已有则加固，勿被 MessageViewport 挤没）。
 
 **阶段 2（对齐 Codex 流式体验）**
 
-1. **StreamController 语义**：`liveTranscriptViewportLines` 不仅截尾显示，还要把“离开窗口的行”**标记为可 Static 的 finalized 片段**（或独立 commit 队列）。  
-2. commit 节奏：按行/按 tick，而不是仅 `assistant_done`。  
+1. **StreamController 语义**：`liveTranscriptViewportLines` 不仅截尾显示，还要把“离开窗口的行”**标记为可 Static 的 finalized 片段**（或独立 commit 队列）。
+2. commit 节奏：按行/按 tick，而不是仅 `assistant_done`。
 3. 回归：过程中 stdout 持续出现 assistant 文本；done 后 **不出现第二次整段重复**。
 
 **阶段 3（根治）**
@@ -263,9 +263,9 @@ Flex:
 
 ### 6.2 与双显修复的兼容原则
 
-> **同一逻辑消息只允许进入一个“不可撤销通道”一次。**  
-> - 若 user 已 Static → live **禁止**再画同一 user。  
-> - 若 user 暂 live → Static **禁止**在 running 中写入该 user。  
+> **同一逻辑消息只允许进入一个“不可撤销通道”一次。**
+> - 若 user 已 Static → live **禁止**再画同一 user。
+> - 若 user 暂 live → Static **禁止**在 running 中写入该 user。
 > Codex：user 只 InsertHistory 一次；stream tail 只在 active_cell，commit 后再进 history 一次。
 
 ---
@@ -307,13 +307,13 @@ return { kind: 'none' }
 
 ### 7.3 App 渲染
 
-- `MessageViewport` 只渲染 **tail**；  
-- commit 队列驱动 `<Static items={...}>` 只追加新行；  
+- `MessageViewport` 只渲染 **tail**；
+- commit 队列驱动 `<Static items={...}>` 只追加新行；
 - **禁止** 在 commit 后仍把已 Static 的文本留在 live。
 
 ### 7.4 光标 / 清理
 
-- `liveViewportGeometryRef.rows` 随 content-desired 变；Ctrl+C 清理高度必须用**当前** dock 高（已有测需覆盖 running 中变高）。  
+- `liveViewportGeometryRef.rows` 随 content-desired 变；Ctrl+C 清理高度必须用**当前** dock 高（已有测需覆盖 running 中变高）。
 - 增高/减高时验证 `clearInlineLiveViewportSequence` 不误清 Static。
 
 ---
@@ -333,9 +333,9 @@ return { kind: 'none' }
 
 ### 8.2 人工
 
-1. 多轮后新开一轮：提问 → **立刻**能看到自己的问题 + Running。  
-2. 流式输出中途截图：应看到正在增长的助手尾，而不是空白。  
-3. 结束后：内容连续，无“空白很久再弹整段”。  
+1. 多轮后新开一轮：提问 → **立刻**能看到自己的问题 + Running。
+2. 流式输出中途截图：应看到正在增长的助手尾，而不是空白。
+3. 结束后：内容连续，无“空白很久再弹整段”。
 4. 对照 Codex 同终端高度。
 
 ---
@@ -382,10 +382,10 @@ return { kind: 'none' }
 
 ## 12. 总结
 
-- **现象**：Running 后本轮 user / 状态 / 流式像被向上盖住，结束才突然全显示。  
-- **机制**：Static 早写本轮 user + live dock 原地增高重绘 + stream 延迟整段 Static；缺 Codex 的 **InsertHistory 下移 viewport** 与 **边流边 commit**。  
-- **Codex**：user/history 进 scrollback 并可能 `area.y +=`；stream **active_cell 尾** 在 dock；稳定行 commit 动画进 history。  
-- **修法**：阶段 1 保证 running 可见（P0-A 或 P1）；阶段 2 增量 commit + live tail；阶段 3 真 viewport 引擎。  
+- **现象**：Running 后本轮 user / 状态 / 流式像被向上盖住，结束才突然全显示。
+- **机制**：Static 早写本轮 user + live dock 原地增高重绘 + stream 延迟整段 Static；缺 Codex 的 **InsertHistory 下移 viewport** 与 **边流边 commit**。
+- **Codex**：user/history 进 scrollback 并可能 `area.y +=`；stream **active_cell 尾** 在 dock；稳定行 commit 动画进 history。
+- **修法**：阶段 1 保证 running 可见（P0-A 或 P1）；阶段 2 增量 commit + live tail；阶段 3 真 viewport 引擎。
 - **原则**：单通道、过程可见、结束无二次双显、保持 content-desired 贴内容。
 
 本文 **仅诊断与方案**，不改代码。实施时 TDD，并与双显 / composer 自测一并跑。

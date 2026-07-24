@@ -1,6 +1,6 @@
 # GA UI Running 可见性 — 充分自测说明
 
-**日期：** 2026-07-14  
+**日期：** 2026-07-14
 **范围：** 阶段 1（P0-A）+ 阶段 2（stream commit）+ 阶段 3（viewport 几何）+ composer layout 回归
 
 ## 怎么跑
@@ -47,8 +47,8 @@ npx tsx src/grok_selfcheck_composer_layout.ts → SELFCHECK PASS
 
 ## 关键断言（充分自测在证什么）
 
-1. **Running 可见**：`user→running` 后 live 含 user，Static 无过早 user  
-2. **边流边 commit**：长 delta 中途出现 `a-*-c*` 且 live ≤ 8 行  
-3. **无双显 / 无二次整段**：finalize 后每行 assistant 仅 1 次；user 单通道  
-4. **Viewport**：先 `areaY` 下移，触底冻结；dock 长高再贴底  
-5. **Layout**：idle content-desired 无满高 spacer；slash 在 input 下  
+1. **Running 可见**：`user→running` 后 live 含 user，Static 无过早 user
+2. **边流边 commit**：长 delta 中途出现 `a-*-c*` 且 live ≤ 8 行
+3. **无双显 / 无二次整段**：finalize 后每行 assistant 仅 1 次；user 单通道
+4. **Viewport**：先 `areaY` 下移，触底冻结；dock 长高再贴底
+5. **Layout**：idle content-desired 无满高 spacer；slash 在 input 下

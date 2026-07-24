@@ -268,7 +268,7 @@ wf_abc123...
 
 ### 9.2 为什么没有 `awaiting_approval`？
 
-当前产品路径固定 `autoApprove=true`。planner 校验通过后直接 `running`。  
+当前产品路径固定 `autoApprove=true`。planner 校验通过后直接 `running`。
 旧文档中的 `--manual` / approve / deny 已废弃。
 
 ### 9.3 workflow 失败
@@ -369,7 +369,7 @@ wf_abc123...
 
 ## 13. 历史回归记录说明
 
-2026-07-07 及更早文档中记录过 `/workflow plan --manual` + `/workflow approve` 的真实 bridge 回归。  
+2026-07-07 及更早文档中记录过 `/workflow plan --manual` + `/workflow approve` 的真实 bridge 回归。
 **自 2026-07-22 起，产品入口收敛为单一自动启动**；那些审批步骤仅作为历史实现与底层 API 兼容说明，不再是用户操作路径。
 
 底层 bridge 仍保留 `workflow_plan(auto_approve=...)`、`workflow_draft`、`workflow_approve` 等方法，主要供自动化测试与内部兼容使用，Ink UI 用户 slash 不再暴露它们。

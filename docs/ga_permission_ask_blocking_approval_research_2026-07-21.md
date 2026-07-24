@@ -1,7 +1,7 @@
 # GA Ask 档行内阻塞审批：Claude Code / Codex 源码调研与落地建议
 
-日期：2026-07-21  
-范围：**仅**主 agent `ask` 档的「工具级、阻塞式、行内审批 UI」；不含档位持久化、不含 workflow 子 agent 审批（见 `docs/ga_permission_modes_research_2026-07-20.md` §14 大件 #2/#3）。  
+日期：2026-07-21
+范围：**仅**主 agent `ask` 档的「工具级、阻塞式、行内审批 UI」；不含档位持久化、不含 workflow 子 agent 审批（见 `docs/ga_permission_modes_research_2026-07-20.md` §14 大件 #2/#3）。
 对照源码：
 
 | 产品 | 本地路径 |
@@ -28,7 +28,7 @@
 
 ### 0.1 产品决策（2026-07-21 拍板，简化）
 
-> **所有工具共用同一套审批 UI；选项仅 `accept` / `deny`。**  
+> **所有工具共用同一套审批 UI；选项仅 `accept` / `deny`。**
 > 不做按工具特化页，不做 Allow for session / Always，不做 diff/命令高亮专用视图（摘要一行工具名 + 短 args 即可）。
 
 | 项 | 决策 |
@@ -123,20 +123,20 @@ canUseTool(...)   ← useCanUseTool 注入的 Promise 函数
 
 `interactiveHandler` + `createResolveOnce`：
 
-1. **`claim()`**：异步回调里先原子占坑，再 await 副作用，关掉「检查 isResolved → await → resolve」窗口。  
-2. **`onUserInteraction`**：用户开始按键后，取消 classifier 自动批准竞态（grace 200ms 防误触）。  
-3. **多源决议**：本地 UI / bridge 远端 / MCP channel / classifier / hook 都可能 resolve；先 claim 者赢，其余 no-op。  
+1. **`claim()`**：异步回调里先原子占坑，再 await 副作用，关掉「检查 isResolved → await → resolve」窗口。
+2. **`onUserInteraction`**：用户开始按键后，取消 classifier 自动批准竞态（grace 200ms 防误触）。
+3. **多源决议**：本地 UI / bridge 远端 / MCP channel / classifier / hook 都可能 resolve；先 claim 者赢，其余 no-op。
 4. **abort**：`onAbort` → deny + 可选 `abortController.abort()`（整轮取消）。
 
 对 GA 的直接含义：**阻塞点必须有 requestId + 单次完成语义**；`/stop` 必须能找到 pending 并统一 deny/abort。
 
 ### 1.4 UI 形态
 
-- **队列表**（React state），通常只展示 **队头**；并行 tool_use 时后续项排队。  
+- **队列表**（React state），通常只展示 **队头**；并行 tool_use 时后续项排队。
 - **按工具特化** 的审批页（Bash / FileWrite / FileEdit / MCP fallback…），共享 `PermissionRequestProps`：
   - `toolUseConfirm.onAllow(updatedInput, permissionUpdates, feedback?)`
   - `toolUseConfirm.onReject(feedback?)`
-  - `onDone` / `onReject` 清队列项  
+  - `onDone` / `onReject` 清队列项
 - 通用 Fallback 选项（`FallbackPermissionRequest`）：
 
 | 选项 | 效果 |
@@ -153,10 +153,10 @@ canUseTool(...)   ← useCanUseTool 注入的 Promise 函数
 
 ### 1.6 不建议 GA 一期照搬的 CC 复杂度
 
-- Bash classifier / auto-mode / YOLO classifier 竞态  
-- Bridge / 手机 channel 旁路批准  
-- Swarm worker / coordinator 权限  
-- 完整 PermissionRule 编辑器与多 destination（user/project/local/session）  
+- Bash classifier / auto-mode / YOLO classifier 竞态
+- Bridge / 手机 channel 旁路批准
+- Swarm worker / coordinator 权限
+- 完整 PermissionRule 编辑器与多 destination（user/project/local/session）
 
 这些是产品力，但 **P1 主 agent 阻塞审批不需要**。
 
@@ -210,10 +210,10 @@ rx_approve.await.unwrap_or(ReviewDecision::Abort)
 
 要点：
 
-1. **先登记 oneshot，再发事件**——避免 UI 极快回复时丢应答。  
-2. **key** = `approval_id` 或回退 `call_id`。  
-3. 接收端 `notify_approval` **remove + send**；找不到 key 只 warn。  
-4. `rx` 被 drop / 无发送者 → **`Abort`**（fail-closed，不是静默 allow）。  
+1. **先登记 oneshot，再发事件**——避免 UI 极快回复时丢应答。
+2. **key** = `approval_id` 或回退 `call_id`。
+3. 接收端 `notify_approval` **remove + send**；找不到 key 只 warn。
+4. `rx` 被 drop / 无发送者 → **`Abort`**（fail-closed，不是静默 allow）。
 5. 同 turn 可有多类 pending（approval / user_input / elicitation / dynamic tool），结构统一。
 
 这与 GA 的 Python 世界可直接类比：
@@ -241,34 +241,34 @@ result = future.result(timeout?)  # 或 wait + stop_sig
 
 TUI `ApprovalOverlay` 再映射到 app-server 的：
 
-- `CommandExecutionApprovalDecision::{Accept, AcceptForSession, Cancel, …}`  
-- `FileChangeApprovalDecision`  
+- `CommandExecutionApprovalDecision::{Accept, AcceptForSession, Cancel, …}`
+- `FileChangeApprovalDecision`
 - MCP elicitation 专用 Cancel（**Esc = Cancel，禁止静默 continue**）
 
 ### 2.4 UI 形态
 
 `ApprovalOverlay` 契约（模块注释写得很清楚）：
 
-1. 选择 **必须** 发出显式 decision 事件回 app。  
-2. MCP elicitation 的 Esc **固定 Cancel**，避免「关掉 = 默认同意」。  
+1. 选择 **必须** 发出显式 decision 事件回 app。
+2. MCP elicitation 的 Esc **固定 Cancel**，避免「关掉 = 默认同意」。
 3. **不**在 overlay 里做安全评估，只展示 + 路由。
 
 实现特征：
 
-- `current_request` + `queue: Vec<ApprovalRequest>`  
-- `enqueue_request` / 解决后 `advance_queue`  
-- 请求类型：`Exec` | `Permissions` | `ApplyPatch` | `McpElicitation`  
-- 列表项带 shortcut；footer hint  
+- `current_request` + `queue: Vec<ApprovalRequest>`
+- `enqueue_request` / 解决后 `advance_queue`
+- 请求类型：`Exec` | `Permissions` | `ApplyPatch` | `McpElicitation`
+- 列表项带 shortcut；footer hint
 - 跨 thread：`PendingThreadApprovals` 提示「别的 agent 在等你」
 
-与 CC 对比：Codex UI **更统一**（一种 overlay + 按请求类型换 options），CC **更特化**（每个 Tool 一个 React 页）。  
+与 CC 对比：Codex UI **更统一**（一种 overlay + 按请求类型换 options），CC **更特化**（每个 Tool 一个 React 页）。
 **GA 更接近 Codex，并再砍一刀**：bridge 已是事件协议 → **统一 ApprovalPanel**；选项固定 **accept/deny**；仅展示 toolName + 短 argsPreview，**不按 tool 换选项集、不做专用页**。
 
 ### 2.5 协议风格（对 GA bridge 极相关）
 
 Codex 整体是 **Submission Queue / Event Queue**：
 
-- 下行：Agent → UI 的 `ExecApprovalRequest` 事件  
+- 下行：Agent → UI 的 `ExecApprovalRequest` 事件
 - 上行：UI → Agent 的 `Op::ExecApproval { id, decision }`（经 `notify_approval`）
 
 GA 的 Ink bridge 已是 JSONL 命令/事件，**天然适合抄这套**：
@@ -385,7 +385,7 @@ frontends/ink-ui/
 
 与既有切档协议正交：
 
-- `permission_status` / `set_permission_mode` —— **mode 切换**  
+- `permission_status` / `set_permission_mode` —— **mode 切换**
 - `permission_request` / `permission_response` —— **单次工具审批（accept|deny）**
 
 ### 5.3 Runtime 伪代码
@@ -454,9 +454,9 @@ if decision.action == "ask":
 
 **线程模型注意（GA 特有）**：
 
-- `agent_runner_loop` / `dispatch` 多在 agent 工作线程；Ink bridge 读 stdin 在另一线程。  
-- `Future` + bridge 线程 `resolve` 是自然适配（≈ Codex oneshot 跨任务）。  
-- **禁止**在 asyncio 假设下写；GA 主路径是线程 + generator `yield`。  
+- `agent_runner_loop` / `dispatch` 多在 agent 工作线程；Ink bridge 读 stdin 在另一线程。
+- `Future` + bridge 线程 `resolve` 是自然适配（≈ Codex oneshot 跨任务）。
+- **禁止**在 asyncio 假设下写；GA 主路径是线程 + generator `yield`。
 - 若 `dispatch` 是 generator：wait 期间可 `yield` 一行 `[Permission] waiting: file_write`，保持 UI 有输出。
 
 ### 5.4 Ink UI 状态机（**同一套，仅 accept/deny**）
@@ -486,7 +486,7 @@ idle
 
 与 `/permissions` 切档面板冲突时：
 
-- **审批 overlay 优先**  
+- **审批 overlay 优先**
 - 打开审批时关闭切档面板，避免双 modal
 
 ### 5.5 `/stop` / abort 与 pending 的关系（详见 §0.2）
@@ -530,26 +530,26 @@ idle
 
 ### Slice P1a — 协议 + runtime 阻塞 ✅
 
-1. `permission_runtime.py` + 单测（accept/deny/resolve 一次/cancel_all/fail-closed）  
-2. `dispatch` 接 runtime；emit 钩子由 bridge 注入  
-3. bridge：`permission_request` / `permission_response`（decision 仅 accept|deny）  
-4. 无 UI → deny；单测注入 mock `resolve(accept)`  
+1. `permission_runtime.py` + 单测（accept/deny/resolve 一次/cancel_all/fail-closed）
+2. `dispatch` 接 runtime；emit 钩子由 bridge 注入
+3. bridge：`permission_request` / `permission_response`（decision 仅 accept|deny）
+4. 无 UI → deny；单测注入 mock `resolve(accept)`
 
 **验收**：ask 档下 `file_write` 在 `accept` 后 **真的写出文件**；`deny` 不落盘。任意其它 mutating 工具走同一路径。→ **live L1–L3 已过**。
 
 ### Slice P1b — Ink **同一套** 审批 UI ✅
 
-1. `approvalPanel.ts`：二选一状态机 + Esc=deny + 单测  
-2. `App.tsx`：所有 `permission_request` 同一组件渲染（**不** `switch(toolName)`）  
-3. 与 `/permissions` 互斥；审批优先  
+1. `approvalPanel.ts`：二选一状态机 + Esc=deny + 单测
+2. `App.tsx`：所有 `permission_request` 同一组件渲染（**不** `switch(toolName)`）
+3. 与 `/permissions` 互斥；审批优先
 
 **验收**：切到 ask → 触发写/执行 → 同一弹层 → accept 后执行成功。→ **代码 + 单测已过**；真键盘 E2E 仍可选。
 
 ### Slice P1c — 小硬化（仍保持简单） ✅ 主路径
 
-1. argsPreview 截断（长度上限）  
-2. stop 取消竞态单测  
-3. deny 回模型固定文案  
+1. argsPreview 截断（长度上限）
+2. stop 取消竞态单测
+3. deny 回模型固定文案
 
 **不做**：session allow、always、按工具换 UI、diff 预览。
 
@@ -573,44 +573,44 @@ idle
 
 ### Claude Code
 
-- `src/hooks/useCanUseTool.tsx` — Promise 门面  
-- `src/hooks/toolPermission/handlers/interactiveHandler.ts` — 入队与多源 resolve  
-- `src/hooks/toolPermission/PermissionContext.ts` — resolveOnce、队列、拒绝文案  
-- `src/utils/permissions/permissions.ts` — 规则决策  
-- `src/components/permissions/PermissionRequest.tsx` — 组件分发  
-- `src/components/permissions/FallbackPermissionRequest.tsx` — 通用选项  
-- `src/components/permissions/FilePermissionDialog/permissionOptions.tsx` — once/session  
-- `src/services/tools/toolExecution.ts` — 执行前 `canUseTool`  
+- `src/hooks/useCanUseTool.tsx` — Promise 门面
+- `src/hooks/toolPermission/handlers/interactiveHandler.ts` — 入队与多源 resolve
+- `src/hooks/toolPermission/PermissionContext.ts` — resolveOnce、队列、拒绝文案
+- `src/utils/permissions/permissions.ts` — 规则决策
+- `src/components/permissions/PermissionRequest.tsx` — 组件分发
+- `src/components/permissions/FallbackPermissionRequest.tsx` — 通用选项
+- `src/components/permissions/FilePermissionDialog/permissionOptions.tsx` — once/session
+- `src/services/tools/toolExecution.ts` — 执行前 `canUseTool`
 
 ### Codex
 
-- `codex-rs/core/src/session/mod.rs` — `request_command_approval` / `notify_approval`  
-- `codex-rs/core/src/state/turn.rs` — `pending_approvals` oneshot map  
-- `codex-rs/protocol/src/protocol.rs` — `ReviewDecision`  
-- `codex-rs/tui/src/bottom_pane/approval_overlay.rs` — UI 队列与决策路由  
-- `codex-rs/tui/src/approval_events.rs` — TUI 请求模型  
-- `codex-rs/tui/src/bottom_pane/pending_thread_approvals.rs` — 跨 thread 提示  
+- `codex-rs/core/src/session/mod.rs` — `request_command_approval` / `notify_approval`
+- `codex-rs/core/src/state/turn.rs` — `pending_approvals` oneshot map
+- `codex-rs/protocol/src/protocol.rs` — `ReviewDecision`
+- `codex-rs/tui/src/bottom_pane/approval_overlay.rs` — UI 队列与决策路由
+- `codex-rs/tui/src/approval_events.rs` — TUI 请求模型
+- `codex-rs/tui/src/bottom_pane/pending_thread_approvals.rs` — 跨 thread 提示
 
 ### GA（P1 后）
 
-- `permission_policy.py` — 三档 evaluate  
-- `permission_runtime.py` — Future 挂起 / resolve / cancel_all  
-- `ga.py` `GenericAgentHandler.dispatch` — ask 阻塞 wait + accept 执行  
-- `agentmain.py` — 挂 runtime；abort → cancel_all  
-- `frontends/ink_bridge.py` — 切档 + `permission_request`/`response`/`settled`  
-- `frontends/ink-ui/src/permissionPanel.ts` — 切档 UI  
-- `frontends/ink-ui/src/approvalPanel.ts` — 统一 accept/deny 审批 UI  
-- `docs/ga_permission_modes_research_2026-07-20.md` §14 — 交付与剩余大件  
+- `permission_policy.py` — 三档 evaluate
+- `permission_runtime.py` — Future 挂起 / resolve / cancel_all
+- `ga.py` `GenericAgentHandler.dispatch` — ask 阻塞 wait + accept 执行
+- `agentmain.py` — 挂 runtime；abort → cancel_all
+- `frontends/ink_bridge.py` — 切档 + `permission_request`/`response`/`settled`
+- `frontends/ink-ui/src/permissionPanel.ts` — 切档 UI
+- `frontends/ink-ui/src/approvalPanel.ts` — 统一 accept/deny 审批 UI
+- `docs/ga_permission_modes_research_2026-07-20.md` §14 — 交付与剩余大件
 
 ---
 
 ## 10. 总结
 
-1. **CC** 证明：工具执行链上的 **`await canUseTool` + 队列 UI + resolve-once** 是交互式 TUI 的完整形态。  
-2. **Codex** 证明：分进程/事件化系统应用 **`pending[id] + oneshot/Future + request/response 事件`**，且 **失败默认 Abort/Deny**。  
-3. **GA P1** 已补：Codex 式 **跨 bridge 等待** + **统一 accept/deny 行内 UI** + fail-closed。  
-4. **P1 产品拍板（再简化）**：**所有工具同一套 UI，仅 `accept` / `deny`**；协议与等待抄 Codex；不做 session/always、不做按工具特化页、不做 classifier、不做 workflow child。  
-5. **fail-closed 两义**（§0.2）：**无 UI** = 没人审就不放行；**`/stop`** = 解开 pending 且不执行未批工具并停轮——勿与「用户点拒绝」混读。  
+1. **CC** 证明：工具执行链上的 **`await canUseTool` + 队列 UI + resolve-once** 是交互式 TUI 的完整形态。
+2. **Codex** 证明：分进程/事件化系统应用 **`pending[id] + oneshot/Future + request/response 事件`**，且 **失败默认 Abort/Deny**。
+3. **GA P1** 已补：Codex 式 **跨 bridge 等待** + **统一 accept/deny 行内 UI** + fail-closed。
+4. **P1 产品拍板（再简化）**：**所有工具同一套 UI，仅 `accept` / `deny`**；协议与等待抄 Codex；不做 session/always、不做按工具特化页、不做 classifier、不做 workflow child。
+5. **fail-closed 两义**（§0.2）：**无 UI** = 没人审就不放行；**`/stop`** = 解开 pending 且不执行未批工具并停轮——勿与「用户点拒绝」混读。
 6. **验证**：单测 + 三级 live（runtime / bridge 方法 / 真子进程 JSONL）见 §12；真 Ink 键盘 E2E 仍可选。
 
 ---
@@ -664,8 +664,8 @@ L3 数据流（最接近 Ink）：
 
 ### 12.3 已知非阻断现象
 
-- accept/deny 后若模型再调其它 mutating 工具（如 `update_working_checkpoint`），会再弹一次审批；L3 deny case 中该二次请求亦被 deny，文件仍不存在。  
-- 工具执行后的下一轮 LLM 偶发 429/503 **不影响** 门控与落盘 oracle。  
+- accept/deny 后若模型再调其它 mutating 工具（如 `update_working_checkpoint`），会再弹一次审批；L3 deny case 中该二次请求亦被 deny，文件仍不存在。
+- 工具执行后的下一轮 LLM 偶发 429/503 **不影响** 门控与落盘 oracle。
 - 模型选择须用 profile 精确 index；`select_llm("grok")` 可能与 `hhhl-grok` 歧义。
 
 ### 12.4 下一步（非本切片）

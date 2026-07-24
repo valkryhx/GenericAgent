@@ -1,10 +1,10 @@
 # GA UI 用户输入重复显示 — 根因分析
 
-**排查日期：** 2026-07-14  
-**范围：** 默认 Ink UI（`ga` / `ga ink`，inline scrollback 模式）  
-**证据图：** `截图/ga_ui重复显示用户输入.png`  
-**修复状态：** 已按 Codex 对齐方案修复（`messagePartition`：done user 只进 Static，live 仅 `!done`）  
-**复现/回归测试：** `frontends/ink-ui/src/grok_user_input_duplicate.test.ts` + `messagePartition.test.ts`  
+**排查日期：** 2026-07-14
+**范围：** 默认 Ink UI（`ga` / `ga ink`，inline scrollback 模式）
+**证据图：** `截图/ga_ui重复显示用户输入.png`
+**修复状态：** 已按 Codex 对齐方案修复（`messagePartition`：done user 只进 Static，live 仅 `!done`）
+**复现/回归测试：** `frontends/ink-ui/src/grok_user_input_duplicate.test.ts` + `messagePartition.test.ts`
 **实施进度：** `docs/ga_ui_user_input_duplicate_display_implementation_progress_2026-07-14.md`
 
 ---
@@ -197,7 +197,7 @@ eventSink({ type: 'status', status: 'running', taskId: 1 })
 eventSink({ type: 'user', taskId: 1, text: '保持输入区稳定' })
 ```
 
-即 **先 running 再 user**。  
+即 **先 running 再 user**。
 生产 bridge 是 **先 user 再 running**。
 
 因此：
@@ -329,10 +329,10 @@ bridge.submit()
 
 ### 6.2 放大因素
 
-1. **Static 不可回滚**：中间态一旦进 Static 就无法靠 React 撤销  
-2. **user 恒 done**：无法靠 `message.done` 表示 “已提交但仍属当前 active 轮”  
-3. **事件顺序固定为 user→running**：生产路径稳定踩中窗口  
-4. **测试用 running→user**：回归网漏掉生产顺序  
+1. **Static 不可回滚**：中间态一旦进 Static 就无法靠 React 撤销
+2. **user 恒 done**：无法靠 `message.done` 表示 “已提交但仍属当前 active 轮”
+3. **事件顺序固定为 user→running**：生产路径稳定踩中窗口
+4. **测试用 running→user**：回归网漏掉生产顺序
 
 ### 6.3 与设计意图的偏差
 
@@ -356,7 +356,7 @@ inline scrollback 设计文档期望：
 2. 输入任意短句（如 `你是谁`）回车
 3. 在助手开始输出前的 running 阶段观察 transcript
 
-**预期：** 本轮 user 只出现一次（应在 live 区，或至少全局只一次）  
+**预期：** 本轮 user 只出现一次（应在 live 区，或至少全局只一次）
 **实际：** scrollback 区与 live 区各出现一次同一条 `> ...`
 
 可选对照：
@@ -376,7 +376,7 @@ inline scrollback 设计文档期望：
 - 若最新 task 只有 user、尚无对应 assistant_done，也视为 active
 - 或：`user` 事件本地乐观地把 status 视为 running 再分区
 
-优点：不改 bridge 协议；贴合 “刚提交的 user 属于当前轮”  
+优点：不改 bridge 协议；贴合 “刚提交的 user 属于当前轮”
 风险：需定义 “孤儿 user / 失败 put_task” 如何最终落入 static
 
 ### 方案 B — bridge：先 `status:running` 再 `user`
@@ -384,7 +384,7 @@ inline scrollback 设计文档期望：
 - 调换 `submit()` 两行 emit 顺序
 - 与现有部分 App 测试顺序一致
 
-优点：改动面小  
+优点：改动面小
 风险：其他消费 bridge 事件的逻辑若依赖 “先有 user 再 running” 需排查；且 React 批处理仍可能在极端情况下合并，但通常 running 先到更安全
 
 ### 方案 C — user 消息在 running 期间标记未 finalized
@@ -392,7 +392,7 @@ inline scrollback 设计文档期望：
 - 例如 user 先 `done:false`，assistant_done/status idle 时再 `done:true`
 - 或增加 `finalized`/`active` 显式字段
 
-优点：分区语义更清晰  
+优点：分区语义更清晰
 风险：协议/状态机面更广，rewind/history_replace 都要对齐
 
 ### 方案 D — Static 追加策略改为“确认 finalized 后再灌入”
@@ -400,13 +400,13 @@ inline scrollback 设计文档期望：
 - 不在每次 render 用当前 staticMessages 全量驱动 Static
 - 仅在 status 回到 idle / assistant_done 时把本轮追加进 Static 队列
 
-优点：从机制上消灭“中间态写 Static”  
+优点：从机制上消灭“中间态写 Static”
 风险：实现更接近 Codex insert_history 模型，工作量大
 
 ### 明确不建议
 
-- 在 live 区对已 Static 的 id 做字符串去重而不修时序：治标，且 scrollback 与 live 仍可能短暂双显  
-- 为消双显重新默认打开 full mouse / alt-screen：会回退可复制体验  
+- 在 live 区对已 Static 的 id 做字符串去重而不修时序：治标，且 scrollback 与 live 仍可能短暂双显
+- 为消双显重新默认打开 full mouse / alt-screen：会回退可复制体验
 
 ---
 
@@ -426,19 +426,19 @@ inline scrollback 设计文档期望：
 
 ### 9.2 修复后建议的回归门禁（待产品修复时改写/迁入）
 
-1. **App 级（默认 mouse off，生产顺序）**  
-   `ready` → `user(taskId=1)` → `status:running` →  
-   - 用户探针文本在 stdout 中 **恰好 1 次**（或：无“仅含用户文本、不含 GenericAgent”的 Static chunk）  
+1. **App 级（默认 mouse off，生产顺序）**
+   `ready` → `user(taskId=1)` → `status:running` →
+   - 用户探针文本在 stdout 中 **恰好 1 次**（或：无“仅含用户文本、不含 GenericAgent”的 Static chunk）
    - live 帧可含该 user；Static 不得在 assistant_done 前写入该 user
 
-2. **App 级 streaming 中**  
+2. **App 级 streaming 中**
    再发 `assistant_delta`，user 仍保持单次
 
-3. **partition 单测（按最终产品语义二选一）**  
-   - 若采用方案 A：裸 `user(done)` 在无 assistant 时也应 active  
+3. **partition 单测（按最终产品语义二选一）**
+   - 若采用方案 A：裸 `user(done)` 在无 assistant 时也应 active
    - 若采用方案 B：保留当前 partition，但 App/bridge 测试必须用生产顺序且不得双显
 
-4. **失败路径**  
+4. **失败路径**
    `user` 后 `put_task_failed` / 立刻 `status:idle`：最终只保留一条 user，不残留双通道
 
 ---
@@ -465,13 +465,13 @@ inline scrollback 设计文档期望：
 
 真正的因果链是：
 
-1. inline scrollback 把 **finalized** 与 **active** 拆成 Static / live 两通道  
-2. 最新 user 是否 active 依赖 `status===running`  
-3. 生产上 `user` 早于 `status:running` 一个 dispatch  
-4. 该窗口内 user 被误判 finalized → Static 永久写屏  
+1. inline scrollback 把 **finalized** 与 **active** 拆成 Static / live 两通道
+2. 最新 user 是否 active 依赖 `status===running`
+3. 生产上 `user` 早于 `status:running` 一个 dispatch
+4. 该窗口内 user 被误判 finalized → Static 永久写屏
 5. status 到达后 user 再进 live → **同一条输入显示两次**
 
 上述链路已由 `grok_user_input_duplicate.test.ts` 在 partition 层与 App 渲染层 **自动化复现锁定**（5/5 pass）。
 
-修复应保证：**从 user 事件到达起，到本轮真正结束前，该 user 不得进入 Static。**  
+修复应保证：**从 user 事件到达起，到本轮真正结束前，该 user 不得进入 Static。**
 在做到这一点之前，任何只改样式/间距的处理都无法消除根因。

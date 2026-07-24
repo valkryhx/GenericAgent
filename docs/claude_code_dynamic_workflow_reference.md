@@ -1,8 +1,8 @@
 # Claude Code Dynamic Workflow 会话参考分析
 
-> 日期：2026-06-11  
-> 目的：为下一轮 GA workflow 设计改造提供 Claude Code dynamic workflow 的真实会话参考。  
-> 范围：本会话 transcript 与 Claude Code workflow/subagent 工件目录的只读分析。  
+> 日期：2026-06-11
+> 目的：为下一轮 GA workflow 设计改造提供 Claude Code dynamic workflow 的真实会话参考。
+> 范围：本会话 transcript 与 Claude Code workflow/subagent 工件目录的只读分析。
 > 安全：未读取 `mykey.py` / `mykey.json` / `mcp.json`，未提交真实 API/MCP artifacts。
 
 ---

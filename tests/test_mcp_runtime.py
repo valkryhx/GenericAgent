@@ -658,9 +658,18 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(starts, 1)
 
     def test_short_timeout_waiter_does_not_cancel_shared_server_startup(self):
+        # Margins must stay wide under full-suite load on slow Windows hosts:
+        # short wait (timeout+1) < startup_delay < long wait (timeout+1).
+        # Previously startup=3 / short=1.5 / long=5 left only ~1s slack for
+        # process spawn + list_tools, which flaked when the suite was busy.
+        startup_delay = 2.0
+        short_timeout = 1.0
+        long_timeout = 12.0
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
-            server_script, starts_path = _write_delayed_counting_server(tmp_path, startup_delay=3.0)
+            server_script, starts_path = _write_delayed_counting_server(
+                tmp_path, startup_delay=startup_delay
+            )
             config_path = _write_named_mcp_config(tmp_path, "delayed", server_script)
             os.environ["GA_MCP_CONFIG"] = str(config_path)
             reset_mcp_manager()
@@ -674,25 +683,35 @@ class McpRuntimeTest(unittest.TestCase):
                     timeout=timeout,
                 )
 
-            short_waiter = threading.Thread(target=call_tool, args=(0, 1.5), daemon=True)
+            short_waiter = threading.Thread(target=call_tool, args=(0, short_timeout), daemon=True)
             short_waiter.start()
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 5
             while not starts_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(starts_path.exists(), "shared startup fixture did not launch")
 
-            long_waiter = threading.Thread(target=call_tool, args=(1, 5), daemon=True)
+            long_waiter = threading.Thread(target=call_tool, args=(1, long_timeout), daemon=True)
             long_waiter.start()
-            short_waiter.join(timeout=5)
-            long_waiter.join(timeout=10)
+            short_waiter.join(timeout=short_timeout + 5)
+            long_waiter.join(timeout=long_timeout + 10)
             starts = int(starts_path.read_text(encoding="utf-8"))
 
         self.assertFalse(short_waiter.is_alive())
         self.assertFalse(long_waiter.is_alive())
-        self.assertEqual(boxes[0]["result"]["status"], "error")
-        self.assertRegex(str(boxes[0]["result"].get("msg", "")), r"(?i)timeout|timed out")
-        self.assertEqual(boxes[1]["result"]["status"], "success")
-        self.assertIn("echo:call-1", json.dumps(boxes[1]["result"], ensure_ascii=False))
+        short_result = boxes[0].get("result")
+        long_result = boxes[1].get("result")
+        self.assertEqual(
+            short_result.get("status"),
+            "error",
+            f"short waiter should time out without killing shared startup: {short_result!r}",
+        )
+        self.assertRegex(str(short_result.get("msg", "")), r"(?i)timeout|timed out")
+        self.assertEqual(
+            long_result.get("status"),
+            "success",
+            f"long waiter must reuse the shared startup future; got {long_result!r}",
+        )
+        self.assertIn("echo:call-1", json.dumps(long_result, ensure_ascii=False))
         self.assertEqual(starts, 1)
 
     def test_concurrent_discovery_reuses_shared_server_startup(self):

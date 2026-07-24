@@ -1,10 +1,10 @@
 # GA UI 用户输入重复显示 — 详细修复方案（Codex 对齐修订版）
 
-**日期：** 2026-07-14  
-**状态：** 已实施主方案 P0（`messagePartition` Codex 对齐）；进度见 `docs/ga_ui_user_input_duplicate_display_implementation_progress_2026-07-14.md`  
-**关联诊断：** `docs/ga_ui_user_input_duplicate_display_diagnosis_2026-07-14.md`  
-**复现测试：** `frontends/ink-ui/src/grok_user_input_duplicate.test.ts`（5/5 pass，锁定现状 bug）  
-**Codex 参考树：** `D:\git_codes\codex\codex-rs\tui`  
+**日期：** 2026-07-14
+**状态：** 已实施主方案 P0（`messagePartition` Codex 对齐）；进度见 `docs/ga_ui_user_input_duplicate_display_implementation_progress_2026-07-14.md`
+**关联诊断：** `docs/ga_ui_user_input_duplicate_display_diagnosis_2026-07-14.md`
+**复现测试：** `frontends/ink-ui/src/grok_user_input_duplicate.test.ts`（5/5 pass，锁定现状 bug）
+**Codex 参考树：** `D:\git_codes\codex\codex-rs\tui`
 **范围：** 默认 Ink UI inline scrollback（`ga` / `ga ink`）
 
 ---
@@ -66,8 +66,8 @@ submit_user_message*
 
 含义：
 
-1. User **不属于** live active cell。  
-2. User **一提交就 finalized 进 scrollback**。  
+1. User **不属于** live active cell。
+2. User **一提交就 finalized 进 scrollback**。
 3. 之后 agent streaming 只动 active / stream controller，**不会再把同一 user 画一遍**。
 
 ### 1.3 防双写：显示层去重
@@ -82,7 +82,7 @@ last_rendered_user_message_display.as_ref() != Some(&display)
 
 ### 1.4 Streaming 的 live commit（相关但非本 bug 主因）
 
-`vt100_live_commit` / `RowBuilder::drain_commit_ready`：流式行稳定后 **分批 commit 进 scrollback**，live ring 只保留尾部。  
+`vt100_live_commit` / `RowBuilder::drain_commit_ready`：流式行稳定后 **分批 commit 进 scrollback**，live ring 只保留尾部。
 模式仍是：**只 commit 一次；live 与 scrollback 不重叠同一行**。
 
 ### 1.5 与 GA 现状对照
@@ -97,7 +97,7 @@ last_rendered_user_message_display.as_ref() != Some(&display)
 
 **一句话对齐目标：**
 
-> 学 Codex：user **只 commit 到 scrollback 一次**；live **永不重画已 commit 的 user**。  
+> 学 Codex：user **只 commit 到 scrollback 一次**；live **永不重画已 commit 的 user**。
 > 不要学成：“user 整轮关在 live 里、结束再进 Static”——那是旧稿方案 A，与 Codex 相反。
 
 ---
@@ -106,24 +106,24 @@ last_rendered_user_message_display.as_ref() != Some(&display)
 
 ### 2.1 已证实事实
 
-1. bridge 每任务只 emit 一次 `user`；state 里也只有一条。  
-2. 生产序：`user` → `status:running`。  
-3. T1（仅 user、status idle）：partition 把 user 放进 `staticMessages` → Static 写屏。  
-4. T2（status running）：`keepLatestTaskActive=true` 把 **含 user 的整 task** 放进 `activeMessages` → live 再画。  
-5. Static 不可撤销 → 肉眼双显。  
+1. bridge 每任务只 emit 一次 `user`；state 里也只有一条。
+2. 生产序：`user` → `status:running`。
+3. T1（仅 user、status idle）：partition 把 user 放进 `staticMessages` → Static 写屏。
+4. T2（status running）：`keepLatestTaskActive=true` 把 **含 user 的整 task** 放进 `activeMessages` → live 再画。
+5. Static 不可撤销 → 肉眼双显。
 6. grok 测试已锁定上述链路。
 
 ### 2.2 修复后必须遵守的产品意图
 
-- 保持 inline scrollback / 可复制 / 原生滚动（Codex 主聊天同款方向）。  
-- finalized 进终端 scrollback；live 只放“进行中”内容。  
-- `history_replace` / `rewind` / `/clear` 仍可 `staticTranscriptGeneration` 重置。  
+- 保持 inline scrollback / 可复制 / 原生滚动（Codex 主聊天同款方向）。
+- finalized 进终端 scrollback；live 只放“进行中”内容。
+- `history_replace` / `rewind` / `/clear` 仍可 `staticTranscriptGeneration` 重置。
 - `GA_INK_MOUSE=full` 不强制改行为。
 
 ### 2.3 非目标
 
-- 本轮不重写为完整 Codex `insert_history_lines` + scroll region 引擎（中长期可演进）。  
-- 不引入 ratatui；仍用 Ink `<Static>` 作为“追加 commit”近似。  
+- 本轮不重写为完整 Codex `insert_history_lines` + scroll region 引擎（中长期可演进）。
+- 不引入 ratatui；仍用 Ink `<Static>` 作为“追加 commit”近似。
 - 不把 user 改成 `done:false` 全协议大改（除非后续单独立项）。
 
 ---
@@ -150,7 +150,7 @@ Codex 实际是：
 
 > user **立即**进入 scrollback；之后 **不得再进入 live**。
 
-GA 的 bug 出在第二句失败，不是第一句“进了 Static”。  
+GA 的 bug 出在第二句失败，不是第一句“进了 Static”。
 T1 把 user 写入 Static **正是 Codex 方向**；T2 把 user 拉进 live 才是缺陷。
 
 修订后的不变量：
@@ -219,8 +219,8 @@ export function splitStaticAndActiveMessages(
 
 要点：
 
-1. **删除**“从 `activeStart` 起整切片”逻辑——那会把 done user 拖进 active。  
-2. `keepLatestTaskActive` 仅决定 **是否需要 live 区**（running 时即使还没有 `!done` assistant，也可显示空 live + Thinking activity）；**不再**决定 user 进 active。  
+1. **删除**“从 `activeStart` 起整切片”逻辑——那会把 done user 拖进 active。
+2. `keepLatestTaskActive` 仅决定 **是否需要 live 区**（running 时即使还没有 `!done` assistant，也可显示空 live + Thinking activity）；**不再**决定 user 进 active。
 3. 与 Codex 一致：user done ⇒ 只在 committed/static。
 
 ### 4.3 `App.tsx` 侧
@@ -237,7 +237,7 @@ const messagePartition = useMemo(
 
 `keepLatestTaskActive` 可保留，用于：
 
-- running 且尚无 assistant 时 `planMessageViewport` 仍可 `live`/`ready`（避免布局塌缩）  
+- running 且尚无 assistant 时 `planMessageViewport` 仍可 `live`/`ready`（避免布局塌缩）
 - **不再**把 user 塞进 `activeTranscriptRows`
 
 若 `activeTranscriptRows.length === 0` 且 running：沿用现有 activity 行（`Thinking...`），与 Codex bottom spinner 类似。
@@ -308,8 +308,8 @@ committedUserTaskIds: Set<number> // 或 lastCommittedUserKey: string
 
 规则：
 
-- 当某 `u-${taskId}` **首次**进入 `staticTranscriptRows` 并完成 Static 渲染后，记入 set。  
-- 计算 `activeTranscriptRows` 时过滤 `role==user && committedUserTaskIds.has(taskId)`（主方案下本已不含，属双保险）。  
+- 当某 `u-${taskId}` **首次**进入 `staticTranscriptRows` 并完成 Static 渲染后，记入 set。
+- 计算 `activeTranscriptRows` 时过滤 `role==user && committedUserTaskIds.has(taskId)`（主方案下本已不含，属双保险）。
 - `history_replace` / `clear` / `staticTranscriptGeneration++` 时清空 set。
 
 收益：防止未来其它路径把 user 又推进 active；接近 Codex 幂等 commit。
@@ -322,7 +322,7 @@ self.emit({"type": "status", "status": "running", "taskId": task_id})
 self.emit({"type": "user", "taskId": task_id, "text": visible_text})
 ```
 
-主方案落地后 **非必须**。仅当希望 status 与 user 更贴近“已在 turn 中”的 UI 文案时可做。  
+主方案落地后 **非必须**。仅当希望 status 与 user 更贴近“已在 turn 中”的 UI 文案时可做。
 单独调序 **不能** 替代 P0：即便先 running，若 active 仍切片含 user，一旦某路径 keep 为 true 仍会双画（例如先 user 的其它入口）。
 
 ### 5.3 P4 — 中长期：显式 commit 队列（真·Codex）
@@ -334,7 +334,7 @@ messages 状态机
   → live = streaming only
 ```
 
-`history_replace`：generation++ 并重建 queue。  
+`history_replace`：generation++ 并重建 queue。
 resize reflow：从源 messages 重算 queue（Codex 有 `transcript_reflow` / resize 路径）。
 
 本轮 bugfix **不阻塞**在 P4；P0 足够。
@@ -345,13 +345,13 @@ resize reflow：从源 messages 重算 queue（Codex 有 `transcript_reflow` / r
 
 ### Phase 0 — 准备
 
-1. 读诊断文档 + 本修订方案 + Codex `chatwidget.rs` / `insert_history.rs` / `on_user_message_display`。  
-2. 跑 grok 测试确认 bug 仍锁定。  
+1. 读诊断文档 + 本修订方案 + Codex `chatwidget.rs` / `insert_history.rs` / `on_user_message_display`。
+2. 跑 grok 测试确认 bug 仍锁定。
 3. 分支：`fix/ink-user-static-once`。
 
 ### Phase 1 — 红：改断言方向（注意：与旧稿相反）
 
-**旧稿错误门禁：** running 窗口 user 不得进 Static。  
+**旧稿错误门禁：** running 窗口 user 不得进 Static。
 **修订门禁：**
 
 | 阶段 | 断言 |
@@ -373,13 +373,13 @@ assert.ok(staticHits >= 1)
 
 同步改 `messagePartition.test.ts`：
 
-- `keepLatestTaskActive:true` + 仅 user → `active=[]`，static 含该 user  
-- + streaming assistant → active 仅 assistant  
+- `keepLatestTaskActive:true` + 仅 user → `active=[]`，static 含该 user
+- + streaming assistant → active 仅 assistant
 
 ### Phase 2 — 绿：实现 P0
 
-1. 改 `splitStaticAndActiveMessages` 为 §4.2。  
-2. 确认 `App.tsx` 无需 openTaskId。  
+1. 改 `splitStaticAndActiveMessages` 为 §4.2。
+2. 确认 `App.tsx` 无需 openTaskId。
 3. 跑 partition / grok / App 测试。
 
 ### Phase 3 —（可选）P1 去重 set
@@ -440,10 +440,10 @@ fix(ink-ui): 对齐 Codex，避免已提交 user 再进入 live 导致双显
 
 ### 8.1 危险错误实现
 
-1. **继续用 `messages.slice(activeStart)` 含 done user** → bug 原样。  
-2. **强制 user 整轮只在 live**（旧 open-turn）→ 与 Codex/可复制 scrollback 目标相反；resize/选中历史 user 变差。  
-3. **按文本全局去重** → 用户连发相同问题丢行。  
-4. **修复后不更新 partition 测试** → CI 假绿或假红。  
+1. **继续用 `messages.slice(activeStart)` 含 done user** → bug 原样。
+2. **强制 user 整轮只在 live**（旧 open-turn）→ 与 Codex/可复制 scrollback 目标相反；resize/选中历史 user 变差。
+3. **按文本全局去重** → 用户连发相同问题丢行。
+4. **修复后不更新 partition 测试** → CI 假绿或假红。
 5. **只调 bridge 顺序** → 未改 active 切片则仍可能双显。
 
 ---
@@ -479,10 +479,10 @@ assert.ok(staticChunks.some(c => c.includes(UNIQUE) && c.includes('助手最终'
 
 ### 9.3 人工清单
 
-1. `ga` 默认模式发问：scrollback 一条 user，running 时下方不重复。  
-2. 观察 Thinking / 流式输出只在 live。  
-3. 完成后历史顺序 user→assistant 正常。  
-4. `/clear`、resume、rewind 无异常双倍历史。  
+1. `ga` 默认模式发问：scrollback 一条 user，running 时下方不重复。
+2. 观察 Thinking / 流式输出只在 live。
+3. 完成后历史顺序 user→assistant 正常。
+4. `/clear`、resume、rewind 无异常双倍历史。
 5. 选中 scrollback 中的 user 文本可复制（inline 目标不回退）。
 
 ---
@@ -502,11 +502,11 @@ assert.ok(staticChunks.some(c => c.includes(UNIQUE) && c.includes('助手最终'
 
 ## 11. Definition of Done
 
-- [ ] partition：done user 永不进 `activeMessages`  
-- [ ] 生产序自动化：`liveHits(user)=0` 且 `staticHits(user)>=1`  
-- [ ] streaming 时 live 有助手、无 user  
-- [ ] 既有 resume/static scrollback 测试通过或按新语义更新  
-- [ ] 人工验收 1–4  
+- [ ] partition：done user 永不进 `activeMessages`
+- [ ] 生产序自动化：`liveHits(user)=0` 且 `staticHits(user)>=1`
+- [ ] streaming 时 live 有助手、无 user
+- [ ] 既有 resume/static scrollback 测试通过或按新语义更新
+- [ ] 人工验收 1–4
 - [ ] 不引入 openTaskId 作为主路径（除非文档化例外）
 
 ---
@@ -579,9 +579,9 @@ GA 已用 Ink `<Static>` 近似 commit，但 `splitStaticAndActiveMessages` 在 
 
 主路径：
 
-1. `activeMessages = only !done`  
-2. `staticMessages = all done`（含最新 user）  
-3. 测试改为断言 **live 无 user / static 有 user**  
-4. 可选 commit 去重 set；bridge 调序非必须  
+1. `activeMessages = only !done`
+2. `staticMessages = all done`（含最新 user）
+3. 测试改为断言 **live 无 user / static 有 user**
+4. 可选 commit 去重 set；bridge 调序非必须
 
 实施后，用户输入在 scrollback 中只出现一次，并可继续被终端原生选中复制——这才是 inline scrollback 的本意。

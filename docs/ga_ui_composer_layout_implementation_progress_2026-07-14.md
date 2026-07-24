@@ -1,8 +1,8 @@
 # GA UI 输入框锚点 + slash 位置 — 实施进度
 
-**日期：** 2026-07-14  
-**方案：** `docs/ga_ui_composer_position_jump_diagnosis_2026-07-14.md`  
-**方法：** TDD  
+**日期：** 2026-07-14
+**方案：** `docs/ga_ui_composer_position_jump_diagnosis_2026-07-14.md`
+**方法：** TDD
 **状态：** **二期完成（content-desired）**
 
 ## 进度

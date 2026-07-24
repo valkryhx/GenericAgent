@@ -1,6 +1,6 @@
 # GA UI：输入框整体晃动 / IME 不贴光标 — Codex 对齐修复
 
-**日期：** 2026-07-14  
+**日期：** 2026-07-14
 **症状：** 打字时**整块用户输入框**左右/上下晃；中文输入法候选窗不在真正 caret 旁。
 
 > ⚠️ **2026-07-16 已被推翻**：本文的修复方向（App 层写**绝对 CUP** `liveTop + relative` 去对齐 IME）在 2026-07-14 当天即因 ghost composer 被回滚（见 `ga_ui_absolute_cup_ghost_composer_rollback_2026-07-14.md`），**请勿采用**。本文对「相对 row 被误当全屏坐标」的几何分析仍有参考价值，但「IME 不贴 caret」的**真正根因不是坐标算错，而是原生光标被隐藏**——终端的 IME 候选框锚定**可见**的原生光标。最终根因与正解见 `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`。
@@ -32,7 +32,7 @@ relative = header + message + activity + hint + border + cursorLine
 CUP(relative, col)   // 误当成全屏坐标
 ```
 
-有 `<Static>` 历史后，live 带贴在终端**底部**，相对 row≈4 的 CUP 却把原生光标/IME 钉到屏幕**靠上**位置。  
+有 `<Static>` 历史后，live 带贴在终端**底部**，相对 row≈4 的 CUP 却把原生光标/IME 钉到屏幕**靠上**位置。
 每键：`save → 错误 CUP → Ink 重绘 → restore`，终端为追 IME 会带动视口，看起来像**整框晃动**。
 
 ## 修复

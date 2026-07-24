@@ -1,14 +1,14 @@
 # GA 图片输入优化方案：对齐 Codex / Claude Code 流程
 
-日期：2026-07-20  
-状态：方案（未实施）  
-前置调研：`docs/ga_image_input_research_2026-07-20.md`  
+日期：2026-07-20
+状态：方案（未实施）
+前置调研：`docs/ga_image_input_research_2026-07-20.md`
 参考源码：
 
 - Codex：`D:\git_codes\codex`（`protocol/user_input`、`utils/image`、`tui/clipboard_paste`、`tui/bottom_pane/chat_composer`）
 - Claude Code：`D:\git_codes\claude-reviews-claude\claude-code-fork\src`（`imagePaste`、`imageResizer`、`imageStore`、`imageValidation`、`usePasteHandler`、`PromptInput`）
 
-目标：让 **GA 本体（默认 Ink UI / `ga` CLI）** 在 LLM API 支持多模态时，能像 Codex、Claude Code 一样原生识图——剪贴板贴图、路径贴图、`[Image #N]` 附件生命周期、有界编码、标准 vision API。  
+目标：让 **GA 本体（默认 Ink UI / `ga` CLI）** 在 LLM API 支持多模态时，能像 Codex、Claude Code 一样原生识图——剪贴板贴图、路径贴图、`[Image #N]` 附件生命周期、有界编码、标准 vision API。
 **不依赖**飞书、Discord、微信等第三方 IM 适配器才能看图。
 
 核心链路（产品主路径）：
@@ -38,16 +38,16 @@
 
 在 **不打开飞书/Discord** 的前提下，仅使用 `ga`（Ink）：
 
-1. Ctrl+V 贴截图 → 出现 `[Image #1]` → 回车 → vision 模型能描述图片  
-2. 粘贴本地图片路径 → 同上  
-3. 当前模型支持 `image_input` 时走多模态；不支持时明确提示，而不是静默当纯文本  
+1. Ctrl+V 贴截图 → 出现 `[Image #1]` → 回车 → vision 模型能描述图片
+2. 粘贴本地图片路径 → 同上
+3. 当前模型支持 `image_input` 时走多模态；不支持时明确提示，而不是静默当纯文本
 
 ### 非目标（本方案不做 / 不优先）
 
-- **不以** Feishu / Discord / 微信 / 企微 等第三方 IM 贯通为交付目标（它们若已有 `images=` 可顺带受益，但 **不排期、不验收**）  
-- 不引入 litellm  
-- 不用 `vision_api` 工具冒充用户消息多模态  
-- 不重写整个 agent loop / transcript 格式（只增量扩展字段）  
+- **不以** Feishu / Discord / 微信 / 企微 等第三方 IM 贯通为交付目标（它们若已有 `images=` 可顺带受益，但 **不排期、不验收**）
+- 不引入 litellm
+- 不用 `vision_api` 工具冒充用户消息多模态
+- 不重写整个 agent loop / transcript 格式（只增量扩展字段）
 - 第一期不要求 Qt / Streamlit / 旧 TUI 全对齐；**默认产品面 = Ink + backend + CLI 可选**
 
 ---
@@ -181,7 +181,7 @@ def put_task(self, query, source="user", images=None):
 }
 ```
 
-禁止：把完整 base64 data URL 写入 transcript 作为默认真源。  
+禁止：把完整 base64 data URL 写入 transcript 作为默认真源。
 Resume：path 存在则重编码；不存在则 UI/日志标 `image_missing`，不静默丢失败。
 
 ---
@@ -214,9 +214,9 @@ class EncodedImage:
 1. `Path.resolve()` + `stat()`：不存在 / 非文件 / `st_size > MAX_RAW_FILE_BYTES` → 抛 `ImageCodecError`
 2. 读字节 → `sha1`；查 LRU `(sha1, MAX_DIMENSION, MAX_BASE64_CHARS)`
 3. 魔数检测格式（勿只信扩展名）；`BM` → 转 PNG（Pillow）
-4. 若 **无 Pillow**：  
-   - 仅允许「已是 png/jpeg/webp 且边长未知时靠文件大小启发式」  
-   - 超过 `MAX_BASE64_CHARS` 直接失败并提示安装 Pillow  
+4. 若 **无 Pillow**：
+   - 仅允许「已是 png/jpeg/webp 且边长未知时靠文件大小启发式」
+   - 超过 `MAX_BASE64_CHARS` 直接失败并提示安装 Pillow
    - 有 Pillow 时：decode → 超 `MAX_DIMENSION` 等比缩放 → JPEG quality~85 或 PNG → 若仍超 5MB base64 再降质量/缩小
 5. 返回 `EncodedImage`；写入 LRU
 
@@ -240,21 +240,21 @@ class EncodedImage:
 
 替换 `agentmain._build_user_content_with_images`：
 
-1. 规范化 attachments + fallback 抽路径  
-2. 逐张 `encode_image_for_prompt`  
-3. 失败张：text 追加可读错误，不中断其它图  
-4. 全部失败且无有效图 → 返回 None 或仅 text（策略：有附件意图则仍返回 text+错误说明）  
+1. 规范化 attachments + fallback 抽路径
+2. 逐张 `encode_image_for_prompt`
+3. 失败张：text 追加可读错误，不中断其它图
+4. 全部失败且无有效图 → 返回 None 或仅 text（策略：有附件意图则仍返回 text+错误说明）
 5. 成功：`[text_block, *image_blocks]`
 
 ### 3.5 单测 `tests/test_image_codec.py`
 
-- 小 PNG 透传  
-- 超大边缩放（Pillow 可用时）  
-- 超 base64 限失败  
-- BMP 魔数转换（Pillow）  
-- 缓存命中同 sha1  
-- 缺失文件错误  
-- `build_user_content` 多图部分失败  
+- 小 PNG 透传
+- 超大边缩放（Pillow 可用时）
+- 超 base64 限失败
+- BMP 魔数转换（Pillow）
+- 缓存命中同 sha1
+- 缺失文件错误
+- `build_user_content` 多图部分失败
 
 ---
 
@@ -324,14 +324,14 @@ else:
 
 现有：
 
-- `_msgs_claude2oai`：`image` → `image_url` data URL ✅  
-- `_to_responses_input`：`image_url` → `input_image` ✅  
-- `NativeToolClient.chat`：保留非 text block ✅  
+- `_msgs_claude2oai`：`image` → `image_url` data URL ✅
+- `_to_responses_input`：`image_url` → `input_image` ✅
+- `NativeToolClient.chat`：保留非 text block ✅
 
 加固：
 
-1. **`_to_responses_input`**：同时识别 Claude 风格 `type=="image"`（防漏转）  
-2. **`validate_images_for_api(content)`**：发 `ask` 前检查 base64 长度（对齐 CC `imageValidation.ts`）  
+1. **`_to_responses_input`**：同时识别 Claude 风格 `type=="image"`（防漏转）
+2. **`validate_images_for_api(content)`**：发 `ask` 前检查 base64 长度（对齐 CC `imageValidation.ts`）
 3. **`_write_llm_log`**：对 content 做 redaction：
 
 ```python
@@ -343,8 +343,8 @@ def _redact_for_log(obj):
 
 ### 5.3 与 `token_meter`
 
-- 继续 `IMAGE_BLOCK_TOKENS = 1500`  
-- 后续可按 `width*height` 微调（P2）  
+- 继续 `IMAGE_BLOCK_TOKENS = 1500`
+- 后续可按 `width*height` 微调（P2）
 - 确保 `image_url` 块与 `image` 块 **都不按 base64 字符计费**
 
 ---
@@ -370,15 +370,15 @@ Placeholder 格式（与 CC 接近，便于用户识别）：
 
 顺序（对齐 `usePasteHandler` 思想）：
 
-1. 若 bracketed paste / 大段输入 **整体是图片路径**（可多行）→ `attachImage(path)`，不插入裸路径（或路径+芯片二选一：**推荐只插芯片**，path 进 attachments）  
-2. 若粘贴为空或检测为「可能是贴图」→ 调 `clipboardImage.capture()`  
-3. 成功 → `attachments.add` + 光标处插入 `[Image #N]`  
-4. 失败 → 通知「剪贴板无图片」  
-5. 普通文本 paste → 现有 `paste.ts` 折叠逻辑不变  
+1. 若 bracketed paste / 大段输入 **整体是图片路径**（可多行）→ `attachImage(path)`，不插入裸路径（或路径+芯片二选一：**推荐只插芯片**，path 进 attachments）
+2. 若粘贴为空或检测为「可能是贴图」→ 调 `clipboardImage.capture()`
+3. 成功 → `attachments.add` + 光标处插入 `[Image #N]`
+4. 失败 → 通知「剪贴板无图片」
+5. 普通文本 paste → 现有 `paste.ts` 折叠逻辑不变
 
 快捷键（第一期）：
 
-- **Ctrl+V**：先走增强逻辑（空/路径/剪贴板图），再退回文本粘贴  
+- **Ctrl+V**：先走增强逻辑（空/路径/剪贴板图），再退回文本粘贴
 - 可选 **Ctrl+Alt+V**：强制剪贴板贴图（对齐 Codex footer / CC `chat:imagePaste`）
 
 ### 6.3 提交
@@ -395,8 +395,8 @@ submit({
 
 Prune 规则（对齐 CC effect）：
 
-- 每次 input 变更：attachments 中 placeholder 不在 value 内 → 移除  
-- 提交前再 filter 一次  
+- 每次 input 变更：attachments 中 placeholder 不在 value 内 → 移除
+- 提交前再 filter 一次
 
 ### 6.4 `ink_bridge.py`
 
@@ -419,18 +419,18 @@ JSONL 协议增量：
 
 PowerShell（无窗口）保存剪贴板图到路径，由 Node `spawn` 调用；失败再尝试「剪贴板文件列表」。
 
-落盘目录：`temp/ga-images/<session_or_run>/`  
-前缀：`clipboard-` / `upload-`  
+落盘目录：`temp/ga-images/<session_or_run>/`
+前缀：`clipboard-` / `upload-`
 权限：正常用户文件；启动或退出时清理超过 N 天的 clipboard 文件。
 
 ### 6.6 Ink 测试（无截图，走 playbook）
 
 `frontends/ink-ui/src/imageAttachments.test.ts` 等：
 
-- alloc placeholder 递增  
-- 删除文本中芯片后 prune  
-- 路径检测：`D:\a.png`、带空格、引号  
-- submit payload 形状  
+- alloc placeholder 递增
+- 删除文本中芯片后 prune
+- 路径检测：`D:\a.png`、带空格、引号
+- submit payload 形状
 - bridge 侧 Python 单测：`images` 传入 `put_task`
 
 ---
@@ -450,7 +450,7 @@ PowerShell（无窗口）保存剪贴板图到路径，由 Node `spawn` 调用�
 
 说明：
 
-- 第三方 IM 适配器即便将来复用 `images=` + codec，也属于「顺带兼容」，**不写进本方案验收**。  
+- 第三方 IM 适配器即便将来复用 `images=` + codec，也属于「顺带兼容」，**不写进本方案验收**。
 - 用户价值陈述应是：「打开 `ga`，像 Claude Code / Codex 一样贴图就能问」，而不是「在飞书里发图」。
 
 可选 CLI 形态（P1，仍属原生，非第三方）：
@@ -468,21 +468,21 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 **交付：**
 
-1. 新增 `image_codec.py` + `tests/test_image_codec.py`  
-2. `agentmain`：`normalize_image_attachments`、`build_user_content_with_images` 改走 codec  
-3. `supports_image_input` 替换窄 gate；Claude native 可收图  
-4. llm log redaction  
-5. 扩展 `tests/test_native_image_input.py`  
-6. 单测用 `put_task(..., images=[png])` 验证 **不经过任何 IM** 即可出多模态请求  
+1. 新增 `image_codec.py` + `tests/test_image_codec.py`
+2. `agentmain`：`normalize_image_attachments`、`build_user_content_with_images` 改走 codec
+3. `supports_image_input` 替换窄 gate；Claude native 可收图
+4. llm log redaction
+5. 扩展 `tests/test_native_image_input.py`
+6. 单测用 `put_task(..., images=[png])` 验证 **不经过任何 IM** 即可出多模态请求
 
 **验收：**
 
-- 仅通过 Python API / unittest：`images=[local.png]` + vision 配置 → 请求含 `image_url` / `input_image` / Claude `image`  
-- 大文件被拒或缩小，不 OOM  
-- 日志无完整 base64  
-- **不**以飞书/Discord 作为验收环境  
+- 仅通过 Python API / unittest：`images=[local.png]` + vision 配置 → 请求含 `image_url` / `input_image` / Claude `image`
+- 大文件被拒或缩小，不 OOM
+- 日志无完整 base64
+- **不**以飞书/Discord 作为验收环境
 
-**预计改动文件：**  
+**预计改动文件：**
 `image_codec.py`（新）、`agentmain.py`、`llmcore.py`（log + 可选 validate）、`tests/test_*.py`、`token_meter.py`（若需认 `image_url`）
 
 ---
@@ -491,16 +491,16 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 **交付：**
 
-1. `ink_bridge` submit / 相关 JSONL **解析并转发 `images`**（这是 GA 自己的协议，不是第三方）  
-2. transcript 可选记录 `images` 元数据（path/sha1/placeholder）  
-3. 模型不支持时的 display 提示（Ink 状态行或回显）  
-4. （可选同 PR）CLI `--image` 把 path 填进 `put_task`  
+1. `ink_bridge` submit / 相关 JSONL **解析并转发 `images`**（这是 GA 自己的协议，不是第三方）
+2. transcript 可选记录 `images` 元数据（path/sha1/placeholder）
+3. 模型不支持时的 display 提示（Ink 状态行或回显）
+4. （可选同 PR）CLI `--image` 把 path 填进 `put_task`
 
 **验收：**
 
-- bridge 收到带 `images` 的 submit → `agent.put_task(..., images=...)` 非空  
-- 无 Ink 时，单测模拟 bridge payload 即可  
-- **不**包含 dcapp/fsapp 改动  
+- bridge 收到带 `images` 的 submit → `agent.put_task(..., images=...)` 非空
+- 无 Ink 时，单测模拟 bridge payload 即可
+- **不**包含 dcapp/fsapp 改动
 
 ---
 
@@ -508,18 +508,18 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 **交付：**
 
-1. `imageAttachments.ts` / `clipboardImage.ts` / `imagePathDetect.ts`  
-2. Ctrl+V 增强 + 可选强制贴图快捷键（如 Ctrl+Alt+V）  
-3. `[Image #N]` 插入 / prune / submit  
-4. 程序化单测（无截图 playbook）  
+1. `imageAttachments.ts` / `clipboardImage.ts` / `imagePathDetect.ts`
+2. Ctrl+V 增强 + 可选强制贴图快捷键（如 Ctrl+Alt+V）
+3. `[Image #N]` 插入 / prune / submit
+4. 程序化单测（无截图 playbook）
 
 **验收（全部在 `ga` Ink 内完成）：**
 
-1. 剪贴板截图 → 芯片 → 发送 → vision 模型能描述图  
-2. 粘贴 `D:\shots\a.png` → 芯片 → 同上  
-3. 删芯片后发送 → 无 image block  
-4. 纯文本 paste 不回归  
-5. **全程不打开任何第三方 IM**  
+1. 剪贴板截图 → 芯片 → 发送 → vision 模型能描述图
+2. 粘贴 `D:\shots\a.png` → 芯片 → 同上
+3. 删芯片后发送 → 无 image block
+4. 纯文本 paste 不回归
+5. **全程不打开任何第三方 IM**
 
 ---
 
@@ -527,11 +527,11 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 详见 `docs/ga_image_input_slice_d_plan_2026-07-20.md`。
 
-1. ~~焦点恢复 + 剪贴板有图提示~~ **取消**（Ctrl+V 贴图已落地，提示多余）  
-2. compact 时旧图省略策略（**做**）  
-3. `/model` 切换后「是否仍支持识图」提示（可选 P2）  
-4. `IMAGE_BLOCK_TOKENS` 细化（可选 P2）  
-5. `temp/ga-images` 临时文件 GC（**做**）  
+1. ~~焦点恢复 + 剪贴板有图提示~~ **取消**（Ctrl+V 贴图已落地，提示多余）
+2. compact 时旧图省略策略（**做**）
+3. `/model` 切换后「是否仍支持识图」提示（可选 P2）
+4. `IMAGE_BLOCK_TOKENS` 细化（可选 P2）
+5. `temp/ga-images` 临时文件 GC（**做**）
 
 ---
 
@@ -565,9 +565,9 @@ ga --image D:\shots\ui.png -q "描述这张图"
  image block       image_url / input_image
 ```
 
-- `image_codec` **不得**依赖 frontends  
-- Ink **不得**自己 base64 塞进 prompt（只传 path，对齐 Codex `LocalImage`）  
-- 唯一编码入口：`image_codec`  
+- `image_codec` **不得**依赖 frontends
+- Ink **不得**自己 base64 塞进 prompt（只传 path，对齐 Codex `LocalImage`）
+- 唯一编码入口：`image_codec`
 - 第三方 IM **不在依赖图上**
 
 ---
@@ -587,11 +587,11 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 ## 11. 明确不做（防 scope creep）
 
-1. **不为飞书 / Discord / 微信等第三方 IM 做专项识图贯通**（非本方案目的）  
-2. 不在 Slice A/B/C 重做 vision_sop / 桌面截图 agent 工具（那是 agent 主动看屏，不是用户贴图）  
-3. 不引入 sharp/napi 到 Ink（第一期：Win 剪贴板 + Python codec）  
-4. 不在终端渲染真实缩略图（`[Image #N]` 文字芯片即可）  
-5. 不把「文本正则抠路径」继续当主产品路径（仅 fallback）  
+1. **不为飞书 / Discord / 微信等第三方 IM 做专项识图贯通**（非本方案目的）
+2. 不在 Slice A/B/C 重做 vision_sop / 桌面截图 agent 工具（那是 agent 主动看屏，不是用户贴图）
+3. 不引入 sharp/napi 到 Ink（第一期：Win 剪贴板 + Python codec）
+4. 不在终端渲染真实缩略图（`[Image #N]` 文字芯片即可）
+5. 不把「文本正则抠路径」继续当主产品路径（仅 fallback）
 
 ---
 
@@ -599,13 +599,13 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 全部在 **GA 原生环境**验收（`ga` Ink + unittest），不依赖第三方 App：
 
-1. **正确通道**：vision 模型 + capability 打开时，请求体出现标准多模态块（非纯路径字符串）  
-2. **Ink 剪贴板贴图**：截图 Ctrl+V → `[Image #N]` → 发送 → 模型能描述  
-3. **Ink 路径贴图**：粘贴本地 `.png/.jpg...` 路径 → 同上  
-4. **生命周期**：删除芯片后发送 → 无 image block  
-5. **有界编码**：超限缩小或拒绝，日志无巨型 base64  
-6. **Claude native 与 OAI native** 在 capability 打开时均可  
-7. 测试：`test_image_codec`、`test_native_image_input`、Ink image 单测、ink_bridge `images` 单测全绿  
+1. **正确通道**：vision 模型 + capability 打开时，请求体出现标准多模态块（非纯路径字符串）
+2. **Ink 剪贴板贴图**：截图 Ctrl+V → `[Image #N]` → 发送 → 模型能描述
+3. **Ink 路径贴图**：粘贴本地 `.png/.jpg...` 路径 → 同上
+4. **生命周期**：删除芯片后发送 → 无 image block
+5. **有界编码**：超限缩小或拒绝，日志无巨型 base64
+6. **Claude native 与 OAI native** 在 capability 打开时均可
+7. 测试：`test_image_codec`、`test_native_image_input`、Ink image 单测、ink_bridge `images` 单测全绿
 
 ---
 
@@ -618,7 +618,7 @@ ga --image D:\shots\ui.png -q "描述这张图"
 | 3 | **C** Ink 贴图 UX | **主交付**：像 Codex/CC 一样用 | A+B |
 | 4 | **D** 打磨 | 提示、GC、compact | C |
 
-推荐：**A → B → C**。C 是用户可感知的「原生识图」完成线；A/B 是底座。  
+推荐：**A → B → C**。C 是用户可感知的「原生识图」完成线；A/B 是底座。
 **不要**在 C 之前插入 Feishu/Discord 工作。
 
 ---
@@ -638,17 +638,17 @@ ga --image D:\shots\ui.png -q "描述这张图"
 
 ### Slice A（底座）
 
-- [ ] 新增 `image_codec.py`：`EncodedImage`、`ImageCodecError`、`encode_image_for_prompt`、LRU  
-- [ ] 新增 `tests/test_image_codec.py`  
-- [ ] `agentmain`：attachments 规范化；codec；gate → `supports_image_input`  
-- [ ] `llmcore`：Prompt 日志 redaction；可选 `validate_images_for_api`  
-- [ ] `token_meter`：`image` / `image_url` 均不计 base64 字符  
-- [ ] `python -m unittest tests.test_image_codec tests.test_native_image_input tests.test_token_meter`  
+- [ ] 新增 `image_codec.py`：`EncodedImage`、`ImageCodecError`、`encode_image_for_prompt`、LRU
+- [ ] 新增 `tests/test_image_codec.py`
+- [ ] `agentmain`：attachments 规范化；codec；gate → `supports_image_input`
+- [ ] `llmcore`：Prompt 日志 redaction；可选 `validate_images_for_api`
+- [ ] `token_meter`：`image` / `image_url` 均不计 base64 字符
+- [ ] `python -m unittest tests.test_image_codec tests.test_native_image_input tests.test_token_meter`
 
 ### Slice B → C（原生产品面，紧接 A）
 
-- [ ] `ink_bridge`：`images` 字段 → `put_task`  
-- [ ] Ink：`clipboardImage` + `imageAttachments` + `[Image #N]` + Ctrl+V  
-- [ ] 在本机 `ga` 上完成「贴图即识图」手测（vision 模型）  
+- [ ] `ink_bridge`：`images` 字段 → `put_task`
+- [ ] Ink：`clipboardImage` + `imageAttachments` + `[Image #N]` + Ctrl+V
+- [ ] 在本机 `ga` 上完成「贴图即识图」手测（vision 模型）
 
 **完成线 = Slice C 在 `ga` Ink 内可用**，而不是「某个第三方 App 能发图」。

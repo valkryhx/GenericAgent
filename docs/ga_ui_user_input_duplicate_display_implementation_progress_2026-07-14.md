@@ -1,8 +1,8 @@
 # GA UI 用户输入双显 — 实施进度
 
-**日期：** 2026-07-14  
-**方案：** `docs/ga_ui_user_input_duplicate_display_fix_plan_2026-07-14.md`（Codex 对齐修订版）  
-**方法：** Test-Driven Development  
+**日期：** 2026-07-14
+**方案：** `docs/ga_ui_user_input_duplicate_display_fix_plan_2026-07-14.md`（Codex 对齐修订版）
+**方法：** Test-Driven Development
 **状态：** **已完成（主方案 P0）**
 
 ## 进度清单

@@ -1,7 +1,7 @@
 # GA Workflow 缺陷优化实施计划
 
-> 日期：2026-06-12  
-> 依据：`docs/P8_real_api_e2e_defect.md`、`docs/claude_code_dynamic_workflow_reference.md`  
+> 日期：2026-06-12
+> 依据：`docs/P8_real_api_e2e_defect.md`、`docs/claude_code_dynamic_workflow_reference.md`
 > 目标：把 GA Dynamic Workflow 从“可调度多 agent 的底层 DSL”升级为“符合真实工程方法论、可验证、可复盘、可持续优化的开发工作流系统”。
 
 ---
@@ -2174,7 +2174,7 @@ Ink UI:
 
 #### 主要缺口
 
-1. **TypeScript 协议还没有声明 `workflow_plan` command**  
+1. **TypeScript 协议还没有声明 `workflow_plan` command**
    Python bridge 已支持 `cmd_type == "workflow_plan"`，但 `frontends/ink-ui/src/protocol.ts` 的 `BridgeCommand` union 尚未包含：
 
    ```ts
@@ -2183,7 +2183,7 @@ Ink UI:
 
    因此 Ink UI 还不能类型安全地直接发起 planned workflow。
 
-2. **`/workflows` UI 仍是旧审批面板行为**  
+2. **`/workflows` UI 仍是旧审批面板行为**
    当前 `/workflows` 更像“列出后自动打开某个 workflow 的 raw script detail”。Claude Code-style UI 要求它先显示汇总列表：
 
    ```text
@@ -2194,13 +2194,13 @@ Ink UI:
      ✓ ...
    ```
 
-3. **workflow_detail 缺少 progress / draft artifact 数据**  
+3. **workflow_detail 缺少 progress / draft artifact 数据**
    图 3/4 所需的 phase/agent overview 和 agent detail 不应从 raw script 或 journal 里猜，而应优先消费 `workflow-progress.json`。计划审阅页还需要 `workflow-draft.json` 中的 `plan.meta`、`phases`、`agents`、`validation issues`、`constraints` 等原始计划结构。当前 bridge `workflow_detail` 没有直接返回这些 artifact。
 
-4. **phase attribution 尚未完全可靠**  
+4. **phase attribution 尚未完全可靠**
    后端已有 `phase(...)` journal 事件、`WorkflowJob.phase` 字段以及 `workflow-progress.json` 的 `phase/phaseTitle` 输出位置，但仍需要补测试确认普通脚本路径 `phase('X')` 后 `agent(...)` 注册的 job 会带上 phase。UI 第一版必须支持 `phase` 为空时的“未分阶段”fallback。
 
-5. **UI 层缺少 Workflow List / Overview / Agent Detail 三层 view model**  
+5. **UI 层缺少 Workflow List / Overview / Agent Detail 三层 view model**
    现有 `workflowPanelRows()` 只有 raw script rows，无法表达：
 
    ```text
@@ -2209,7 +2209,7 @@ Ink UI:
    → Agents × Agent detail
    ```
 
-6. **底部 live workflow status bar 尚未实现**  
+6. **底部 live workflow status bar 尚未实现**
    图 1 里的底部固定区域：
 
    ```text
@@ -2219,7 +2219,7 @@ Ink UI:
 
    当前 Ink UI 只在 panel 中显示 workflow，尚未在主会话底部常驻显示运行中 workflow 摘要。
 
-7. **缺少从自然语言发起 planned workflow 的用户入口**  
+7. **缺少从自然语言发起 planned workflow 的用户入口**
    bridge 已有 `workflow_plan` JSONL command，但 Ink UI 尚无 slash command，例如：
 
    ```text

@@ -1,11 +1,11 @@
 # GA Ink UI 输入框位置跳动 — 诊断与 Codex 对齐方案
 
-**日期：** 2026-07-14  
-**状态：** **二期已落地（content-desired）** — slash 在 input 下 + idle 贴 Static / stream 随内容 capped；见 `docs/ga_ui_composer_layout_implementation_progress_2026-07-14.md`  
-**范围：** 默认 inline scrollback 模式（`ga` / `ga ink`，`mouseMode !== 'full'`）；slash 面板顺序问题在 full 模式同样存在  
-**证据图：** `截图/图1.png`（输入前）、`截图/图2.png`（输出后）  
-**Codex 参考：** `D:\git_codes\codex\codex-rs\tui`（`bottom_pane`、`chat_composer`、`command_popup`、`custom_terminal.viewport_area`、`insert_history`、`app.rs` 的 `desired_height` 绘制）  
-**实施进度：** `docs/ga_ui_composer_layout_implementation_progress_2026-07-14.md`  
+**日期：** 2026-07-14
+**状态：** **二期已落地（content-desired）** — slash 在 input 下 + idle 贴 Static / stream 随内容 capped；见 `docs/ga_ui_composer_layout_implementation_progress_2026-07-14.md`
+**范围：** 默认 inline scrollback 模式（`ga` / `ga ink`，`mouseMode !== 'full'`）；slash 面板顺序问题在 full 模式同样存在
+**证据图：** `截图/图1.png`（输入前）、`截图/图2.png`（输出后）
+**Codex 参考：** `D:\git_codes\codex\codex-rs\tui`（`bottom_pane`、`chat_composer`、`command_popup`、`custom_terminal.viewport_area`、`insert_history`、`app.rs` 的 `desired_height` 绘制）
+**实施进度：** `docs/ga_ui_composer_layout_implementation_progress_2026-07-14.md`
 **衍生问题：** Running 可见性阶段 1–3 已落地 — `docs/ga_ui_running_turn_visibility_diagnosis_2026-07-14.md` / `docs/ga_ui_running_visibility_implementation_progress_2026-07-14.md`
 
 ---
@@ -25,16 +25,16 @@
 
 一句话（更新）：
 
-> **修前是“底栏塌缩贴内容”；一期修成“底栏永远贴终端底 + 中间大片空”**。  
+> **修前是“底栏塌缩贴内容”；一期修成“底栏永远贴终端底 + 中间大片空”**。
 > Codex 则是：**composer 紧贴最新内容下方；内容变多时整体下移；触底后 composer 固定，历史向上滚。**
 
 ### 0.1 用户观察是否成立？（对照 Codex 源码：**成立**）
 
 用户描述：
 
-1. Codex 输入框距离内容下方**不远**（贴内容，不是贴终端底中间留一大片空）  
-2. 内容变多时，输入框**跟着下移**  
-3. 内容多到阈值后，输入框**固定不动**（贴终端底），再往上看历史要滚动  
+1. Codex 输入框距离内容下方**不远**（贴内容，不是贴终端底中间留一大片空）
+2. 内容变多时，输入框**跟着下移**
+3. 内容多到阈值后，输入框**固定不动**（贴终端底），再往上看历史要滚动
 
 Codex 源码对应关系：
 
@@ -144,9 +144,9 @@ return { kind: 'none' }                                              // 高度 0
 
 因此用户看到的是：
 
-1. 空会话：有 ready 占位 → 像底部输入  
-2. 有历史且 idle：无占位 → 输入贴内容  
-3. streaming：突然给满高 live → 输入又沉底  
+1. 空会话：有 ready 占位 → 像底部输入
+2. 有历史且 idle：无占位 → 输入贴内容
+3. streaming：突然给满高 live → 输入又沉底
 
 **三态高度策略不一致**，造成“输入框位置乱跳”。
 
@@ -200,7 +200,7 @@ return { kind: 'none' }                                              // 高度 0
 | viewport 内 active/stream | `MessageViewport` live | 放在底栏**之上固定槽**或并入底栏上方固定区 |
 | 无 “none 高度 0” 塌缩 | `planMessageViewport none` | **删除/替换 none 塌缩** |
 
-Codex **不会**在“有历史但无 stream”时把底部 pane 高度收成 0 并上贴 history。  
+Codex **不会**在“有历史但无 stream”时把底部 pane 高度收成 0 并上贴 history。
 但 Codex **也绝不会**在 idle 时预留「几乎整屏空白 live 槽」把 composer 钉在终端底、与最近消息隔十几行——那是 GA 一期过修。
 
 ### 3.5 Codex「先下移、后固定」——源码级时序（用户描述的权威确认）
@@ -214,7 +214,7 @@ desired_height = chat_widget.desired_height(width)
 tui.draw(desired_height, |frame| chat_widget.render(frame.area(), …))
 ```
 
-`ChatWidget::desired_height` → active streaming/hook cell 高度 + `BottomPane::desired_height`（composer + status + popup…）。  
+`ChatWidget::desired_height` → active streaming/hook cell 高度 + `BottomPane::desired_height`（composer + status + popup…）。
 **阈值 ≈ 终端高度**；未触顶时 viewport **可以很矮**，紧贴已写入的 history 下方。
 
 #### 3.5.2 插入历史：未贴底则 `area.y += scroll_amount`
@@ -278,18 +278,18 @@ if area.bottom() > size.height {
 
 ### 4.1 目标体验（修订：对齐 Codex 真实体感）
 
-1. **Composer 紧贴最新可见内容下方**（小间距：activity/status 等 chrome），**不要**中间空十几行。  
-2. **短会话 / 内容未满屏**：composer **随内容增多下移**（相对终端坐标变大），而不是一开始就钉死在最后一行。  
-3. **长会话 / 内容触底后**：composer **固定贴终端底**；更早历史进入原生 scrollback，向上滚可看。  
-4. **历史仍可原生滚动/复制**（inline scrollback）。  
-5. **Streaming** 时增量在 composer 上方可见；dock 高度随 active 尾变化，但相对「内容尾」仍近。  
-6. 不回退 user 双显修复（done user 仍只进 Static）。  
+1. **Composer 紧贴最新可见内容下方**（小间距：activity/status 等 chrome），**不要**中间空十几行。
+2. **短会话 / 内容未满屏**：composer **随内容增多下移**（相对终端坐标变大），而不是一开始就钉死在最后一行。
+3. **长会话 / 内容触底后**：composer **固定贴终端底**；更早历史进入原生 scrollback，向上滚可看。
+4. **历史仍可原生滚动/复制**（inline scrollback）。
+5. **Streaming** 时增量在 composer 上方可见；dock 高度随 active 尾变化，但相对「内容尾」仍近。
+6. 不回退 user 双显修复（done user 仍只进 Static）。
 7. slash/panel 仍在 input **下**（一期 B 保留）。
 
 ### 4.2 非目标
 
-- 完整 1:1 移植 Codex `insert_history` 的全部 ANSI 细节（可分阶段逼近）  
-- 重做 full mouse 模式  
+- 完整 1:1 移植 Codex `insert_history` 的全部 ANSI 细节（可分阶段逼近）
+- 重做 full mouse 模式
 - 改主题色/字体
 
 ---
@@ -308,24 +308,24 @@ if area.bottom() > size.height {
 
 **一期（快）：消灭 `none` 塌缩**
 
-- `planMessageViewport`：有 Static 且无 live 时，不再 `none`  
-- 改为 `{ kind: 'live', height: stableRows }` 或 `{ kind: 'spacer', height: stableRows }`，空白填充  
+- `planMessageViewport`：有 Static 且无 live 时，不再 `none`
+- 改为 `{ kind: 'live', height: stableRows }` 或 `{ kind: 'spacer', height: stableRows }`，空白填充
 - `stableRows` 建议：`max(1, messageRows)` 与现 `computeLayoutMetrics.messageRows` 对齐，保证 BottomChrome 落在终端下半区
 
 **二期（稳）：语义对齐 Codex bottom dock**
 
-- 明确分区：  
-  - **Scrollback band**：仅 `<Static>`  
-  - **Dock band**（固定贴终端底）：`[ optional live tail ≤ H_live ][ activity ][ hint ][ input ][ slash/panel 在 input 下 ]`  
-- live tail 在 dock 内**顶部**滚动，高度上限 `H_live`（例如 6–12 行或 `messageRows` 的比例）  
-- idle 时 live tail 为空但**保留高度**（或最小 spacer），避免 chrome 上移  
+- 明确分区：
+  - **Scrollback band**：仅 `<Static>`
+  - **Dock band**（固定贴终端底）：`[ optional live tail ≤ H_live ][ activity ][ hint ][ input ][ slash/panel 在 input 下 ]`
+- live tail 在 dock 内**顶部**滚动，高度上限 `H_live`（例如 6–12 行或 `messageRows` 的比例）
+- idle 时 live tail 为空但**保留高度**（或最小 spacer），避免 chrome 上移
 - **slash / 其它 panel 一律在 composer 下方**（见 §5.2、§6.6）
 
 ### 5.2 问题 B：`/` 命令列表应在输入框下方（Codex 对齐）
 
 #### 5.2.1 用户观察
 
-- Codex：输入 `/` 后，`/xxx` 候选列表出现在 **composer 下方**（列表在下、输入框在上）。  
+- Codex：输入 `/` 后，`/xxx` 候选列表出现在 **composer 下方**（列表在下、输入框在上）。
 - GA：候选出现在 **输入框上方**（列表在上、输入框在下）。
 
 #### 5.2.2 GA 现状（证据）
@@ -365,9 +365,9 @@ let [composer_rect, popup_rect] =
 
 含义（ratatui `Layout::vertical` 自上而下切分）：
 
-1. **上方** `composer_rect`：边框 + textarea（`Constraint::Min(3)`）  
-2. **下方** `popup_rect`：  
-   - 有 slash/file/skill/mention popup 时 → 画 `CommandPopup` 等  
+1. **上方** `composer_rect`：边框 + textarea（`Constraint::Min(3)`）
+2. **下方** `popup_rect`：
+   - 有 slash/file/skill/mention popup 时 → 画 `CommandPopup` 等
    - 无 popup 时 → 该区域用于 **footer key hints**（`Constraint::Max(footer_total_height)`）
 
 渲染时 `popup.render_ref(popup_rect, …)` 与 `render_footer_*` 都落在 **composer 之下**。
@@ -412,26 +412,26 @@ return [
 
 **配套注意：**
 
-1. **光标行计算**（`inputCursorPosition` / `visiblePanelRows`）  
-   - 当前假设 panel 在 input 上，用 `panelRows` 参与“input 上方占用”。  
+1. **光标行计算**（`inputCursorPosition` / `visiblePanelRows`）
+   - 当前假设 panel 在 input 上，用 `panelRows` 参与“input 上方占用”。
    - 顺序对调后，input 上方不再含 slash 高度，**必须同步改公式**，否则 IME 光标会偏到错误行。
 
-2. **布局高度**  
-   - `computeLayoutMetrics` 的 `bottomRows` 仍 = base + activity + panel，总和可不变。  
+2. **布局高度**
+   - `computeLayoutMetrics` 的 `bottomRows` 仍 = base + activity + panel，总和可不变。
    - 变的是 **bottom 内部相对顺序**，不是总高度。
 
-3. **其它 panel**  
-   - 建议 mcp/model/workflow/selector 与 slash **同一策略：input 下**（一致 UX）。  
+3. **其它 panel**
+   - 建议 mcp/model/workflow/selector 与 slash **同一策略：input 下**（一致 UX）。
    - 若个别全屏选择器更适合“盖住上方”，可单独 `overlay` 模式，但默认 slash 必须在下。
 
-4. **hint 文案位置**  
-   - Codex 的 key hints 更偏 footer（composer 下）。  
-   - GA 可二选一：  
-     - **保守**：`hint` 仍在 input 上（只先挪 slash）  
+4. **hint 文案位置**
+   - Codex 的 key hints 更偏 footer（composer 下）。
+   - GA 可二选一：
+     - **保守**：`hint` 仍在 input 上（只先挪 slash）
      - **更贴 Codex**：`hint` 也挪到 input 下（无 slash 时 hint 在下；有 slash 时 hint 可与列表底提示合并）
 
-5. **测试**  
-   - 单测 `inputChromeSections`：有 slash 时顺序为 `… input … slashSuggestions`。  
+5. **测试**
+   - 单测 `inputChromeSections`：有 slash 时顺序为 `… input … slashSuggestions`。
    - App 测：注入 `/` 后，stdout 中 `>` 输入行出现在 `/help` 等建议行**之上**（或解析帧行号比较）。
 
 #### 5.2.6 与问题 A 的关系
@@ -491,13 +491,13 @@ return { kind: 'live', height: spacer }
 
 ### 6.2 `App.tsx` 渲染
 
-- `inlineMessageViewportPlan.kind === 'none'` 分支删除或永不走到  
-- 空 live 时 `MessageViewport` 仍以固定 height 渲染空白行（或 dim “Ready” 一行 + 其余空）  
+- `inlineMessageViewportPlan.kind === 'none'` 分支删除或永不走到
+- 空 live 时 `MessageViewport` 仍以固定 height 渲染空白行（或 dim “Ready” 一行 + 其余空）
 - `liveViewportRows = header + stableMessageRows + bottomRows` 尽量接近 `terminal.rows - 安全边距`，使 chrome 贴底
 
 ### 6.3 与 `computeLayoutMetrics` 的关系
 
-`bottomRows` 已含 input/activity/panel；`messageRows` 已是“除掉底栏后的剩余”。  
+`bottomRows` 已含 input/activity/panel；`messageRows` 已是“除掉底栏后的剩余”。
 一期正确用法：
 
 > **默认模式也始终消费 `messageRows` 作为 live/spacer 高度**，而不是仅在 `liveLineCount>0` 时才用。
@@ -508,8 +508,8 @@ return { kind: 'live', height: spacer }
 
 `inputCursorPosition` 依赖 `messageRows`；稳定槽高后光标行计算更稳，IME 停车与 redraw 更少跳变。需回归：
 
-- idle 输入中文  
-- streaming 时输入框禁用态光标  
+- idle 输入中文
+- streaming 时输入框禁用态光标
 - Ctrl+C 清理 live 块高度与 `clearInlineLiveViewportSequence` 一致（高度变了要同步 geometry）
 
 ### 6.5 退出清理
@@ -609,19 +609,19 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 要点：
 
-- **Static 已是 history**：idle 时不必再在 live 区留满屏空。  
-- **防贴飞**：用 `minGapRows`（0～2）代替满 `messageRows`。  
-- **防跳动**：streaming 时 live 高度随行数增长，**上限** `maxLiveRows`（如 8～12），超出进 Static / 截尾（现有 `liveTranscriptViewportLines`）。  
+- **Static 已是 history**：idle 时不必再在 live 区留满屏空。
+- **防贴飞**：用 `minGapRows`（0～2）代替满 `messageRows`。
+- **防跳动**：streaming 时 live 高度随行数增长，**上限** `maxLiveRows`（如 8～12），超出进 Static / 截尾（现有 `liveTranscriptViewportLines`）。
 - **触底感**：当 `header + liveH + bottomRows >= terminalRows` 时，live 截尾，composer 自然在底——模拟 Codex「贴底后固定」。
 
-优点：仍用 Ink Static + Box，改动面小于完整 ANSI 引擎。  
+优点：仍用 Ink Static + Box，改动面小于完整 ANSI 引擎。
 风险：Ink 不会像 Codex 那样精确 `area.y += scroll`；短会话「整体下移」依赖 Static 自然推进 + 矮 dock，可能与 Codex 像素级路径不同，但**观感可接近**。
 
 #### 方案 G — **真·Codex viewport_area + insert_history**（中长期）
 
-1. 自管 `viewport_area = Rect { y, height: desired_height }`  
-2. finalized 行走 `insert_history_lines`（scroll region + 可能 `area.y +=`）  
-3. 每帧 `draw(desired_height)` 只重绘 dock  
+1. 自管 `viewport_area = Rect { y, height: desired_height }`
+2. finalized 行走 `insert_history_lines`（scroll region + 可能 `area.y +=`）
+3. 每帧 `draw(desired_height)` 只重绘 dock
 4. 与 Ink 抢 stdout 需隔离（可能 dock 自绘 / 减小 Ink 职责）
 
 工作量大，但是「先下移后固定」的**精确**实现。
@@ -647,9 +647,9 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 ### 7.4 仍可选的增强
 
-1. 限制 streaming live 上限 + 超额 commit Static（类 Codex live commit）。  
-2. 弱化 inline 模式重复 `GenericAgent` header。  
-3. popup 高度 `Max(required)` + 内部滚动。  
+1. 限制 streaming live 上限 + 超额 commit Static（类 Codex live commit）。
+2. 弱化 inline 模式重复 `GenericAgent` header。
+3. popup 高度 `Max(required)` + 内部滚动。
 4. hint 是否下移到 composer 下（Codex footer）——与间距问题独立。
 
 ---
@@ -668,20 +668,20 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 ### 8.2 App 级（内存终端）
 
-1. ready 帧：输入框 border 行号接近终端底（与现图1 类似）  
-2. 注入长 Static 历史 + idle：输入框 border 行号与 (1) **相同或相差 ≤1**  
-3. streaming 多行 assistant：输入框行号仍稳定  
-4. 用户双显回归：Static 有 user、live 无 user 文本  
-5. Ctrl+C 清理无残框  
-6. **输入 `/`：帧内 `>` composer 行号 < 首条 slash 建议行号**（列表在下）  
+1. ready 帧：输入框 border 行号接近终端底（与现图1 类似）
+2. 注入长 Static 历史 + idle：输入框 border 行号与 (1) **相同或相差 ≤1**
+3. streaming 多行 assistant：输入框行号仍稳定
+4. 用户双显回归：Static 有 user、live 无 user 文本
+5. Ctrl+C 清理无残框
+6. **输入 `/`：帧内 `>` composer 行号 < 首条 slash 建议行号**（列表在下）
 7. **slash 打开时 IME/光标仍落在输入框内**（非落在列表行）
 
 ### 8.3 人工
 
-1. 空会话看图1 体感  
-2. 问一长句等完整回答后：输入框仍在下半屏，不贴回答末尾  
-3. `/clear` 后回到稳定底栏  
-4. 输入 `/`：列表在输入框**下方**，上下键选命令，Tab/Enter 补全  
+1. 空会话看图1 体感
+2. 问一长句等完整回答后：输入框仍在下半屏，不贴回答末尾
+3. `/clear` 后回到稳定底栏
+4. 输入 `/`：列表在输入框**下方**，上下键选命令，Tab/Enter 补全
 5. 可选对照 Codex CLI 同终端高度截图（底栏 + slash）
 
 ---
@@ -699,8 +699,8 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 回滚：
 
-- 问题 A：恢复 `planMessageViewport` 的 `none` 分支  
-- 问题 B：恢复 `inputChromeSections` 旧顺序  
+- 问题 A：恢复 `planMessageViewport` 的 `none` 分支
+- 问题 B：恢复 `inputChromeSections` 旧顺序
 
 ---
 
@@ -708,16 +708,16 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 ### 轨道 A — 输入框锚点
 
-1. **RED**：`planMessageViewport` 有 Static、无 live 时 height 稳定。  
-2. **RED**：App 长 history idle 与空会话输入 border 行接近。  
-3. **GREEN**：改 `messageViewportPlan.ts` / App。  
+1. **RED**：`planMessageViewport` 有 Static、无 live 时 height 稳定。
+2. **RED**：App 长 history idle 与空会话输入 border 行接近。
+3. **GREEN**：改 `messageViewportPlan.ts` / App。
 4. 回归双显 grok + `npm test`。
 
 ### 轨道 B — slash 在输入框下（可先做，改动更小）
 
-1. **RED**：`inputChromeSections` 断言 `index(slash) > index(input)`。  
-2. **RED**：App 帧内 slash 行在 input 下；光标仍在 input。  
-3. **GREEN**：改 `inputLayout.ts` + 光标公式。  
+1. **RED**：`inputChromeSections` 断言 `index(slash) > index(input)`。
+2. **RED**：App 帧内 slash 行在 input 下；光标仍在 input。
+3. **GREEN**：改 `inputLayout.ts` + 光标公式。
 4. 人工 `/` 与 Codex 对照。
 
 **预估：** 轨道 B 约 0.5 日；轨道 A 约 0.5–1 日；合计约 1–1.5 日。
@@ -743,15 +743,15 @@ const height = max(minGapRows, contentRows)  // minGap 建议 0～2，不要 mes
 
 ## 12. 总结
 
-- **现象 A（修前）**：`none` 塌缩 → 输入框贴 Static 尾、下半屏空。  
-- **现象 A'（一期后）**：满高 live 槽 → 输入框永远贴终端底，**与对话内容过远**，本轮 user 常需上滚。  
-- **现象 B**：slash 在 input 上 → 一期已改为 input 下。  
-- **Codex 真实语义**（用户观察正确）：  
-  - viewport **content-desired**（`desired_height`）；  
-  - 未贴底时插入 history **下移** `area.y`；  
-  - 贴底后 **y 固定**，历史在上方 scroll region 滚。  
-- **一期有效部分**：禁止无策略塌缩；slash 顺序；光标/清理几何。  
-- **一期错误部分**：把「稳定」理解成「永远 `messageRows`」。  
+- **现象 A（修前）**：`none` 塌缩 → 输入框贴 Static 尾、下半屏空。
+- **现象 A'（一期后）**：满高 live 槽 → 输入框永远贴终端底，**与对话内容过远**，本轮 user 常需上滚。
+- **现象 B**：slash 在 input 上 → 一期已改为 input 下。
+- **Codex 真实语义**（用户观察正确）：
+  - viewport **content-desired**（`desired_height`）；
+  - 未贴底时插入 history **下移** `area.y`；
+  - 贴底后 **y 固定**，历史在上方 scroll region 滚。
+- **一期有效部分**：禁止无策略塌缩；slash 顺序；光标/清理几何。
+- **一期错误部分**：把「稳定」理解成「永远 `messageRows`」。
 - **二期方向**：方案 F/H — content-desired 矮 dock + 触底固定；必要时再上方案 G 完整 `insert_history`。
 
 ### 12.1 文档修订记录

@@ -1,9 +1,9 @@
 # P8 真实 API 多 Agent Workflow 自测缺陷记录
 
-> 日期：2026-06-11  
-> 范围：P8/P5 Dynamic Workflow 真实 `gpt-5.5` 多 agent sandbox code E2E  
-> 配置：`native_oai_config / gpt-native / gpt-5.5`  
-> 临时脚本：`temp/run_p5_multi_agent_code_e2e.py`  
+> 日期：2026-06-11
+> 范围：P8/P5 Dynamic Workflow 真实 `gpt-5.5` 多 agent sandbox code E2E
+> 配置：`native_oai_config / gpt-native / gpt-5.5`
+> 临时脚本：`temp/run_p5_multi_agent_code_e2e.py`
 > 安全约束：未读取、未打印、未提交 `mykey.py` / `mykey.json` / `mcp.json`；真实 API artifacts 不提交。
 
 ---
@@ -225,13 +225,13 @@ GA 当前能发现大量 Claude/Codex skills，包括：
 
 原因分三层：
 
-1. **临时 harness 出于安全考虑裁剪了 tools schema。**  
+1. **临时 harness 出于安全考虑裁剪了 tools schema。**
    本次 `tools_schema_factory=selected_file_tools` 只开放 `file_read` / `file_write`，没有开放 `load_skill`，因此 child agent 无法实际加载 skill。
 
-2. **workflow script 没有声明 agent 必须使用哪些 skills。**  
+2. **workflow script 没有声明 agent 必须使用哪些 skills。**
    即便 `workflow_child_agent.py` 会在 system prompt 拼接 `build_skill_prompt()` 的 skill index，这也只是软提示。
 
-3. **GA workflow DSL 没有一等 skill policy。**  
+3. **GA workflow DSL 没有一等 skill policy。**
    当前 `agent(prompt, options)` 没有类似 `skills: [...]`、`requireSkills: true` 的机制；runtime 也不会验证 child transcript 是否出现 `load_skill`。
 
 结论：GA 不是没有 skills 能力，而是 skills 与 workflow 编排没有深度融合。

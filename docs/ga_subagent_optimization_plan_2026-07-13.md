@@ -952,4 +952,3 @@ SubagentManager(process_exists=lambda pid: pid == 1234)
 - 最后实现 close_agent previous_state。
 
 这三步完成后，GA 就能解决目前 subagent 最大的问题：父进程不再把“完成但等待 reply”的 worker 当成“未完成”，cleanup 也不会再丢掉已经完成的子任务结果。
-

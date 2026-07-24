@@ -1,8 +1,8 @@
 # GA UI Running 可见性 — 实施进度
 
-**日期：** 2026-07-14  
-**方案：** `docs/ga_ui_running_turn_visibility_diagnosis_2026-07-14.md`  
-**方法：** TDD  
+**日期：** 2026-07-14
+**方案：** `docs/ga_ui_running_turn_visibility_diagnosis_2026-07-14.md`
+**方法：** TDD
 **状态：** **阶段 1+2 生产可用；阶段 3 几何库保留，App ANSI 写入已回滚（Ink 冲突）**
 
 ## 进度

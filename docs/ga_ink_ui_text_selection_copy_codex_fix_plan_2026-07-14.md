@@ -1,8 +1,8 @@
 # GA Ink UI 文本选择/复制与滚动保留修复计划
 
-**日期：** 2026-07-14  
-**范围：** `frontends/ink-ui` 默认终端 UI  
-**参考源码：** `D:\git_codes\codex\codex-rs\tui`  
+**日期：** 2026-07-14
+**范围：** `frontends/ink-ui` 默认终端 UI
+**参考源码：** `D:\git_codes\codex\codex-rs\tui`
 **当前状态：** 已按目标 2 实施默认 inline scrollback 修复，并保留 `GA_INK_MOUSE=full` 旧行为开关。
 
 > **二次复核更新：** Codex 主聊天界面的“鼠标滚轮滚动”和“拖动右侧滚动条滑块滚动”主要来自终端原生 scrollback/scrollbar，而不是 Codex 捕获鼠标后实现的应用内滚动条。Codex 将已完成历史写入正常终端 scrollback，并把底部输入区作为 inline viewport 渲染；因此终端自己的滚轮、窗口滚动条拖拽、文本拖选可以同时工作。本文此前的 `1007` 方案仍适合作为 GA 维持 alt-screen 架构时的保守修复，但若目标是对齐 Codex 当前 CLI 体验，GA 更合适的目标架构应是 **默认 inline scrollback，alt-screen 仅用于 overlay/legacy/fullscreen 模式**。

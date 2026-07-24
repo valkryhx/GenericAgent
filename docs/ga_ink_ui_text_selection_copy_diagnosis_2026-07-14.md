@@ -1,7 +1,7 @@
 # GA Ink UI 文本无法选中/复制 排查报告
 
-**排查日期：** 2026-07-14  
-**范围：** `frontends/ink-ui` 主界面（默认 `ga` / `ga ink`）展示内容的鼠标选中与复制  
+**排查日期：** 2026-07-14
+**范围：** `frontends/ink-ui` 主界面（默认 `ga` / `ga ink`）展示内容的鼠标选中与复制
 **修复状态：** 诊断结论已用于实施；当前默认修复已落地，本报告保留为根因依据。
 
 > **2026-07-14 Codex 源码复核补充：** 后续只以 `D:\git_codes\codex\codex-rs\tui` 为主要参考。二次复核确认：Codex 主聊天的滚轮滚动和拖动右侧滑块滚动，主要来自终端正常 scrollback/scrollbar，而不是 Codex 捕获鼠标实现的应用内滚动条。`1007` alternate scroll 主要服务于进入 alternate screen 的 overlay/pager 场景。GA 已按该结论实施默认 inline scrollback：finalized transcript 写入终端 scrollback，底部只保留 composer/active tail/panel 的 inline viewport；`GA_INK_MOUSE=full` 仍保留旧应用内鼠标路径。详细结果见 `docs/ga_ink_ui_text_selection_copy_codex_fix_plan_2026-07-14.md`。
@@ -47,7 +47,7 @@
 3. 在消息区域用鼠标左键拖选一段文字
 4. 尝试 `Ctrl+C` / 右键复制 / 终端“复制”动作
 
-**预期（正常终端/多数 CLI）：**  
+**预期（正常终端/多数 CLI）：**
 出现选区高亮，复制后可粘贴到别处。
 
 **实际（当前 GA Ink UI）：**
@@ -148,7 +148,7 @@ stdout.write(enterMainScreenTerminalSequence)
   → 用户无法选中
 ```
 
-滚动条命中逻辑见 `transcriptScrollbar.ts` 的 `shouldHandleScrollbarDrag` / `isScrollbarColumn`：  
+滚动条命中逻辑见 `transcriptScrollbar.ts` 的 `shouldHandleScrollbarDrag` / `isScrollbarColumn`：
 **只有最右 1–2 列**用于拖滚动条；消息正文区域的 press/drag 被识别后直接丢弃。
 
 #### 证据 D：应用层没有 selection / clipboard 补偿
@@ -305,19 +305,19 @@ parseMouseEvent / parseMouseWheel
 - 可能削弱或失去**拖动滚动条滑块**（点击 jump 可保留）
 - `1000` 仍可能在部分终端干扰选区；需实机验证 Windows Terminal 是否要求“完全关闭 mouse tracking”才能原生选中
 
-**风险点：**  
+**风险点：**
 Windows Terminal 上“开着 1000 是否仍允许 Shift-select / 普通 select”存在终端差异，**必须以实机为验收**，不能只靠单元测试。
 
 ### 方案 B — 保留完整 mouse tracking，但增加“关闭开关”恢复原生复制（对齐 Claude Code 的 escape hatch）
 
 **做法概要：**
 
-- 增加 `GA_DISABLE_MOUSE=1`（或 `/config`）  
-  - true：不写 `mouseTrackingOn()`，wheel 不可用时依赖 PgUp/PgDn  
+- 增加 `GA_DISABLE_MOUSE=1`（或 `/config`）
+  - true：不写 `mouseTrackingOn()`，wheel 不可用时依赖 PgUp/PgDn
   - false：保持现状
 - 文档写明：需要复制长文本时关闭鼠标捕获
 
-**收益：** 实现最快，行为可解释  
+**收益：** 实现最快，行为可解释
 **代价：** 默认体验仍然不能复制；只是给高级用户出口
 
 ### 方案 C — 应用内 Text Selection + copy-on-select（完整体验，工作量大）
@@ -333,7 +333,7 @@ Windows Terminal 上“开着 1000 是否仍允许 Shift-select / 普通 select�
 5. 与滚动条 drag 抢事件时：滚动条列优先给 scrollbar；正文给 selection
 6. **不要**把 Ctrl+C 改成复制（当前是退出）；copy-on-select 更合适
 
-**收益：** 全屏 + 虚拟滚动 + 可复制，三者兼得  
+**收益：** 全屏 + 虚拟滚动 + 可复制，三者兼得
 **代价：**
 
 - 需要可靠的 screen buffer 或“从当前可见 `TranscriptLine[]` + 布局几何反查字符”的 hit-test
@@ -342,9 +342,9 @@ Windows Terminal 上“开着 1000 是否仍允许 Shift-select / 普通 select�
 
 ### 方案 D — 混合（推荐产品形态）
 
-1. **默认**：关闭 button-drag 捕获或默认 `GA_DISABLE_MOUSE` 类行为，保证原生复制  
-2. **需要滚动条拖拽时**：显式开启  
-3. **中长期**：若要坚持默认全功能鼠标，再投入方案 C  
+1. **默认**：关闭 button-drag 捕获或默认 `GA_DISABLE_MOUSE` 类行为，保证原生复制
+2. **需要滚动条拖拽时**：显式开启
+3. **中长期**：若要坚持默认全功能鼠标，再投入方案 C
 
 这与 Claude Code 文档中的权衡一致：mouse capture 与 native copy-on-select 本质冲突，必须二选一或自建 selection。
 
@@ -401,11 +401,11 @@ Windows Terminal 上“开着 1000 是否仍允许 Shift-select / 普通 select�
 
 实施前请 review agent 明确拍板：
 
-1. **产品默认站哪边？**  
-   - 默认可复制（牺牲部分鼠标手势）  
+1. **产品默认站哪边？**
+   - 默认可复制（牺牲部分鼠标手势）
    - 还是默认可拖滚动条/全鼠标（必须自建 selection）
 2. **Windows Terminal 实机**：方案 A 是否真能恢复普通拖选，还是仍需完全关闭 1000？
-3. **是否需要 Shift-select 提示？**  
+3. **是否需要 Shift-select 提示？**
    即便短期不修，UI 底部提示 “Hold Shift to select text” 也能降低“坏了”的误判（部分终端支持）。
 4. **远程/SSH 场景**是否要 OSC 52？若只保证本机 Windows，可先 `clip`。
 5. 现有测试把 `1000+1002+1003+1006` 写死——修复必然改测试；review 应防止“为了让测试绿而保持无法复制”。
@@ -416,9 +416,9 @@ Windows Terminal 上“开着 1000 是否仍允许 Shift-select / 普通 select�
 
 GA Ink UI 无法选中复制，**不是显示层把文字变成不可选控件**，而是：
 
-1. 启动时开启了完整 DEC 鼠标报告；  
-2. 输入循环把所有鼠标事件当作应用事件消费掉；  
-3. 消费结果只服务于滚动，**从不建立选区，也不写剪贴板**；  
+1. 启动时开启了完整 DEC 鼠标报告；
+2. 输入循环把所有鼠标事件当作应用事件消费掉；
+3. 消费结果只服务于滚动，**从不建立选区，也不写剪贴板**；
 4. 因此终端原生选区与应用内选区同时缺失。
 
 **根因已定位，可修；本报告故意止于诊断，供其他 agent review 后再实施。**

@@ -1,15 +1,15 @@
 # GA Slice D 方案：Compact 旧图 · 临时文件 GC
 
-日期：2026-07-20  
-状态：**D2 + D3 已实施**（D1 焦点提示仍取消）  
-实施提交见仓库 `feat(image): Slice D2 compact strip + D3 image GC` 一带。  
+日期：2026-07-20
+状态：**D2 + D3 已实施**（D1 焦点提示仍取消）
+实施提交见仓库 `feat(image): Slice D2 compact strip + D3 image GC` 一带。
 前置：
 
 - 调研：`docs/ga_image_input_research_2026-07-20.md`
 - 主方案 A–C：`docs/ga_image_input_optimization_plan_2026-07-20.md`（**A/B/C 已落地**）
 - 选型：compact 旧图主跟 **Codex** + 摘要时 strip 跟 **CC**；GC 目录/上限跟 **CC**，clipboard 短生命周期跟 **Codex**；**焦点提示不做**
 
-目标：在 **不改变 A–C 识图主路径** 的前提下，补齐 **compact 旧图卫生** 与 **临时文件 GC**（长会话/磁盘相关）。  
+目标：在 **不改变 A–C 识图主路径** 的前提下，补齐 **compact 旧图卫生** 与 **临时文件 GC**（长会话/磁盘相关）。
 非目标：飞书/Discord；不重写 compact 算法本身；不引入 sharp/napi；**不做焦点剪贴板提示**（见 §2 决策）。
 
 ---
@@ -22,7 +22,7 @@
 | 长会话 compact | `_content_to_text` 把 **整段 base64 image 块 JSON 序列化进摘要 prompt**，易 **prompt-too-long / 贵 / 慢** | 摘要前 strip 为 `[image]` 标记 |
 | 磁盘 | `clipboard-*.png` 落在系统 temp，无统一 GC | 统一目录 + 天数/条数清理 |
 
-**A–C = 能不能看图；D = 会不会在 compact/磁盘上把自己撑死。**  
+**A–C = 能不能看图；D = 会不会在 compact/磁盘上把自己撑死。**
 （「回焦点提醒剪贴板有图」对已实现 Ctrl+V→`[Image #N]` 的 GA 收益低，**明确不做**。）
 
 ---
@@ -87,9 +87,9 @@ Claude Code 做 hint，是因为其产品要照顾更广的新手路径；**GA �
 
 ### 2.2 文档与排期
 
-- **不实现** `useClipboardImageHint` / `clipboardLikelyHasImage` / focus footer  
-- 若未来大量反馈「不知道能贴图」，再单独立项，**不默认进 Slice D**  
-- CC 源码对照仅作历史参考，不再作为交付蓝本  
+- **不实现** `useClipboardImageHint` / `clipboardLikelyHasImage` / focus footer
+- 若未来大量反馈「不知道能贴图」，再单独立项，**不默认进 Slice D**
+- CC 源码对照仅作历史参考，不再作为交付蓝本
 
 ### 2.3 验收
 
@@ -119,11 +119,11 @@ else:
 
 后果：
 
-1. Compact **请求体**可能比正常对话还大（CC 文档原话：images can cause compaction API 自身 prompt-too-long）  
-2. 摘要模型浪费 token「阅读」base64  
-3. 日志 `replace_log_with_compact_history` 也可能间接触发巨内容  
+1. Compact **请求体**可能比正常对话还大（CC 文档原话：images can cause compaction API 自身 prompt-too-long）
+2. 摘要模型浪费 token「阅读」base64
+3. 日志 `replace_log_with_compact_history` 也可能间接触发巨内容
 
-CC 的解法（必须学）：**生成摘要前先 stripImagesFromMessages**。  
+CC 的解法（必须学）：**生成摘要前先 stripImagesFromMessages**。
 Codex 的解法（语义学）：history 侧区分 image；真源可回落到 path。
 
 ### 3.2 目标语义
@@ -157,7 +157,7 @@ image → "[image | path=D:\\...\\a.png | sha1=abcd1234]"
 
 path/sha1 来源优先级：
 
-1. 若 history 旁保存了 attachments 元数据（见 3.3）  
+1. 若 history 旁保存了 attachments 元数据（见 3.3）
 2. 否则仅 `[image]`（与 CC 同）
 
 #### 层 B — Compact **输出** history（跟 Codex path 真源思想）
@@ -166,9 +166,9 @@ Compact 成功后，GA 当前用 summary pair **整表替换** history（已有�
 
 额外保证：
 
-1. **transcript** `record_compact` 已记 `backend_history_after`；确认不把 strip 前的巨 JSON 再写入  
-2. 若用户 resume 后还想引用「压缩前那张图」：只能靠 **磁盘 path 仍在** + 用户再次附上；**不**在 summary 里假装模型仍「看见」像素  
-3. 可选（P1）：summary 中强制要求模型写「用户曾附 N 张图」——依赖层 A 的 `[image]` 标记已进入源文本，摘要自然会提到  
+1. **transcript** `record_compact` 已记 `backend_history_after`；确认不把 strip 前的巨 JSON 再写入
+2. 若用户 resume 后还想引用「压缩前那张图」：只能靠 **磁盘 path 仍在** + 用户再次附上；**不**在 summary 里假装模型仍「看见」像素
+3. 可选（P1）：summary 中强制要求模型写「用户曾附 N 张图」——依赖层 A 的 `[image]` 标记已进入源文本，摘要自然会提到
 
 ### 3.3 可选：history 旁路元数据（便于层 A 增强）
 
@@ -179,7 +179,7 @@ Compact 成功后，GA 当前用 summary pair **整表替换** history（已有�
 images_meta=[{"path": "...", "sha1": "...", "placeholder": "[Image #1]"}]
 ```
 
-Compact strip 时若 message 带关联 meta，生成更富 `[image | path=...]`。  
+Compact strip 时若 message 带关联 meta，生成更富 `[image | path=...]`。
 **第一期可不做 meta**，只做 `[image]` strip。
 
 ### 3.4 代码落点
@@ -204,10 +204,10 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ### 3.6 验收
 
-1. 单元：含巨大 image block 的 history → compact 源文本长度 ≈ 无图文本级，且含 `[image]`  
-2. 单元：纯文本 history compact 行为与现网一致（回归）  
-3. 手测：多轮贴图后 `/compact` 成功，不 413；摘要里可提到曾看过图  
-4. 贴图识图主路径（A–C）回归仍绿  
+1. 单元：含巨大 image block 的 history → compact 源文本长度 ≈ 无图文本级，且含 `[image]`
+2. 单元：纯文本 history compact 行为与现网一致（回归）
+3. 手测：多轮贴图后 `/compact` 成功，不 413；摘要里可提到曾看过图
+4. 贴图识图主路径（A–C）回归仍绿
 
 ---
 
@@ -228,16 +228,16 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 **`GA_IMAGE_ROOT` 解析顺序：**
 
-1. 环境变量 `GA_IMAGE_TEMP`（已有）  
-2. 否则：`{repo}/temp/ga-images`（与 GA `temp/` 一致，**优于**纯系统 tmpdir，便于用户找到、一并 gitignore）  
+1. 环境变量 `GA_IMAGE_TEMP`（已有）
+2. 否则：`{repo}/temp/ga-images`（与 GA `temp/` 一致，**优于**纯系统 tmpdir，便于用户找到、一并 gitignore）
 3. 若 repo 不可写：fallback `os.tmpdir()/ga-images`
 
 > 现状 `clipboardImage.ts` 默认 `tmpdir()/ga-images`。方案要求 **优先改到 `temp/ga-images`**（与仓库 temp 策略一致），仍可用 env 覆盖。
 
 **Session id：**
 
-- Ink bridge ready / agent `session_id` 可用时写入子目录  
-- 未就绪时用 `pid` 或 `orphan`  
+- Ink bridge ready / agent `session_id` 可用时写入子目录
+- 未就绪时用 `pid` 或 `orphan`
 
 ### 4.2 清理策略
 
@@ -251,7 +251,7 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 **绝不删除：**
 
-- 用户原图路径（如 `截图/图2.png`）— 只管理 **GA 自己写下的** `clipboard-*` / `upload-*`  
+- 用户原图路径（如 `截图/图2.png`）— 只管理 **GA 自己写下的** `clipboard-*` / `upload-*`
 - `temp/sessions/*.jsonl`
 
 ### 4.3 双端职责
@@ -264,16 +264,16 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ### 4.4 测试
 
-- `tests/test_image_gc.py`：临时目录造旧文件/新文件 → gc 后旧删新留  
-- 条数上限：建 201 个文件 → 剩 ≤200  
+- `tests/test_image_gc.py`：临时目录造旧文件/新文件 → gc 后旧删新留
+- 条数上限：建 201 个文件 → 剩 ≤200
 - 不碰非 `clipboard-`/`upload-` 前缀（若策略限定前缀）
 
 ### 4.5 验收
 
-1. 多次 Ctrl+V 贴图后，`temp/ga-images/` 有文件且可定位  
-2. 把某文件 mtime 改成 8 天前，启动 gc → 被删  
-3. 用户目录下的 `截图/图2.png` 永不被 gc  
-4. 识图路径回归通过  
+1. 多次 Ctrl+V 贴图后，`temp/ga-images/` 有文件且可定位
+2. 把某文件 mtime 改成 8 天前，启动 gc → 被删
+3. 用户目录下的 `截图/图2.png` 永不被 gc
+4. 识图路径回归通过
 
 ---
 
@@ -294,21 +294,21 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ### PR-D3（先做，风险最低）
 
-1. 统一 `temp/ga-images` 布局；改 `clipboardImage.ts` 默认根  
-2. `image_gc.py` + 启动调用  
-3. 单测 + gitignore  
+1. 统一 `temp/ga-images` 布局；改 `clipboardImage.ts` 默认根
+2. `image_gc.py` + 启动调用
+3. 单测 + gitignore
 
-**依赖：** 无  
-**验证：** gc 单测；手测贴图仍识图  
+**依赖：** 无
+**验证：** gc 单测；手测贴图仍识图
 
 ### PR-D2（长会话刚需）
 
-1. `compact_context._content_to_text` strip image*  
-2. 单测：巨 base64 不进 compact 源  
-3. 手动 `/compact` 多图会话  
+1. `compact_context._content_to_text` strip image*
+2. 单测：巨 base64 不进 compact 源
+3. 手动 `/compact` 多图会话
 
-**依赖：** 无（不依赖 D3）  
-**验证：** compact 单测 + 回归  
+**依赖：** 无（不依赖 D3）
+**验证：** compact 单测 + 回归
 
 ### ~~PR-D1~~ 取消
 
@@ -347,22 +347,22 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ## 9. 明确不做
 
-1. Compact 后自动把旧 path 图重新注入 history（需用户再次附上或显式命令）  
-2. 在 history 中永久保存 base64 作为真源  
-3. **焦点剪贴板提示**（已取消；Ctrl+V 已够）  
-4. 第三方 IM 的图片 GC  
-5. 复刻 CC 全量 `~/.claude` 目录布局  
-6. 为已取消的 hint 引入 focus 监听 / 剪贴板轮询  
+1. Compact 后自动把旧 path 图重新注入 history（需用户再次附上或显式命令）
+2. 在 history 中永久保存 base64 作为真源
+3. **焦点剪贴板提示**（已取消；Ctrl+V 已够）
+4. 第三方 IM 的图片 GC
+5. 复刻 CC 全量 `~/.claude` 目录布局
+6. 为已取消的 hint 引入 focus 监听 / 剪贴板轮询
 
 ---
 
 ## 10. 验收总清单（仅 D2+D3）
 
-1. **D2：** 含大图 history 的 compact 源文本无 base64；`/compact` 成功  
-2. **D3：** `temp/ga-images` 可定位；过期/超限清理生效；用户原图安全  
-3. **回归：** `test_image_codec`、`test_native_image_input`、Ink 贴路径提交、bridge `images` 全绿  
-4. **手测：** `图2.png` 路径 + Ctrl+V 仍能被 vision 模型描述  
-5. **无** 焦点剪贴板提示相关行为/代码  
+1. **D2：** 含大图 history 的 compact 源文本无 base64；`/compact` 成功
+2. **D3：** `temp/ga-images` 可定位；过期/超限清理生效；用户原图安全
+3. **回归：** `test_image_codec`、`test_native_image_input`、Ink 贴路径提交、bridge `images` 全绿
+4. **手测：** `图2.png` 路径 + Ctrl+V 仍能被 vision 模型描述
+5. **无** 焦点剪贴板提示相关行为/代码
 
 ---
 
@@ -370,17 +370,17 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 
 ### D3 GC
 
-- [x] 定 `resolve_ga_image_root()`（TS `clipboardImage.ts` + Python `image_gc.py`）  
-- [x] `clipboardImage.ts` 默认根 `temp/ga-images`（已有）  
-- [x] `image_gc.py` + `tests/test_image_gc.py`  
-- [x] `ink_bridge` / `GenericAgent.__init__` 启动调用 gc  
-- [x] 兼容清理 `tmpdir()/ga-images`  
+- [x] 定 `resolve_ga_image_root()`（TS `clipboardImage.ts` + Python `image_gc.py`）
+- [x] `clipboardImage.ts` 默认根 `temp/ga-images`（已有）
+- [x] `image_gc.py` + `tests/test_image_gc.py`
+- [x] `ink_bridge` / `GenericAgent.__init__` 启动调用 gc
+- [x] 兼容清理 `tmpdir()/ga-images`
 
 ### D2 Compact strip
 
-- [x] `_content_to_text` 识别 `image` / `image_url` / `input_image` → `[image]`  
-- [x] 单测巨 base64 不出现在 `_history_to_text` / compact source  
-- [x] 注释指向 CC `stripImagesFromMessages`  
+- [x] `_content_to_text` 识别 `image` / `image_url` / `input_image` → `[image]`
+- [x] 单测巨 base64 不出现在 `_history_to_text` / compact source
+- [x] 注释指向 CC `stripImagesFromMessages`
 
 ### D1 Focus hint
 
@@ -395,5 +395,5 @@ GA:    摘要路径更接近 CC 的 strip；真源叙事接近 Codex path-first
 | `ga_image_input_optimization_plan_2026-07-20.md` | A–C 主路径（多数已实现）；D 仅提纲 |
 | **本文** | **Slice D 详细设计、选型、切片、验收** |
 
-实施以本文为准；与 A–C 冲突时仍遵守三原则：  
+实施以本文为准；与 A–C 冲突时仍遵守三原则：
 **路径真源 · 有界 codec · 标准多模态出口**；D 只做体验与卫生，不削弱这三条。

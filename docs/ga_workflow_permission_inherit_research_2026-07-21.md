@@ -1,9 +1,9 @@
 # GA Workflow / Subagent 权限继承调研（P0b）
 
-日期：2026-07-21  
-范围：对照 **Claude Code** 与 **Codex** 的 subagent / 多 agent 权限控制与继承；**并收敛 GA 产品拍板：workflow 子 agent 默认 full_access、不做人审**。  
-**不含**：档位持久化（大件 #2 / P2a）。  
-**大件 #3（workflow 内 ask 阻塞 UI）**：按 §0.1 产品拍板 **不做 / 降级为非目标**（见下文）。  
+日期：2026-07-21
+范围：对照 **Claude Code** 与 **Codex** 的 subagent / 多 agent 权限控制与继承；**并收敛 GA 产品拍板：workflow 子 agent 默认 full_access、不做人审**。
+**不含**：档位持久化（大件 #2 / P2a）。
+**大件 #3（workflow 内 ask 阻塞 UI）**：按 §0.1 产品拍板 **不做 / 降级为非目标**（见下文）。
 相关总文档：`docs/ga_permission_modes_research_2026-07-20.md` §13–§14。
 
 | 产品 | 本地路径 |
@@ -22,12 +22,12 @@
 | **Claude Code** | 默认 **继承 parent `toolPermissionContext`**；agent 定义可设 `permissionMode` / `disallowedTools` / `allowedTools` | **不能**用 agent mode 压过 parent 的 `bypassPermissions` / `acceptEdits` /（feature）`auto`；可在更严 parent 下再收紧 | **async / headless**：`shouldAvoidPermissionPrompts` → 先 hook，否则 **deny**（fail-closed）；`bubble` 可把提示冒泡到 parent 终端 |
 | **GA 现状** | workflow child：`ToolPermissionPolicy(profile=run.permission_profile)`；默认 `inherit-current-permissions` | 名写 inherit，实现是 **无条件 allow** | workflow ask 仍非阻塞；主会话 P1 已有阻塞，**child 未接** |
 
-**对 GA 的含义（调研层）**：Codex/CC 倾向 **child 不比 parent 更松**，且后台无 UI 时 **deny 而非弹窗**。  
+**对 GA 的含义（调研层）**：Codex/CC 倾向 **child 不比 parent 更松**，且后台无 UI 时 **deny 而非弹窗**。
 **对 GA 的含义（产品层，见 §0.1）**：用户明确选择 **workflow 子 agent = full_access、永不阻塞等人**——这是 **体验优先** 的拍板，与「严格继承 parent」不同；实现上应 **写死默认 allow-all + 禁止 child 人审**，而不是做假 inherit 或半套 ask UI。
 
 ### 0.1 产品拍板（2026-07-21）：workflow subagent = full_access，不做人审
 
-> **用户判断**：workflow 里的 subagent **肯定不能**做成「每个写/执行都等人批」；否则多 job / 并行 / 长脚本会完全不可用。  
+> **用户判断**：workflow 里的 subagent **肯定不能**做成「每个写/执行都等人批」；否则多 job / 并行 / 长脚本会完全不可用。
 > **拍板**：workflow 子 agent **就是 full_access（工具放行）**；**不**做 child 行内 accept/deny。
 
 | 项 | 决策 |
@@ -42,19 +42,19 @@
 
 **为什么同意这个拍板（工程侧）**：
 
-1. **交互模型不匹配**：主会话 ask 是「人在环、一步一确认」；workflow 是「编排后批量跑」。把 P1 审批搬进每个 child tool，等于把批处理打回交互式，**友好度归零**。  
-2. **无靠谱 UI 挂点**：child 在后台线程/多 job；即便做排队审批，用户也难理解「job 3 的 file_write」。CC 对 async 默认 **deny** 而不是弹窗——说明业界也认为 **后台不宜等人**；GA 选 full_access 是另一极：**后台直接干**（信任 workflow 发起者）。  
-3. **与今天行为兼容**：当前 inherit→allow 其实已是 full_access；拍板是 **承认并产品化**，去掉「以后要继承 parent / 要做 child ask」的错误预期。  
+1. **交互模型不匹配**：主会话 ask 是「人在环、一步一确认」；workflow 是「编排后批量跑」。把 P1 审批搬进每个 child tool，等于把批处理打回交互式，**友好度归零**。
+2. **无靠谱 UI 挂点**：child 在后台线程/多 job；即便做排队审批，用户也难理解「job 3 的 file_write」。CC 对 async 默认 **deny** 而不是弹窗——说明业界也认为 **后台不宜等人**；GA 选 full_access 是另一极：**后台直接干**（信任 workflow 发起者）。
+3. **与今天行为兼容**：当前 inherit→allow 其实已是 full_access；拍板是 **承认并产品化**，去掉「以后要继承 parent / 要做 child ask」的错误预期。
 4. **风险可控点在入口**：真正该守的是 **谁能启动 workflow、脚本是否可信、可选 read_only run**，而不是 child 内部假审批。
 
 **与 Codex/CC 的差异（有意）**：两边更偏「child ≤ parent」。GA workflow 选择 **「child = 自动化全权」**。这不是实现不了继承，而是 **产品不要继承带来的卡顿/弹窗**。主会话三档 + P1 审批 **仍然有价值**，作用域是 **人手操的主 agent**，不是 workflow worker。
 
 **原 P0b「真继承 parent mode」**：在拍板后 **降级 / 取消为默认路径**。若仍要做安全加固，优先顺序改为：
 
-1. **文档 + 语义澄清**（inherit = full_access，不继承 ask）— 必做、极小  
-2. **可选** 显式 `read_only` run 保持可用 — 已有  
-3. **可选** 启动 workflow 时若主会话是 `read_only`，**提示/二次确认**「子 agent 仍将 full_access」— 体验护栏，非门控  
-4. ~~child 阻塞审批 UI~~ — **不做**  
+1. **文档 + 语义澄清**（inherit = full_access，不继承 ask）— 必做、极小
+2. **可选** 显式 `read_only` run 保持可用 — 已有
+3. **可选** 启动 workflow 时若主会话是 `read_only`，**提示/二次确认**「子 agent 仍将 full_access」— 体验护栏，非门控
+4. ~~child 阻塞审批 UI~~ — **不做**
 5. ~~parent ask → child 降级 read_only~~ — **默认不做**（与 full_access 拍板冲突；仅当未来要「保守模式」再议）
 
 ---
@@ -74,7 +74,7 @@
 
 注释写得很直白（`multi_agents_common.rs`）：
 
-> 从 parent 的 effective config 起步，再刷新 turn 上的 runtime 字段：**model、reasoning、approval policy、sandbox、cwd**。  
+> 从 parent 的 effective config 起步，再刷新 turn 上的 runtime 字段：**model、reasoning、approval policy、sandbox、cwd**。
 > 跳过这步会让 child 与 parent 在 **approval / cwd / sandbox** 上不一致。
 
 **`apply_spawn_agent_runtime_overrides`** 明确拷贝：
@@ -101,14 +101,14 @@ AgentControl.spawn_agent_with_metadata(config, ...)
 
 要点：
 
-1. **Role 可以改模型、指令、技能、以及 role 文件里写的 sandbox 等配置层**。  
-2. 但 **live turn 的 approval_policy + permission_profile + sandbox 句柄 + cwd 在 role 之后再次写入** → 对「用户当前这一轮选了什么审批/沙箱」，**parent turn 优先于 role**。  
-3. 因此 Codex 的 subagent **默认不会比 parent 当前会话更「野」**；role 更像「在 parent 安全边界内的任务特化」，而不是独立降权/越权通道。  
+1. **Role 可以改模型、指令、技能、以及 role 文件里写的 sandbox 等配置层**。
+2. 但 **live turn 的 approval_policy + permission_profile + sandbox 句柄 + cwd 在 role 之后再次写入** → 对「用户当前这一轮选了什么审批/沙箱」，**parent turn 优先于 role**。
+3. 因此 Codex 的 subagent **默认不会比 parent 当前会话更「野」**；role 更像「在 parent 安全边界内的任务特化」，而不是独立降权/越权通道。
 4. Full-history fork 进一步禁止改 agent_type/model/effort，强调 **上下文 + 身份继承**。
 
 ### 1.4 与 UI 审批的关系
 
-Codex 子 thread 仍挂在同一 `AgentControl` / session 服务上，审批走既有 **pending oneshot + 事件** 路径（见既有 ask 调研文档），不是「child 无条件 YOLO」。  
+Codex 子 thread 仍挂在同一 `AgentControl` / session 服务上，审批走既有 **pending oneshot + 事件** 路径（见既有 ask 调研文档），不是「child 无条件 YOLO」。
 P0b 不需要复刻 AgentControl；只需学 **spawn 时快照 parent 策略上界**。
 
 ---
@@ -147,16 +147,16 @@ else child.mode = parent.mode   # parent 的「放行档」优先，不能被 ag
 | `acceptEdits` | 任意 | **仍 acceptEdits** |
 | `auto`（feature） | 任意 | **仍 auto**（不覆盖） |
 
-解读：**parent 已选择「少问我 / 代批」时，子 agent 不能偷偷变成更啰嗦的交互模式来绕过；更重要的是不能在 parent 收紧时由 agent 单方面改回 bypass。**  
+解读：**parent 已选择「少问我 / 代批」时，子 agent 不能偷偷变成更啰嗦的交互模式来绕过；更重要的是不能在 parent 收紧时由 agent 单方面改回 bypass。**
 （实现上写的是「这些 parent mode 时不应用 agent override」，等价于 **高特权 parent 档粘住**。）
 
 ### 2.3 工具池 vs 规则
 
 `AgentTool.tsx`：
 
-- Worker 用 **`assembleToolPool(workerPermissionContext, mcp.tools)`** 独立组装工具集，注释写明 **不受 parent 工具限制列表拖累**（避免 parent 被裁工具后 worker 缺工具）。  
-- 但 `workerPermissionContext.mode` 默认 `selectedAgent.permissionMode ?? 'acceptEdits'`（组装工具时的 mode 视图）。  
-- **Fork 路径**：为 prompt cache 一致性，传 **parent 精确 tools**，且 fork 的 permissionMode 常为 `bubble`。  
+- Worker 用 **`assembleToolPool(workerPermissionContext, mcp.tools)`** 独立组装工具集，注释写明 **不受 parent 工具限制列表拖累**（避免 parent 被裁工具后 worker 缺工具）。
+- 但 `workerPermissionContext.mode` 默认 `selectedAgent.permissionMode ?? 'acceptEdits'`（组装工具时的 mode 视图）。
+- **Fork 路径**：为 prompt cache 一致性，传 **parent 精确 tools**，且 fork 的 permissionMode 常为 `bubble`。
 - **`allowedTools`**：写入 child 的 **session alwaysAllowRules**；**保留** SDK `cliArg` 级 allow，**清空** parent 的 session allow 泄漏。
 
 ### 2.4 内置 agent 的「硬收紧」
@@ -184,7 +184,7 @@ else child.mode = parent.mode   # parent 的「放行档」优先，不能被 ag
 
 `permissions.ts`：若仍需交互且 `shouldAvoidPermissionPrompts`：
 
-1. 先跑 PermissionRequest hooks（给 headless 一个放行/拒绝机会）  
+1. 先跑 PermissionRequest hooks（给 headless 一个放行/拒绝机会）
 2. 无 hook 决策 → **`behavior: 'deny'`**，reason `asyncAgent` / *Permission prompts are not available*
 
 与 GA 主会话 P1 的 **无 emit → deny** 同构。
@@ -231,14 +231,14 @@ if self.profile == INHERIT_CURRENT_PERMISSIONS:
     return self._decision("allow", "inherit_current", tool_name)
 ```
 
-→ **名字是 inherit，语义是 allow-all**。  
+→ **名字是 inherit，语义是 allow-all**。
 测试 `test_workflow_permission_inheritance_e2e.py` 验证的是 **profile 写入 metadata / 事件 / cache 分区**，不是「parent 为 read_only 时 child 不能写」。
 
 ### 3.3 dispatch 优先级
 
 `ga.py`：
 
-1. **`workflow_permission_policy` 优先**；非 allow 时 workflow ask 仍 **非阻塞** `approval_required`。  
+1. **`workflow_permission_policy` 优先**；非 allow 时 workflow ask 仍 **非阻塞** `approval_required`。
 2. 否则主会话 `permission_mode_policy` + `permission_runtime`（P1）。
 
 因此即使用户在 Ink 主会话切到 `read_only` / `ask`，**默认 workflow child 仍全开写/执行**——与 Codex「parent turn 刷审批/沙箱」和 CC「继承 toolPermissionContext」都不一致。
@@ -272,11 +272,11 @@ P0b 文档与实现默认只钉 **workflow child**；文件 IO subagent 若在�
 
 ### 5.1 产品规则（现行）
 
-1. **默认** `inherit-current-permissions` ≡ **full_access / allow-all**（与今天代码行为一致，**改文档与命名预期**，不必再「修成继承」）。  
-2. **禁止** workflow child 路径接入 `permission_runtime` 阻塞审批；`dispatch` 在 workflow policy 下 **不得** wait 用户。  
-3. **`explicit_approval` → ask**：若保留 profile，只允许 **非阻塞** 信号或 **直接当 allow/deny 策略**；**禁止**做成 Ink 弹窗队列（与 §0.1 冲突则删/映射 allow）。  
-4. **显式** `read_only` / `restricted_mcp` 仍可用：给测试、审计、用户主动收紧的 run；**不是**默认。  
-5. 主会话 `read_only` / `ask`：**不**自动改变默认 workflow child 能力；可选 UX：启动 workflow 时一行提示「子任务将以 Full Access 运行」。  
+1. **默认** `inherit-current-permissions` ≡ **full_access / allow-all**（与今天代码行为一致，**改文档与命名预期**，不必再「修成继承」）。
+2. **禁止** workflow child 路径接入 `permission_runtime` 阻塞审批；`dispatch` 在 workflow policy 下 **不得** wait 用户。
+3. **`explicit_approval` → ask**：若保留 profile，只允许 **非阻塞** 信号或 **直接当 allow/deny 策略**；**禁止**做成 Ink 弹窗队列（与 §0.1 冲突则删/映射 allow）。
+4. **显式** `read_only` / `restricted_mcp` 仍可用：给测试、审计、用户主动收紧的 run；**不是**默认。
+5. 主会话 `read_only` / `ask`：**不**自动改变默认 workflow child 能力；可选 UX：启动 workflow 时一行提示「子任务将以 Full Access 运行」。
 6. 安全边界放在 **启动 workflow 的人** + **可选 profile**，不放在 child 逐步审批。
 
 ### 5.2 映射表（拍板后）
@@ -342,8 +342,8 @@ P0b 文档与实现默认只钉 **workflow child**；文件 IO subagent 若在�
 
 风险：
 
-- **安全**：主会话 read_only 时 workflow 仍可写——须在 UI/文档 **明示**，避免用户以为全局只读。  
-- **误读 inherit 名字**：长期可考虑 rename 为 `workflow-full-access`（cache key 变更，另开小 PR）。  
+- **安全**：主会话 read_only 时 workflow 仍可写——须在 UI/文档 **明示**，避免用户以为全局只读。
+- **误读 inherit 名字**：长期可考虑 rename 为 `workflow-full-access`（cache key 变更，另开小 PR）。
 - 与 Codex/CC「child≤parent」不一致：接受为 **产品差异**，不是实现遗漏。
 
 ---
@@ -352,35 +352,35 @@ P0b 文档与实现默认只钉 **workflow child**；文件 IO subagent 若在�
 
 ### Codex
 
-- `core/src/tools/handlers/multi_agents_common.rs` — runtime overrides  
-- `core/src/tools/handlers/multi_agents_v2/spawn.rs` — spawn 顺序  
-- `core/src/agent/role.rs` — role 层  
-- `core/src/config/agent_roles.rs` — role 加载  
+- `core/src/tools/handlers/multi_agents_common.rs` — runtime overrides
+- `core/src/tools/handlers/multi_agents_v2/spawn.rs` — spawn 顺序
+- `core/src/agent/role.rs` — role 层
+- `core/src/config/agent_roles.rs` — role 加载
 
 ### Claude Code
 
-- `tools/AgentTool/runAgent.ts` — mode 覆盖 / async deny 标志  
-- `tools/AgentTool/AgentTool.tsx` — worker 工具池 / fork  
-- `tools/AgentTool/loadAgentsDir.ts` — frontmatter permissionMode  
-- `tools/AgentTool/built-in/exploreAgent.ts` / `planAgent.ts` — 禁写  
-- `utils/permissions/permissions.ts` — `shouldAvoidPermissionPrompts`  
+- `tools/AgentTool/runAgent.ts` — mode 覆盖 / async deny 标志
+- `tools/AgentTool/AgentTool.tsx` — worker 工具池 / fork
+- `tools/AgentTool/loadAgentsDir.ts` — frontmatter permissionMode
+- `tools/AgentTool/built-in/exploreAgent.ts` / `planAgent.ts` — 禁写
+- `utils/permissions/permissions.ts` — `shouldAvoidPermissionPrompts`
 
 ### GA
 
-- `workflow_permissions.py` — inherit → allow（拍板后 = workflow full_access）  
-- `workflow_child_agent.py` `_build_handler`  
-- `workflow_models.py` — `DEFAULT_PERMISSION_PROFILE`  
-- `ga.py` `dispatch` — workflow vs 主会话优先级  
-- `docs/ga_permission_modes_research_2026-07-20.md` §13–§14  
+- `workflow_permissions.py` — inherit → allow（拍板后 = workflow full_access）
+- `workflow_child_agent.py` `_build_handler`
+- `workflow_models.py` — `DEFAULT_PERMISSION_PROFILE`
+- `ga.py` `dispatch` — workflow vs 主会话优先级
+- `docs/ga_permission_modes_research_2026-07-20.md` §13–§14
 
 ---
 
 ## 9. 总结
 
-1. **Codex / CC** 调研结论仍成立：业界默认 **child≤parent**，后台 **少弹窗**（CC 甚至 deny）。  
-2. **GA 产品拍板（§0.1）**：workflow subagent = **full_access**，**不做人审**——体验优先，与调研默认不同，**有意为之**。  
-3. 今天代码的 inherit→allow **正好贴合拍板**；要改的是 **叙事与路线图**（取消「真继承 / child ask UI」为必做），不是硬做成 parent 只读继承。  
-4. 主会话三档 + P1 审批 **只管人手主 agent**；workflow 是 **已授权的批处理通道**。  
+1. **Codex / CC** 调研结论仍成立：业界默认 **child≤parent**，后台 **少弹窗**（CC 甚至 deny）。
+2. **GA 产品拍板（§0.1）**：workflow subagent = **full_access**，**不做人审**——体验优先，与调研默认不同，**有意为之**。
+3. 今天代码的 inherit→allow **正好贴合拍板**；要改的是 **叙事与路线图**（取消「真继承 / child ask UI」为必做），不是硬做成 parent 只读继承。
+4. 主会话三档 + P1 审批 **只管人手主 agent**；workflow 是 **已授权的批处理通道**。
 5. 可选保留 **显式 read_only run**；大件 #2 持久化仍独立；大件 #3 **取消**。
 
 ---

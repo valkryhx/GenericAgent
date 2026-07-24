@@ -1,7 +1,7 @@
 # GA UI：LLM Running Turn 重复 + 尾部截断 — 根因与修复
 
-**日期：** 2026-07-14  
-**复现会话：** `temp/sessions/session_b3aeef24a3a24a1495609ec298cb91b9.jsonl`  
+**日期：** 2026-07-14
+**复现会话：** `temp/sessions/session_b3aeef24a3a24a1495609ec298cb91b9.jsonl`
 **症状：**
 
 1. 同一轮里 `LLM Running (Turn 1) ...` 及 tool 轨迹出现两次（先完整展开，再折叠版再来一遍）。
@@ -33,7 +33,7 @@ Session `assistant_text` **本身只有一份**完整轨迹：
 dispatch({ type: 'assistant_done', text: cachedDelta + event.text })
 ```
 
-`event.text` 已是全文，再拼未 flush 的 `cachedDelta` → done 文本变成「尾部 + 全文」或至少与已 commit 前缀对不齐。  
+`event.text` 已是全文，再拼未 flush 的 `cachedDelta` → done 文本变成「尾部 + 全文」或至少与已 commit 前缀对不齐。
 `remainingAssistantTextAfterCommits` 前缀匹配失败 → **整轮全文再次落入 Static**，于是 Turn 1 / tool 再画一遍（第二次常已走 `formatAssistantText` 折叠样式，看起来像「展开版 + 折叠版」）。
 
 ### B. done-only 的 `</summary>` 改写（次因 / 放大器）

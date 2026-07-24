@@ -1,7 +1,7 @@
 # GA UI：中间 LLM Turn 显示为 `**LLM Running ...**` 字面量
 
-**日期：** 2026-07-14  
-**截图：** `截图/llm_turn_显示问题.png`  
+**日期：** 2026-07-14
+**截图：** `截图/llm_turn_显示问题.png`
 **会话：** `temp/sessions/session_8cc72593a75640fda4d4aab73217594c.jsonl`
 
 ## 现象
