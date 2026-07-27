@@ -414,11 +414,21 @@ class NativeGPTChildAgentRunner:
     def _build_system_prompt(self) -> str:
         base = self.system_prompt or "You are a workflow child agent. Complete only this assigned job and return a concise result."
         try:
+            from ga_agents_runtime import build_ga_project_instructions
+            project_prompt = build_ga_project_instructions(os.path.dirname(os.path.abspath(__file__)), os.getcwd())
+        except Exception:
+            project_prompt = ""
+        try:
             from skills_runtime import build_skill_prompt
             skill_prompt = build_skill_prompt()
         except Exception:
             skill_prompt = ""
-        return base + ("\n" + skill_prompt if skill_prompt else "")
+        prompt = base
+        if project_prompt:
+            prompt += "\n" + project_prompt
+        if skill_prompt:
+            prompt += "\n" + skill_prompt
+        return prompt
 
     def _build_tool_summary(self, transcript_events: list[dict]) -> dict:
         allowed = [event.get("toolName") for event in transcript_events if event.get("type") == "tool_allowed" and event.get("toolName")]

@@ -105,11 +105,15 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
     def test_child_agent_system_prompt_includes_optional_skill_listing(self):
         runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
 
-        with mock.patch("skills_runtime.build_skill_prompt", return_value="\n[Available Skills]\nWhen matched, call load_skill.\n- using-superpowers\n"):
-            prompt = runner._build_system_prompt()
+        with mock.patch("ga_agents_runtime.build_ga_project_instructions", return_value="\n[GA_PROJECT_INSTRUCTIONS]\nproject fake\n[/GA_PROJECT_INSTRUCTIONS]\n"):
+            with mock.patch("skills_runtime.build_skill_prompt", return_value="\n[Available Skills]\nWhen matched, call load_skill.\n- using-superpowers\n"):
+                prompt = runner._build_system_prompt()
 
         self.assertIn("base prompt", prompt)
+        self.assertIn("[GA_PROJECT_INSTRUCTIONS]", prompt)
+        self.assertIn("project fake", prompt)
         self.assertIn("[Available Skills]", prompt)
+        self.assertLess(prompt.index("[GA_PROJECT_INSTRUCTIONS]"), prompt.index("[Available Skills]"))
         self.assertIn("call load_skill", prompt)
         self.assertIn("using-superpowers", prompt)
 

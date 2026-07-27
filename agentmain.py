@@ -23,6 +23,7 @@ try:
 except Exception:  # 压缩核心导入失败时降级：/compact 报不可用，不影响主流程
     compact_agent_context = None
     replace_log_with_compact_history = None
+from ga_agents_runtime import build_ga_project_instructions
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
 from subagent_prompts import build_agent_role_usage_hint
 
@@ -303,6 +304,7 @@ if not os.path.exists(cdp_cfg):
 def get_system_prompt(agent=None):
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
+    prompt += build_ga_project_instructions(script_dir, os.getcwd())
     prompt += get_global_memory()
     prompt += build_skill_prompt()
     prompt += "\n" + build_agent_role_usage_hint(is_subagent=bool(getattr(agent, 'task_dir', None)), lang_suffix=lang_suffix) + "\n"
