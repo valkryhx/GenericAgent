@@ -48,7 +48,7 @@ class SubagentStateTest(unittest.TestCase):
 
             self.assertEqual(read_json_or_none(path), {"turn_status": "completed"})
             self.assertEqual(len(replace_calls), 2)
-            sleep_mock.assert_called_once_with(0.02)
+            sleep_mock.assert_called_once_with(subagent_state._WINDOWS_REPLACE_RETRY_DELAYS[0])
             self.assertEqual(list(Path(td).glob("*.tmp")), [])
 
     def test_append_jsonl_event_writes_one_json_object_per_line(self):

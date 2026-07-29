@@ -352,6 +352,188 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([("first", "user", [])], agent.prompts)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
+    def test_submit_can_drive_resume_agent_tool_through_frontend_bridge(self):
+        with tempfile.TemporaryDirectory() as td:
+            from agent_loop import exhaust
+            from ga import GenericAgentHandler
+            from subagent_manager import SubagentManager
+            from subagent_state import atomic_write_json
+            from subagent_transcript import SubagentTranscriptStore
+
+            calls = []
+
+            class FakeProcess:
+                pid = 6060
+
+            def fake_popen(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                return FakeProcess()
+
+            task_dir = Path(td) / "temp" / "bridge_resume"
+            task_dir.mkdir(parents=True)
+            old_output = task_dir / "output.txt"
+            old_output.write_text("bridge old answer\n\n[ROUND END]\n", encoding="utf-8")
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "bridge_resume",
+                    "agent_path": "/root/bridge_resume",
+                    "parent_session_id": "bridge_session",
+                    "run_id": "run_bridge_resume",
+                    "pid": None,
+                    "round": 0,
+                    "turn_status": "completed",
+                    "process_status": "shutdown",
+                    "output_path": str(old_output),
+                    "final_output_path": str(old_output),
+                    "permission_profile": "read_only",
+                    "parent_permission_mode": "read_only",
+                    "permission_options": {},
+                    "llm_no": 0,
+                    "verbose": False,
+                },
+            )
+            store = SubagentTranscriptStore(Path(td) / "temp" / "sessions")
+            store.write_metadata(session_id="bridge_session", run_id="run_bridge_resume", agent_path="/root/bridge_resume")
+            store.append_event("bridge_session", "run_bridge_resume", "request", {"prompt": "bridge original task"})
+            store.append_event("bridge_session", "run_bridge_resume", "assistant", {"content": "bridge old analysis"})
+            store.append_event("bridge_session", "run_bridge_resume", "final_output", {"final_output": "bridge old answer"})
+
+            class ResumeToolAgent(FakeAgent):
+                def __init__(self):
+                    super().__init__()
+                    self.session_id = "bridge_session"
+                    self.handler = GenericAgentHandler(self, last_history=[], cwd=str(Path(td) / "temp"))
+                    self.handler.subagent_manager = SubagentManager(
+                        root_dir=td,
+                        popen=fake_popen,
+                        python_executable="python-test",
+                        process_exists=lambda pid: False,
+                        sleep=lambda _: None,
+                    )
+                    entry = self.handler.subagent_manager.registry.create_child(
+                        parent_path="/root",
+                        task_name="bridge_resume",
+                        task_dir=task_dir,
+                        state_path=task_dir / "state.json",
+                        parent_session_id="bridge_session",
+                        permission_profile="read_only",
+                        parent_permission_mode="read_only",
+                    )
+                    self.handler.subagent_manager.registry.update(entry.agent_path, run_id="run_bridge_resume")
+                    self.handler.subagent_manager.registry.mark_closed(entry.agent_path, previous_status="completed", closed_status="shutdown")
+
+                def put_task(self, text, source="user", images=None):
+                    self.prompts.append((text, source, list(images or [])))
+                    dq = queue.Queue()
+                    outcome = exhaust(
+                        self.handler.do_resume_agent(
+                            {"target": "bridge_resume", "message": "continue from bridge"},
+                            response=None,
+                        )
+                    )
+                    dq.put({"done": json.dumps(outcome.data, ensure_ascii=False, sort_keys=True)})
+                    self.queues.append(dq)
+                    return dq
+
+            events = []
+            agent = ResumeToolAgent()
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+            task_id = bridge.submit("请恢复 bridge_resume 子智能体")
+            bridge.wait_for_idle(timeout=1)
+
+            self.assertEqual(task_id, 1)
+            self.assertEqual([("请恢复 bridge_resume 子智能体", "user", [])], agent.prompts)
+            done = next(event for event in events if event.get("type") == "assistant_done")
+            payload = json.loads(done["text"])
+            self.assertEqual(payload["status"], "resumed")
+            self.assertEqual(payload["target"], "/root/bridge_resume")
+            self.assertEqual(payload["handle"]["pid"], 6060)
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(Path(state["output_path"]), task_dir / "output1.txt")
+            self.assertEqual(old_output.read_text(encoding="utf-8"), "bridge old answer\n\n[ROUND END]\n")
+            self.assertEqual(calls[0][0][0], "python-test")
+
+    def test_submit_can_drive_attach_detach_stream_through_frontend_bridge(self):
+        with tempfile.TemporaryDirectory() as td:
+            from agent_loop import exhaust
+            from ga import GenericAgentHandler
+            from subagent_manager import SubagentManager
+            from subagent_state import atomic_write_json
+
+            task_dir = Path(td) / "temp" / "bridge_attach"
+            task_dir.mkdir(parents=True)
+            output_path = task_dir / "output.txt"
+            output_path.write_text("bridge live chunk\n", encoding="utf-8")
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "bridge_attach",
+                    "agent_path": "/root/bridge_attach",
+                    "parent_session_id": "bridge_session",
+                    "run_id": "run_bridge_attach",
+                    "pid": None,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                    "background": True,
+                    "output_path": str(output_path),
+                    "final_output_path": None,
+                },
+            )
+
+            class AttachToolAgent(FakeAgent):
+                def __init__(self):
+                    super().__init__()
+                    self.session_id = "bridge_session"
+                    self.handler = GenericAgentHandler(self, last_history=[], cwd=str(Path(td) / "temp"))
+                    self.handler.subagent_manager = SubagentManager(
+                        root_dir=td,
+                        process_exists=lambda pid: False,
+                        sleep=lambda _: None,
+                    )
+
+                def put_task(self, text, source="user", images=None):
+                    self.prompts.append((text, source, list(images or [])))
+                    dq = queue.Queue()
+                    attached = exhaust(
+                        self.handler.do_attach_agent({"target": "bridge_attach", "max_chars": 6}, response=None)
+                    )
+                    output_path.write_text("bridge live chunk\ntail\n\n[ROUND END]\n", encoding="utf-8")
+                    detached = exhaust(
+                        self.handler.do_detach_agent(
+                            {"target": "bridge_attach", "since_offset": attached.data["next_stream_offset"]},
+                            response=None,
+                        )
+                    )
+                    dq.put({"done": json.dumps({"attached": attached.data, "detached": detached.data}, ensure_ascii=False, sort_keys=True)})
+                    self.queues.append(dq)
+                    return dq
+
+            events = []
+            agent = AttachToolAgent()
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+            task_id = bridge.submit("请附着 bridge_attach 子智能体的实时输出")
+            bridge.wait_for_idle(timeout=1)
+
+            self.assertEqual(task_id, 1)
+            done = next(event for event in events if event.get("type") == "assistant_done")
+            payload = json.loads(done["text"])
+            self.assertEqual(payload["attached"]["status"], "attached")
+            self.assertEqual(payload["attached"]["stream_text"], "bridge")
+            self.assertTrue(payload["attached"]["stream_truncated"])
+            self.assertFalse(payload["attached"]["state"]["background"])
+            self.assertEqual(payload["detached"]["status"], "detached")
+            self.assertEqual(payload["detached"]["stream_text"], " live chunk\ntail\n\n[ROUND END]\n")
+            self.assertTrue(payload["detached"]["stream_eof"])
+            self.assertTrue(payload["detached"]["state"]["background"])
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["attach_status"], "detached")
+
     def test_new_session_replaces_agent_and_resets_visible_state(self):
         agents = [FakeAgent(), FakeAgent()]
         events = []
@@ -2890,12 +3072,17 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
             self.assertIn("profile_name", kwargs)
 
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.run(
             [sys.executable, str(FRONTENDS / "ink_bridge.py")],
             input=json.dumps({"type": "shutdown"}) + "\n",
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             cwd=REPO_ROOT,
+            env=env,
             timeout=20,
         )
 

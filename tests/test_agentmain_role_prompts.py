@@ -41,6 +41,21 @@ class AgentMainRolePromptsTest(unittest.TestCase):
         self.assertLess(prompt.index("[GA_PROJECT_INSTRUCTIONS]"), prompt.index("[Memory fake]"))
         self.assertLess(prompt.index("[Memory fake]"), prompt.index("[Skills fake]"))
 
+    def test_root_agent_prompt_injects_subagent_notifications_before_memory(self):
+        with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n"):
+            prompt = self._system_prompt()
+
+        self.assertIn("[GA_SUBAGENT_NOTIFICATIONS]", prompt)
+        self.assertLess(prompt.index("[GA_SUBAGENT_NOTIFICATIONS]"), prompt.index("[Memory fake]"))
+
+    def test_subagent_prompt_does_not_consume_parent_notifications(self):
+        subagent = type("Subagent", (), {"task_dir": str(REPO_ROOT / "temp" / "demo_subagent")})()
+        with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n") as mocked:
+            prompt = self._system_prompt(subagent)
+
+        self.assertNotIn("[GA_SUBAGENT_NOTIFICATIONS]", prompt)
+        mocked.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
