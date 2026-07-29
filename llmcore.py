@@ -773,7 +773,7 @@ class ClaudeSession(BaseSession):
         parse_fn = (lambda r: _parse_claude_sse(r.iter_lines(), self)) if self.stream else (lambda r: _parse_claude_json(r.json(), self))
         return (yield from _stream_with_retry(self, url, headers, payload, parse_fn))
     def make_messages(self, raw_list):
-        msgs = _drop_unsigned_thinking([{"role": m['role'], "content": list(m['content'])} for m in raw_list])
+        msgs = _drop_unsigned_thinking([{"role": m['role'], "content": _content_blocks(m['content'])} for m in raw_list])
         user_idxs = [i for i, m in enumerate(msgs) if m['role'] == 'user']
         for idx in user_idxs[-2:]:
             msgs[idx]["content"][-1] = dict(msgs[idx]["content"][-1], cache_control={"type": "ephemeral"})
@@ -783,10 +783,30 @@ class LLMSession(BaseSession):
     def raw_ask(self, messages): return (yield from _openai_stream(self, messages))
     def make_messages(self, raw_list): return _msgs_claude2oai(_fix_messages(raw_list))
 
+def _content_blocks(content):
+    """Normalize a message's content to a fresh list of blocks.
+
+    History rows do not all arrive as block lists: subagent resume writes
+    `{"role": "user", "content": "<text>"}` (SubagentTranscriptStore.build_resume_context),
+    and `list("text")` would shred that into one block per character — which then made
+    cache_control stamping raise `dict('s', cache_control=...)`. Copy, don't iterate.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, dict):
+        return [content]
+    return [{"type": "text", "text": str(content)}]
+
+
 def _fix_messages(messages):
     """修复 messages 符合 Claude API：交替、tool_use/tool_result 配对"""
     if not messages: return messages
     _wrap = lambda c: c if isinstance(c, list) else [{"type": "text", "text": str(c)}]
+    # 先把 str content 统一成 block list：resume 写出的 _history.json 就是 str content，
+    # 下游 raw_ask 的 cache_control 打标假定 block list，str 会被逐字符拆开后炸掉。
+    messages = [{**m, 'content': _content_blocks(m.get('content'))} for m in messages]
     fixed = []
     for m in messages:
         if fixed and m['role'] == fixed[-1]['role']:
@@ -850,7 +870,7 @@ class NativeClaudeSession(BaseSession):
             self.history.append(msg)
             if self.auto_compact_enabled:
                 trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
-            messages = [{"role": m["role"], "content": list(m["content"])} for m in self.history]
+            messages = [{"role": m["role"], "content": _content_blocks(m["content"])} for m in self.history]
         content_blocks = None
         gen = self.raw_ask(messages)
         try:
