@@ -1,0 +1,611 @@
+# GA subagent IPC 待实现优化规划
+
+日期：2026-07-29
+
+依据：`docs/ga_subagent_claudecode_codex_ipc_reference_2026-07-29.md`（Claude Code / Codex
+源码级调研 + GA 缺陷实测），归属 feat：`docs/ga_subagent_v2_optimization_design_2026-07-27.md`。
+
+## 0. 路线判定（已决策）
+
+**不切路线。保留"独立进程 + durable 文件为权威源"，把通知信号实时化。**
+
+三条依据：
+
+1. **参考实现都没有父子 agent IPC。** Claude Code 子 agent 是同进程隔离 context
+   （`forkedAgent.ts:345-462`），Codex 子 agent 是同进程 Tokio task
+   （`session/mod.rs:662`；`core/src/agent/` 下 `Command::new` 调用点为 0）。
+   所以"改走 Claude Code 路线"和"改走 Codex 路线"在传输层是**同一件事**：取消 IPC、改同进程。
+   GA 是三者中唯一把子 agent 放进独立 OS 进程的，需要 IPC 是必然结果而非设计失误。
+2. **同进程化的前置成本大于收益。** GA 工具层依赖进程级可变全局：
+   `ga.py:437` `os.chdir(cwd)`、`agentmain.py:269-272` 模块全局 `TOOLS_SCHEMA`
+   （还按模型名切中英文 schema）。同进程并发子 agent 会互相踩。
+   另外 Python 同进程多 agent 共享 GIL 与异常传播面，会把 Codex 用 Rust 换来的
+   隔离性代价原样承担；且失去 Windows 上最可靠的进程级取消（GA 有 `code_run()` 这类阻塞调用，
+   协作式 cancel 未必及时）。
+3. **GA 想做的通知模型就是 Codex 的通知模型。** Codex `wait_agent` 阻塞在
+   `multi_agents_v2/wait.rs:151` `wait_for_mailbox_change(mailbox_rx: &mut watch::Receiver<()>)`，
+   信号源 `session/input_queue.rs:26` `mailbox_tx: watch::Sender<()>`——负载是**空元组**，
+   只说"变了，去读"。GA 要做的"realtime channel 只推 trigger、内容仍回读 durable mailbox"
+   与之完全同构，只是把进程内 `watch` 换成跨进程 named pipe / socket。
+
+同时确认 GA 的工具面已与 Codex `multi_agents_v2` **6/6 同名**
+（`spawn_agent`/`wait_agent`/`close_agent`/`send_message`/`followup_task`/`list_agents`），
+协议层无需改造。**剩余工作全部在传输与并发正确性上。**
+
+## 1. 任务总表（按优先级）
+
+P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标；P2 是控制面清晰度（纯收益、不动进程模型）。
+
+| ID | 优先级 | 任务 | 类型 | 依赖 |
+| --- | --- | --- | --- | --- |
+| M1 | **P0** | mailbox 加跨进程锁，消除并发丢消息 | 正确性 | — |
+| M2 | **P0** | mailbox 落盘改原子替换，消除截断脏读 | 正确性 | M1 |
+| M3 | **P0** | 消除 `message_id` 行数派生碰撞 | 正确性 | M1 |
+| M4 | **P0** | 统一两套分叉的 mailbox 消费实现，删死代码 | 正确性 | M1, M2 |
+| S1 | **P0** | realtime channel 加 per-run authkey 认证 | **安全** | — |
+| S2 | P1 | POSIX socket 目录权限 0o700 / Windows server owner 校验 | 安全 | S1 |
+| R1 | **P1** | 子 agent 订阅 realtime channel（接通现有死通道） | 实时性 | S1 |
+| R2 | **P1** | mailbox trigger 走 realtime 通知，durable 仍为权威源 | 实时性 | M1, R1 |
+| R3 | P1 | 轮询粒度与空转寿命解耦（`poll_interval_s` / `idle_timeout_s`） | 实时性 | R1 |
+| R4 | P1 | realtime 不可用时优雅退回轮询，且状态可观测 | 健壮性 | R1 |
+| G1 | **P1** | agent 深度 / 总数上限守护 | 安全 | — |
+| B1 | P2 | realtime channel 补 bounded + Lagged 背压 | 健壮性 | R1 |
+| B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构 | 控制面 | — |
+| B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义 | 控制面 | R1, B2 |
+
+**不在范围内**：同进程运行时 / asyncio 化（4.2.1 阶段 C，除非出现第 5 节的切换信号）；
+`workflow_runtime.py` / `workflow_scheduler.py` / `workflow_child_agent.py` 重构（本 feat 明确边界）。
+
+### 1.1 实施进度（2026-07-29）
+
+切片 1（M1→M2→M3→M4，P0 正确性）**已完成**。全部按 TDD 落地：先写红测、确认红、最小实现、转绿。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| M1 | ✅ 完成 | `subagent_state.py` 新增共享 `cross_process_lock(lock_path)`；`subagent_event_bus._locked()` 改为委托它（消除第二套锁实现）；`SubagentMailbox` 持 `mailbox.jsonl.lock`，`enqueue()` / `consume_trigger_turn()` 全程持锁 | `expected 6 persisted messages, got 1`；`msg_new was neither persisted nor consumed, i.e. lost` |
+| M2 | ✅ 完成 | `subagent_state.py` 新增 `atomic_write_lines(path, lines)`（tmp + `_replace_file`）；`SubagentMailbox._write_rows()` 改用它，不再 `open(...,"w")` 截断 | `41 truncated reads observed, e.g. row counts [0,0,0,0,0] < 40` |
+| M3 | ✅ 完成 | `_new_message_id(rows)` 改为跳过已占用 ID（不再纯行数派生），避免碰撞被 `:35-36` 去重分支伪装成幂等命中 | `['explicit'] != ['explicit', 'auto']` |
+| M4 | ✅ 完成 | 删除 `subagent_state.consume_mailbox_trigger()` 死实现与 `agentmain.py:27` 的 import；`SubagentMailbox.consume_trigger_turn()` 成为唯一消费实现 | `subagent_state still exposes a second mailbox consumer` |
+
+`tests/test_subagent_mailbox.py` 从 4 个测试增至 8 个，新增 4 个均为并发/结构红测。
+
+**M3 实现与原方案的偏差（有意）**：原方案写"改为 `uuid4().hex[:12]`"。实际改为
+"行数起步 + 跳过已占用 ID"，保留 `msg_%06d` 格式。原因：`agentmain.py:980` 与
+`subagent_manager.py:1107` 都把 `message_id` 透出到事件与工具返回值，换成随机 hex 会让
+日志里的消息顺序不可读，而顺序可读性在排查父子通信时价值很高；持锁后唯一性已由
+M1 保证，跳过占用只是补上"库层不依赖调用方持锁"这一条。
+
+**顺带修的一处副作用**：M2 让 mailbox 也走 `_replace_file()`，而 Windows 上
+`os.replace` 遇到读者持有目标文件句柄会抛 `PermissionError`。原重试预算
+`(0.02, 0.05, 0.1, 0.2)` 在"写入期持续并发读"下不够，红测直接打出
+`PermissionError(13, '拒绝访问。')`。改为 `(0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8)`：
+首个退避更短（读者 open-read-close 只需微秒级），总预算更长（读者绝不能让写入失败）。
+`tests/test_subagent_state.py` 里断言首个退避值的测试改为引用
+`subagent_state._WINDOWS_REPLACE_RETRY_DELAYS[0]`，不再硬编码 `0.02`。
+
+**回归基线**：subagent 相关 `Ran 130 tests ... OK`；全量 `Ran 748 tests in 106.855s ... OK (skipped=1)`
+（较上次基线 743 增加的 5 个即本次新增测试）。
+
+切片 2（S1，P0 安全）**已完成**。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| S1 | ✅ 完成 | `subagent_realtime_ipc.py` 新增 `new_channel_authkey()`（`secrets.token_bytes(32)`）/ `write_channel_authkey()` / `read_channel_authkey()` / `remove_channel_authkey()`；`SubagentManager._env_realtime_channel_factory()` 为每个 run 生成独立 authkey；spawn 建好 task dir 后由 `_write_realtime_authkey()` 把密钥写进 `<task_dir>/ipc_authkey`（`chmod 0o600`，POSIX 生效）；`close_agent` 关通道时一并删除密钥文件 | `None is not an instance of <class 'bytes'>`；`cannot import name 'read_channel_authkey'`；`b'cccc...' is not None` |
+
+**密钥不外泄的三条保证**（均有测试断言）：
+- 密钥走 task dir 侧车文件，**不进 `state.json`**——`state.json` 会被 `read_agent` 返回给 LLM。
+- `ipc_endpoint`（`subagent_realtime_ipc.py` `endpoint()`）只含 status/address/family/subscriber_count，
+  测试直接断言序列化后的 `ipc_endpoint` 里不出现 `authkey` 字面量。
+- 通道关闭即删密钥，避免留下一个已无用途的秘密。
+
+**回归**：`Ran 134 tests ... OK`（较 M 系列的 130 增加的 4 个即 S1 新增测试）。
+
+下一步：切片 3（R1 子 agent 订阅 realtime channel → R2 → R4 → R3）。R1 之所以必须排在 S1 之后：
+R1 会让这条通道从"没人用的摆设"变成"承载真实消息的通路"，先接通再补认证等于把泄露面从理论变成现实。
+
+切片 3 的 R1 / R2 / R4 **已完成**（R3 待做）。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| R1 | ✅ 完成 | `subagent_realtime_ipc.py` 新增 `SubagentRealtimeSubscriber`（`wait(timeout)` 阻塞在 `conn.poll` 上，排空积压信号）与 `resolve_child_subscription()` / `open_child_subscription()`；`run_task_worker_loop()` 启动时读 `state.json` 的 `ipc_endpoint` + task dir 里的 authkey 完成订阅，等待回复时用 `subscriber.wait(reply_sleep_s)` 取代 `sleep_fn(reply_sleep_s)`；异常与正常退出都 `close()` | `[0] != [1]`（子从未订阅）；`[0.05, 0.05] != []`（持有订阅仍在盲睡） |
+| R2 | ✅ 完成 | 无需新增发布代码——`SubagentManager._queue_message()` 落盘后已经走 `event_bus.append_event("message_queued", ...)`，而 event bus 的 `_publish()` 会把事件 fan-out 到 channel。R1 接通订阅后这条链路自动成立。本项落的是**契约测试**：断言 (a) 先落盘、(b) 通道上收到 `message_queued` 信号、(c) 信号里**不含消息正文**、(d) 信号丢失时轮询兜底仍能送达 | 见下方说明 |
+| R4 | ✅ 完成 | 子侧订阅结果写入 `state.json` 的 `child_ipc_status`（`subscribed` / `fallback` / `file`）+ `child_ipc_fallback_reason` + `child_ipc_address`，并在非 `file` 时补一条 `child_ipc_status` 事件；运行中通道被父侧关闭会重新记为 `fallback` 且原因含 `disconnected mid-run` | `KeyError: 'child_ipc_status'` ×3；`'subscribed' != 'fallback'`（中途断连未被记录） |
+
+**R2 是唯一一项红测一开始就绿的任务**，需要说明清楚：R1 落地后 `_queue_message` →
+`event_bus.append_event` → `_publish` → channel → subscriber 这条链路已经自然连通，
+所以 R2 的价值不是"写新代码"，而是**把不可妥协的设计约束固化成断言**：
+realtime 事件只是 Codex `watch::Sender<()>` 式的空信号，正文永远从 durable mailbox 读。
+测试额外开了一个裸 `connect_realtime_channel` 连接直接检查载荷，
+断言 `"second turn please" not in json.dumps(signal)`——如果将来有人把正文塞进事件走捷径，
+这条断言会立刻变红。这正是规划里"反模式"一节要防的退化。
+
+**R4 的一处设计取舍**：`child_ipc_status == "file"`（未配置 realtime，绝大多数情况）
+**不写事件**，只写 state 字段。否则每个子 agent 的事件流都会多一条毫无信息量的记录，
+而现有生命周期测试正是按事件序列断言的（`['turn_started', 'turn_completed', ...]`）。
+状态字段本身仍然写，可观测性不受影响。
+
+**回归**：subagent 相关 `Ran 142 tests ... OK`；全量 `Ran 760 tests in 116.766s ... OK (skipped=1)`。
+
+下一步：R3（轮询粒度与空转寿命解耦）。R1 落地后这个耦合更值得拆——
+realtime 已保证低延迟，轮询间隔本该放大省 CPU，但当前放大就会缩短子 agent 寿命。
+
+R3 **已完成**，切片 3 全部收尾。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| R3 | ✅ 完成 | `agentmain.py` 新增 `resolve_reply_wait_schedule()`（把 iterations×sleep 折算成 interval + timeout）、`_reply_wait_slices()`（按 deadline 产出每次等待时长，末片钳到 deadline）、`resolve_reply_wait_schedule_from_env()`（`GA_SUBAGENT_POLL_INTERVAL_S` / `GA_SUBAGENT_IDLE_TIMEOUT_S`）；`run_task_worker_loop()` 新增 `poll_interval_s` / `idle_timeout_s` / `monotonic_fn` 三个可选参数，`__main__` 的 spawn 入口读环境变量 | `unexpected keyword argument 'monotonic_fn'` ×5；`cannot import name 'resolve_reply_wait_schedule_from_env'` |
+
+**向后兼容按"旧参数原义不变"实现**（有专门测试锁定）：只传 `reply_wait_iterations` /
+`reply_sleep_s` 时，等待次数与时长与改动前逐次一致（`reply_wait_iterations=3, reply_sleep_s=0.5`
+→ `[0.5, 0.5, 0.5]`）；默认值 `300×2s` 仍等于 600s 空转寿命。这一点很关键——
+仓库里有 12 处调用点直接传这两个参数，静默改变时序会让"测试还绿但行为变了"。
+
+**两个边界处理**：
+- `poll_interval_s` 大于 `idle_timeout_s` 时最后一片钳到 deadline（`5.0` 间隔 + `1.0` 寿命 → 只等 `[1.0]`），
+  否则粗间隔会越过寿命边界。
+- `interval <= 0`（测试里大量使用 `reply_sleep_s=0`）退回按迭代次数计数，
+  否则 deadline 驱动的循环会因为时间不推进而空转不止。
+
+**为什么额外补了环境变量入口**：子 agent 由 `SubagentManager` 用固定命令行拉起
+（`subagent_manager.py:454-470`，只有 task/llm_no/permission 相关参数），
+不加环境变量路径的话这两个新旋钮**只有测试能用到**，真实 spawn 的子进程永远拿不到。
+非法值（空串 / 非数字 / 非正数）一律回落默认而不是让启动失败。
+
+**回归**：subagent 相关 `Ran 147 tests ... OK`；全量 `Ran 766 tests in 113.908s ... OK (skipped=1)`。
+
+下一步：切片 4（G1 agent 深度/总数上限守护 + S2 传输层加固）。
+
+G1 **已完成**。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| G1 | ✅ 完成 | `subagent_registry.py` 新增 `SubagentTreeLimitError`、`resolve_tree_limits_from_env()`（`GA_SUBAGENT_MAX_DEPTH` / `GA_SUBAGENT_MAX_ACTIVE`）、`SubagentRegistry(max_depth=3, max_active_agents=8)` 与 `_check_tree_limits()`（`create_child()` 落盘前校验）；`SubagentManager` 新增 `self_agent_path`（构造参数或 `GA_SUBAGENT_AGENT_PATH` 环境变量），spawn 以它为 parent 而非硬编码 `/root`，并通过 `_child_popen_kwargs()` 把 agent path 传给子进程；越限时先写 `spawn_rejected` 事件再抛错 | `cannot import name 'SubagentTreeLimitError'` / `'resolve_tree_limits_from_env'`；`unexpected keyword argument 'self_agent_path'`；`KeyError: 'env'`；`'SubagentManager' object has no attribute 'self_agent_path'`；`0 != 1`（拒绝无事件） |
+
+**实现中发现的真实前置缺陷（原规划未列出）**：`spawn_agent()` 把
+`parent_path=AgentPath.root()` **硬编码**，所以孙 agent 也注册成 `/root/<name>`——
+**深度上限即使实现了也永远不会触发**，因为树在 registry 里永远是扁平的。
+必须先让嵌套被正确记录，守护才有意义。为此加了两条：
+- `SubagentManager.self_agent_path`：当前 manager 代表哪个 agent。
+- spawn 时通过 `env` 传 `GA_SUBAGENT_AGENT_PATH` 给子进程。子进程跑的是同一份
+  `agentmain.py` / 同一个 registry，不告诉它"你是谁"，它的 spawn 又会退回 `/root`。
+  `env` 用 `{**os.environ, ...}` 扩展而非替换（有测试断言 `PATH` 仍在），
+  否则子进程会丢掉整个环境。
+
+**语义选择**：上限管的是**活跃** agent 数，不是历史累计。测试显式验证
+"关掉一个就能再开一个"——累计计数会让长会话逐渐无法 spawn，那是资源治理而非安全守护。
+默认 depth ≤ 3 / 活跃 ≤ 8，保守但可用环境变量放宽。
+
+**回归**：subagent 相关 `Ran 156 tests ... OK`；全量 `Ran 774 tests in 119.629s ... OK (skipped=1)`。
+
+S2 **已完成**，切片 4 收尾，规划内 P0/P1 全部落地。
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| S2 | ✅ 完成 | `subagent_realtime_ipc.py`：POSIX 侧 `default_channel_address()` 在 `mkdir` 后每次都 `os.chmod(base, 0o700)`；Windows 侧新增 `validate_channel_owner()` + `_pipe_server_user_sid()` / `_process_user_sid()` / `_current_user_sid()` / `_is_pipe_address()`（ctypes 调 `GetNamedPipeServerProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `OpenProcessToken` → `GetTokenInformation(TokenUser)` → `ConvertSidToStringSidW`），`connect_realtime_channel()` 在 `Client()` 之后立即校验，失败先关句柄再抛 `PermissionError` | `does not have the attribute '_pipe_server_user_sid'`；`cannot import name 'validate_channel_owner'` |
+
+**为什么 S1 的 authkey 不够**：authkey 只证明"对端知道这个 secret"，不证明
+"这个端点值得把 secret 交出去"。剩下两个洞方向相反：
+
+- POSIX：channel 目录按 ambient umask 创建，别的本地账号可以往里放自己的 socket
+  抢地址。所以 `chmod` 每次调用都做，而不是只在新建时做——上一次跑在宽 umask 下
+  建出来的目录不能永久敞着（有独立测试覆盖"目录已存在"这条路径）。
+- Windows：命名管道是全局命名空间，地址由**顺序递增**的 `run_id` 推出，任何本地进程
+  都能先抢注 `\\.\pipe\ga_subagent_<run_id>`，然后坐等子 agent 把 authkey 送上门。
+  管道**所有者**正是 authkey 无法证明的东西。参考 Codex
+  `codex-rs/tui/src/ide_context/windows_pipe.rs:263` `validate_pipe_server_owner`：
+  同样是 pid → token → user SID → 比对当前用户。
+
+**fail closed 的取舍**：owner 读不出来时按"不可信"处理并拒连。唯一会读不出来的现实原因
+就是那个服务端进程不归我们、查不了；把"查不到"当"可信"等于给冒名管道开后门。
+代价是子 agent 退回轮询——由测试锁住：`resolve_child_subscription()` 把
+`PermissionError` 归到 `fallback` 状态并带上原因，durable mailbox 仍然送达，
+所以最坏情况是延迟变差而不是消息丢失。
+
+**平台边界**：`validate_channel_owner()` 只在 Windows 且地址是 `AF_PIPE` 时动作，
+POSIX socket 直接返回 `None`——它的防线是 `0o700` 目录，不是 SID 比对；有一条
+非 Windows 也会跑的测试断言这条短路存在，免得以后有人给 POSIX 路径加无意义的 ctypes 调用。
+
+**回归**：subagent 相关 `Ran 163 tests ... OK (skipped=2)`；全量
+`Ran 781 tests in 117.700s ... OK (skipped=3)`。（新增 skip 是两条 Windows-only /
+POSIX-only 的平台守卫测试，在当前 Windows 环境下 POSIX 权限那两条被跳过。）
+
+下一步：规划内 P0/P1 已全部完成。剩余为显式排除项（P2 的 B1-B3：realtime channel
+背压、显式 `Op` 结构、watch 语义状态订阅）。
+
+### 1.2 真实 API E2E 验收（2026-07-29）
+
+§7 要求的真实 API 验收。原计划用 `gpt-5.6-terra`（`provider: wapq`），
+实跑时该渠道 `ConnectTimeout`（`hhhl` 中转在 `/v1/chat/completions` 上可用但子 agent
+首轮仍超时），**改用 `claude-opus-5`（`provider: gorouter`，anthropic 线）**完成验收。
+两个脚本都保留 `SECRET_RE` / `sanitize()` 脱敏。
+
+| 脚本 | 覆盖 | 结果 |
+| --- | --- | --- |
+| `tests/real_subagent_terra_e2e.py` | spawn → 真实 LLM 首轮 → close → `resume_agent` 复用同 run_id 第二轮 → artifact / transcript / round 断言 | `passed: true`，`issues: []`，`finalOutputRounds: [0, 1]` |
+| `tests/real_subagent_realtime_e2e.py`（**新增**） | `GA_SUBAGENT_REALTIME_IPC=1` + `ipc_mode=socket` 真实命名管道：authkey 交付 → 子进程订阅 → 真实 LLM 首轮 → `followup_task` 实时唤醒 → authkey 泄漏扫描 → close 后删密钥 | `passed: true`，`issues: []` |
+
+realtime E2E 的关键数字：`effectiveIpcMode: socket`、`childIpc.status: subscribed`、
+`subscriberCount: 1`、`authkey.bytes: 32`、`authkeyLeaks: []`、
+`endpointKeys: [address, family, status, subscriber_count]`、`authkeyRemovedOnClose: true`，
+以及 **`followupWakeSeconds: 0.25`**。
+
+最后这个数字是整份规划的验收点：脚本把 `GA_SUBAGENT_POLL_INTERVAL_S=30` /
+`GA_SUBAGENT_IDLE_TIMEOUT_S=600` 故意设成粗轮询 + 长寿命，所以 0.25 秒被唤醒
+**只可能**来自 realtime 信号——轮询定时器要 30 秒才会醒。脚本对此设了硬断言
+（≥25 秒记 `followup_woke_on_poll_not_realtime`），否则"realtime 生效"这个结论
+就退化成一句无法证伪的话。§8 预期的"父→子延迟从平均 1s / 最差 2s 降到毫秒级"
+至此有了实测数字。
+
+**为什么必须补这个脚本**：单元测试里 owner 校验是 mock 的，realtime 路径也都在
+进程内驱动 `run_task_worker_loop`。真实子进程 + 真实管道 + 真实 authkey + 真实
+owner 校验 + 真实 LLM 轮次这一条组合路径，之前零覆盖。
+
+### 1.3 E2E 暴露的两个真实缺陷（规划外，已按 TDD 修复）
+
+真实跑批各暴露一个只有真实链路才会触发的缺陷。两个都是"单测全绿但功能不可用"，
+正是补 E2E 的理由。
+
+| 缺陷 | 现象 | 根因 | 修复 | 红测证据 |
+| --- | --- | --- | --- | --- |
+| G1 的上限守护把 registry 变成一次性资源 | 第一次跑 terra E2E 直接起不来：`SubagentTreeLimitError: active agent limit exceeded: 36 agents already active, max active is 8` | `_check_tree_limits()` 把"`status != closed`"当活跃，而 `status` 只在 `close_agent` 走完时才变 `closed`。崩溃、被 kill、机器重启留下的行永久算活跃——实测 registry 里 36 行"活跃"，实际存活进程 **1 个** | `SubagentRegistry(process_exists=...)` + `_reap_stale_agents()`：进程没了就把行改成 `closed` / `closed_status="stale"`（**不删**，行本身是崩溃的唯一证据），返回真实活跃数；`SubagentManager` 把自己的 `process_exists` 传下去 | `unexpected keyword argument 'process_exists'`；`'SubagentRegistry' object has no attribute 'process_exists'` |
+| 所有 resume 轮次在 anthropic 线上必炸 | resume 第二轮输出 `ValueError: dictionary update sequence element #0 has length 1; 2 is required @ llmcore.py:842, raw_ask` | `build_resume_context()` 写出的 `_history.json` 行是 `{"role": ..., "content": "<str>"}`（content 是**字符串**），而 `BaseSession.ask()` / `ClaudeSession.make_messages()` / `NativeClaudeSession.raw_ask()` 都 `list(m["content"])`，把字符串拆成**逐字符** block，随后 `dict('s', cache_control=...)` 抛错 | 新增 `llmcore._content_blocks()`（str → 单个 text block，list → 拷贝，dict → 包一层），替换三处 `list(content)`，并在 `_fix_messages()` 入口统一归一化 | `Lists differ: ['c','o','n','t',...] != [{'type':'text','text':'continue analysis'}]`；`ValueError: dictionary update sequence element #0 has length 1; 2 is required` |
+
+第二个缺陷的影响面比本 feat 大得多：它让**任何** anthropic-wire 后端上的 subagent
+resume 都无法完成第二轮，而单测全绿是因为没有一条测试用 str content 的 history 走过
+真实 payload 组装。`tests/test_llmcore_history_content.py`（6 条）把这个契约锁住，
+包含一条直接打在崩溃行 `raw_ask` 上的用例。
+
+**回归**：subagent 相关 `Ran 168 tests ... OK (skipped=2)`；全量
+`Ran 792 tests in 114.913s ... OK (skipped=3)`。
+
+## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
+
+### 2.0 实测证据摘要
+
+一次性探针脚本实测（Python 3.12.4 / Windows，`threading.Barrier` 对齐起跑放大竞态窗口，
+跑完即删）。线程级竞态即证明跨进程竞态——跨进程没有 GIL 保护，只会更差。
+
+| 探针 | 条件 | 结果 |
+| --- | --- | --- |
+| 并发 `enqueue` | 4 writer × 200 轮 = 800 条 | **丢 600 条（75%）** |
+| `enqueue` vs `consume_trigger_turn` | 2 线程 × 200 轮 | **93/200 轮（46.5%）消息彻底丢失** |
+| 并发自动 `message_id` | 4 writer × 200 轮 | **200/200 轮碰撞** |
+| 套用 event bus 现成锁后重跑 | 4 writer × 200 轮 | **丢 0 条**（修复方案已验证） |
+| `_write_rows` 截断窗口 | 500 行，写入期并发读 | **86/259 次（33%）读到残缺/空 mailbox** |
+
+完整归因见调研文档 3.4 节。
+
+### M1（P0）mailbox 加跨进程锁
+
+**问题**：`subagent_mailbox.py:30,50,51` 的 `enqueue()` 是无锁 read-modify-write
+（`rows = self._read_rows()` → `rows.append(row)` → `self._write_rows(rows)`）；
+`consume_trigger_turn()`（`:55` 读 → `:75` 写回全量）同样无锁。
+父进程 `send_message` / `followup_task` 与子进程轮询消费天然并发，实测 46.5% 概率静默丢消息。
+丢失量 = (writers-1) × rounds 与实测完全吻合，说明是**结构性必然，不是偶发**。
+
+**方案**：复用 `subagent_event_bus.py:117-142` 的 `_locked()`（Windows `msvcrt.locking`
+自旋 + POSIX `fcntl.flock`）。抽成共享工具（如 `subagent_state.py` 里的
+`cross_process_lock(lock_path)`），`SubagentMailbox` 持有自己的 `mailbox.lock`，
+`enqueue()` / `consume_trigger_turn()` 全程持锁。探针 5 已验证丢失归零。
+
+不要新造锁机制——仓库里已有一个能用的，重复实现会产生第三套分叉。
+
+**TDD**：先写并发红测（N 线程 `Barrier` 对齐后各 `enqueue` 一条，断言落盘条数 == N；
+以及 enqueue/consume 并发断言消息不丢），确认红，再实现。
+
+**验收**：并发红测转绿；`tests.test_subagent_mailbox` 全绿。
+
+### M2（P0）落盘改原子替换
+
+**问题**：`subagent_mailbox.py:111` `open(self.path, "w")` 先截断再逐行写。
+截断到写完之间任何读者看到残缺文件（实测 33%）；此刻崩溃会**留下被截断的 mailbox**，
+直接违反"durable 为权威源"。
+
+**方案**：照 `subagent_state.py:102-106` 的写法——写 tmp 文件后 `_replace_file()`
+（内部 `os.replace` + Windows `PermissionError` 重试）。同一仓库已有正确实现。
+
+**注意**：M1 的锁和 M2 的原子替换**都要**。锁防止逻辑覆盖，原子替换防止读者脏读和崩溃残缺；
+两者解决的是不同问题，不能互相替代。
+
+**TDD**：先写"写入期间并发读永不观测到少于已提交行数"的红测，确认红，再实现。
+
+### M3（P0）消除 message_id 行数派生碰撞
+
+**问题**：`subagent_mailbox.py:33`
+`message_id = message_id or f"msg_{len(rows) + 1:06d}"` 用行数派生 ID，
+并发写入者读到同样行数生成同一 ID，实测 200/200 轮碰撞。更糟的是 `:31-32` 的去重逻辑
+会把碰撞消息当成同一条返回——**丢失被伪装成幂等命中**，比直接报错更难查。
+
+**方案**：M1 的锁已能消除并发碰撞（持锁期间 `len(rows)` 稳定）。
+但库层不该依赖调用方持锁，ID 应自身唯一：改为 `f"msg_{uuid4().hex[:12]}"`
+或 `序号 + 随机后缀`。保留显式 `message_id` 的幂等去重语义不变（那是有意设计，
+供工具层重试用）。
+
+**TDD**：先写并发自动 ID 唯一性红测，确认红，再实现。
+
+### M4（P0）统一两套分叉的 mailbox 消费实现
+
+**问题**：仓库里有两套 mailbox 消费实现，语义不一致，且**被调用的那套用的是不安全写法**：
+
+| | `SubagentMailbox.consume_trigger_turn()` | `consume_mailbox_trigger()` |
+| --- | --- | --- |
+| 位置 | `subagent_mailbox.py:54` | `subagent_state.py:77` |
+| 落盘 | `open(...,"w")` 就地截断（**不安全**） | tmp + `os.replace`（安全） |
+| 消费范围 | trigger 消息**及其之前所有 queue_only**（`:64`） | 只消费第一条 trigger 行（`:96-99`） |
+| 返回 | dict（content/messages/consumed_at） | 仅 content 字符串 |
+| 被调用 | 是（`agentmain.py:969`） | **否——死代码**（`agentmain.py:27` import 但全仓无调用） |
+
+**方案**：保留 `SubagentMailbox` 的消费语义（范围正确，符合 QueueOnly/TriggerTurn 协议），
+落盘换成 M2 的原子替换，然后**删除 `consume_mailbox_trigger` 与 `agentmain.py:27` 的 import**。
+留着会让后来者改错文件。
+
+**验收**：`grep -rn "consume_mailbox_trigger"` 只剩历史文档；子 agent 生命周期测试全绿。
+
+## 3. P0 安全：realtime channel 认证
+
+### S1（P0）per-run authkey
+
+**问题**：`subagent_realtime_ipc.py:39` `__init__(..., authkey=None)` +
+`:52` `Listener(self.address, authkey=self.authkey)` —— **默认不做任何认证**。
+而地址完全可预测：`subagent_registry.py:76` `run_id = f"run_{run_no:06d}"` 是顺序编号，
+`subagent_realtime_ipc.py:15` 拼成 `\\.\pipe\ga_subagent_run_000001`。
+本机任何进程都能猜到管道名后 `Client()` 连上，**接收该子 agent 的完整事件流**——
+events 里含 task 内容、工具调用参数、权限决策。Windows named pipe 默认 ACL
+允许同 session 其它进程连接。
+
+**这一条优先级高于所有延迟优化：延迟是体验问题，未认证事件流是信息泄露。**
+而且必须与 R1 同批落地——R1 会让这条通道从"没人用的摆设"变成"承载真实消息的通路"，
+在没有认证的情况下接通它等于把泄露面从理论变成现实。
+
+**方案**：
+- spawn 时生成 per-run 随机 authkey（`secrets.token_bytes(32)`），写入子 agent
+  task dir 内的 state（仅父与该子进程可达），不进 registry 全局文件、不进日志。
+- `SubagentRealtimeChannel(address, authkey=...)` 与 `connect_realtime_channel(address, authkey=...)`
+  双向使用（两个函数**已有 authkey 参数**，只是没人传）。
+- `ipc_endpoint` 暴露地址但**不得暴露 authkey**（`ipc_endpoint` 会写进 `state.json` 并被
+  `read_agent` 返回给 LLM）。
+- 日志与事件 payload 不得出现 authkey；沿用 E2E 脚本的 secret redaction 思路。
+
+**TDD**：先写"未带 authkey 的 Client 连接被拒"红测，确认红，再实现。
+
+### S2（P1）传输层加固
+
+- POSIX：`default_channel_address()`（`subagent_realtime_ipc.py:16-18`）建的
+  channel 目录权限收到 `0o700`。
+- Windows：参考 Codex `tui/src/ide_context/windows_pipe.rs:56-82` 的
+  `validate_pipe_server_owner`，客户端连上后校验管道服务端所有者，防连到冒名管道。
+
+## 4. P1 实时性：把死通道接通
+
+### R1（P1）子 agent 订阅 realtime channel
+
+**问题（最高性价比修复点）**：`subagent_realtime_ipc.py:21`
+`connect_realtime_channel()` 在**整个非测试代码里零调用者**——
+`grep -rn "connect_realtime_channel" --include=*.py . | grep -v tests` 只命中定义处本身。
+父侧 `SubagentManager._open_realtime_ipc()`（`subagent_manager.py:209-218`）
+确实 `start()` 了 Listener 并把地址写进 `ipc_endpoint`（`:421`），
+但**子进程 `agentmain.py` 从未连接**。
+
+所以 `GA_SUBAGENT_REALTIME_IPC=1` 目前只做到"父侧监听 + 事件 fan-out 给不存在的订阅者"
+（`subagent_manager.py:220-224` `_publish_realtime_event` 找到 channel 后
+`channel.publish(event)`，而 `publish()` 的 `subscribers` 永远是空列表）。
+**父→子延迟因此完全没有改善，子侧仍是纯 2 秒轮询。这是"realtime IPC 感觉没用"的直接原因。**
+
+**方案**：
+- 子进程启动时从 `state.json` 读 `ipc_endpoint.address` + authkey（S1），
+  调 `connect_realtime_channel()` 订阅；连接失败不报错，退回轮询（R4）。
+- 传递路径：`ipc_endpoint` 已经在 `state.json` 里（`subagent_manager.py:421`），
+  子进程 `run_task_worker_loop` 已经在读 `state.json`（`agentmain.py:848-849`），
+  **不需要新增命令行参数或环境变量**。
+- 连接生命周期跟随 worker loop，退出时关闭。
+
+**TDD**：先写"子 agent 连上父 channel 后能收到父 publish 的事件"红测（用真实
+`SubagentRealtimeChannel` + 真实 `connect_realtime_channel`，不 mock 传输），确认红，再实现。
+
+### R2（P1）mailbox trigger 走 realtime 通知
+
+**目标**：把父→子延迟从"平均 1s / 最差 2s"压到毫秒级，**同时不改变权威源语义**。
+
+**当前路径**：`agentmain.py:960-961` `for _ in range(reply_wait_iterations): sleep_fn(reply_sleep_s)`
+先睡 2 秒，再 `consume_trigger_turn()`（`:969`）。父进程
+`SubagentManager.send_message`（`subagent_manager.py:1094`）落盘后要等子 agent 下一次醒。
+
+**目标路径**（这就是 Codex 的模型，见第 0 节第 3 条）：
+1. 父 `enqueue` 到 `mailbox.jsonl`（持锁 + 原子替换，M1/M2）——**先落盘**。
+2. 落盘成功后 publish 一条 `message_queued` / `message_trigger` 事件到 realtime channel。
+   与 `SubagentEventBus._publish()`（`subagent_event_bus.py:58,61-68`）一致：
+   durable append 先完成，publish 是 best-effort，失败被吞掉不影响 durable。
+3. 子 agent 阻塞在 `conn.poll(timeout=poll_interval_s)` 而非 `sleep()`；
+   收到通知后**回去读 durable mailbox**（`consume_trigger_turn()`）拿内容。
+4. 通知丢失不影响正确性——`poll` 超时后照样走一次 `consume_trigger_turn()`，
+   轮询降级为兜底而非主路径。
+
+**关键设计约束（不可妥协）**：realtime 事件**只作为 trigger 信号，不携带消息内容**。
+内容始终从 durable mailbox 读。这样：
+- 崩溃时未消费消息仍可重放（GA 相对两个参考实现的唯一优势，不能丢）。
+- 通知丢失退化为"延迟到下次轮询"，不是"消息丢失"。
+- 与 Codex `watch::Sender<()>` 空负载语义一致。
+
+**反模式**：不要把消息内容塞进 realtime 事件然后跳过读盘——那会让 realtime 通道变成
+第二个权威源，退化成 Claude Code 的内存队列语义，同时失去 durable 优势。
+
+**TDD**：先写红测断言三件事同时成立——(a) 消息仍持久化到 `mailbox.jsonl`；
+(b) realtime channel 上收到 trigger 事件；(c) 子 agent 消费到的内容来自 durable mailbox。
+确认红，再实现。
+
+### R3（P1）轮询粒度与空转寿命解耦
+
+**问题**：`agentmain.py:827` `reply_wait_iterations=300, reply_sleep_s=2` 这两个参数
+同时决定了两件无关的事：
+- 轮询粒度 = `reply_sleep_s` = 2s（决定延迟）
+- 子 agent 空转寿命 = `300 × 2s = 600s`（决定何时判定 `agent_exited`，
+  见 `agentmain.py:986-989` 的 `for...else` 分支）
+
+后果：想降低延迟就得减小 `reply_sleep_s`，但那会同时缩短子 agent 寿命；
+反之想延长寿命就得加大轮询间隔。R1/R2 接通后这个耦合更别扭——
+realtime 已经保证低延迟，轮询间隔本该放大以省 CPU，但放大就缩短寿命。
+
+**方案**：拆成 `poll_interval_s`（单次等待粒度）与 `idle_timeout_s`（总空转寿命），
+循环条件改为按 deadline 判定而非固定迭代次数。保持默认行为等价（600s 寿命），
+避免破坏现有测试与真实 E2E 的时序预期。
+
+**注意**：`run_task_worker_loop` 的签名被测试直接调用
+（`tests/test_agentmain_subagent_lifecycle.py` 传 `sleep_fn` 等），
+改签名要保留旧参数兼容或同步更新测试，不能静默破坏。
+
+### R4（P1）优雅降级与可观测性
+
+- realtime 连接失败 / 中途断开 → 自动退回轮询，不得让子 agent 卡死或退出。
+- 降级要在 `state.json` / events 里可见：沿用现有
+  `effective_ipc_mode` + `ipc_fallback_reason` 字段（`subagent_ipc.py:26-51` 已有这套语义），
+  子侧订阅失败时也要写一条，让 `read_agent` 能看出"父侧监听成功但子侧没连上"。
+  当前只有父侧的 fallback 会被记录，子侧静默失败——这也是本轮才发现死通道的原因之一。
+- `subagent_ipc.py` 的 `_REALTIME_IPC_MODES`（`:4`）保持 opt-in 默认关闭，
+  直到 R1-R4 + S1 全绿再考虑是否默认开启。
+
+## 5. P1 安全守护：agent 树上限
+
+### G1（P1）深度 / 总数上限
+
+**问题**：`subagent_registry.py` / `subagent_manager.py` / `subagent_agent_path.py`
+里 grep 不到任何 depth / max_agents / MAX_ 限制。子 agent 可以递归 spawn 子 agent，
+每个都是**独立 OS 进程**——失控时后果比同进程实现严重得多（进程耗尽、内存耗尽、
+真实 LLM API 费用失控）。
+
+**参考**：Codex `core/src/agent/registry.rs:23-26`
+`AgentRegistry { active_agents: Mutex<ActiveAgents>, total_count: AtomicUsize }`
+守护 agent 树深度与活跃总数，`control.rs:221` `reserve_spawn_slot` 在 spawn 前预留槽位。
+
+**方案**：`SubagentRegistry.create_child()` 里按 `AgentPath` 深度 + 活跃 entry 计数拒绝超限，
+返回明确错误而非静默失败。默认值保守（如 depth ≤ 3、活跃 ≤ 8），可配置。
+拒绝时写 event，便于排查。
+
+**TDD**：先写"超过深度上限时 spawn 被拒且有明确原因"红测。
+
+## 6. P2 控制面清晰度（纯收益，不动进程模型）
+
+这一组是 Codex 路线里**值得抄且不需要切换运行时**的部分（调研文档 4.2.1 阶段 B）。
+
+### B1 realtime channel 背压
+
+**问题**：`subagent_realtime_ipc.py:59-82` `publish()` 是同步全量 fan-out，
+对每个 subscriber 顺序 `conn.send(event)`。慢订阅者（或管道缓冲满）会**阻塞 publish 调用方**，
+而 publish 是从 `SubagentEventBus.append_event()`（`subagent_event_bus.py:58`）
+在持锁路径之后调用的——一个卡住的订阅者能拖慢整个事件写入链路。
+
+**参考**：Codex `app-server-client/src/lib.rs:130-136` 的
+`AppServerEvent { Lagged, ServerNotification, ServerRequest, Disconnected }`——
+显式区分 lossless 与 best-effort，慢订阅者收到 `Lagged` 而不是拖垮发送方；
+`app-server/src/transport.rs:129-166` 对可丢连接用 `try_send`，满了直接断开。
+
+**方案**：per-subscriber bounded 队列 + 后台发送线程；队列满则丢弃并投递一个
+"你落后了，请回读 durable"的 lagged 标记。这与 R2 的"trigger 不携带内容"设计天然契合——
+丢事件不丢消息。
+
+### B2 显式 Op 结构
+
+把 `spawn/send/close/interrupt/resume` 收敛成显式提交对象（参考 Codex
+`protocol.rs:123-133` `Submission { id, op, trace }`），带 `id` 便于幂等与追踪。
+GA 的 mailbox 消息字段已与 `Op::InterAgentCommunication`
+（`protocol.rs:663-670`：`author`/`recipient`/`other_recipients`/`content`/`trigger_turn`）同构，
+`other_recipients`（多播）是 GA 目前缺的，可顺带补上。
+
+收益：控制面可审计、可重放、可测试；代价：触及 `subagent_manager.py`（1544 行）
+与 13 个工具 handler，建议在 P0/P1 全绿后单独一个切片做。
+
+### B3 状态订阅改 watch 语义
+
+`wait_agents()`（`subagent_manager.py:775-830`）目前轮询
+`_event_size()` / `state.json` / 父 inbox。R1 接通后可改为"阻塞等 realtime 事件 +
+轮询兜底"，与 Codex `control.rs:880-887` `subscribe_status` 返回
+`watch::Receiver<AgentStatus>` 的语义对齐。
+
+注意 watch 语义是"最新值"而非"全部事件"，GA 的 `event_seq` cursor 语义
+（`subagent_event_bus.py:40,55`）不能因此丢——两者要共存：
+watch 负责唤醒，cursor 负责保证不漏事件。
+
+## 7. 实施顺序与验收
+
+### 建议切片顺序
+
+每个切片走 TDD（先红测→确认红→最小实现→绿→回归），落地后更新
+`docs/ga_subagent_v2_optimization_design_2026-07-27.md` 进度段。
+
+1. **切片 1（P0 正确性）**：M1 → M2 → M3 → M4。
+   先修正确性，因为 R2 会显著提高父子并发访问 mailbox 的频率——
+   在无锁 mailbox 上接通实时通知，等于把 46.5% 的丢消息概率暴露得更频繁。
+2. **切片 2（P0 安全）**：S1。必须在 R1 之前或同批——不能先把未认证通道接通。
+3. **切片 3（P1 实时性）**：R1 → R2 → R4 → R3。
+   R1 单独可验证（能收到事件），R2 才是业务价值，R4 保证不引入新的卡死路径，
+   R3 最后做因为它要改被测试直接调用的签名。
+4. **切片 4（P1 守护）**：G1 + S2。独立于上面，可并行。
+5. **切片 5（P2）**：B1 → B3 → B2。B2 最大，放最后。
+
+### 每切片的回归要求
+
+- focused fresh test：本切片的红测转绿。
+- subagent 回归：`python -m unittest tests.test_subagent_state tests.test_subagent_agent_path
+  tests.test_subagent_mailbox tests.test_subagent_artifacts tests.test_subagent_transcript
+  tests.test_subagent_notifications tests.test_subagent_roles tests.test_subagent_worktree
+  tests.test_subagent_ipc tests.test_subagent_realtime_ipc tests.test_subagent_registry
+  tests.test_ga_subagent_permissions tests.test_subagent_manager tests.test_subagent_event_bus
+  tests.test_ga_subagent_tools tests.test_agentmain_subagent_lifecycle tests.test_ink_bridge`
+  （当前基线 `Ran 217 tests ... OK`）。
+- workflow 回归（确认未动 workflow 语义），当前基线 `Ran 165 tests ... OK`；
+  已知 transient `test_runtime_observes_external_kill_state` 属 workflow 侧
+  deadline-vs-kill 竞态，**不在本 feat 范围，不修**。
+- 全量：`python -m unittest discover -s tests`（当前基线 `Ran 743 tests ... OK (skipped=1)`）。
+- 前后端模拟用户调用：涉及工具层改动时补 `tests.test_ink_bridge` 的 `submit()` 驱动用例。
+
+### 并发类测试的写法要求
+
+M1/M2/M3 的红测是并发测试，容易写成偶尔通过的假绿。要求：
+
+- 用 `threading.Barrier` 对齐起跑点放大竞态窗口，不要靠 `sleep` 碰运气。
+- 断言**确定性事实**（落盘条数 == 写入条数、ID 集合大小 == writer 数、
+  并发读永不观测到少于已提交行数），不要断言时序。
+- 重复足够轮次（实测 200 轮足以让无锁实现 100% 暴露）；
+  但正式测试里控制轮次以免拖慢 CI——无锁实现在 4 writer 下每轮必丢，
+  少量轮次即可稳定复现。
+- 跨进程语义优先用真实子进程验证一次（如 R1 的端到端），线程级测试作为快速回归。
+
+### 真实 LLM E2E
+
+若切片影响父子消息真实链路（R2 尤其），补一轮真实 API E2E：
+沿用 `tests/real_subagent_terra_e2e.py` 的模式，`llm.yaml` 的 `gpt-5.6-terra`
+（`provider: wapq`），并**保留 `SECRET_RE` / `sanitize()` 脱敏机制**。
+S1 落地后要额外确认 authkey 不出现在任何 E2E 输出、日志、`state.json` 可见字段里。
+
+## 8. 完成后的预期状态
+
+- 父→子消息延迟：从平均 1s / 最差 2s 降到毫秒级（realtime 通知），轮询降级为兜底。
+- 消息不丢：并发 enqueue/consume 不再互相覆盖；崩溃后未消费消息可重放
+  （相对 Claude Code / Codex 的唯一架构优势得以真正成立，而非名义上成立）。
+- 事件流认证：本机其它进程无法窃听子 agent 事件流。
+- agent 树有界：递归 spawn 不再能失控。
+- 架构定位清晰：GA = 跨进程版的 Codex 通知模型（durable 内容 + 空信号唤醒），
+  而不是"没做完的 Claude Code"。
+
+## 9. 何时才应重新考虑切换路线
+
+出现以下信号才值得付同进程化的成本（调研文档 4.4）：
+
+- 需要子 agent 与父共享内存态（共享文件读取缓存、共享 MCP 连接池），
+  序列化成本成为瓶颈 → 考虑 Claude Code 同进程路线。
+- 需要同时管理数十个 agent、需要 fork/replay 成为一等公民 → 考虑 Codex SQ/EQ 路线。
+- **需要 live tool permission request**（子 agent 实时请求父批准工具调用）→
+  这是文件协议的真实边界。它是请求-应答语义，用 mailbox 轮询实现会很别扭；
+  realtime channel 双向化能缓解，但如果要做成完整交互 runtime（接管子 stdin +
+  TUI 控制权转交），那时切路线的理由才充分。
+
+在此之前，本文档的 P0/P1/P2 是更高性价比的投入。
+
+## 10. 相关文档
+
+- `docs/ga_subagent_claudecode_codex_ipc_reference_2026-07-29.md`——源码级调研与缺陷实测证据
+- `docs/ga_subagent_v2_optimization_design_2026-07-27.md`——本 feat 主设计与进度
+- `docs/ga_subagent_mechanism_research_2026-07-27.md`
+- `docs/ga_subagent_codex_reference_2026-07-13.md`
+
+
+
