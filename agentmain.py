@@ -24,7 +24,7 @@ except Exception:  # 压缩核心导入失败时降级：/compact 报不可用�
     compact_agent_context = None
     replace_log_with_compact_history = None
 from ga_agents_runtime import build_ga_project_instructions
-from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, consume_mailbox_trigger, now_iso, sha256_file
+from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 from subagent_prompts import build_agent_role_usage_hint
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -305,6 +305,12 @@ def get_system_prompt(agent=None):
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
     prompt += build_ga_project_instructions(script_dir, os.getcwd())
+    if not bool(getattr(agent, 'task_dir', None)):
+        try:
+            from subagent_notifications import build_subagent_notifications_prompt
+            prompt += build_subagent_notifications_prompt(script_dir)
+        except Exception:
+            pass
     prompt += get_global_memory()
     prompt += build_skill_prompt()
     prompt += "\n" + build_agent_role_usage_hint(is_subagent=bool(getattr(agent, 'task_dir', None)), lang_suffix=lang_suffix) + "\n"
@@ -357,6 +363,7 @@ class GenericAgent:
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
         from permission_policy import DEFAULT_PERMISSION_MODE
         self.permission_mode = DEFAULT_PERMISSION_MODE
+        self.subagent_permission_policy = None
         # ask 档阻塞审批 runtime（可无 emit = headless deny）；bridge 会 set_emit
         try:
             from permission_runtime import PermissionRuntime
@@ -586,6 +593,17 @@ class GenericAgent:
                 )
             except Exception as e:
                 print(f"[WARN] Failed to attach permission mode policy: {e}")
+            # 进程型 subagent 专用权限隔离；workflow policy 仍由 workflow_child_agent 自己管理。
+            handler.subagent_permission_policy = getattr(self, 'subagent_permission_policy', None)
+            subagent_tool_before = getattr(self, '_subagent_transcript_tool_before', None)
+            if subagent_tool_before is not None:
+                handler.tool_before_callback = subagent_tool_before
+            subagent_tool_after = getattr(self, '_subagent_transcript_tool_after', None)
+            if subagent_tool_after is not None:
+                handler.tool_after_callback = subagent_tool_after
+            subagent_permission_callback = getattr(self, '_subagent_transcript_permission', None)
+            if subagent_permission_callback is not None:
+                handler.subagent_permission_event_callback = subagent_permission_callback
             # 共享 agent 级 runtime（含 bridge emit）；每轮 handler 都挂上同一实例
             handler.permission_runtime = getattr(self, 'permission_runtime', None)
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
@@ -666,6 +684,10 @@ class GenericAgent:
                 # Ink UI re-paints Turn 1 + tools a second time. Display spacing belongs
                 # in the frontend formatter (formatAssistantText).
                 display_queue.put({'done': full_resp, 'source': source})
+                subagent_assistant_callback = getattr(self, '_subagent_transcript_assistant', None)
+                if subagent_assistant_callback is not None:
+                    try: subagent_assistant_callback(full_resp)
+                    except Exception: pass
                 self.history = handler.history_info
                 try:
                     session_transcript.record_agent_turn(
@@ -681,6 +703,10 @@ class GenericAgent:
                 print(f"Backend Error: {format_error(e)}")
                 failed_resp = full_resp + f'\n```\n{format_error(e)}\n```'
                 display_queue.put({'done': failed_resp, 'source': source})
+                subagent_assistant_callback = getattr(self, '_subagent_transcript_assistant', None)
+                if subagent_assistant_callback is not None:
+                    try: subagent_assistant_callback(failed_resp, error=format_error(e))
+                    except Exception: pass
                 try:
                     session_transcript.record_agent_turn(
                         self,
@@ -739,31 +765,260 @@ PARENT_INBOX_EVENT_TYPES = {
     'agent_closed',
 }
 
+def _subagent_transcript_append(task_dir, event_type, payload):
+    try:
+        state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
+        parent_session_id = state.get('parent_session_id') or payload.get('parent_session_id')
+        run_id = state.get('run_id') or payload.get('run_id')
+        if parent_session_id and run_id:
+            from subagent_transcript import SubagentTranscriptStore
+            SubagentTranscriptStore(os.path.join(os.path.dirname(task_dir), 'sessions')).append_event(
+                parent_session_id,
+                run_id,
+                event_type,
+                payload,
+            )
+    except Exception:
+        pass
+
+
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
+    task_name = event.get('task_name') or os.path.basename(os.path.normpath(task_dir))
+    state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
+    agent_path = event.get('agent_path') or state.get('agent_path') or f'/root/{task_name}'
+    run_id = state.get('run_id') or event.get('run_id')
+    payload = {k: v for k, v in event.items() if k not in {'type', 'task_name', 'agent_path', 'run_id'}}
+    status = {
+        'turn_status': state.get('turn_status'),
+        'process_status': state.get('process_status'),
+    }
+    try:
+        from subagent_event_bus import SubagentEventBus
+        SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
+            event.get('type') or 'subagent_update',
+            agent_path=agent_path,
+            run_id=run_id,
+            task_name=task_name,
+            status=status,
+            payload=payload,
+            notify=event.get('type') in {'turn_completed', 'agent_exited', 'agent_shutdown', 'agent_error', 'agent_closed'},
+        )
+    except Exception:
+        pass
+    try:
+        parent_session_id = state.get('parent_session_id') or event.get('parent_session_id')
+        if parent_session_id and run_id:
+            _subagent_transcript_append(
+                task_dir,
+                event.get('type') or 'subagent_update',
+                {
+                    'task_name': task_name,
+                    'agent_path': agent_path,
+                    'status': status,
+                    **payload,
+                },
+            )
+    except Exception:
+        pass
     if event.get('type') in PARENT_INBOX_EVENT_TYPES:
         append_parent_inbox_event(task_dir, event)
 
-def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep):
+def _record_child_ipc_status(task_dir, task_name, status, fallback_reason, address=None):
+    state_path = os.path.join(task_dir, 'state.json')
+    state = read_json_or_none(state_path) or {}
+    state['child_ipc_status'] = status
+    state['child_ipc_fallback_reason'] = fallback_reason
+    state['child_ipc_address'] = address
+    atomic_write_json(state_path, state)
+    # 'file' is the default transport, so an event there would add a line to every
+    # subagent's stream while saying nothing. Only realtime outcomes are worth an event.
+    if status != 'file':
+        _subagent_event(task_dir, {
+            'type': 'child_ipc_status',
+            'task_name': task_name,
+            'child_ipc_status': status,
+            'child_ipc_fallback_reason': fallback_reason,
+        })
+    return state
+
+
+def resolve_reply_wait_schedule_from_env(env=None):
+    """Read the poll/lifetime knobs from the environment.
+
+    Children are launched by SubagentManager with a fixed command line that carries no
+    timing, so the env is the only path that reaches a real spawned subagent. Unset or
+    unparseable values fall through to the defaults rather than failing the launch.
+    """
+    env = os.environ if env is None else env
+    overrides = {}
+    for key, name in (('GA_SUBAGENT_POLL_INTERVAL_S', 'poll_interval_s'), ('GA_SUBAGENT_IDLE_TIMEOUT_S', 'idle_timeout_s')):
+        raw = env.get(key)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        overrides[name] = value
+    return overrides
+
+
+def _reply_wait_slices(interval, timeout, max_iterations, monotonic_fn):
+    """Yield each wait duration for one reply-wait window.
+
+    Deadline-driven so the poll interval can change without changing the lifetime; the last
+    slice is clamped to the deadline so a coarse interval cannot overshoot it.
+    """
+    if max_iterations is not None:
+        for _ in range(max_iterations):
+            yield interval
+        return
+    deadline = monotonic_fn() + timeout
+    while True:
+        remaining = deadline - monotonic_fn()
+        # Epsilon guard: float accumulation of many small slices can land a hair short of
+        # the deadline and buy a spurious extra round.
+        if remaining <= 1e-9:
+            return
+        yield min(interval, remaining)
+
+
+def resolve_reply_wait_schedule(reply_wait_iterations, reply_sleep_s, poll_interval_s, idle_timeout_s):
+    """Separate wake-up granularity from total idle lifetime.
+
+    These used to be one knob: reply_wait_iterations x reply_sleep_s set both, so halving
+    the latency also halved how long an idle subagent stayed alive. Now poll_interval_s
+    controls granularity and idle_timeout_s controls lifetime. The legacy iteration params
+    are still honoured verbatim so existing callers and tests keep their exact timing.
+    """
+    interval = float(poll_interval_s) if poll_interval_s is not None else float(reply_sleep_s)
+    if poll_interval_s is None and idle_timeout_s is None:
+        timeout = float(reply_sleep_s) * int(reply_wait_iterations)
+    elif idle_timeout_s is not None:
+        timeout = float(idle_timeout_s)
+    else:
+        timeout = float(reply_sleep_s) * int(reply_wait_iterations)
+    if interval <= 0:
+        # A zero interval means "wake immediately"; lifetime then has to stay bounded by the
+        # iteration count, otherwise a deadline-driven loop would spin forever.
+        return 0.0, timeout, int(reply_wait_iterations)
+    return interval, timeout, None
+
+
+def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
     task_dir = str(task_dir)
     task_name = os.path.basename(os.path.normpath(task_dir))
+    poll_interval, idle_timeout, max_wait_iterations = resolve_reply_wait_schedule(
+        reply_wait_iterations, reply_sleep_s, poll_interval_s, idle_timeout_s
+    )
     agent.peer_hint = False
     agent.task_dir = task_dir
-    nround = ''
+    if permission_profile is not None or permission_options is not None or parent_permission_mode is not None:
+        state_path = os.path.join(task_dir, 'state.json')
+        state = read_json_or_none(state_path) or {}
+        if permission_profile is not None:
+            state['permission_profile'] = permission_profile
+        if permission_options is not None:
+            state['permission_options'] = permission_options
+        if parent_permission_mode is not None:
+            state['parent_permission_mode'] = parent_permission_mode
+        atomic_write_json(state_path, state)
+    try:
+        from subagent_permissions import load_subagent_permission_policy
+        agent.subagent_permission_policy = load_subagent_permission_policy(task_dir)
+    except Exception as e:
+        print(f"[WARN] Failed to attach subagent permission policy: {e}")
+    state_path = os.path.join(task_dir, 'state.json')
+    existing_state = read_json_or_none(state_path) or {}
+    # Realtime subscription is an accelerator only: it carries change signals, while
+    # mailbox.jsonl stays the authoritative source. A child that cannot subscribe keeps
+    # polling, but records why — a silent child-side failure is how the never-connected
+    # channel stayed hidden.
+    realtime_subscriber = None
+    child_ipc_status, child_ipc_fallback_reason = 'file', None
+    try:
+        from subagent_realtime_ipc import resolve_child_subscription
+        realtime_subscriber, child_ipc_status, child_ipc_fallback_reason = resolve_child_subscription(task_dir, existing_state)
+    except Exception as e:
+        realtime_subscriber = None
+        child_ipc_status, child_ipc_fallback_reason = 'fallback', format_error(e)
+    existing_state = _record_child_ipc_status(
+        task_dir, task_name, child_ipc_status, child_ipc_fallback_reason, getattr(realtime_subscriber, 'address', None)
+    )
+    nround = int(existing_state.get('round') or 0) if existing_state.get('round') else ''
     infile = os.path.join(task_dir, 'input.txt')
     if input_text:
         os.makedirs(task_dir, exist_ok=True)
         import glob
         [os.remove(f) for f in glob.glob(os.path.join(task_dir, 'output*.txt'))]
         with open(infile, 'w', encoding='utf-8') as f: f.write(input_text)
+        nround = ''
     if (fh := consume_file(task_dir, '_history.json')):
         agent.llmclient.backend.history = json.loads(fh)
     with open(infile, encoding='utf-8') as f: raw = f.read()
+    _subagent_transcript_append(task_dir, 'request', {'task_name': task_name, 'prompt': raw})
     while True:
         output_path = os.path.join(task_dir, f'output{nround}.txt')
         try:
             _subagent_state(task_dir, task_name, nround, 'running', 'alive', output_path=output_path)
             _subagent_event(task_dir, {'type': 'turn_started', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+
+            def _transcript_tool_before(tool_name, args, response):
+                _subagent_transcript_append(
+                    task_dir,
+                    'tool_call',
+                    {
+                        'task_name': task_name,
+                        'round': int(nround) if isinstance(nround, int) else 0,
+                        'tool_name': tool_name,
+                        'args': {k: v for k, v in (args or {}).items() if not str(k).startswith('_')},
+                    },
+                )
+
+            def _transcript_tool_after(tool_name, args, response, ret):
+                data = getattr(ret, 'data', ret)
+                if not isinstance(data, (dict, list, str, int, float, bool, type(None))):
+                    data = {'content': getattr(data, 'content', str(data))}
+                _subagent_transcript_append(
+                    task_dir,
+                    'tool_result',
+                    {
+                        'task_name': task_name,
+                        'round': int(nround) if isinstance(nround, int) else 0,
+                        'tool_name': tool_name,
+                        'data': data,
+                    },
+                )
+
+            def _transcript_permission(tool_name, args, decision):
+                _subagent_transcript_append(
+                    task_dir,
+                    'permission_decision',
+                    {
+                        'task_name': task_name,
+                        'round': int(nround) if isinstance(nround, int) else 0,
+                        'tool_name': tool_name,
+                        'decision': decision.to_dict(),
+                    },
+                )
+
+            def _transcript_assistant(content, error=None):
+                payload = {
+                    'task_name': task_name,
+                    'round': int(nround) if isinstance(nround, int) else 0,
+                    'content': content,
+                }
+                if error:
+                    payload['error'] = error
+                _subagent_transcript_append(task_dir, 'assistant', payload)
+
+            agent._subagent_transcript_tool_before = _transcript_tool_before
+            agent._subagent_transcript_tool_after = _transcript_tool_after
+            agent._subagent_transcript_permission = _transcript_permission
+            agent._subagent_transcript_assistant = _transcript_assistant
             dq = agent.put_task(raw, source='task')
             while 'done' not in (item := dq.get(timeout=300)):
                 if 'next' in item and random.random() < 0.95:
@@ -771,29 +1026,71 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                     _subagent_event(task_dir, {'type': 'output_snapshot', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path})
             with open(output_path, 'w', encoding='utf-8') as f: f.write(item['done'] + '\n\n[ROUND END]\n')
             digest = sha256_file(output_path)
+            state_before_final = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
+            final_output_ref = None
+            try:
+                from subagent_artifacts import SubagentArtifactStore
+                run_id = state_before_final.get('run_id') or f"legacy_{task_name}"
+                artifact_dir = state_before_final.get('artifact_dir') or os.path.join(os.path.dirname(task_dir), 'subagents', 'runs', run_id)
+                artifact = SubagentArtifactStore(artifact_dir).record_final_output(output_path, round_no=int(nround) if isinstance(nround, int) else 0)
+                final_output_ref = artifact.get('artifact_id')
+                state_before_final['artifact_dir'] = artifact_dir
+                state_before_final['final_output_ref'] = final_output_ref
+                atomic_write_json(os.path.join(task_dir, 'state.json'), state_before_final)
+            except Exception:
+                pass
+            try:
+                _subagent_transcript_append(
+                    task_dir,
+                    'final_output',
+                    {
+                        'task_name': task_name,
+                        'round': int(nround) if isinstance(nround, int) else 0,
+                        'output_path': output_path,
+                        'sha256': digest,
+                        'artifact_id': final_output_ref,
+                        'final_output': item['done'],
+                    },
+                )
+            except Exception:
+                pass
             _subagent_state(task_dir, task_name, nround, 'completed', 'waiting_reply', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
-            _subagent_event(task_dir, {'type': 'turn_completed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path, 'sha256': digest})
+            _subagent_event(task_dir, {'type': 'turn_completed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path, 'sha256': digest, 'final_output_ref': final_output_ref})
             _subagent_event(task_dir, {'type': 'agent_waiting_reply', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
             consume_file(task_dir, '_stop')
             stop_requested = False
-            for _ in range(reply_wait_iterations):
-                sleep_fn(reply_sleep_s)
+            for wait_s in _reply_wait_slices(poll_interval, idle_timeout, max_wait_iterations, monotonic_fn):
+                if realtime_subscriber is not None and not realtime_subscriber.closed:
+                    # A signal carries no payload; it only means "go re-read the durable
+                    # mailbox now" instead of waiting out the poll interval.
+                    realtime_subscriber.wait(wait_s)
+                    if realtime_subscriber.closed:
+                        # The parent tore the channel down mid-run. Polling still delivers,
+                        # but the degradation has to be visible or it looks healthy.
+                        child_ipc_status, child_ipc_fallback_reason = 'fallback', 'realtime channel disconnected mid-run; durable file event bus stays the transport'
+                        _record_child_ipc_status(task_dir, task_name, child_ipc_status, child_ipc_fallback_reason)
+                else:
+                    sleep_fn(wait_s)
                 if consume_file(task_dir, '_stop'):
                     _subagent_state(task_dir, task_name, nround, 'completed', 'shutdown', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
                     _subagent_event(task_dir, {'type': 'agent_shutdown', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
                     stop_requested = True
                     break
-                if (raw := consume_mailbox_trigger(os.path.join(task_dir, 'mailbox.jsonl'))) is not None:
-                    reply_path = os.path.join(task_dir, 'reply.txt')
-                    try:
-                        if os.path.exists(reply_path):
-                            with open(reply_path, encoding='utf-8', errors='replace') as f:
-                                reply_raw = f.read()
-                            if reply_raw == raw:
-                                os.remove(reply_path)
-                    except OSError:
-                        pass
-                    _subagent_event(task_dir, {'type': 'message_consumed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'source': 'mailbox'})
+                try:
+                    from subagent_mailbox import SubagentMailbox
+                    mailbox_result = SubagentMailbox(os.path.join(task_dir, 'mailbox.jsonl')).consume_trigger_turn()
+                except Exception:
+                    mailbox_result = None
+                if mailbox_result is not None:
+                    raw = mailbox_result.get('content') or ''
+                    consume_file(task_dir, 'reply.txt')
+                    _subagent_event(task_dir, {
+                        'type': 'message_consumed',
+                        'task_name': task_name,
+                        'round': int(nround) if isinstance(nround, int) else 0,
+                        'source': 'mailbox',
+                        'message_ids': [row.get('message_id') for row in mailbox_result.get('messages') or []],
+                    })
                     break
                 if (raw := consume_file(task_dir, 'reply.txt')):
                     _subagent_event(task_dir, {'type': 'message_consumed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
@@ -808,7 +1105,11 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         except Exception as e:
             _subagent_state(task_dir, task_name, nround, 'errored', 'exited', output_path=output_path, last_error=format_error(e))
             _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
+            if realtime_subscriber is not None:
+                realtime_subscriber.close()
             raise
+    if realtime_subscriber is not None:
+        realtime_subscriber.close()
 
 def start_task_background(
     task_name,
@@ -821,6 +1122,9 @@ def start_task_background(
     python_executable=None,
     fork_turns=None,
     fork_history=None,
+    permission_profile=None,
+    parent_permission_mode=None,
+    permission_options=None,
 ):
     from subagent_manager import SubagentManager
 
@@ -830,6 +1134,10 @@ def start_task_background(
     if fork_turns is None:
         fork_turns = 'all' if fork_history is not None else 'none'
     fork_mode, history_to_write = manager._select_fork_history(fork_turns, fork_history)
+    from subagent_permissions import normalize_permission_metadata
+    permission_metadata = normalize_permission_metadata(
+        {'permission_profile': permission_profile, 'permission_options': permission_options or {}, 'parent_permission_mode': parent_permission_mode}
+    )
     task_dir = os.path.join(root_dir, 'temp', task_name)
     os.makedirs(task_dir, exist_ok=True)
     input_path = os.path.join(task_dir, 'input.txt')
@@ -868,6 +1176,9 @@ def start_task_background(
         'last_error': None,
         'close_reason': None,
         'fork_turns': fork_mode,
+        'permission_profile': permission_metadata['permission_profile'],
+        'parent_permission_mode': permission_metadata.get('parent_permission_mode'),
+        'permission_options': permission_metadata['options'],
     }
     state_path = os.path.join(task_dir, 'state.json')
     atomic_write_json(state_path, state)
@@ -882,6 +1193,12 @@ def start_task_background(
         root_dir,
         '--llm_no',
         str(llm_no),
+        '--permission_profile',
+        permission_metadata['permission_profile'],
+        '--parent_permission_mode',
+        permission_metadata.get('parent_permission_mode') or '',
+        '--permission_options',
+        json.dumps(permission_metadata['options'], ensure_ascii=False, sort_keys=True),
     ]
     if verbose:
         cmd.append('--verbose')
@@ -910,6 +1227,16 @@ def start_task_background(
     manager.register_agent(task_name, state, task_dir)
     return pid
 
+def _load_permission_options_arg(value):
+    if not value:
+        return None
+    try:
+        loaded = json.loads(value)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _load_fork_history_arg(value):
     if not value:
         return None
@@ -934,6 +1261,9 @@ if __name__ == '__main__':
     parser.add_argument('--nobg', action='store_true')
     parser.add_argument('--fork_turns', default=None, help='context fork mode: none, all, or a positive integer')
     parser.add_argument('--fork_history', default=None, help='context fork history as JSON, a JSON file path, or @file')
+    parser.add_argument('--permission_profile', default=None, help='subagent permission profile')
+    parser.add_argument('--parent_permission_mode', default=None, help='parent permission mode for inherit-current-permissions')
+    parser.add_argument('--permission_options', default=None, help='subagent permission options JSON')
     args, _unknown = parser.parse_known_args()
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
 
@@ -947,6 +1277,9 @@ if __name__ == '__main__':
             root_dir=args.task_root,
             fork_turns=args.fork_turns,
             fork_history=fork_history,
+            permission_profile=args.permission_profile,
+            parent_permission_mode=args.parent_permission_mode,
+            permission_options=_load_permission_options_arg(args.permission_options),
         )); sys.exit(0)
 
     agent = GeneraticAgent()
@@ -956,7 +1289,15 @@ if __name__ == '__main__':
 
     if args.task:
         task_root = os.path.abspath(args.task_root or script_dir)
-        run_task_worker_loop(agent, os.path.join(task_root, f'temp/{args.task}'), input_text=args.input)
+        run_task_worker_loop(
+            agent,
+            os.path.join(task_root, f'temp/{args.task}'),
+            input_text=args.input,
+            permission_profile=args.permission_profile,
+            parent_permission_mode=args.parent_permission_mode,
+            permission_options=_load_permission_options_arg(args.permission_options),
+            **resolve_reply_wait_schedule_from_env(),
+        )
     elif args.reflect:
         agent.peer_hint = False
         import importlib.util

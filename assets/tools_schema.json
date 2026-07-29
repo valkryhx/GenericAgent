@@ -73,7 +73,18 @@
     "parameters": {"type": "object", "properties": {
       "task_name": {"type": "string", "description": "Lowercase letters, digits, and underscores only"},
       "message": {"type": "string", "description": "Self-contained task prompt. Include the exact result needed next, constraints, relevant paths/context, and final answer contract; avoid vague requests and do not duplicate parent work."},
+      "agent_type": {"type": "string", "description": "Optional role definition name loaded from .ga/subagents/<agent_type>.json or .md; role defaults can supply task_name, permission_profile, allowed/denied tools, and fork_turns."},
       "fork_turns": {"type": "string", "description": "'all' (default), 'none', or a positive integer string for recent turns", "default": "all"},
+      "permission_profile": {"type": "string", "description": "Subagent permission profile: inherit-current-permissions, read_only, restricted_mcp, or explicit_approval", "default": "inherit-current-permissions"},
+      "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional static tool allowlist for the subagent"},
+      "denied_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional static tool denylist for the subagent"},
+      "allowed_mcp_servers": {"type": "array", "items": {"type": "string"}, "description": "Optional MCP server allowlist for restricted_mcp"},
+      "denied_mcp_servers": {"type": "array", "items": {"type": "string"}, "description": "Optional MCP server denylist"},
+      "allowed_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional exact MCP tool allowlist"},
+      "denied_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional exact MCP tool denylist"},
+      "background": {"type": "boolean", "description": "Run as a background subagent process; false is recorded for future foreground/background handoff support but still uses the durable process runner in this version", "default": true},
+      "isolation": {"type": "string", "description": "Optional isolation mode. Use 'worktree' to launch the subagent from an isolated git worktree while keeping the parent task root for coordination files"},
+      "ipc_mode": {"type": "string", "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why", "default": "file"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
       "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
   }},
@@ -91,6 +102,7 @@
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional non-empty list of task names; overrides target"},
+      "since_event_seq": {"type": "integer", "description": "Optional event cursor; return only subagent event-bus events after this sequence"},
       "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30}}}
   }},
   {"type": "function", "function": {
@@ -98,7 +110,19 @@
     "description": "Read the authoritative final result of a completed subagent. Call after wait_agent reports completed status or when explicitly collecting results; prefer final result fields over raw output traces.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "artifact_id": {"type": "string", "description": "Optional artifact id such as final_output_round_0; reads that artifact from the subagent run manifest"},
+      "include_transcript_replay": {"type": "boolean", "description": "Include a read-only replay summary reconstructed from the sidechain transcript JSONL when parent_session_id and run_id are available", "default": false},
+      "include_transcript_timeline": {"type": "boolean", "description": "Include an editable replay timeline projection. Each item has event_key, resume_role, resume_content, and editable metadata for selective replay edits", "default": false},
+      "include_resume_context": {"type": "boolean", "description": "Include a backend-history-shaped resume context projected from the sidechain transcript; this is a recovery aid and does not restart the subagent", "default": false},
+      "resume_context_edits": {"type": "object", "description": "Optional edits keyed by transcript_timeline event_key. Each edit may set {resume_content: string} or {drop: true}; applied only when include_resume_context is true"},
       "max_output_chars": {"type": "integer", "description": "Maximum final output characters to return", "default": 8000}}}
+  }},
+  {"type": "function", "function": {
+    "name": "resume_agent",
+    "description": "Resume a closed or waiting subagent from its sidechain transcript, reuse the same agent_path/run_id, write a new message, and start the next turn without overwriting prior output/artifacts.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "message": {"type": "string", "description": "Next-turn task prompt after resume"}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",
@@ -115,11 +139,52 @@
       "message": {"type": "string", "description": "Follow-up task prompt"}}}
   }},
   {"type": "function", "function": {
+    "name": "foreground_agent",
+    "description": "Request a subagent foreground handoff. This records foreground state and emits events for observation; it does not take over an interactive TUI in this version.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "reason": {"type": "string", "description": "Optional handoff reason", "default": "parent_foreground"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "background_agent",
+    "description": "Request a subagent background handoff. This records background state and emits events; it does not change process ownership in this version.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "reason": {"type": "string", "description": "Optional handoff reason", "default": "parent_background"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "attach_agent",
+    "description": "Attach to a running subagent's live output stream: switch it to foreground handoff state and read an incremental slice of its current-round output from since_offset. Use next_stream_offset for the following call; stream_eof becomes true once the round has finished.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "since_offset": {"type": "integer", "description": "Character offset already consumed from the current-round output", "default": 0},
+      "max_chars": {"type": "integer", "description": "Maximum characters to return in this slice; omit for the whole remainder"},
+      "reason": {"type": "string", "description": "Optional attach reason", "default": "parent_attach"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "detach_agent",
+    "description": "Detach from a subagent's live output stream: read the remaining incremental output and switch the subagent back to background handoff state, keeping the same run_id and transcript.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name"},
+      "since_offset": {"type": "integer", "description": "Character offset already consumed from the current-round output", "default": 0},
+      "max_chars": {"type": "integer", "description": "Maximum characters to return in this slice; omit for the whole remainder"},
+      "reason": {"type": "string", "description": "Optional detach reason", "default": "parent_detach"}}}
+  }},
+  {"type": "function", "function": {
     "name": "interrupt_agent",
     "description": "Ask a subagent to interrupt its current turn while preserving its task directory for follow-up.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Task name or /root/task_name"},
       "reason": {"type": "string", "description": "Optional interrupt reason"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "close_agent",
+    "description": "Close a subagent, request shutdown/termination, preserve final artifacts, and return the previous status plus closed state. The root agent cannot be closed.",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "Task name or /root/task_name; /root is not allowed"},
+      "reason": {"type": "string", "description": "Optional close reason", "default": "parent_cleanup"},
+      "grace_seconds": {"type": "number", "description": "Seconds to wait after writing _stop before terminating", "default": 2},
+      "cleanup_worktree": {"type": "boolean", "description": "When closing a worktree-isolated subagent, capture git status/diff summary and remove the worktree directory after preserving the summary", "default": false}}}
   }},
   {"type": "function", "function": {
     "name": "ask_user",

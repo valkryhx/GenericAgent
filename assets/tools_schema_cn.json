@@ -73,7 +73,18 @@
     "parameters": {"type": "object", "properties": {
       "task_name": {"type": "string", "description": "只能包含小写字母、数字、下划线"},
       "message": {"type": "string", "description": "自包含任务提示。写清下一步真正需要的结果、约束、相关路径/上下文和最终结果契约；避免泛泛请求，不要与主进程工作重复。"},
+      "agent_type": {"type": "string", "description": "可选角色定义名，从 .ga/subagents/<agent_type>.json 或 .md 加载；角色默认值可提供 task_name、permission_profile、工具白/黑名单和 fork_turns。"},
       "fork_turns": {"type": "string", "description": "'all'（默认）、'none'，或表示最近轮数的正整数字符串", "default": "all"},
+      "permission_profile": {"type": "string", "description": "子智能体权限档：inherit-current-permissions、read_only、restricted_mcp 或 explicit_approval", "default": "inherit-current-permissions"},
+      "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "可选静态工具白名单"},
+      "denied_tools": {"type": "array", "items": {"type": "string"}, "description": "可选静态工具黑名单"},
+      "allowed_mcp_servers": {"type": "array", "items": {"type": "string"}, "description": "restricted_mcp 下可选 MCP server 白名单"},
+      "denied_mcp_servers": {"type": "array", "items": {"type": "string"}, "description": "可选 MCP server 黑名单"},
+      "allowed_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "可选精确 MCP tool 白名单"},
+      "denied_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "可选精确 MCP tool 黑名单"},
+      "background": {"type": "boolean", "description": "作为后台子智能体进程运行；false 会被记录用于未来 foreground/background 切换，但当前版本仍使用 durable 进程 runner", "default": true},
+      "isolation": {"type": "string", "description": "可选隔离模式。使用 'worktree' 时从独立 git worktree 启动子智能体，同时保留父任务根目录用于协调文件"},
+      "ipc_mode": {"type": "string", "description": "IPC 模式。'file' 是 durable 默认值。'socket'/'pipe'/'event_server' 会请求常驻实时通道推送已持久化事件；仅当 GA_SUBAGENT_REALTIME_IPC=1 且通道成功打开时才生效，否则仍以 durable file event bus 为传输，并在 ipc_fallback_reason 说明原因", "default": "file"},
       "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
   }},
@@ -91,6 +102,7 @@
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},
+      "since_event_seq": {"type": "integer", "description": "可选事件游标；只返回该序号之后的子智能体 event-bus 事件"},
       "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30}}}
   }},
   {"type": "function", "function": {
@@ -98,7 +110,19 @@
     "description": "读取已完成子智能体的权威最终结果。应在 wait_agent 报告 completed 后，或显式收集结果时调用；优先使用 final result 字段，不把 raw output 轨迹当最终答案。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "artifact_id": {"type": "string", "description": "可选 artifact id，例如 final_output_round_0；会从子智能体 run manifest 中读取该 artifact"},
+      "include_transcript_replay": {"type": "boolean", "description": "当存在 parent_session_id 与 run_id 时，附带从 sidechain transcript JSONL 重建的只读 replay 摘要", "default": false},
+      "include_transcript_timeline": {"type": "boolean", "description": "附带可编辑 replay timeline 投影；每个条目包含 event_key、resume_role、resume_content 与 editable 元数据，可用于选择性 replay 编辑", "default": false},
+      "include_resume_context": {"type": "boolean", "description": "附带一个由 sidechain transcript 投影而成、可写入 backend.history 的恢复上下文；这只是恢复辅助，不会重启子智能体", "default": false},
+      "resume_context_edits": {"type": "object", "description": "按 transcript_timeline event_key 索引的可选编辑。每个 edit 可设置 {resume_content: string} 或 {drop: true}；仅在 include_resume_context 为 true 时应用"},
       "max_output_chars": {"type": "integer", "description": "最多返回的最终输出字符数", "default": 8000}}}
+  }},
+  {"type": "function", "function": {
+    "name": "resume_agent",
+    "description": "基于 sidechain transcript 恢复一个已关闭或等待中的子智能体，复用同一 agent_path/run_id，写入新的 message，并启动下一轮；不会覆盖旧 output/artifact。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "message": {"type": "string", "description": "恢复后要执行的下一轮任务说明"}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",
@@ -115,11 +139,52 @@
       "message": {"type": "string", "description": "后续任务说明"}}}
   }},
   {"type": "function", "function": {
+    "name": "foreground_agent",
+    "description": "请求子智能体切到前台观察状态。本版本只记录 foreground 状态并发出事件，不接管交互式 TUI。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "reason": {"type": "string", "description": "可选切换原因", "default": "parent_foreground"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "background_agent",
+    "description": "请求子智能体切回后台队列状态。本版本只记录 background 状态并发出事件，不改变进程所有权。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "reason": {"type": "string", "description": "可选切换原因", "default": "parent_background"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "attach_agent",
+    "description": "附着到运行中子智能体的实时输出流：把它切到前台 handoff 状态，并从 since_offset 增量读取当前轮输出。下一次调用请使用返回的 next_stream_offset；该轮结束后 stream_eof 为 true。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "since_offset": {"type": "integer", "description": "当前轮输出中已消费的字符偏移", "default": 0},
+      "max_chars": {"type": "integer", "description": "本次返回的最大字符数；省略则返回剩余全部"},
+      "reason": {"type": "string", "description": "可选附着原因", "default": "parent_attach"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "detach_agent",
+    "description": "从子智能体输出流分离：读取剩余增量输出，并把子智能体切回后台 handoff 状态，保持同一 run_id 与 transcript。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name"},
+      "since_offset": {"type": "integer", "description": "当前轮输出中已消费的字符偏移", "default": 0},
+      "max_chars": {"type": "integer", "description": "本次返回的最大字符数；省略则返回剩余全部"},
+      "reason": {"type": "string", "description": "可选分离原因", "default": "parent_detach"}}}
+  }},
+  {"type": "function", "function": {
     "name": "interrupt_agent",
     "description": "请求子智能体中断当前轮次，同时保留任务目录以便后续 followup。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
       "reason": {"type": "string", "description": "可选中断原因"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "close_agent",
+    "description": "关闭子智能体，请求停机/终止，保留最终 artifact，并返回关闭前状态和关闭后状态。root agent 不能关闭。",
+    "parameters": {"type": "object", "properties": {
+      "target": {"type": "string", "description": "task_name 或 /root/task_name；不允许 /root"},
+      "reason": {"type": "string", "description": "可选关闭原因", "default": "parent_cleanup"},
+      "grace_seconds": {"type": "number", "description": "写入 _stop 后等待终止前的秒数", "default": 2},
+      "cleanup_worktree": {"type": "boolean", "description": "关闭 worktree 隔离子智能体时，先采集 git status/diff 摘要，再保留摘要并移除 worktree 目录", "default": false}}}
   }},
   {"type": "function", "function": {
     "name": "ask_user",

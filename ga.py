@@ -292,6 +292,8 @@ class GenericAgentHandler(BaseHandler):
         # 主会话三档权限（read_only/ask/full_access）。默认 None = 全开（等价 full_access）。
         # workflow 子 agent 的 workflow_permission_policy 优先级更高，两者都设时以 workflow 为准。
         self.permission_mode_policy = None
+        self.subagent_permission_policy = None
+        self.subagent_permission_event_callback = None
         # ask 档阻塞审批 runtime（permission_request/response）；None = 无 UI 时 ask→deny。
         self.permission_runtime = None
 
@@ -307,6 +309,18 @@ class GenericAgentHandler(BaseHandler):
                 _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
                 return ret
         else:
+            subagent_policy = getattr(self, 'subagent_permission_policy', None)
+            if subagent_policy is not None:
+                decision = subagent_policy.evaluate(tool_name, args or {})
+                subagent_permission_callback = getattr(self, 'subagent_permission_event_callback', None)
+                if subagent_permission_callback is not None:
+                    subagent_permission_callback(tool_name, args or {}, decision)
+                if decision.action != 'allow':
+                    status = 'approval_required' if decision.action == 'ask' else 'error'
+                    yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
+                    ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                    return ret
             mode_policy = getattr(self, 'permission_mode_policy', None)
             if mode_policy is not None:
                 decision = mode_policy.evaluate(tool_name, args or {})
@@ -621,6 +635,26 @@ class GenericAgentHandler(BaseHandler):
             "round": state.round,
             "output_path": state.output_path,
             "final_output_path": state.final_output_path,
+            "run_id": getattr(state, "run_id", None),
+            "parent_session_id": getattr(state, "parent_session_id", None),
+            "artifact_dir": getattr(state, "artifact_dir", None),
+            "permission_profile": getattr(state, "permission_profile", None),
+            "parent_permission_mode": getattr(state, "parent_permission_mode", None),
+            "permission_options": getattr(state, "permission_options", None) or {},
+            "agent_type": getattr(state, "agent_type", None),
+            "role_source_path": getattr(state, "role_source_path", None),
+            "background": getattr(state, "background", True),
+            "handoff_mode": getattr(state, "handoff_mode", None),
+            "handoff_reason": getattr(state, "handoff_reason", None),
+            "attach_status": getattr(state, "attach_status", None),
+            "ipc_mode": getattr(state, "ipc_mode", None),
+            "effective_ipc_mode": getattr(state, "effective_ipc_mode", None),
+            "ipc_fallback_reason": getattr(state, "ipc_fallback_reason", None),
+            "ipc_endpoint": getattr(state, "ipc_endpoint", None),
+            "isolation": getattr(state, "isolation", None),
+            "worktree_path": getattr(state, "worktree_path", None),
+            "worktree_summary": getattr(state, "worktree_summary", None),
+            "worktree_cleanup": getattr(state, "worktree_cleanup", None),
             "updated_at": state.updated_at,
             "last_message": state.last_message,
             "last_error": state.last_error,
@@ -638,18 +672,51 @@ class GenericAgentHandler(BaseHandler):
     def do_spawn_agent(self, args, response):
         '''启动一个后台子智能体。默认继承当前会话上下文，子智能体拥有完整 GA 工具能力。'''
         task_name = args.get("task_name") or args.get("name")
+        agent_type = args.get("agent_type") or args.get("agentType")
+        role = None
+        role_source_path = None
+        if agent_type:
+            try:
+                from subagent_roles import SubagentRoleRegistry, build_role_task_message
+                manager_for_roles = self._get_subagent_manager()
+                role = SubagentRoleRegistry(manager_for_roles.root_dir).get(agent_type)
+                role_source_path = role.source_path
+                task_name = task_name or role.name
+            except Exception as e:
+                return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} not found: {format_error(e)}"}, next_prompt="\n")
         message = args.get("message") or args.get("prompt") or ""
         if not task_name:
             return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
         if not message:
             return StepOutcome({"status": "error", "msg": "message is required"}, next_prompt="\n")
-        fork_turns = str(args.get("fork_turns", "all"))
+        if role is not None:
+            message = build_role_task_message(role, message)
+        raw_fork_turns = args.get("fork_turns")
+        if raw_fork_turns is None and role is not None and role.fork_turns_default:
+            raw_fork_turns = role.fork_turns_default
+        fork_turns = str(raw_fork_turns if raw_fork_turns is not None else "all")
         fork_history = None if fork_turns.lower() == "none" else self._current_backend_history_snapshot()
         try:
             llm_no = int(args.get("llm_no", getattr(self.parent, "llm_no", 0)))
         except Exception:
             llm_no = getattr(self.parent, "llm_no", 0)
         verbose = bool(args.get("verbose", getattr(self.parent, "verbose", False)))
+        permission_profile = args.get("permission_profile") or args.get("permissionProfile") or (role.permission_profile if role is not None else None) or "inherit-current-permissions"
+        parent_permission_mode = args.get("parent_permission_mode") or args.get("parentPermissionMode") or getattr(self.parent, "permission_mode", None)
+        role_permission_options = dict(role.permission_options or {}) if role is not None else {}
+        permission_options = {
+            key: args.get(key)
+            for key in [
+                "allowed_tools",
+                "denied_tools",
+                "allowed_mcp_servers",
+                "denied_mcp_servers",
+                "allowed_mcp_tools",
+                "denied_mcp_tools",
+            ]
+            if args.get(key) is not None
+        }
+        permission_options = {**role_permission_options, **permission_options}
         manager = self._get_subagent_manager()
         yield f"[Action] Spawning subagent: {task_name}\n"
         try:
@@ -661,6 +728,14 @@ class GenericAgentHandler(BaseHandler):
                 parent_session_id=getattr(self.parent, "session_id", None),
                 fork_turns=fork_turns,
                 fork_history=fork_history,
+                permission_profile=permission_profile,
+                parent_permission_mode=parent_permission_mode,
+                permission_options=permission_options,
+                agent_type=agent_type,
+                role_source_path=role_source_path,
+                background=bool(args.get("background", True)),
+                ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "file",
+                isolation=args.get("isolation"),
             )
             result = {
                 "status": "started",
@@ -669,6 +744,20 @@ class GenericAgentHandler(BaseHandler):
                 "pid": handle.pid,
                 "task_dir": handle.task_dir,
                 "state_path": handle.state_path,
+                "run_id": handle.run_id,
+                "artifact_dir": handle.artifact_dir,
+                "permission_profile": handle.permission_profile,
+                "parent_permission_mode": handle.parent_permission_mode,
+                "permission_options": handle.permission_options or {},
+                "agent_type": handle.agent_type,
+                "role_source_path": handle.role_source_path,
+                "background": handle.background,
+                "ipc_mode": handle.ipc_mode,
+                "effective_ipc_mode": handle.effective_ipc_mode,
+                "ipc_fallback_reason": handle.ipc_fallback_reason,
+                "ipc_endpoint": handle.ipc_endpoint,
+                "isolation": handle.isolation,
+                "worktree_path": handle.worktree_path,
                 "fork_turns": fork_turns,
             }
             yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
@@ -740,13 +829,26 @@ class GenericAgentHandler(BaseHandler):
         except Exception:
             poll_interval_s = 0.5
         poll_interval_s = max(0.05, min(poll_interval_s, 10.0))
+        raw_since_seq = args.get("since_event_seq") or args.get("sinceEventSeq")
+        since_event_seq = None
+        if raw_since_seq is not None:
+            try:
+                since_event_seq = int(raw_since_seq)
+            except Exception:
+                since_event_seq = 0
         manager = self._get_subagent_manager()
         yield f"[Action] Waiting for subagent update ({timeout_s:g}s).\n"
-        result = manager.wait_agents(targets=targets, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+        result = manager.wait_agents(
+            targets=targets,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            since_event_seq=since_event_seq,
+        )
         data = {
             "status": "timeout" if result.timed_out else "changed",
             "message": result.message,
             "events": result.events or [],
+            "next_event_seq": result.next_event_seq,
             "agents": [
                 self._subagent_state_payload(state, include_output=False)
                 for state in result.changed_agents
@@ -762,6 +864,11 @@ class GenericAgentHandler(BaseHandler):
         target = args.get("target") or args.get("task_name")
         if not target:
             return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        artifact_id = args.get("artifact_id") or args.get("artifactId")
+        include_transcript_replay = bool(args.get("include_transcript_replay") or args.get("includeTranscriptReplay"))
+        include_transcript_timeline = bool(args.get("include_transcript_timeline") or args.get("includeTranscriptTimeline"))
+        include_resume_context = bool(args.get("include_resume_context") or args.get("includeResumeContext"))
+        resume_context_edits = args.get("resume_context_edits") or args.get("resumeContextEdits") or None
         try:
             max_output_chars = int(args.get("max_output_chars", max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))))
         except Exception:
@@ -770,18 +877,176 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         try:
             state = manager.read_agent(target)
-            payload = self._subagent_state_payload(state, include_output=True, max_output_chars=max_output_chars)
-            if state.turn_status != "completed":
+            payload = self._subagent_state_payload(state, include_output=not bool(artifact_id), max_output_chars=max_output_chars)
+            if artifact_id:
+                from subagent_artifacts import SubagentArtifactStore
+
+                artifact = SubagentArtifactStore(state.artifact_dir).get(artifact_id)
+                artifact_path = artifact.get("path")
+                with open(artifact_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                text = text.replace("\n\n[ROUND END]\n", "").rstrip()
+                payload.update(
+                    {
+                        "artifact_id": artifact.get("artifact_id"),
+                        "artifact": artifact,
+                        "final_output_path": artifact_path,
+                        "final_output": smart_format(
+                            text,
+                            max_str_len=max_output_chars,
+                            omit_str="\n\n[omitted long subagent output]\n\n",
+                        ),
+                    }
+                )
+                status = "success"
+            elif state.turn_status != "completed":
                 status = "not_completed"
             elif payload.get("final_output") is None:
                 status = "missing_result"
             else:
                 status = "success"
+            if include_transcript_replay or include_transcript_timeline or include_resume_context:
+                parent_session_id = getattr(state, "parent_session_id", None)
+                run_id = getattr(state, "run_id", None)
+                if parent_session_id and run_id:
+                    from subagent_transcript import SubagentTranscriptStore
+
+                    transcript_store = SubagentTranscriptStore(manager.temp_dir / "sessions")
+                    if include_transcript_replay:
+                        payload["transcript_replay"] = transcript_store.replay(parent_session_id, run_id)
+                    if include_transcript_timeline:
+                        payload["transcript_timeline"] = transcript_store.build_replay_timeline(parent_session_id, run_id)
+                    if include_resume_context:
+                        payload["resume_context"] = transcript_store.build_resume_context(parent_session_id, run_id, edits=resume_context_edits)
+                else:
+                    missing = {"status": "missing", "reason": "parent_session_id_or_run_id_missing"}
+                    if include_transcript_replay:
+                        payload["transcript_replay"] = missing
+                    if include_transcript_timeline:
+                        payload["transcript_timeline"] = missing
+                    if include_resume_context:
+                        payload["resume_context"] = missing
             data = {"status": status, "agent": payload}
             yield f"[Status] Read result for {state.agent_path}: {status}.\n"
         except Exception as e:
             data = {"status": "error", "msg": format_error(e)}
             yield f"[Status] Failed to read subagent result: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_resume_agent(self, args, response):
+        '''基于 sidechain transcript 恢复一个已关闭子智能体并启动下一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or args.get("prompt") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.resume_agent(target, message, author="/root")
+            data = {
+                "status": "resumed",
+                "target": result.target,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+                "handle": {
+                    "task_name": result.handle.task_name,
+                    "agent_path": result.handle.agent_path,
+                    "pid": result.handle.pid,
+                    "task_dir": result.handle.task_dir,
+                    "state_path": result.handle.state_path,
+                    "run_id": result.handle.run_id,
+                    "artifact_dir": result.handle.artifact_dir,
+                    "permission_profile": result.handle.permission_profile,
+                    "parent_permission_mode": result.handle.parent_permission_mode,
+                    "permission_options": result.handle.permission_options or {},
+                    "agent_type": result.handle.agent_type,
+                    "background": result.handle.background,
+                    "ipc_mode": result.handle.ipc_mode,
+                    "effective_ipc_mode": result.handle.effective_ipc_mode,
+                    "ipc_fallback_reason": result.handle.ipc_fallback_reason,
+                    "isolation": result.handle.isolation,
+                    "worktree_path": result.handle.worktree_path,
+                    "handoff_mode": result.handle.handoff_mode,
+                    "handoff_reason": result.handle.handoff_reason,
+                },
+                "resume_context": result.resume_context,
+            }
+            yield f"[Status] Resumed subagent {result.target}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to resume subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_foreground_agent(self, args, response):
+        '''请求子智能体切到前台观察状态；当前版本只记录 handoff 状态，不接管交互式 TUI。'''
+        return self._do_handoff_agent(args, handoff_mode="foreground")
+
+    def do_background_agent(self, args, response):
+        '''请求子智能体切回后台队列状态；当前版本只记录 handoff 状态。'''
+        return self._do_handoff_agent(args, handoff_mode="background")
+
+    def _do_handoff_agent(self, args, *, handoff_mode):
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or f"parent_{handoff_mode}"
+        manager = self._get_subagent_manager()
+        try:
+            if handoff_mode == "foreground":
+                result = manager.request_foreground(target, reason=reason)
+            else:
+                result = manager.request_background(target, reason=reason)
+            data = {
+                "status": "handoff_requested",
+                "target": result.target,
+                "handoff_mode": result.handoff_mode,
+                "reason": result.reason,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+                "updated_state": self._subagent_state_payload(result.updated_state),
+            }
+            yield f"[Status] Requested {handoff_mode} handoff for {result.target}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to request {handoff_mode} handoff: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_attach_agent(self, args, response):
+        '''附着到子智能体的实时输出流：切到前台 handoff 状态并按 since_offset 增量读取输出。'''
+        return self._do_attach_stream(args, attach_status="attached")
+
+    def do_detach_agent(self, args, response):
+        '''从子智能体输出流分离：读取剩余增量输出并切回后台 handoff 状态。'''
+        return self._do_attach_stream(args, attach_status="detached")
+
+    def _do_attach_stream(self, args, *, attach_status):
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or ("parent_attach" if attach_status == "attached" else "parent_detach")
+        since_offset = args.get("since_offset") or 0
+        max_chars = args.get("max_chars")
+        manager = self._get_subagent_manager()
+        try:
+            if attach_status == "attached":
+                result = manager.attach_agent(target, since_offset=since_offset, max_chars=max_chars, reason=reason)
+            else:
+                result = manager.detach_agent(target, since_offset=since_offset, max_chars=max_chars, reason=reason)
+            data = {
+                "status": result.attach_status,
+                "target": result.target,
+                "handoff_mode": result.handoff_mode,
+                "reason": result.reason,
+                "output_path": result.output_path,
+                "stream_text": result.stream_text,
+                "stream_offset": result.stream_offset,
+                "next_stream_offset": result.next_stream_offset,
+                "stream_truncated": result.stream_truncated,
+                "stream_eof": result.stream_eof,
+                "next_event_seq": result.next_event_seq,
+                "state": self._subagent_state_payload(result.state),
+            }
+            yield f"[Status] {result.attach_status.capitalize()} subagent {result.target} stream.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to {attach_status[:-2]} subagent stream: {data['msg']}\n"
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_interrupt_agent(self, args, response):
@@ -803,6 +1068,34 @@ class GenericAgentHandler(BaseHandler):
         except Exception as e:
             data = {"status": "error", "msg": format_error(e)}
             yield f"[Status] Failed to interrupt subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_close_agent(self, args, response):
+        '''关闭子智能体并返回关闭前状态；root agent 不能关闭。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or "parent_cleanup"
+        try:
+            grace_s = float(args.get("grace_seconds", args.get("grace_s", 2)))
+        except Exception:
+            grace_s = 2.0
+        grace_s = max(0.0, min(grace_s, 60.0))
+        cleanup_worktree = bool(args.get("cleanup_worktree") or args.get("cleanupWorktree"))
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.close_agent(target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree)
+            data = {
+                "status": "closed",
+                "target": result.previous_state.agent_path,
+                "previous_status": self._subagent_state_payload(result.previous_state),
+                "closed_state": self._subagent_state_payload(result.closed_state),
+                "final_output_path": result.final_output_path,
+            }
+            yield f"[Status] Closed subagent {result.previous_state.agent_path}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to close subagent: {data['msg']}\n"
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def _retry_or_exit(self, prompt):
