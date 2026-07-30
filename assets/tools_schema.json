@@ -184,6 +184,7 @@
       "target": {"type": "string", "description": "Task name or /root/task_name; /root is not allowed"},
       "reason": {"type": "string", "description": "Optional close reason", "default": "parent_cleanup"},
       "grace_seconds": {"type": "number", "description": "Seconds to wait after writing _stop before terminating", "default": 2},
+      "cascade": {"type": "boolean", "description": "Also close every agent below the target, deepest first, before closing the target itself. Use this when the target spawned its own subagents: closing it alone leaves them running with nobody reading their output. Closed descendants are reported in closed_descendants", "default": false},
       "cleanup_worktree": {"type": "boolean", "description": "When closing a worktree-isolated subagent, capture git status/diff summary and remove the worktree directory after preserving the summary", "default": false}}}
   }},
   {"type": "function", "function": {

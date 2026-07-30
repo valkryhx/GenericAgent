@@ -258,6 +258,45 @@ resume 都无法完成第二轮，而单测全绿是因为没有一条测试用 
 **回归**：subagent 相关 `Ran 168 tests ... OK (skipped=2)`；全量
 `Ran 792 tests in 114.913s ... OK (skipped=3)`。
 
+### 1.4 规划外补齐：`close_agent(cascade=true)`（2026-07-30）
+
+复核 v2 设计文档 §6 时发现一处**从未实现的 P0 子项**：§6.2 的 schema 里有 `cascade` 字段、
+返回值里有 `closed_descendants`、§6.3 的 P0 测试清单里有"close descendants"，
+但 `close_agent()` 从头到尾只关目标本身，`cascade` / `descendants` 在全仓 grep 零命中。
+
+**为什么现在比设计当初更该做**：G1 落地后活跃 agent 有了硬上限，而关掉一个中间层 agent
+会把它的后代留成孤儿——没人读它们的输出，却继续各占一个活跃额度，直到进程自己死掉
+才被 1.3 节的 stale-row 回收注意到。cascade 是让 close 成为树操作的那一步。
+
+| 落地内容 | 红测证据 |
+| --- | --- |
+| `SubagentRegistry.descendants(agent_path, include_closed=False)`：复用 `list_agents` 的前缀过滤（`path == prefix or path.startswith(prefix + "/")`，所以 `/root/a` 不误伤 `/root/ab`），排除自身，按 **段数倒序** 返回（深的在前） | `'SubagentRegistry' object has no attribute 'descendants'` ×4 |
+| `SubagentManager.close_agent(..., cascade=False)`：原实现整体下移为 `_close_single_agent()`，`close_agent()` 变成"先 `_close_descendants()`，再关自己"的编排层；`CloseResult` 新增 `closed_descendants: list[dict]`；`AgentState` 新增 `close_reason` | `unexpected keyword argument 'cascade'` |
+| 工具层：`ga.py do_close_agent` 透出 `cascade` 与 `closed_descendants`，中英文 schema 补 `cascade` 字段（描述里点明"只关目标会把后代留成孤儿"） | `KeyError: 'closed_descendants'`；`'cascade' not found in {...}` ×2 |
+
+**三条实现决定与理由**：
+1. **后代由深到浅关、目标最后关。** 子必须先于派生它的父消失，否则父的停机会与自己子进程的
+   写入相互竞争；目标放最后是为了"cascade 中途失败时不会只剩目标还活着"。
+2. **单个后代失败只记录不抛。** 某后代 `state.json` 被别的进程锁住时若直接抛出，
+   剩余后代和目标都会继续运行——半棵树加一个异常是最坏结果。失败以
+   `{"status": "error", "msg": ...}` 记入 `closed_descendants`，测试用注入的
+   `_close_single_agent` 打桩验证这条路径。
+3. **后代 `close_reason` 写 `cascade_close:<ancestor>`，不沿用父的 reason。** 事后看
+   `state.json` 能直接知道它是被谁的收尾带走的，而不是显示成一次独立的 `parent_cleanup`。
+
+**一处测试自身的修正**：最初的 fixture 给每个 agent 写了带 `[ROUND END]` 的 output，
+于是 `read_agent()` 把它们全部提升为 `completed`，close 变成对"已结束进程"的 no-op，
+`test_each_cascaded_descendant_gets_a_real_close_not_just_a_registry_flag` 断言
+`'completed' != 'interrupted'` 而红。改掉的是 **fixture**（去掉 `[ROUND END]`，让 agent 处于
+真正的 mid-turn 状态）而非实现——cascade 有意义的场景本来就只有"后代还在跑"。
+
+**回归**：subagent 相关 `Ran 131 tests ... OK (skipped=2)` + 生命周期 17 项全绿；
+全量 `Ran 804 tests in 129.133s ... OK (skipped=3)`（较上次 792 增加的 12 项即本次新增测试：
+registry 4 + manager 6 + 工具层 2）。
+
+至此 v2 设计 §6 的 P0 条目全部落地，`memory/supervisor_sop.md` 的收尾条目已改为在目标
+派生过子 agent 时使用 `cascade=true`。
+
 ## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
 
 ### 2.0 实测证据摘要

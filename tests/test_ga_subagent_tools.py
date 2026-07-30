@@ -419,6 +419,71 @@ class GaSubagentToolsTest(unittest.TestCase):
                 ["git", "-C", str(Path(td)), "worktree", "remove", "--force", str(worktree)],
             )
 
+    def test_close_agent_tool_cascade_closes_descendants_and_reports_them(self):
+        """The LLM has no other way to clean up a subtree: without cascade it must walk the
+        tree itself, and it cannot see agents it did not personally spawn."""
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td, process_exists=lambda _pid: True, terminate_process=lambda _pid: None, sleep=lambda _: None
+            )
+            manager = handler.subagent_manager
+            manager.registry.max_depth = 0
+            for parent, name, pid in (("/root", "lead", 11), ("/root/lead", "helper", 22), ("/root", "bystander", 33)):
+                entry = manager.registry.create_child(
+                    parent, name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json", pid=pid
+                )
+                task_dir = Path(entry.task_dir)
+                task_dir.mkdir(parents=True, exist_ok=True)
+                (task_dir / "output.txt").write_text(f"{name} mid-turn", encoding="utf-8")
+                atomic_write_json(
+                    task_dir / "state.json",
+                    {
+                        "schema_version": 1,
+                        "task_name": name,
+                        "agent_path": str(entry.agent_path),
+                        "run_id": entry.run_id,
+                        "pid": pid,
+                        "round": 0,
+                        "turn_status": "running",
+                        "process_status": "alive",
+                        "output_path": str(task_dir / "output.txt"),
+                    },
+                )
+
+            outcome = exhaust(
+                handler.do_close_agent(
+                    {"target": "/root/lead", "reason": "test_cleanup", "grace_seconds": 0, "cascade": True}, None
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "closed")
+            self.assertEqual([row["agent_path"] for row in outcome.data["closed_descendants"]], ["/root/lead/helper"])
+            self.assertEqual(outcome.data["closed_descendants"][0]["status"], "closed")
+            self.assertEqual(manager.registry.get("/root/lead/helper").status, "closed")
+            self.assertEqual(manager.registry.get("/root/bystander").status, "running")
+
+    def test_close_agent_tool_reports_an_empty_descendant_list_when_cascade_is_off(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "solo_worker"
+            task_dir.mkdir(parents=True)
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "solo_worker",
+                    "agent_path": "/root/solo_worker",
+                    "pid": None,
+                    "round": 0,
+                    "turn_status": "completed",
+                    "process_status": "waiting_reply",
+                },
+            )
+            handler = self.make_handler(td, process_exists=lambda _pid: False, sleep=lambda _: None)
+
+            outcome = exhaust(handler.do_close_agent({"target": "solo_worker", "grace_seconds": 0}, None))
+
+            self.assertEqual(outcome.data["closed_descendants"], [])
+
     def test_read_agent_result_supports_artifact_id(self):
         with tempfile.TemporaryDirectory() as td:
             from subagent_artifacts import SubagentArtifactStore
@@ -797,6 +862,7 @@ class GaSubagentToolsTest(unittest.TestCase):
                 self.assertIn("resume_context_edits", read_schema["parameters"]["properties"])
                 close_schema = next(item["function"] for item in raw if item["function"]["name"] == "close_agent")
                 self.assertIn("cleanup_worktree", close_schema["parameters"]["properties"])
+                self.assertIn("cascade", close_schema["parameters"]["properties"])
                 spawn_schema = next(item["function"] for item in raw if item["function"]["name"] == "spawn_agent")
                 properties = spawn_schema["parameters"]["properties"]
                 for prop in ["agent_type", "background", "isolation", "ipc_mode"]:

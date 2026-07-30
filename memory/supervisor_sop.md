@@ -40,4 +40,4 @@
 - **沉默为主**：没问题不说话
 - **一句话**：像用户一样直接说，禁长篇解释
 - **`_keyinfo`只用于提前预注入**：在工作agent到达该步之前塞细节。已经犯错的一律用`_intervene`纠正
-- **收尾优先 close_agent**：cleanup 前先读 `state.json`，再用 `close_agent()` 收尾，不能只按 PID 统一杀掉
+- **收尾优先 close_agent**：cleanup 前先读 `state.json`，再用 `close_agent()` 收尾，不能只按 PID 统一杀掉。目标自己派生过子 agent 时用 `close_agent(target, cascade=true)`，否则后代会变成孤儿进程

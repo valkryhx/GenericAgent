@@ -188,6 +188,17 @@ class SubagentRegistry:
             entries.append(_entry_from_dict(raw))
         return sorted(entries, key=lambda entry: str(entry.agent_path))
 
+    def descendants(self, agent_path, include_closed=False):
+        """Rows strictly below ``agent_path``, deepest first.
+
+        Deepest-first is the cascade close order: a child must be closed before the parent
+        that spawned it, or the parent's shutdown races its own children's writes. The `+ "/"`
+        in list_agents' prefix test is what keeps /root/a from sweeping up /root/ab.
+        """
+        prefix = str(_coerce_agent_path(agent_path))
+        entries = [e for e in self.list_agents(prefix, include_closed=include_closed) if str(e.agent_path) != prefix]
+        return sorted(entries, key=lambda entry: (-len(entry.agent_path.segments), str(entry.agent_path)))
+
     def update(self, agent_path, **updates):
         path = str(_coerce_agent_path(agent_path))
         data = self._load()

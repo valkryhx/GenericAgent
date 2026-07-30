@@ -97,6 +97,65 @@ class SubagentRegistryTest(unittest.TestCase):
             self.assertEqual(got.process_status, "waiting_reply")
 
 
+class RegistryDescendantsTest(unittest.TestCase):
+    """`close_agent(cascade=true)` needs to know who lives below a path.
+
+    The v2 design lists `descendants()` in the registry API (§6 schema + P0 test list), but
+    nothing ever implemented it. Without it, closing a middle-tier agent orphans its children:
+    they keep running, keep consuming the G1 active-agent cap, and only get reaped once their
+    process dies — the exact failure mode the stale-row reaping had to clean up by hand.
+    """
+
+    def _registry(self, td, **kwargs):
+        return SubagentRegistry(Path(td) / "temp" / "subagents", **kwargs)
+
+    def _child(self, registry, parent, name, td):
+        return registry.create_child(parent, name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json")
+
+    def test_descendants_excludes_the_agent_itself_and_returns_deepest_first(self):
+        """Deepest-first is the close order: a leaf must go before the parent that owns it."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td, max_depth=0)
+            top = self._child(registry, "/root", "top", td)
+            mid = self._child(registry, top.agent_path, "mid", td)
+            leaf = self._child(registry, mid.agent_path, "leaf", td)
+
+            paths = [str(e.agent_path) for e in registry.descendants(top.agent_path)]
+
+            self.assertEqual(paths, [str(leaf.agent_path), str(mid.agent_path)])
+
+    def test_descendants_does_not_match_a_sibling_sharing_the_name_prefix(self):
+        """/root/a must not sweep up /root/ab — a string prefix is not a path prefix."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td)
+            first = self._child(registry, "/root", "a", td)
+            self._child(registry, "/root", "ab", td)
+            child = self._child(registry, first.agent_path, "inner", td)
+
+            self.assertEqual([str(e.agent_path) for e in registry.descendants("/root/a")], [str(child.agent_path)])
+
+    def test_descendants_skips_closed_rows_unless_asked(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td)
+            top = self._child(registry, "/root", "top", td)
+            gone = self._child(registry, top.agent_path, "gone", td)
+            alive = self._child(registry, top.agent_path, "alive", td)
+            registry.mark_closed(gone.agent_path, previous_status="running", closed_status="shutdown")
+
+            self.assertEqual([str(e.agent_path) for e in registry.descendants(top.agent_path)], [str(alive.agent_path)])
+            self.assertEqual(
+                sorted(str(e.agent_path) for e in registry.descendants(top.agent_path, include_closed=True)),
+                [str(alive.agent_path), str(gone.agent_path)],
+            )
+
+    def test_descendants_of_a_leaf_is_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td)
+            leaf = self._child(registry, "/root", "leaf", td)
+
+            self.assertEqual(registry.descendants(leaf.agent_path), [])
+
+
 class SubagentTreeLimitsTest(unittest.TestCase):
     """G1: nothing bounded the agent tree, and every GA subagent is a separate OS process.
 

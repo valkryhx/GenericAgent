@@ -327,6 +327,163 @@ class SubagentManagerReadTest(unittest.TestCase):
             self.assertEqual(state.process_status, "shutdown")
 
 
+class CascadeCloseTest(unittest.TestCase):
+    """`close_agent(cascade=true)` — the one P0 item in the v2 design that never landed.
+
+    §6.2 of docs/ga_subagent_v2_optimization_design_2026-07-27.md specifies a `cascade` field
+    and a `closed_descendants` return value, and §6.3 lists "close descendants" as a P0 test,
+    but the implementation only ever closed the target. Closing a middle-tier agent therefore
+    orphaned everything below it: those processes keep running with nobody reading their
+    output, and each one keeps consuming a G1 active-agent slot until its process happens to
+    die and the stale-row reaper notices. Cascade is what makes close a tree operation.
+    """
+
+    def _agent(self, manager, td, parent, name, pid):
+        entry = manager.registry.create_child(
+            parent,
+            name,
+            Path(td) / "temp" / name,
+            Path(td) / "temp" / name / "state.json",
+            pid=pid,
+        )
+        task_dir = Path(entry.task_dir)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        output_path = task_dir / "output.txt"
+        # No [ROUND END] marker: these agents are mid-turn, which is the only state where a
+        # cascade matters. With the marker, read_agent would promote them to completed and the
+        # close would be a no-op on an already-finished process.
+        output_path.write_text(f"{name} is still working", encoding="utf-8")
+        atomic_write_json(
+            task_dir / "state.json",
+            {
+                "schema_version": 1,
+                "task_name": name,
+                "agent_path": str(entry.agent_path),
+                "run_id": entry.run_id,
+                "pid": pid,
+                "round": 0,
+                "turn_status": "running",
+                "process_status": "alive",
+                "output_path": str(output_path),
+                "final_output_path": None,
+            },
+        )
+        return entry
+
+    def _manager(self, td, terminated):
+        return SubagentManager(
+            root_dir=td,
+            process_exists=lambda _pid: True,
+            terminate_process=lambda pid: terminated.append(pid),
+            sleep=lambda _: None,
+        )
+
+    def _tree(self, manager, td):
+        """/root/top -> /root/top/mid -> /root/top/mid/leaf, plus an unrelated sibling."""
+        manager.registry.max_depth = 0
+        top = self._agent(manager, td, "/root", "top", 100)
+        mid = self._agent(manager, td, top.agent_path, "mid", 200)
+        leaf = self._agent(manager, td, mid.agent_path, "leaf", 300)
+        other = self._agent(manager, td, "/root", "other", 400)
+        return top, mid, leaf, other
+
+    def test_cascade_closes_descendants_deepest_first_and_leaves_unrelated_agents_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            top, mid, leaf, other = self._tree(manager, td)
+
+            result = manager.close_agent(str(top.agent_path), reason="parent_cleanup", grace_s=0, cascade=True)
+
+            self.assertEqual(
+                [row["agent_path"] for row in result.closed_descendants],
+                [str(leaf.agent_path), str(mid.agent_path)],
+            )
+            # The target is terminated last: its children must be gone before it is.
+            self.assertEqual(terminated, [300, 200, 100])
+            self.assertEqual(manager.registry.get(other.agent_path).status, "running")
+            self.assertEqual([str(e.agent_path) for e in manager.registry.list_agents()], [str(other.agent_path)])
+
+    def test_cascade_defaults_to_false_so_existing_close_behaviour_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            top, mid, leaf, _other = self._tree(manager, td)
+
+            result = manager.close_agent(str(top.agent_path), reason="parent_cleanup", grace_s=0)
+
+            self.assertEqual(result.closed_descendants, [])
+            self.assertEqual(terminated, [100])
+            self.assertEqual(manager.registry.get(mid.agent_path).status, "running")
+            self.assertEqual(manager.registry.get(leaf.agent_path).status, "running")
+
+    def test_each_cascaded_descendant_gets_a_real_close_not_just_a_registry_flag(self):
+        """A row flipped to closed while the process keeps running is worse than no cascade."""
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            top, mid, leaf, _other = self._tree(manager, td)
+
+            manager.close_agent(str(top.agent_path), grace_s=0, cascade=True)
+
+            for entry in (mid, leaf):
+                task_dir = Path(entry.task_dir)
+                state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+                self.assertEqual(state["turn_status"], "interrupted", entry.task_name)
+                self.assertEqual(state["process_status"], "killed", entry.task_name)
+                self.assertEqual(state["close_reason"], f"cascade_close:{top.agent_path}", entry.task_name)
+                self.assertTrue((task_dir / "_stop").exists(), entry.task_name)
+                self.assertIn('"type":"agent_closed"', (task_dir / "events.jsonl").read_text(encoding="utf-8"))
+
+    def test_a_descendant_that_fails_to_close_is_reported_and_does_not_abort_the_cascade(self):
+        """Half a cascade with an exception is the worst outcome: the target stays alive too."""
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            top, mid, leaf, _other = self._tree(manager, td)
+            real_close = manager._close_single_agent
+
+            def flaky(target, **kwargs):
+                if str(target) == str(mid.agent_path):
+                    raise OSError("state.json is locked by another process")
+                return real_close(target, **kwargs)
+
+            manager._close_single_agent = flaky
+
+            result = manager.close_agent(str(top.agent_path), grace_s=0, cascade=True)
+
+            rows = {row["agent_path"]: row for row in result.closed_descendants}
+            self.assertEqual(rows[str(leaf.agent_path)]["status"], "closed")
+            self.assertEqual(rows[str(mid.agent_path)]["status"], "error")
+            self.assertIn("locked", rows[str(mid.agent_path)]["msg"])
+            self.assertEqual(result.closed_state.process_status, "killed")
+            self.assertEqual(manager.registry.get(top.agent_path).status, "closed")
+
+    def test_cascade_on_a_leaf_reports_no_descendants(self):
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            _top, _mid, leaf, _other = self._tree(manager, td)
+
+            result = manager.close_agent(str(leaf.agent_path), grace_s=0, cascade=True)
+
+            self.assertEqual(result.closed_descendants, [])
+            self.assertEqual(terminated, [300])
+
+    def test_cascade_reason_records_which_ancestor_triggered_the_close(self):
+        """`parent_cleanup` on a descendant hides why it died; the ancestor path is the reason."""
+        with tempfile.TemporaryDirectory() as td:
+            terminated = []
+            manager = self._manager(td, terminated)
+            top, mid, _leaf, _other = self._tree(manager, td)
+
+            result = manager.close_agent(str(top.agent_path), reason="user_abort", grace_s=0, cascade=True)
+
+            rows = {row["agent_path"]: row for row in result.closed_descendants}
+            self.assertEqual(rows[str(mid.agent_path)]["reason"], f"cascade_close:{top.agent_path}")
+            self.assertEqual(result.closed_state.close_reason, "user_abort")
+
+
 class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
     def test_spawn_agent_duplicate_task_name_uses_new_agent_path_and_preserves_first_artifact(self):
         with tempfile.TemporaryDirectory() as td:

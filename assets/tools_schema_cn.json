@@ -184,6 +184,7 @@
       "target": {"type": "string", "description": "task_name 或 /root/task_name；不允许 /root"},
       "reason": {"type": "string", "description": "可选关闭原因", "default": "parent_cleanup"},
       "grace_seconds": {"type": "number", "description": "写入 _stop 后等待终止前的秒数", "default": 2},
+      "cascade": {"type": "boolean", "description": "同时关闭目标之下的所有后代 agent，由深到浅，最后关闭目标本身。目标自己派生过子 agent 时必须用：只关目标会把它的子 agent 留成孤儿进程，没人读它们的输出。被关闭的后代在 closed_descendants 中返回", "default": false},
       "cleanup_worktree": {"type": "boolean", "description": "关闭 worktree 隔离子智能体时，先采集 git status/diff 摘要，再保留摘要并移除 worktree 目录", "default": false}}}
   }},
   {"type": "function", "function": {

@@ -2,7 +2,7 @@ import json
 import os
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from subagent_agent_path import AgentPath
@@ -63,6 +63,7 @@ class AgentState:
     worktree_cleanup: dict | None = None
     attach_status: str | None = None
     ipc_endpoint: dict | None = None
+    close_reason: str | None = None
 
 
 @dataclass
@@ -105,6 +106,7 @@ class CloseResult:
     previous_state: AgentState
     closed_state: AgentState
     final_output_path: str | None
+    closed_descendants: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1063,7 +1065,66 @@ class SubagentManager:
         self._write_registry_entry(previous.task_name, raw, task_dir)
         return HandoffResult(previous.agent_path, previous, updated, handoff_mode, reason)
 
-    def close_agent(self, target, reason="parent_cleanup", grace_s=2.0, cleanup_worktree=False):
+    def close_agent(self, target, reason="parent_cleanup", grace_s=2.0, cleanup_worktree=False, cascade=False):
+        """Close ``target``; with ``cascade=True`` close everything below it first.
+
+        Without cascade, closing a middle-tier agent orphans its children: they keep running
+        with nobody reading their output and keep consuming G1 active-agent slots until their
+        process happens to die. Descendants go deepest-first so a child is always gone before
+        the parent that spawned it, and the target itself is closed last — a cascade that dies
+        halfway must not leave the target alive as well, so per-descendant failures are
+        recorded and the sweep continues.
+        """
+        if str(target or "").strip().replace("\\", "/").rstrip("/") in {"root", "/root"}:
+            raise ValueError("cannot close root agent")
+        closed_descendants = []
+        if cascade:
+            closed_descendants = self._close_descendants(
+                target, grace_s=grace_s, cleanup_worktree=cleanup_worktree
+            )
+        result = self._close_single_agent(
+            target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree
+        )
+        result.closed_descendants = closed_descendants
+        return result
+
+    def _close_descendants(self, target, *, grace_s, cleanup_worktree):
+        """Close every live agent below ``target``, deepest first; never raise."""
+        try:
+            anchor = self.read_agent(target).agent_path
+        except Exception:
+            anchor = str(target)
+        try:
+            entries = self.registry.descendants(anchor)
+        except Exception:
+            return []
+        cascade_reason = f"cascade_close:{anchor}"
+        rows = []
+        for entry in entries:
+            row = {"agent_path": str(entry.agent_path), "task_name": entry.task_name, "reason": cascade_reason}
+            try:
+                closed = self._close_single_agent(
+                    str(entry.agent_path),
+                    reason=cascade_reason,
+                    grace_s=grace_s,
+                    cleanup_worktree=cleanup_worktree,
+                )
+                row.update(
+                    {
+                        "status": "closed",
+                        "previous_turn_status": closed.previous_state.turn_status,
+                        "closed_process_status": closed.closed_state.process_status,
+                        "final_output_path": closed.final_output_path,
+                    }
+                )
+            except Exception as exc:
+                # One stuck descendant must not abort the sweep: aborting would leave both the
+                # remaining descendants and the target itself running.
+                row.update({"status": "error", "msg": f"{type(exc).__name__}: {exc}"})
+            rows.append(row)
+        return rows
+
+    def _close_single_agent(self, target, reason="parent_cleanup", grace_s=2.0, cleanup_worktree=False):
         if str(target or "").strip().replace("\\", "/").rstrip("/") in {"root", "/root"}:
             raise ValueError("cannot close root agent")
         previous = self.read_agent(target)
@@ -1563,6 +1624,7 @@ class SubagentManager:
             worktree_cleanup=raw.get("worktree_cleanup"),
             attach_status=raw.get("attach_status"),
             ipc_endpoint=raw.get("ipc_endpoint"),
+            close_reason=raw.get("close_reason"),
         )
 
 
@@ -1585,8 +1647,8 @@ def wait_agents(targets=None, timeout_s=30, poll_interval_s=0.5, since_event_off
     return _DEFAULT_MANAGER.wait_agents(targets, timeout_s, poll_interval_s, since_event_offsets, since_event_seq)
 
 
-def close_agent(target, reason="parent_cleanup", grace_s=2.0):
-    return _DEFAULT_MANAGER.close_agent(target, reason=reason, grace_s=grace_s)
+def close_agent(target, reason="parent_cleanup", grace_s=2.0, cascade=False):
+    return _DEFAULT_MANAGER.close_agent(target, reason=reason, grace_s=grace_s, cascade=cascade)
 
 
 def interrupt_agent(target, reason="parent_interrupt"):

@@ -76,6 +76,12 @@
 > **0.25 秒**（轮询间隔故意设成 30 秒，所以只可能来自 realtime 信号）；
 > E2E 另外暴露并修掉两个规划外缺陷（registry 陈旧行占满活跃额度、
 > resume 的 str content history 在 anthropic 线必炸），见规划文档 1.2 / 1.3 节。
+>
+> **补充（2026-07-30）**：本文 §6.2 schema 里的 `cascade` 与 §6.3 P0 测试项 "close descendants"
+> 此前从未实现（`close_agent` 只关目标本身），现已按 TDD 补齐：
+> `SubagentRegistry.descendants()` + `SubagentManager.close_agent(cascade=True)`，
+> 后代由深到浅先关、目标最后关，单个后代失败只记录不中断整棵树的收尾。
+> 至此 §6 的 P0 条目全部落地。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；
@@ -685,6 +691,20 @@ close_agent
 - close 不删除 artifact。
 - close 写 event：`agent_close_requested`、`agent_closed`。
 - close 更新 registry/state。
+
+> **✅ 已实现（2026-07-30）**：`cascade` 参数与 `closed_descendants` 返回字段已落地
+> （`subagent_manager.py` `close_agent(cascade=...)` / `_close_descendants()` /
+> `_close_single_agent()`，`subagent_registry.py` `descendants()`，工具层 `ga.py do_close_agent`
+> 与中英文 schema 的 `cascade` 字段）。三条实现决定及其理由：
+> 1. **后代由深到浅关，目标最后关**：子必须先于派生它的父消失，否则父的停机会和自己子进程的写入相互竞争；
+>    目标放最后是为了"cascade 中途失败也不会只剩目标还活着"。
+> 2. **单个后代失败只记录不抛**：某个后代 `state.json` 被别的进程锁住时若直接抛出，
+>    剩余后代和目标都会继续运行 —— 半棵树加一个异常是最坏结果。失败以
+>    `{"status": "error", "msg": ...}` 记入 `closed_descendants`。
+> 3. **后代的 `close_reason` 写 `cascade_close:<ancestor>` 而非沿用父的 reason**：
+>    事后看 `state.json` 能直接知道它是被谁的收尾带走的，而不是显示成一次独立的 `parent_cleanup`。
+>
+> 前缀匹配用 `path == prefix or path.startswith(prefix + "/")`，`/root/a` 不会误伤 `/root/ab`。
 
 ### 6.3 P0 测试
 

@@ -1071,7 +1071,7 @@ class GenericAgentHandler(BaseHandler):
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_close_agent(self, args, response):
-        '''关闭子智能体并返回关闭前状态；root agent 不能关闭。'''
+        '''关闭子智能体并返回关闭前状态；root agent 不能关闭。cascade=true 会先关闭其所有后代。'''
         target = args.get("target") or args.get("task_name")
         if not target:
             return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
@@ -1082,17 +1082,24 @@ class GenericAgentHandler(BaseHandler):
             grace_s = 2.0
         grace_s = max(0.0, min(grace_s, 60.0))
         cleanup_worktree = bool(args.get("cleanup_worktree") or args.get("cleanupWorktree"))
+        cascade = bool(args.get("cascade"))
         manager = self._get_subagent_manager()
         try:
-            result = manager.close_agent(target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree)
+            result = manager.close_agent(
+                target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree, cascade=cascade
+            )
             data = {
                 "status": "closed",
                 "target": result.previous_state.agent_path,
                 "previous_status": self._subagent_state_payload(result.previous_state),
                 "closed_state": self._subagent_state_payload(result.closed_state),
                 "final_output_path": result.final_output_path,
+                "closed_descendants": result.closed_descendants,
             }
-            yield f"[Status] Closed subagent {result.previous_state.agent_path}.\n"
+            if result.closed_descendants:
+                yield f"[Status] Closed subagent {result.previous_state.agent_path} and {len(result.closed_descendants)} descendant(s).\n"
+            else:
+                yield f"[Status] Closed subagent {result.previous_state.agent_path}.\n"
         except Exception as e:
             data = {"status": "error", "msg": format_error(e)}
             yield f"[Status] Failed to close subagent: {data['msg']}\n"
