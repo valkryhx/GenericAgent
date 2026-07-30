@@ -16,8 +16,11 @@ P2 项（B1/B2/B3）做实测验证，结果推翻了原有优先级排序 —�
 | **B1** | `publish()` 同步 fan-out 会阻塞在慢订阅者上 | P2 健壮性 | 规划文档 §6 已列，未实现 | **前提为真**：真实 `message_queued` 事件（pickle 329 字节）**24 条未读即卡死**；但"拖慢整个事件写入链路"的推断**未复现**，实际爆炸半径远小于文档描述。**✅ 已修复（2026-07-30）** |
 | **B3** | `wait_agents()` 轮询 `state.json` 而非 watch 语义 | P2 控制面 | 规划文档 §6 已列，未实现 | 顺带量到写放大：4 agent / 2s / 0.5s 间隔 → **40 次原子写（每秒 20 次）**，且这些写正是 M5 竞态的主要喂食者。**✅ 已修复（2026-07-30）** |
 | **B2** | 控制面 op 没有提交身份，重放即重复执行 | P2 控制面 → **实测为正确性问题** | 规划文档 §6 已列，本文初版判为"纯结构收益，无实测正确性问题" | 重放 `followup_task` → **2 条 trigger_turn 行（任务干两遍）**；重放 `spawn_agent` → **两个真实进程、两个 run_id**；`enqueue` 的 `message_id` 去重分支存在但 13 个 handler 从未使用。**✅ 已修复（2026-07-30）** |
+| **M6** | 同名 spawn 静默改名：活着的 agent 被复制成第二个进程 | **P1 正确性 + 花费** | **完全未记录** | `spawn_agent("reviewer")` 在 `/root/reviewer` 仍在运行时产出 `/root/reviewer_1` —— 第二个 OS 进程、第二个活跃名额、第二份真实 LLM 花费，而模型以为只有一个 agent。Codex 同场景直接报错（`agent/registry.rs:247-250`）。**✅ 已修复（2026-07-30）** |
+| **M7** | `resume_agent` 无任何守卫：可 resume 活着的 agent，且重放不设防 | **P1 正确性 + 花费** | **完全未记录** | resume 一个进程仍活着的 agent 会**再起一个进程并把 `state.json` 的 pid 覆盖成新的**，首个 pid 从此无人引用（wait/interrupt/close 都摸不到），却继续烧真实 LLM 花费；且 B2 给 spawn/close/followup 都加了 `submission_id`，唯独漏了 resume，重放即起第二个进程。**✅ 已修复（2026-07-30）** |
 
-**由此得出的顺序：M5 → B1 → B3 → （B2 继续后放）**。理由见第 4 节。
+**由此得出的顺序：M5 → B1 → B3 → B2 → M6 → M7**（M6/M7 是做完 B2 后回头查
+"还有哪个控制面 op 会悄悄多起一个进程" 时发现的）。理由见第 4 节。
 
 ## 1. M5：registry.json 的无锁读改写（新发现）
 
@@ -258,6 +261,124 @@ close_agent   重放（且已 rmtree 任务目录）→ 不抛错，previous_sta
 16 条测试固化在 `tests/test_subagent_submissions.py::SubmissionLogTest`（6）、
 `tests/test_subagent_manager.py::SubmissionIdempotencyTest`（5）与 `MulticastMessageTest`（5）。
 
+### 3.4 B2 的遗留问题：去重是 opt-in 的
+
+B2 落地后被问到"重复执行的 bug 修好了吗"，诚实的答案是：**机制在，但要模型自己带 id**。
+`ga.py` 读的是 `args.get("submission_id")`，GA 既不自动生成也没有自动重试路径，
+不带 id 的两次调用仍然是两条消息 —— 这是刻意的（`test_without_a_submission_id_two_calls_stay_two_messages`
+固化了它），因为去重必须靠 id 而不是文本：两次同文本的 followup 可能是两个真实意图。
+
+先查了两个参考实现有没有"分发层自动派 id"这一层，结论是**都没有**：
+
+- **Codex**：`Submission.id` 由宿主生成（`core/src/session/mod.rs:688` `Uuid::now_v7()`），
+  doc comment 明说它存在的目的是"to correlate with Events"。`submission_loop`
+  （`handlers.rs:715`）只在 tracing 里碰 `sub.id`，没有任何已执行集合。
+  `SendMessageArgs` / `SpawnAgentArgs`（`message_tool.rs:36-47`、`spawn.rs:244-253`）
+  根本不带 id。唯一以模型给的 id 做 at-most-once 的地方是 agent-jobs 对 `item_id`
+  的 SQL compare-and-set（`agent_jobs.rs:445-463`）。
+- **Claude Code**：宿主层完全没有幂等。`AgentTool.tsx:82-100` 的 schema 没有幂等键；
+  `spawnMultiAgent.ts:268-293` 对重名直接追加 `-2`/`-3`；`inProgressToolUseIDs`
+  在完成时被删除（`toolOrchestration.ts:179-188`），结构上不可能当已执行集合用。
+  唯一的守卫 `handledToolUseIds`（`cli/print.ts:5272`）只服务 SDK/bridge 的
+  orphaned-permission WebSocket 重连。
+
+所以两家真正的护栏都不是 id，而是**语义唯一性**：Codex 在 `registry.rs:247-250` 对
+已存在的 agent path 直接 `Err(UnsupportedOperation)`。GA 的 `agent_loop.py:68-92` 没有任何
+重放路径（无重试、无 WebSocket 重连、无 orphaned-permission 再入），在分发层自动派 id
+挡不住唯一真实的重复来源 —— 模型在**新一轮**里重发同一个调用，那时任何按
+`(session_id, turn, index)` 推导的 id 都不一样。
+
+因此这里的取舍是：**不在分发层造 id，改为补语义唯一性守卫（M6/M7），
+并把 schema 措辞从"可选"改成带触发条件的义务**（Codex 就是靠措辞让模型交出 `item_id` 的）。
+
+## 3.5 M6：活着的同名 agent 被静默改名（新发现）
+
+```
+spawn_agent("reviewer", ...)                       → /root/reviewer   pid 7000（仍在运行）
+spawn_agent("reviewer", ...)  ← 模型以为在复用它    → /root/reviewer_1 pid 7001
+结果：2 个 OS 进程、2 个活跃 agent 名额、2 份真实 LLM 花费，模型以为只有 1 个 agent
+```
+
+改名本身不是 bug —— 对**已关闭或已崩溃**的 agent 它是对的：那个 agent 的 task dir
+和 artifact 仍然是它做过什么的唯一证据，复用同名会把证据清掉。错的是不区分死活。
+
+### 3.5.1 M6 修复结果（2026-07-30，已完成）
+
+- `subagent_registry.py` 新增 `SubagentNameConflictError`（带 `agent_path` 字段，
+  让工具层能把冲突路径当结构化数据给模型，而不是让它去解析句子）。
+- `_unique_child_name_unlocked` 在写锁内判活：活着 → 抛错；已关闭/崩溃 → 照旧改名。
+  判活规则与 `_reap_stale_agents` 一致，包括"**判断不了就算活着**" ——
+  这里猜死会静默复用一个正在运行的 agent 的名字，正是要修的缺陷。
+- `SubagentRegistry.reject_if_live()` 作为**只读**前置检查暴露给 manager：
+  task dir 是按 task name 命名的（`temp/<task_name>`），如果让 `create_child`
+  把 agent path 改名而 manager 仍用请求的目录名，新 agent 会拿到旧 agent 的目录。
+  所以拒绝必须发生在推导目录**之前**。
+- 拒绝走 `_record_spawn_rejection()` 记 `spawn_rejected` 事件（与 G1 树上限拒绝同一出口）。
+- 错误文案是写给模型的，点名三个替代动作：
+  `Use followup_task to give it more work, close_agent to end it first, or pick a different task_name.`
+  `ga.py` 的 `_subagent_error_result()` 对这个错误类**跳过 `format_error`**，
+  不让 `@ file:line, func -> \`src\`` 的噪声把一个刻意的策略答复伪装成 GA 崩溃、
+  诱导模型换个畸形名字重试。
+
+## 3.6 M7：resume_agent 完全没有守卫（新发现）
+
+```
+案例 1：resume 一个进程仍活着的 agent
+  spawn worker → pid 5000（活着），state.json pid = 5000
+  resume worker → 返回成功，pid 5001，state.json pid 被覆盖成 5001
+  => pid 5000 从此无人引用：wait/interrupt/close 都摸不到它，但它继续烧真实 LLM 花费
+
+案例 2：同一逻辑提交重放 resume
+  resume(submission_id 不存在这个参数) × 2 → 2 个 resume 进程
+  => B2 给 spawn/close/followup 都加了 submission_id，唯独漏了 resume
+```
+
+`interrupt_agent` 天然幂等（只写 `_stop` 文件），所以只有 resume 是缺口。
+
+### 3.6.1 M7 修复结果（2026-07-30，已完成）
+
+- `resume_agent` 新增 `submission_id`，走 B2 同一套 `_replayed_submission` /
+  `_record_submission`，重放时用 `_resume_result_from_submission()` 重建首次的
+  `ResumeResult`（含 handle 快照与 resume_context）。
+- 新增 `_reject_resume_of_a_live_agent()`：复用 `SubagentNameConflictError`，
+  因为从模型视角这就是同一件事（要的 agent 已经活着），三个替代动作也一样。
+  判活用 `_is_live_state()`，同样"判断不了就算活着"。
+- `resume_agent` 的 schema 描述与错误文案都改为指向 `followup_task`：
+  给活着的 agent 加活儿本来就该用它。
+
+同规模复验：
+
+```
+resume 活着的 agent  → 抛 SubagentNameConflictError，popen 调用数不变，state.json pid 仍是首个 pid
+resume 已关闭的 agent → 照旧成功，起 1 个进程
+resume 重放（同 submission_id）→ popen 总数不变，pid/run_id/target 与首次一致
+不带 submission_id 的第二次 resume → 仍是新一轮（两次 deliberate resume 是合法的）
+```
+
+12 条测试固化在 `tests/test_subagent_manager.py::SpawnNameConflictTest`（6）、
+`ResumeAgentGuardTest`（4）、`tests/test_subagent_registry.py` 的两条新用例，
+外加 `tests/test_ga_subagent_tools.py` 的 4 条（冲突文案无 traceback 噪声、
+真实崩溃仍带 traceback、resume 冲突同样处理、schema 措辞含触发条件）。
+
+### 3.7 真实 API E2E：把被 stub 掉的那一环补上（2026-07-30）
+
+上面 §3.5 / §3.6 的 14 条单测有一个共同的空洞：它们都注入了假的 `process_exists`。
+而 M6 / M7 的**唯一判定输入**就是真实进程是否活着（默认走 `psutil.pid_exists`）。
+所以单测证明的是"给定判活结果，分支走对了"，没有证明"判活本身在真实进程上成立"。
+
+`tests/real_subagent_guard_e2e.py`（`GA_RUN_REAL_API_E2E=1` 开关，
+`claude-opus-5` / `provider: gorouter`，保留 `SECRET_RE` / `sanitize()`）补的就是这一环：
+spawn 一个真实子进程 → 等它跑完一轮真实 LLM 并停在 `waiting_reply` →
+让守卫对着真 pid / 真 registry 行 / 真 OS 进程判活。进程数用
+`psutil.process_iter` 扫 `agentmain.py` 命令行按 task_name **精确**匹配，
+而不是脚本自己的 popen 计数 —— 否则"被拒绝的调用有没有偷偷起进程"就是在验脚本的账本。
+
+实跑 `passed: true`，`issues: []`。八段断言与实测值见
+`docs/ga_subagent_ipc_implementation_plan_2026-07-29.md` §1.7，
+其中最关键的三个：`realPidAlive: true`（守卫确实是在对活进程判活）、
+`newProcessesAfterRefusal: []` / `newProcesses: []`（拒绝后 OS 层面真的没有新进程）、
+`originalArtifactIntact: true`（close 后改名，旧 agent 的 `output.txt` 逐字节完好）。
+
 ## 4. 优先级判断
 
 1. **M5（P0）**：实测 75% 丢行 + run_id 碰撞绕过 S1/S2 的隔离粒度 + Windows 直接抛错。
@@ -270,7 +391,16 @@ close_agent   重放（且已 rmtree 任务目录）→ 不抛错，previous_sta
    **✅ 已完成（2026-07-30）**，见 §3.1。
 4. **B2（P2 → 实测为正确性问题）**：本文初版判为"纯结构收益，没有实测出来的正确性问题"，
    实测推翻 —— 重放 `followup_task` 让子 agent 干两遍任务、重放 `spawn_agent` 起第二个进程。
-   **✅ 已完成（2026-07-30）**，实测证据见 §3.2，修复见 §3.3。
+   **✅ 已完成（2026-07-30）**，实测证据见 §3.2，修复见 §3.3，遗留取舍见 §3.4。
+5. **M6（P1）**：活着的同名 agent 被静默改名成第二个进程。与 Codex 同构（语义唯一性拒绝），
+   收益确定：省掉一个进程 + 一份 LLM 花费，且模型不再对"有几个 agent"产生错觉。
+   **✅ 已完成（2026-07-30）**，见 §3.5。
+6. **M7（P1）**：`resume_agent` 既能 resume 活着的 agent（把首个 pid 变成无人引用的孤儿进程），
+   又漏了 B2 的 `submission_id`。是 M6 的同类缺陷，只是发生在另一个入口。
+   **✅ 已完成（2026-07-30）**，见 §3.6。
+
+M6 / M7 / B2 三者的真实 API E2E 验收见 §3.7 —— 单测把判活 stub 掉了，
+必须再补一条真对真实进程的链路。
 
 同样维持后放：S8（subagent 与 workflow child agent 抽象统一，文档自评"v2 稳定后再做"）、
 S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保留、P2 移除）。
@@ -287,10 +417,16 @@ S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保
 | wait 写放大 | monkeypatch `subagent_state/manager/registry` 三处 `atomic_write_json` 计数，跑一次 `wait_agents` 超时周期 | 按文件名分类的写次数 |
 | 通道双向复用 | 父侧线程 `multiprocessing.connection.wait([sink.conn])` 阻塞读，同时 sink 发送线程持续写同一 handle，子侧交错 recv/send 300 轮 | 有无异常 + 上行信号到达数 |
 | 提交重放 | 对同一逻辑提交重复调 `followup_task` / `spawn_agent`，统计 mailbox `trigger_turn` 行数与 `popen` 调用次数 | 行数 / 进程数是否 > 1 |
+| 同名活 agent | 注入 `process_exists=lambda _: True` 让首个 agent 恒定判活，再 spawn 同名 | 第二次拿到的 `agent_path` 与 `popen` 调用次数 |
+| resume 守卫 | 注入 `process_exists` 控制死活，对活着 / 已关闭 / 重放三种情形各跑一次 resume，记录 `popen` pid 序列与 `state.json` 的 pid | 进程数是否增加 + `state.json` 的 pid 是否被覆盖 |
 
 写并发探针时有一处要注意：`SubagentRegistry` 默认 `max_active_agents=8`，
 不显式传 `max_depth=0, max_active_agents=0` 关掉上限的话，探针会先撞 G1 的
 `SubagentTreeLimitError` 而不是测到竞态。
+
+另一处：判活相关的探针和测试都必须**自己注入 `process_exists`**。默认实现会去问
+`psutil.pid_exists`，于是断言变成"宿主上恰好有没有这个假 pid"，在别人机器上会翻脸。
+M6/M7 的所有用例都显式传了它。
 
 ## 6. 相关文档
 

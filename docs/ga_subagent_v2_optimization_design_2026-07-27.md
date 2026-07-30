@@ -72,6 +72,7 @@
 > 缺陷 1（死通道，R1+R2+R4）、缺陷 2（轮询耦合，R3）、缺陷 7（上限守护，G1）
 > **已按 TDD 修复并全绿**，下面对应条目保留原始诊断以备回溯，并在条目末尾标注实际落地方式。
 > 规划内 P0/P1 全部完成；P2 的 B1-B3 也已于 2026-07-30 全部落地，见规划文档 1.1 节进度表。
+> 规划外另补了 M5（registry 锁）、M6/M7（语义唯一性守卫），见规划文档 §1.5 / §1.6。
 > 真实 API E2E 已通过（`claude-opus-5` / `provider: gorouter`），实测父→子唤醒
 > **0.25 秒**（轮询间隔故意设成 30 秒，所以只可能来自 realtime 信号）；
 > E2E 另外暴露并修掉两个规划外缺陷（registry 陈旧行占满活跃额度、
@@ -117,6 +118,44 @@
 > `Op::InterAgentCommunication` 的 `other_recipients` 多播 ——
 > 同收者列表事后 `annotate()` 补写，绝不让它有本事让已成功的投递失败。
 > 落地细节见规划文档 §6 的"B2 落地记录"。**P2 的 B1/B2/B3 至此全部完成。**
+
+> **M6 / M7 已修复（2026-07-30，规划外新增）**：B2 落地后被追问"重复执行的 bug 修好了吗"，
+> 诚实答案是"机制在，但要模型自己带 id"。于是先查两个参考实现有没有"分发层自动派 id"，
+> 结论是**都没有** —— Codex 的 `Submission.id` 只为关联 Event（`session/mod.rs:688` 由宿主
+> `Uuid::now_v7()` 生成，`submission_loop` 只在 tracing 里碰它，`SpawnAgentArgs` /
+> `SendMessageArgs` 根本不带 id）；Claude Code 宿主层完全没有幂等（`AgentTool.tsx:82-100`
+> 无幂等键，`spawnMultiAgent.ts:268-293` 对重名直接追加 `-2`/`-3`，`inProgressToolUseIDs`
+> 完成即删除，结构上不可能当已执行集合）。两家真正的护栏是**语义唯一性**：
+> Codex `agent/registry.rs:247-250` 对已存在的 agent path 直接 `Err(UnsupportedOperation)`。
+>
+> GA 的 `agent_loop.py:68-92` 同样没有重放路径（无重试、无 WebSocket 重连、无
+> orphaned-permission 再入），所以自动派 id 挡不住唯一真实的重复来源 ——
+> 模型在**新一轮**里重发同一个调用，那时任何按 `(session_id, turn, index)` 推导的 id 都不一样。
+> 因此改为补语义唯一性守卫，实测量到两处规划外缺陷：
+>
+> - **M6**：`spawn_agent("reviewer")` 在 `/root/reviewer` 仍在运行时静默产出 `/root/reviewer_1`
+>   —— 第二个 OS 进程、第二个活跃名额、第二份真实 LLM 花费，而模型以为只有一个 agent。
+> - **M7**：`resume_agent` 完全没有守卫。resume 一个进程仍活着的 agent 会再起一个进程并把
+>   `state.json` 的 pid 覆盖成新的，首个 pid 从此无人引用（wait/interrupt/close 都摸不到），
+>   却继续烧真实花费；且 B2 给 spawn/close/followup 都加了 `submission_id`，唯独漏了 resume。
+>
+> 修法：`SubagentNameConflictError`（带 `agent_path`）+ 写锁内判活 + 只读前置检查
+> `reject_if_live()`（拒绝必须发生在推导 `temp/<task_name>` 之前，否则新 agent 会拿到旧
+> agent 的目录）；`resume_agent` 补 `submission_id` 并复用同一错误类。
+> **只有"活着"才冲突** —— 已关闭/崩溃的 agent 仍拥有它的 task dir 和 artifact，
+> 那是它做过什么的唯一证据，那种情况改名才是对的；判活"判断不了就算活着"。
+> 错误文案写给模型（点名 `followup_task` / `close_agent` / 换名字），
+> `ga.py` 对这个错误类跳过 `format_error`，不让 `@ file:line` 噪声把策略答复伪装成崩溃。
+> 五个 op 的 `submission_id` schema 措辞从"可选"改成带触发条件的义务
+> （Codex 就是靠措辞让模型交出 `item_id` 的）。落地细节见规划文档 §1.6。
+>
+> **真实 API E2E 已通过（2026-07-30）**：M6/M7 的 14 条单测全部注入了假的
+> `process_exists`，恰好把"判活"这唯一判定输入 stub 掉了。
+> `tests/real_subagent_guard_e2e.py` 用真实子进程 + 真实 LLM 轮次 + `psutil` 扫真实进程
+> 补上这一环，`passed: true` / `issues: []`：拒绝后 OS 层面确无新进程
+> （`newProcessesAfterRefusal: []`），活 agent 的 `state.json` pid 未被覆盖，
+> 同 `submission_id` 重放 followup/resume 各只生效一次，close 后同名改名且旧
+> `output.txt` 逐字节完好。细节见规划文档 §1.7、缺陷文档 §3.7。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；

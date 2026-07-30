@@ -86,7 +86,7 @@
       "isolation": {"type": "string", "description": "可选隔离模式。使用 'worktree' 时从独立 git worktree 启动子智能体，同时保留父任务根目录用于协调文件"},
       "ipc_mode": {"type": "string", "description": "IPC 模式。'file' 是 durable 默认值。'socket'/'pipe'/'event_server' 会请求常驻实时通道推送已持久化事件；仅当 GA_SUBAGENT_REALTIME_IPC=1 且通道成功打开时才生效，否则仍以 durable file event bus 为传输，并在 ipc_fallback_reason 说明原因", "default": "file"},
       "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
-      "submission_id": {"type": "string", "description": "可选幂等键；用同一个 submission_id 重试会返回首次结果，不会再启动第二个进程"},
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试会返回首次结果，不会再启动第二个进程、第二个活跃 agent 名额和第二份真实 LLM 花费。只有确实是一次全新的 spawn 时才可以省略"},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
   }},
   {"type": "function", "function": {
@@ -120,10 +120,11 @@
   }},
   {"type": "function", "function": {
     "name": "resume_agent",
-    "description": "基于 sidechain transcript 恢复一个已关闭或等待中的子智能体，复用同一 agent_path/run_id，写入新的 message，并启动下一轮；不会覆盖旧 output/artifact。",
+    "description": "基于 sidechain transcript 恢复一个已关闭或等待中的子智能体，复用同一 agent_path/run_id，写入新的 message，并启动下一轮；不会覆盖旧 output/artifact。仍在运行的子智能体不能 resume，请改用 followup_task，或先 close_agent。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
-      "message": {"type": "string", "description": "恢复后要执行的下一轮任务说明"}}}
+      "message": {"type": "string", "description": "恢复后要执行的下一轮任务说明"},
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试会返回首次 resume 的结果，不会为同一轮再启动第二个进程。只有确实是一次全新的 resume 时才可以省略"}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",
@@ -132,7 +133,7 @@
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
       "message": {"type": "string", "description": "消息内容"},
       "other_recipients": {"type": "array", "items": {"type": "string"}, "description": "可选，额外接收同一条消息的 task_name 列表；会作为同收者上下文写入每个副本"},
-      "submission_id": {"type": "string", "description": "可选幂等键；用同一个 submission_id 重试不会再排入第二条消息"}}}
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试不会再排入第二条相同消息。只有确实是一条全新消息时才可以省略"}}}
   }},
   {"type": "function", "function": {
     "name": "followup_task",
@@ -141,7 +142,7 @@
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
       "message": {"type": "string", "description": "后续任务说明"},
       "other_recipients": {"type": "array", "items": {"type": "string"}, "description": "可选，额外接收同一后续任务的 task_name 列表；会作为同收者上下文写入每个副本"},
-      "submission_id": {"type": "string", "description": "可选幂等键；用同一个 submission_id 重试不会让任务执行两次"}}}
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试不会让子智能体把同一个任务执行两次。只有确实是一个全新的后续任务时才可以省略"}}}
   }},
   {"type": "function", "function": {
     "name": "foreground_agent",
@@ -191,7 +192,7 @@
       "grace_seconds": {"type": "number", "description": "写入 _stop 后等待终止前的秒数", "default": 2},
       "cascade": {"type": "boolean", "description": "同时关闭目标之下的所有后代 agent，由深到浅，最后关闭目标本身。目标自己派生过子 agent 时必须用：只关目标会把它的子 agent 留成孤儿进程，没人读它们的输出。被关闭的后代在 closed_descendants 中返回", "default": false},
       "cleanup_worktree": {"type": "boolean", "description": "关闭 worktree 隔离子智能体时，先采集 git status/diff 摘要，再保留摘要并移除 worktree 目录", "default": false},
-      "submission_id": {"type": "string", "description": "可选幂等键；用同一个 submission_id 重试会返回首次关闭结果，即使任务目录已被清理也不会报错"}}}
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试会返回首次关闭结果，即使任务目录已被清理也不会报错。只有确实是一次全新的关闭时才可以省略"}}}
   }},
   {"type": "function", "function": {
     "name": "ask_user",

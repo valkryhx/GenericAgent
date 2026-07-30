@@ -19,6 +19,25 @@ class SubagentTreeLimitError(RuntimeError):
     """
 
 
+class SubagentNameConflictError(RuntimeError):
+    """Raised when a spawn would land on the name of an agent that is still live.
+
+    GA used to silently rename ``reviewer`` to ``reviewer_1``, so asking for an agent that
+    already exists produced a second OS process, a second active-agent slot and a second real
+    LLM spend while the caller believed there was one agent. Codex refuses the same situation
+    outright (`codex-rs/core/src/agent/registry.rs:247-250`). The rename is still correct once
+    the previous agent is gone — there it protects that agent's artifacts from being
+    overwritten — so only live names conflict.
+
+    Carries ``agent_path`` so the tool layer can hand the model the conflicting path as data
+    instead of making it re-parse the sentence.
+    """
+
+    def __init__(self, message, agent_path=None):
+        super().__init__(message)
+        self.agent_path = agent_path
+
+
 def resolve_tree_limits_from_env(env=None):
     """Read the tree caps from the environment; unset or non-positive values fall through."""
     if env is None:
@@ -326,18 +345,70 @@ class SubagentRegistry:
             reaped += 1
         return active, reaped
 
+    def reject_if_live(self, agent_path):
+        """Raise ``SubagentNameConflictError`` if ``agent_path`` is an agent that is still live.
+
+        Exposed because the caller has to know the answer *before* it derives a task dir: the
+        manager's task dirs are named after the task name, so letting create_child rename the
+        conflict away would hand the new agent the old agent's directory.
+        """
+        path = str(_coerce_agent_path(agent_path))
+        raw = self._load().get("agents", {}).get(path)
+        if raw is None or not self._is_live_row(raw):
+            return None
+        raise SubagentNameConflictError(self._name_conflict_message(path, raw), agent_path=path)
+
+    @staticmethod
+    def _name_conflict_message(path, raw):
+        # Names the alternatives on purpose: a bare "already exists" makes the model retry with
+        # a mangled name instead of reusing the agent it already has.
+        return (
+            f"agent path `{path}` already exists and is still live "
+            f"(status={raw.get('status')}, process_status={raw.get('process_status')}, "
+            f"pid={raw.get('pid')}). Use followup_task to give it more work, "
+            f"close_agent to end it first, or pick a different task_name."
+        )
+
     def _unique_child_name_unlocked(self, parent, task_name):
-        """Caller must already hold the write lock — see create_child."""
+        """Caller must already hold the write lock — see create_child.
+
+        Refuses when the requested name belongs to a live agent, and only then: a closed or
+        crashed row still owns its task dir and artifacts, so reusing that exact name would
+        clobber the only evidence of what it did. This is the authoritative check — callers may
+        pre-check via reject_if_live, but only this one runs under the write lock.
+        """
         base = parent.join(task_name).name
         data = self._load()
-        if str(parent.join(base)) not in data.get("agents", {}):
+        taken = data.get("agents", {})
+        requested = str(parent.join(base))
+        existing = taken.get(requested)
+        if existing is not None and self._is_live_row(existing):
+            raise SubagentNameConflictError(self._name_conflict_message(requested, existing), agent_path=requested)
+        if existing is None:
             return base
         index = 1
         while True:
             candidate = f"{base}_{index}"
-            if str(parent.join(candidate)) not in data.get("agents", {}):
+            if str(parent.join(candidate)) not in taken:
                 return candidate
             index += 1
+
+    def _is_live_row(self, raw):
+        """A row is live when it is not closed and its process has not gone away.
+
+        Mirrors _reap_stale_agents' liveness rule, including "cannot tell means alive": guessing
+        dead here would silently reuse a running agent's name, which is the defect being fixed.
+        """
+        if raw.get("status") == "closed":
+            return False
+        pid = raw.get("pid")
+        if not pid:
+            # create_child registers before Popen, so a missing pid means "starting", not "dead".
+            return True
+        try:
+            return bool(self.process_exists(pid))
+        except Exception:
+            return True
 
     def _load(self):
         data = read_json_or_none(self.path) or {}

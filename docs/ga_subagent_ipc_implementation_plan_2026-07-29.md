@@ -53,6 +53,8 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 | B1 | P2 | realtime channel 补 bounded + Lagged 背压（**✅ 2026-07-30 已完成**） | 健壮性 | R1 |
 | B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构（**✅ 2026-07-30 已完成**） | 控制面 | — |
 | B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义（**✅ 2026-07-30 已完成**） | 控制面 | R1, B2 |
+| **M6** | **P1** | 活着的同名 agent 拒绝 spawn，不再静默改名（**✅ 2026-07-30 已完成**） | 正确性 + 花费 | M5 |
+| **M7** | **P1** | `resume_agent` 拒绝 resume 活着的 agent，并补 `submission_id`（**✅ 2026-07-30 已完成**） | 正确性 + 花费 | B2 |
 
 **不在范围内**：同进程运行时 / asyncio 化（4.2.1 阶段 C，除非出现第 5 节的切换信号）；
 `workflow_runtime.py` / `workflow_scheduler.py` / `workflow_child_agent.py` 重构（本 feat 明确边界）。
@@ -62,6 +64,13 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 > 且后果更重：`run_id` 碰撞会让 S1/S2 建立的"每 run 一把密钥"隔离粒度被悄悄放大。
 > 实测证据见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`，任务详情见本文 §1.5。
 > 同一轮复核还实测校准了 B1 的真实爆炸半径、量到了 B3 的写放大，结论都在那份文档里。
+
+> **M6 / M7 是 B2 完成后（2026-07-30）新增的（15 项 → 17 项）**。做完 B2 的提交幂等之后
+> 回头查"还有哪个控制面 op 会悄悄多起一个进程"，量到两处：同名 spawn 对**活着的** agent
+> 静默改名（M6），以及 `resume_agent` 既能 resume 活着的 agent、又漏了 `submission_id`（M7）。
+> 两者都是"模型以为在复用一个 agent，实际多了一个进程 + 一份真实 LLM 花费"，
+> 与 Codex 的语义唯一性拒绝（`codex-rs/core/src/agent/registry.rs:247-250`）同构。
+> 详情见本文 §1.6，实测证据见缺陷文档 §3.5 / §3.6。
 
 ### 1.1 实施进度（2026-07-29）
 
@@ -218,6 +227,7 @@ POSIX-only 的平台守卫测试，在当前 Windows 环境下 POSIX 权限那�
 
 下一步：规划内 P0/P1 已全部完成。P2 的 B1 / B3 / B2 也已于 2026-07-30 全部落地
 （realtime channel 背压、watch 语义状态订阅、显式提交身份 + 多播），落地记录见 §6。
+规划外新增的 M6 / M7（语义唯一性守卫）也已在同日完成，见 §1.6。
 
 ### 1.2 真实 API E2E 验收（2026-07-29）
 
@@ -230,6 +240,7 @@ POSIX-only 的平台守卫测试，在当前 Windows 环境下 POSIX 权限那�
 | --- | --- | --- |
 | `tests/real_subagent_terra_e2e.py` | spawn → 真实 LLM 首轮 → close → `resume_agent` 复用同 run_id 第二轮 → artifact / transcript / round 断言 | `passed: true`，`issues: []`，`finalOutputRounds: [0, 1]` |
 | `tests/real_subagent_realtime_e2e.py`（**新增**） | `GA_SUBAGENT_REALTIME_IPC=1` + `ipc_mode=socket` 真实命名管道：authkey 交付 → 子进程订阅 → 真实 LLM 首轮 → `followup_task` 实时唤醒 → authkey 泄漏扫描 → close 后删密钥 | `passed: true`，`issues: []` |
+| `tests/real_subagent_guard_e2e.py`（**新增，2026-07-30**） | M6 / M7 / B2 守卫对真实进程判活：真 pid + 真 registry 行 + `psutil` 扫真实子进程；详见 §1.7 | `passed: true`，`issues: []` |
 
 realtime E2E 的关键数字：`effectiveIpcMode: socket`、`childIpc.status: subscribed`、
 `subscriberCount: 1`、`authkey.bytes: 32`、`authkeyLeaks: []`、
@@ -381,6 +392,109 @@ expected=240 persisted=240 returned=240 distinct_run_ids=240 errors=0
 **回归**：`tests.test_subagent_registry` `Ran 24 tests ... OK`（21 → 24）；
 全量 `Ran 807 tests in 126.270s ... OK (skipped=3)`（804 → 807）。
 现有 21 个单线程 registry 测试全部未受影响，单线程语义未变。
+
+### 1.6 M6 / M7（P1）语义唯一性守卫 —— 2026-07-30 B2 之后新增
+
+**实测证据全文见 `docs/ga_subagent_control_plane_defects_2026-07-30.md` §3.5 / §3.6。**
+
+做完 B2 之后被问到"重复执行的 bug 修好了吗"。诚实答案是"机制在，但要模型自己带 id"，
+于是先去查两个参考实现有没有"分发层自动派 id"这一层 —— **都没有**（Codex 的
+`Submission.id` 只为关联 Event；Claude Code 宿主层完全没有幂等，见缺陷文档 §3.4）。
+两家真正的护栏是**语义唯一性**：Codex 在 `agent/registry.rs:247-250` 对已存在的
+agent path 直接报错。GA 的 `agent_loop.py:68-92` 也没有任何重放路径，
+在分发层自动派 id 挡不住唯一真实的重复来源（模型在**新一轮**里重发调用，
+那时任何按 `(session_id, turn, index)` 推导的 id 都不一样）。
+
+所以取舍是：**不造分发层 id，改为补语义唯一性守卫，并把 schema 措辞从"可选"改成带触发条件的义务。**
+
+| ID | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| M6 | ✅ 完成 | `subagent_registry.py` 新增 `SubagentNameConflictError`（带 `agent_path` 字段）；`_unique_child_name_unlocked` 在写锁内判活，活着抛错、已关闭/崩溃照旧改名；新增只读前置检查 `reject_if_live()`；`SubagentManager._next_available_task_name` 改为先拒绝再扫目录；拒绝走新的 `_record_spawn_rejection()` 记 `spawn_rejected` 事件 | `'/root/parent/worker_1' != '/root/parent/worker'`；`SubagentNameConflictError not raised` |
+| M7 | ✅ 完成 | `resume_agent` 新增 `submission_id`（走 B2 同一套 `_replayed_submission` / `_record_submission` + `_resume_result_from_submission`）；新增 `_reject_resume_of_a_live_agent()` / `_is_live_state()`；`ga.py` 透传 `submission_id` 并复用 `_subagent_error_result()` | `TypeError: resume_agent() got an unexpected keyword argument 'submission_id'`；`SubagentNameConflictError not raised` |
+
+四条实现决定：
+
+1. **只有"活着"才冲突**。已关闭或崩溃的 agent 仍然拥有它的 task dir 和 artifact ——
+   那是它做过什么的唯一证据，复用同名会把证据清掉，所以那种情况**改名才是对的**。
+   判活规则与 `_reap_stale_agents` 一致，包括"**判断不了就算活着**"：
+   这里猜死会静默复用一个正在运行的 agent 的名字，正是要修的缺陷。
+2. **拒绝必须发生在推导 task dir 之前**，所以要有 `reject_if_live()` 这个只读前置检查。
+   task dir 是 `temp/<task_name>`，如果让 `create_child` 把 agent path 改名而 manager
+   仍用请求的目录名，新 agent 会拿到旧 agent 的目录 —— 第一版实现就是这么写错的，
+   被 `test_spawning_over_a_closed_agent_still_renames_and_keeps_its_artifacts` 抓到。
+   写锁内的 `_unique_child_name_unlocked` 仍是权威判定，前置检查只是让目录与路径保持同步。
+3. **错误文案是写给模型的**，点名三个替代动作（`followup_task` / `close_agent` / 换名字），
+   因为一句干巴巴的 "already exists" 只会让模型换个畸形名字重试。
+   为此 `ga.py` 的 `_subagent_error_result()` 对这个错误类**跳过 `format_error`**：
+   `@ file:line, func -> \`src\`` 的噪声会把一个刻意的策略答复伪装成 GA 崩溃。
+   其它异常照旧带 traceback —— 那才是真崩溃时有用的部分。
+4. **resume 复用同一个错误类**，因为从模型视角这就是同一件事（要的 agent 已经活着），
+   三个替代动作也一样。`interrupt_agent` 不需要 `submission_id`：它只写 `_stop` 文件，天然幂等。
+
+**schema 措辞同步**（Codex 就是靠措辞让模型交出 `item_id` 的）：五个 op 的
+`submission_id` 说明从"可选幂等键"改成带触发条件的义务 ——
+"只要你在重试、或不确定上一次调用是否生效，就必须带上"，
+并说明代价（第二个进程 / 第二个活跃名额 / 第二份真实 LLM 花费）。
+`resume_agent` 的工具描述也补上"仍在运行的子智能体不能 resume，请改用 followup_task"。
+
+**验收**：`SpawnNameConflictTest`（6）+ `ResumeAgentGuardTest`（4）+
+`tests/test_subagent_registry.py` 两条新用例 + `tests/test_ga_subagent_tools.py` 四条新用例。
+回归 `Ran 859 tests in 116.513s ... OK (skipped=3)`（843 → 851 → 859）。
+
+**顺带改对的两个既有测试**：`test_spawn_agent_duplicate_task_name_...` 与
+`test_duplicate_task_name_creates_unique_child_path_...` 原来依赖"同名 spawn 会改名"，
+现在必须先让第一个 agent 死掉（显式传 `process_exists=lambda _: False` 或先 `mark_closed`）。
+判活相关的测试都**必须自己注入 `process_exists`** —— 默认实现会去问 `psutil.pid_exists`，
+断言就变成了"宿主上恰好有没有这个假 pid"。
+
+真实 API 验收见 §1.7：单测把判活 stub 掉了，而这两个守卫的判定输入正是真实进程存活，
+所以必须再补一条真实链路。
+
+### 1.7 M6 / M7 / B2 的真实 API E2E 验收（2026-07-30）
+
+`tests/real_subagent_guard_e2e.py`（新增，`GA_RUN_REAL_API_E2E=1` 开关，
+沿用 `SECRET_RE` / `sanitize()` 脱敏），`claude-opus-5`（`provider: gorouter`）。
+
+**为什么必须补**：M6 / M7 的判定输入是 `psutil.pid_exists` 的真实进程存活，
+而 §1.6 列的 14 条单测**全部注入了假的 `process_exists`** —— 恰好把要验的那一环 stub 掉了。
+所以脚本先 spawn 一个真实子进程、跑完一轮真实 LLM、停在 `waiting_reply`，
+让守卫对着真 pid、真 registry 行、真 OS 进程判活。
+进程数也不从脚本自己的 popen 计数里读，而是 `psutil.process_iter` 扫 `agentmain.py`
+命令行按 task_name 精确匹配 —— 否则"被拒绝的调用到底有没有偷偷起进程"这个断言
+就是在验脚本自己的账本。
+
+实跑结果 `passed: true`，`issues: []`。关键数字：
+
+| 阶段 | 断言 | 实测 |
+| --- | --- | --- |
+| 前置 | 子进程真的活着 | `realPidAlive: true`，`pid: 20232`，`process_status: waiting_reply` |
+| M6 manager | 同名 spawn 被拒 + 没起新进程 + 没留改名目录 | `refused: true`，`newProcessesAfterRefusal: []`，`noStrayTaskDir: true` |
+| M6 工具层 | 模型收到的是可执行指引而非 traceback | `reason: name_conflict`，msg 含 `followup_task` / `close_agent`，无 `` -> ` `` 后缀 |
+| M7 live | resume 被拒 + 没偷走 pid | `refused: true`，`pidUnchanged: true`，`newProcesses: []` |
+| B2 | 同 `submission_id` 重放 followup 只排一次 | `triggerRowsAdded: 1`，`followupOutputFile: output1.txt` |
+| M7 重放 | 同 `submission_id` 重放 resume 不起第二个进程 | `samePid: true`，`sameRunId: true`，`runIdMatchesOriginal: true`，`newProcessCount: 1` |
+| M6 改名 | close 后同名改名 + 旧 artifact 逐字节完好 | `guard_e2e_…_1`，`separateTaskDir: true`，`originalArtifactIntact: true` |
+| 事件 | 每次拒绝都记事件 | `spawnRejectedEvents: 4` |
+
+三个 marker（`FIRST` / `FOLLOWUP` / `RESUME`）分别落在 `output.txt` / `output1.txt` /
+`output2.txt`，改名后的 agent 落在自己的 `output.txt` —— 即"被拒绝"的那几步之外，
+真实 LLM 轮次全部照常完成，守卫没有把正常路径一起挡掉。
+
+**跑批中踩到的两件事，都不是 GA 缺陷**：
+
+1. 中途把 `claude-opus-5` 切到 `provider: claude-100x` 时子 agent 首轮 `HTTP 403
+   Cloudflare`。两侧抓 `requests.post` 对比确认：父进程同 profile 每次都成功，
+   子进程的 `POST https://sub.100xlabs.space/v1/messages?beta=true`（`n_tools=51`,
+   `payload_bytes=59174`）稳定 403（`cf-ray …-SEA`）；换回 gorouter 后**同一个请求**
+   （`n_tools=51`, `payload_bytes=59177`）200（`cf-ray …-HKG`）。是该渠道边缘对
+   大体积多工具请求的拒绝，与代理环境 / `CREATE_NO_WINDOW` / 系统提示形状均无关
+   （逐项排除过）。
+2. 脚本第一版把 `TASK` 写成固定字符串 `guard_e2e`，上一次被杀的跑批留下的目录让
+   E2E **自己的**首次 spawn 就被改名，之后每条断言都在验一个没人持有的名字。
+   已改成 `f"guard_e2e_{int(time.time())}"`，并让后续所有 op 都用
+   `first.task_name` 而不是请求名；`live_child_pids` 也从子串匹配改成精确匹配
+   （否则 `guard_e2e` 会匹配到 `guard_e2e_1`）。这类"测试脚本自身缺陷伪装成产品缺陷"
+   的坑，判据是：先确认脚本断言的对象和产品实际创建的对象是同一个。
 
 ## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
 
@@ -816,6 +930,9 @@ total atomic_write_json during wait = 0   (修复前 40：registry.json 20 + sta
 >    所以按 B1 → B3 → B2 的顺序做时 B3 并未被 B2 阻塞。
 >    B2 原本被记为"纯结构收益"，实测推翻：无提交身份时重放 `followup_task` 会让子 agent
 >    把任务干两遍、重放 `spawn_agent` 会起第二个进程，所以它是正确性修复而非重构。
+> 8. **切片 8（P1 语义唯一性）**：**M6 → M7**（§1.6）。B2 之后新增，因为 B2 的幂等是
+>    opt-in（要模型自己带 id），而两个参考实现的真正护栏都是语义唯一性拒绝，不是 id。
+>    **M6、M7 已于 2026-07-30 完成。**
 >
 > 依据全部来自实测，见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`。
 

@@ -763,9 +763,24 @@ class GenericAgentHandler(BaseHandler):
             }
             yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
         except Exception as e:
-            result = {"status": "error", "msg": format_error(e)}
+            result = self._subagent_error_result(e)
             yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    @staticmethod
+    def _subagent_error_result(exc):
+        """Shape a spawn/resume failure for the model.
+
+        A live-name conflict is a policy answer, not a crash: its message already names the
+        things the model can do instead, so `format_error`'s ``@ file:line, func -> `src```
+        suffix only invites the model to read a deliberate refusal as a GA bug and retry with a
+        mangled task_name. Every other exception keeps the traceback context.
+        """
+        from subagent_registry import SubagentNameConflictError
+
+        if isinstance(exc, SubagentNameConflictError):
+            return {"status": "error", "reason": "name_conflict", "agent_path": getattr(exc, "agent_path", None), "msg": str(exc)}
+        return {"status": "error", "msg": format_error(exc)}
 
     def do_list_agents(self, args, response):
         '''列出当前 root 下的子智能体状态。'''
@@ -964,7 +979,12 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
         manager = self._get_subagent_manager()
         try:
-            result = manager.resume_agent(target, message, author="/root")
+            result = manager.resume_agent(
+                target,
+                message,
+                author="/root",
+                submission_id=args.get("submission_id") or args.get("submissionId"),
+            )
             data = {
                 "status": "resumed",
                 "target": result.target,
@@ -994,7 +1014,7 @@ class GenericAgentHandler(BaseHandler):
             }
             yield f"[Status] Resumed subagent {result.target}.\n"
         except Exception as e:
-            data = {"status": "error", "msg": format_error(e)}
+            data = self._subagent_error_result(e)
             yield f"[Status] Failed to resume subagent: {data['msg']}\n"
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 

@@ -42,6 +42,11 @@ class SubagentRegistryTest(unittest.TestCase):
             self.assertTrue(registry.path.exists())
 
     def test_duplicate_task_name_creates_unique_child_path_and_does_not_reuse_artifact_dir(self):
+        """Reusing a *closed* agent's name renames rather than overwrites its artifact dir.
+
+        A live name is refused instead (see test_a_live_name_is_refused_rather_than_renamed), so
+        the first row is closed here — that is the only case where the rename is the right answer.
+        """
         with tempfile.TemporaryDirectory() as td:
             registry = SubagentRegistry(Path(td) / "temp" / "subagents")
 
@@ -51,6 +56,7 @@ class SubagentRegistryTest(unittest.TestCase):
                 task_dir=Path(td) / "temp" / "researcher",
                 state_path=Path(td) / "temp" / "researcher" / "state.json",
             )
+            registry.mark_closed(first.agent_path, previous_status="running", closed_status="shutdown")
             second = registry.create_child(
                 parent_path="/root",
                 task_name="researcher",
@@ -66,6 +72,54 @@ class SubagentRegistryTest(unittest.TestCase):
                 "/root/researcher",
                 "/root/researcher_1",
             ])
+
+    def test_a_live_name_is_refused_rather_than_renamed(self):
+        """Silently renaming a live name spawned a second process the caller never asked for.
+
+        Codex refuses the same situation (`codex-rs/core/src/agent/registry.rs:247-250`).
+        """
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            registry = SubagentRegistry(Path(td) / "temp" / "subagents", process_exists=lambda _pid: True)
+            registry.create_child(
+                parent_path="/root",
+                task_name="researcher",
+                task_dir=Path(td) / "temp" / "researcher",
+                state_path=Path(td) / "temp" / "researcher" / "state.json",
+                pid=4321,
+            )
+
+            with self.assertRaises(SubagentNameConflictError):
+                registry.create_child(
+                    parent_path="/root",
+                    task_name="researcher",
+                    task_dir=Path(td) / "temp" / "researcher_1",
+                    state_path=Path(td) / "temp" / "researcher_1" / "state.json",
+                )
+
+            self.assertEqual([str(e.agent_path) for e in registry.list_agents(include_closed=True)], ["/root/researcher"])
+
+    def test_reject_if_live_is_a_read_only_pre_check(self):
+        """The manager needs the answer before it derives a task dir, so it must not write."""
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            registry = SubagentRegistry(Path(td) / "temp" / "subagents", process_exists=lambda _pid: True)
+            registry.create_child(
+                parent_path="/root",
+                task_name="researcher",
+                task_dir=Path(td) / "temp" / "researcher",
+                state_path=Path(td) / "temp" / "researcher" / "state.json",
+                pid=4321,
+            )
+            before = registry.path.read_text(encoding="utf-8")
+
+            self.assertIsNone(registry.reject_if_live("/root/never_spawned"))
+            with self.assertRaises(SubagentNameConflictError):
+                registry.reject_if_live("/root/researcher")
+
+            self.assertEqual(registry.path.read_text(encoding="utf-8"), before)
 
     def test_list_agents_filters_by_prefix_and_closed_status(self):
         with tempfile.TemporaryDirectory() as td:

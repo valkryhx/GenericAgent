@@ -299,7 +299,7 @@ class SubagentManager:
         A refused spawn that leaves no trace is indistinguishable from one that was never
         attempted, which is exactly what makes runaway-spawn incidents hard to reconstruct.
         """
-        from subagent_registry import SubagentTreeLimitError
+        from subagent_registry import SubagentNameConflictError, SubagentTreeLimitError
 
         try:
             return self.registry.create_child(
@@ -314,20 +314,24 @@ class SubagentManager:
                 permission_options=permission_metadata["options"],
                 **entry_fields,
             )
-        except SubagentTreeLimitError as e:
-            self.event_bus.append_event(
-                "spawn_rejected",
-                agent_path=str(self.self_agent_path),
-                task_name=task_name,
-                payload={
-                    "reason": str(e),
-                    "parent_agent_path": str(self.self_agent_path),
-                    "max_depth": self.registry.max_depth,
-                    "max_active_agents": self.registry.max_active_agents,
-                },
-                notify=True,
-            )
+        except (SubagentTreeLimitError, SubagentNameConflictError) as e:
+            self._record_spawn_rejection(task_name, e)
             raise
+
+    def _record_spawn_rejection(self, task_name, exc):
+        """One place for "this spawn was refused", so every refusal reason is observable."""
+        self.event_bus.append_event(
+            "spawn_rejected",
+            agent_path=str(self.self_agent_path),
+            task_name=task_name,
+            payload={
+                "reason": str(exc),
+                "parent_agent_path": str(self.self_agent_path),
+                "max_depth": self.registry.max_depth,
+                "max_active_agents": self.registry.max_active_agents,
+            },
+            notify=True,
+        )
 
     def read_agent(self, target):
         task_name = self._task_name_from_target(target)
@@ -730,10 +734,16 @@ class SubagentManager:
             target, message, author=author, trigger_turn=True, other_recipients=other_recipients, submission_id=submission_id
         )
 
-    def resume_agent(self, target, message, *, author="/root"):
+    def resume_agent(self, target, message, *, author="/root", submission_id=None):
         previous = self.read_agent(target)
         if not previous.parent_session_id or not previous.run_id:
             raise ValueError("parent_session_id and run_id are required to resume a subagent")
+        replay = self._replayed_submission(submission_id, op="resume_agent", target=previous.agent_path)
+        if replay is not None:
+            # Resume is as unguarded as spawn: it launches a real process and rewrites state.json's
+            # pid, so a replay would leave the first resumed process referenced by nothing.
+            return self._resume_result_from_submission(previous, replay.get("result"))
+        self._reject_resume_of_a_live_agent(previous)
         task_dir = Path(previous.task_dir)
         state_path = task_dir / "state.json"
         raw = read_json_or_none(state_path) or {}
@@ -889,7 +899,60 @@ class SubagentManager:
             handoff_mode=raw.get("handoff_mode"),
             handoff_reason=raw.get("handoff_reason"),
         )
+        self._record_submission(
+            submission_id,
+            op="resume_agent",
+            target=previous.agent_path,
+            result={"handle": asdict(handle), "resume_context": resume_context},
+        )
         return ResumeResult(previous.agent_path, previous, handle, resume_context)
+
+    def _reject_resume_of_a_live_agent(self, previous):
+        """Refuse to resume an agent that is still running.
+
+        Measured: resume launched a second process and overwrote ``state.json``'s pid with it, so
+        the still-running first process was referenced by nothing — unwaitable, uninterruptible,
+        uncloseable, and still spending real LLM budget. Reuses the spawn conflict error because
+        it is the same situation from the model's side (the agent it asked for is already live) and
+        the same three answers apply.
+        """
+        if not self._is_live_state(previous):
+            return
+        from subagent_registry import SubagentNameConflictError
+
+        message = (
+            f"agent path `{previous.agent_path}` is still live "
+            f"(turn_status={previous.turn_status}, process_status={previous.process_status}, "
+            f"pid={previous.pid}) and cannot be resumed. Use followup_task to give it more work, "
+            f"close_agent to end it first, then resume_agent."
+        )
+        exc = SubagentNameConflictError(message, agent_path=previous.agent_path)
+        self._record_spawn_rejection(previous.task_name, exc)
+        raise exc
+
+    def _is_live_state(self, state):
+        """Mirrors SubagentRegistry._is_live_row, including "cannot tell means alive".
+
+        Guessing dead here would resume over a running agent, which is the defect being fixed.
+        """
+        if getattr(state, "process_status", None) in {"shutdown", "killed", "exited"}:
+            return False
+        pid = getattr(state, "pid", None)
+        if not pid:
+            return False
+        try:
+            return bool(self.process_exists(pid))
+        except Exception:
+            return True
+
+    def _resume_result_from_submission(self, previous, result):
+        result = result or {}
+        return ResumeResult(
+            previous.agent_path,
+            previous,
+            self._handle_from_submission(result),
+            result.get("resume_context") or {},
+        )
 
     def wait_agents(self, targets=None, timeout_s=30, poll_interval_s=0.5, since_event_offsets=None, since_event_seq=None):
         deadline = time.monotonic() + timeout_s
@@ -1578,13 +1641,28 @@ class SubagentManager:
         }
 
     def _next_available_task_name(self, task_name):
+        """Pick the task-dir name to spawn into; refuse outright if the name is a live agent.
+
+        The refusal has to happen here rather than inside ``create_child`` because the task dir
+        is named after the task name: renaming the agent path while keeping the requested dir
+        would hand the new agent the old agent's directory. A dir with no registry row is a
+        leftover from an older layout, not a live agent, so it is renamed around as before.
+        """
         base = self._task_name_from_target(task_name)
+        parent = str(self.self_agent_path).rstrip("/")
+        from subagent_registry import SubagentNameConflictError
+
+        try:
+            self.registry.reject_if_live(f"{parent}/{base}")
+        except SubagentNameConflictError as e:
+            self._record_spawn_rejection(base, e)
+            raise
         index = 0
         while True:
             candidate = base if index == 0 else f"{base}_{index}"
             if not (self.temp_dir / candidate / "state.json").exists():
                 try:
-                    self.registry.get(f"/root/{candidate}")
+                    self.registry.get(f"{parent}/{candidate}")
                 except FileNotFoundError:
                     return candidate
             index += 1

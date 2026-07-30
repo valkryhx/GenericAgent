@@ -498,6 +498,10 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
                 root_dir=td,
                 popen=lambda *_, **__: FakeProcess(),
                 python_executable="python-test",
+                # The first agent must be gone for the rename to be the right answer; a live name
+                # is refused instead (SpawnNameConflictTest). Stated explicitly so this test does
+                # not silently depend on whether pid 3000 happens to exist on the host.
+                process_exists=lambda _pid: False,
             )
 
             first = manager.spawn_agent("researcher", "first prompt")
@@ -1599,6 +1603,242 @@ class MulticastMessageTest(unittest.TestCase):
             for name in ("a", "b"):
                 row = next(row for row in self._rows(td, name) if row["content"] == "go")
                 self.assertTrue(row["trigger_turn"], f"{name} got the multicast without being woken")
+
+
+class SpawnNameConflictTest(unittest.TestCase):
+    """Spawning onto a live agent's name must be refused, not silently renamed.
+
+    Measured before this existed: `spawn_agent("reviewer", ...)` while /root/reviewer was still
+    running produced /root/reviewer_1 — a second OS process, a second active-agent slot and a
+    second real LLM spend, while the model believed there was one agent. Codex refuses the same
+    situation outright (`codex-rs/core/src/agent/registry.rs:247-250`,
+    "agent path `{agent_path}` already exists"); the rename only makes sense once the previous
+    agent is gone, where it protects that agent's artifacts from being overwritten.
+    """
+
+    def _manager(self, td, *, alive_pids=(), popen_log=None):
+        class FakeProcess:
+            next_pid = 7000
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        def popen(*_a, **_kw):
+            if popen_log is not None:
+                popen_log.append(1)
+            return FakeProcess()
+
+        return SubagentManager(
+            root_dir=td,
+            popen=popen,
+            python_executable="python-test",
+            sleep=lambda _: None,
+            # Liveness decides rename-vs-refuse, so the tests must own it rather than depend on
+            # whether a fake pid happens to exist on the host running them.
+            process_exists=lambda pid: pid in set(alive_pids) or alive_pids == "all",
+        )
+
+    def test_spawning_over_a_live_agent_is_refused_instead_of_silently_renamed(self):
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            spawned = []
+            manager = self._manager(td, alive_pids="all", popen_log=spawned)
+            first = manager.spawn_agent("reviewer", "review the diff")
+
+            with self.assertRaises(SubagentNameConflictError) as ctx:
+                manager.spawn_agent("reviewer", "review it again")
+
+            self.assertIn("/root/reviewer", str(ctx.exception))
+            self.assertEqual(len(spawned), 1, "the refused spawn still started a process")
+            self.assertEqual([state.agent_path for state in manager.list_agents()], [first.agent_path])
+
+    def test_the_refusal_tells_the_model_what_to_do_instead(self):
+        """A bare "already exists" makes the model retry with a mangled name; it needs the verbs."""
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, alive_pids="all")
+            manager.spawn_agent("reviewer", "review the diff")
+
+            with self.assertRaises(SubagentNameConflictError) as ctx:
+                manager.spawn_agent("reviewer", "again")
+
+            message = str(ctx.exception)
+            self.assertIn("followup_task", message)
+            self.assertIn("close_agent", message)
+
+    def test_the_refusal_is_recorded_as_a_spawn_rejected_event(self):
+        """Same reason the tree-limit refusal is recorded: an unrecorded refusal is invisible."""
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, alive_pids="all")
+            manager.spawn_agent("reviewer", "review the diff")
+
+            with self.assertRaises(SubagentNameConflictError):
+                manager.spawn_agent("reviewer", "again")
+
+            rejected = [
+                event
+                for event in manager.event_bus.read_events_since(0)
+                if event.get("type") == "spawn_rejected"
+            ]
+            self.assertEqual(len(rejected), 1)
+            self.assertIn("/root/reviewer", rejected[0]["payload"]["reason"])
+
+    def test_spawning_over_a_closed_agent_still_renames_and_keeps_its_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, alive_pids=())
+            first = manager.spawn_agent("reviewer", "first prompt")
+            (Path(first.task_dir) / "output.txt").write_text("first answer\n\n[ROUND END]\n", encoding="utf-8")
+            manager.close_agent("reviewer", reason="done", grace_s=0)
+
+            second = manager.spawn_agent("reviewer", "second prompt")
+
+            self.assertEqual(second.task_name, "reviewer_1")
+            self.assertNotEqual(first.task_dir, second.task_dir)
+            self.assertEqual(
+                (Path(first.task_dir) / "output.txt").read_text(encoding="utf-8"),
+                "first answer\n\n[ROUND END]\n",
+                "the closed agent's artifacts were clobbered by the reused name",
+            )
+
+    def test_a_crashed_agent_does_not_block_its_name_forever(self):
+        """A row nobody closed is not a live agent; refusing here would strand the name.
+
+        Renamed rather than reused because the crashed agent's task dir is the only remaining
+        evidence of what it did — the same reason _reap_stale_agents closes rows instead of
+        deleting them.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, alive_pids=())
+            first = manager.spawn_agent("reviewer", "first prompt")
+            (Path(first.task_dir) / "output.txt").write_text("crashed midway\n", encoding="utf-8")
+
+            second = manager.spawn_agent("reviewer", "second prompt")
+
+            self.assertEqual(second.task_name, "reviewer_1")
+            self.assertEqual((Path(first.task_dir) / "output.txt").read_text(encoding="utf-8"), "crashed midway\n")
+
+    def test_a_nested_agent_is_not_refused_because_an_unrelated_root_agent_shares_the_name(self):
+        """The name is scoped to the spawning agent's path, so a live /root/x must not refuse /root/a/x.
+
+        The nested agent still gets a suffixed *name*: task dirs are flat (temp/<task_name>), so
+        two agents at different depths cannot share one directory. That is pre-existing layout,
+        not the conflict guard — what matters here is that the spawn is allowed at all.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, alive_pids="all")
+            manager.spawn_agent("worker", "root level")
+            child = SubagentManager(
+                root_dir=td,
+                popen=lambda *_a, **_kw: type("P", (), {"pid": 7500})(),
+                python_executable="python-test",
+                sleep=lambda _: None,
+                process_exists=lambda _pid: True,
+                self_agent_path="/root/parent",
+            )
+
+            nested = child.spawn_agent("worker", "nested level")
+
+            self.assertTrue(
+                nested.agent_path.startswith("/root/parent/"),
+                f"nested spawn landed outside its parent: {nested.agent_path}",
+            )
+
+
+class ResumeAgentGuardTest(unittest.TestCase):
+    """`resume_agent` is the one control-plane op that starts a process without any guard.
+
+    Measured (temp/_probe_resume_live.py):
+      - resuming an agent whose process is still alive launched a *second* process and overwrote
+        `state.json`'s pid with it, so the first pid was no longer referenced anywhere — nothing
+        could wait on it, interrupt it or close it, and it kept spending real LLM budget.
+      - two `resume_agent` calls for the same logical submission launched two processes; unlike
+        spawn/close/followup (B2) resume never took a `submission_id`, so a replay was unguarded.
+    """
+
+    def _manager(self, td, *, alive, popen_log=None):
+        class FakeProcess:
+            next_pid = 6000
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        def popen(*_a, **_kw):
+            proc = FakeProcess()
+            if popen_log is not None:
+                popen_log.append(proc.pid)
+            return proc
+
+        return SubagentManager(
+            root_dir=td,
+            popen=popen,
+            python_executable="python-test",
+            sleep=lambda _: None,
+            process_exists=lambda _pid: alive,
+        )
+
+    def _closed_agent(self, td, *, alive=False, popen_log=None):
+        manager = self._manager(td, alive=alive, popen_log=popen_log)
+        handle = manager.spawn_agent("worker", "initial", parent_session_id="sess_resume")
+        manager.terminate_process = lambda _pid: None
+        manager.close_agent("worker", reason="done", grace_s=0)
+        return manager
+
+    def test_resuming_a_still_running_agent_is_refused_instead_of_orphaning_its_process(self):
+        from subagent_registry import SubagentNameConflictError
+
+        with tempfile.TemporaryDirectory() as td:
+            launched = []
+            manager = self._manager(td, alive=True, popen_log=launched)
+            handle = manager.spawn_agent("worker", "initial", parent_session_id="sess_resume")
+
+            with self.assertRaises(SubagentNameConflictError) as ctx:
+                manager.resume_agent("worker", "keep going")
+
+            self.assertEqual(launched, [handle.pid], "the refused resume still launched a process")
+            self.assertEqual(json.loads(Path(handle.state_path).read_text(encoding="utf-8"))["pid"], handle.pid)
+            self.assertIn("followup_task", str(ctx.exception))
+
+    def test_resuming_a_closed_agent_still_works(self):
+        with tempfile.TemporaryDirectory() as td:
+            launched = []
+            manager = self._closed_agent(td, popen_log=launched)
+
+            result = manager.resume_agent("worker", "keep going")
+
+            self.assertEqual(result.handle.task_name, "worker")
+            self.assertEqual(len(launched), 2, "resume of a closed agent must still start a process")
+
+    def test_a_replayed_resume_does_not_start_a_second_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            launched = []
+            manager = self._closed_agent(td, popen_log=launched)
+
+            first = manager.resume_agent("worker", "keep going", submission_id="sub_resume")
+            second = manager.resume_agent("worker", "keep going", submission_id="sub_resume")
+
+            self.assertEqual(len(launched), 2, "a replayed resume started a second real process")
+            self.assertEqual(second.handle.pid, first.handle.pid)
+            self.assertEqual(second.handle.run_id, first.handle.run_id)
+            self.assertEqual(second.target, first.target)
+
+    def test_without_a_submission_id_a_second_resume_is_still_a_second_round(self):
+        """Two deliberate resumes are legitimate; only an id says "this is the same submission"."""
+        with tempfile.TemporaryDirectory() as td:
+            launched = []
+            manager = self._closed_agent(td, popen_log=launched)
+
+            manager.resume_agent("worker", "round one")
+            manager.terminate_process = lambda _pid: None
+            manager.close_agent("worker", reason="done", grace_s=0)
+            manager.resume_agent("worker", "round two")
+
+            self.assertEqual(len(launched), 3)
 
 
 if __name__ == "__main__":

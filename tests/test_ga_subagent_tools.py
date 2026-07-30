@@ -868,6 +868,96 @@ class GaSubagentToolsTest(unittest.TestCase):
                 for prop in ["agent_type", "background", "isolation", "ipc_mode"]:
                     self.assertIn(prop, properties)
 
+    def test_spawn_agent_tool_reports_a_live_name_conflict_as_actionable_guidance(self):
+        """The refusal message is written for the model, so it must arrive without traceback noise.
+
+        `format_error` appends ``@ file:line, func -> `source``` to every exception it formats.
+        For a genuine crash that is the useful part; for this refusal the useful part is
+        "use followup_task / close_agent / another task_name", and the file/line suffix invites
+        the model to treat a deliberate policy answer as a GA bug and retry with a mangled name.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 4242})(),
+                python_executable="python-test",
+                # Liveness is what separates "refuse" from "rename", so the test owns it instead
+                # of depending on whether pid 4242 happens to exist on the host.
+                process_exists=lambda _pid: True,
+            )
+
+            first = exhaust(handler.do_spawn_agent({"task_name": "reviewer", "message": "review once"}, response=None))
+            second = exhaust(handler.do_spawn_agent({"task_name": "reviewer", "message": "review again"}, response=None))
+
+            self.assertEqual(first.data["status"], "started")
+            self.assertEqual(second.data["status"], "error")
+            self.assertEqual(second.data["reason"], "name_conflict")
+            self.assertEqual(second.data["agent_path"], "/root/reviewer")
+            msg = second.data["msg"]
+            self.assertIn("followup_task", msg)
+            self.assertIn("close_agent", msg)
+            self.assertNotIn("subagent_registry.py:", msg)
+            self.assertNotIn("SubagentNameConflictError:", msg)
+            self.assertNotIn(" -> `", msg)
+
+    def test_spawn_agent_tool_still_reports_other_failures_with_traceback_context(self):
+        """Only the name conflict loses the file/line suffix; real crashes still need it."""
+        with tempfile.TemporaryDirectory() as td:
+
+            def exploding_popen(*_args, **_kwargs):
+                raise OSError("popen exploded")
+
+            handler = self.make_handler(td, popen=exploding_popen, python_executable="python-test")
+
+            outcome = exhaust(handler.do_spawn_agent({"task_name": "boom", "message": "go"}, response=None))
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertNotIn("reason", outcome.data)
+            self.assertIn("popen exploded", outcome.data["msg"])
+            self.assertIn(" -> `", outcome.data["msg"])
+
+    def test_resume_agent_tool_reports_a_live_agent_as_actionable_guidance(self):
+        """Same reasoning as the spawn conflict: this is a policy answer, not a traceback."""
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 4343})(),
+                python_executable="python-test",
+                process_exists=lambda _pid: True,
+            )
+            exhaust(handler.do_spawn_agent({"task_name": "worker", "message": "start"}, response=None))
+
+            outcome = exhaust(handler.do_resume_agent({"target": "worker", "message": "keep going"}, response=None))
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "name_conflict")
+            self.assertEqual(outcome.data["agent_path"], "/root/worker")
+            self.assertIn("followup_task", outcome.data["msg"])
+            self.assertNotIn(" -> `", outcome.data["msg"])
+
+    def test_tool_schemas_tell_the_model_when_a_submission_id_is_required(self):
+        """The dedup only fires when the model supplies the id, so the schema has to demand it.
+
+        GA has no auto-generated submission id (agent_loop has no replay path, so an id derived
+        there would differ on the only real duplication path: the model re-emitting the call in a
+        new turn). That makes the wording the entire enforcement mechanism — "Optional idempotency
+        key" reads as "skip me". Codex gets `item_id` supplied by stating the obligation.
+        """
+        required_by_schema = {
+            "tools_schema.json": ["Set this whenever you retry", "not sure whether the previous call took effect"],
+            "tools_schema_cn.json": ["重试", "不确定上一次调用是否生效"],
+        }
+        for schema_name, phrases in required_by_schema.items():
+            with self.subTest(schema_name=schema_name):
+                raw = json.loads((REPO_ROOT / "assets" / schema_name).read_text(encoding="utf-8"))
+                by_name = {item["function"]["name"]: item["function"] for item in raw}
+                for tool in ["spawn_agent", "send_message", "followup_task", "close_agent", "resume_agent"]:
+                    properties = by_name[tool]["parameters"]["properties"]
+                    self.assertIn("submission_id", properties, f"{tool} cannot be made idempotent")
+                    description = properties["submission_id"]["description"]
+                    for phrase in phrases:
+                        self.assertIn(phrase, description, f"{tool} does not tell the model when to set it")
+
     def test_tool_schemas_teach_codex_style_subagent_delegation(self):
         required_by_schema = {
             "tools_schema.json": [

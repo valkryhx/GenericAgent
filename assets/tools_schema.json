@@ -86,7 +86,7 @@
       "isolation": {"type": "string", "description": "Optional isolation mode. Use 'worktree' to launch the subagent from an isolated git worktree while keeping the parent task root for coordination files"},
       "ipc_mode": {"type": "string", "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why", "default": "file"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
-      "submission_id": {"type": "string", "description": "Optional idempotency key for this control-plane call. Retrying the same submission_id returns the first result instead of spawning a second process"},
+      "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry a spawn or are not sure whether the previous call took effect: retrying with the same submission_id returns the first result instead of starting a second process, a second active-agent slot and a second round of LLM spend. Omit it only for a genuinely new spawn"},
       "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
   }},
   {"type": "function", "function": {
@@ -120,10 +120,11 @@
   }},
   {"type": "function", "function": {
     "name": "resume_agent",
-    "description": "Resume a closed or waiting subagent from its sidechain transcript, reuse the same agent_path/run_id, write a new message, and start the next turn without overwriting prior output/artifacts.",
+    "description": "Resume a closed or waiting subagent from its sidechain transcript, reuse the same agent_path/run_id, write a new message, and start the next turn without overwriting prior output/artifacts. A subagent that is still running cannot be resumed; use followup_task instead, or close_agent first.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Task name or /root/task_name"},
-      "message": {"type": "string", "description": "Next-turn task prompt after resume"}}}
+      "message": {"type": "string", "description": "Next-turn task prompt after resume"},
+      "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry a resume or are not sure whether the previous call took effect: retrying with the same submission_id reports the first resume instead of starting a second process for the same round. Omit it only for a genuinely new resume"}}}
   }},
   {"type": "function", "function": {
     "name": "send_message",
@@ -132,7 +133,7 @@
       "target": {"type": "string", "description": "Task name or /root/task_name"},
       "message": {"type": "string", "description": "Message content"},
       "other_recipients": {"type": "array", "items": {"type": "string"}, "description": "Optional additional task names that receive the same message; recorded on every copy as peer context"},
-      "submission_id": {"type": "string", "description": "Optional idempotency key; retrying the same submission_id does not queue a second message"}}}
+      "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry the send or are not sure whether the previous call took effect: retrying with the same submission_id does not queue a second copy of the message. Omit it only for a genuinely new message"}}}
   }},
   {"type": "function", "function": {
     "name": "followup_task",
@@ -141,7 +142,7 @@
       "target": {"type": "string", "description": "Task name or /root/task_name"},
       "message": {"type": "string", "description": "Follow-up task prompt"},
       "other_recipients": {"type": "array", "items": {"type": "string"}, "description": "Optional additional task names that receive the same follow-up task; recorded on every copy as peer context"},
-      "submission_id": {"type": "string", "description": "Optional idempotency key; retrying the same submission_id does not run the task twice"}}}
+      "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry the follow-up or are not sure whether the previous call took effect: retrying with the same submission_id does not make the subagent run the task twice. Omit it only for a genuinely new follow-up task"}}}
   }},
   {"type": "function", "function": {
     "name": "foreground_agent",
@@ -191,7 +192,7 @@
       "grace_seconds": {"type": "number", "description": "Seconds to wait after writing _stop before terminating", "default": 2},
       "cascade": {"type": "boolean", "description": "Also close every agent below the target, deepest first, before closing the target itself. Use this when the target spawned its own subagents: closing it alone leaves them running with nobody reading their output. Closed descendants are reported in closed_descendants", "default": false},
       "cleanup_worktree": {"type": "boolean", "description": "When closing a worktree-isolated subagent, capture git status/diff summary and remove the worktree directory after preserving the summary", "default": false},
-      "submission_id": {"type": "string", "description": "Optional idempotency key; retrying the same submission_id reports the first close instead of failing once the task directory is gone"}}}
+      "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry the close or are not sure whether the previous call took effect: retrying with the same submission_id reports the first close instead of failing once the task directory is gone. Omit it only for a genuinely new close"}}}
   }},
   {"type": "function", "function": {
     "name": "ask_user",
