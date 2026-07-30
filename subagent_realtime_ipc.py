@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import os
 import secrets
 import threading
@@ -8,6 +9,8 @@ from pathlib import Path
 
 
 SUBSCRIBED_ACK = "channel_subscribed"
+CHANNEL_LAGGED = "channel_lagged"
+DEFAULT_QUEUE_SIZE = 64
 AUTHKEY_FILENAME = "ipc_authkey"
 AUTHKEY_BYTES = 32
 
@@ -286,6 +289,129 @@ def open_child_subscription(task_dir, state, *, ack_timeout=5.0):
     return subscriber
 
 
+def _force_shutdown(conn):
+    """Unblock a thread parked in ``conn.send()`` so close() can join it.
+
+    Closing the handle is enough on Windows — the pending overlapped write is cancelled — but a
+    POSIX socket send does not return just because the fd was closed, so the connection is shut
+    down through a dup'd descriptor first (shutdown acts on the socket, not on one fd).
+    """
+    if os.name != "nt":
+        try:
+            import socket
+
+            fd = os.dup(conn.fileno())
+        except Exception:
+            fd = None
+        if fd is not None:
+            try:
+                sock = socket.socket(fileno=fd)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            else:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                finally:
+                    sock.close()
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+class _SubscriberSink:
+    """One subscriber: a bounded queue plus the thread that owns its connection.
+
+    ``publish()`` only appends here, so a subscriber that stops reading fills its own queue and
+    is told it lagged instead of parking the publisher. Before this, publish() sent inline and a
+    busy child froze the parent's tool handler after 24 unread events
+    (docs/ga_subagent_control_plane_defects_2026-07-30.md §2). Dropping is the right failure mode
+    because R2 keeps mailbox.jsonl / events.jsonl authoritative — a lost signal costs latency,
+    a blocked publish costs the parent its turn.
+    """
+
+    def __init__(self, conn, *, queue_size, name="ga-subagent-realtime-send"):
+        self.conn = conn
+        self.queue_size = max(1, int(queue_size))
+        self.alive = True
+        self._queue = collections.deque()
+        self._dropped = 0
+        self._lagged_pending = False
+        self._stopping = False
+        self._cond = threading.Condition()
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def offer(self, event):
+        """Queue one event. Never blocks, never raises; False means the peer is gone."""
+        with self._cond:
+            if self._stopping or not self.alive:
+                return False
+            while len(self._queue) >= self.queue_size:
+                self._queue.popleft()
+                self._dropped += 1
+                self._lagged_pending = True
+            self._queue.append(event)
+            self._cond.notify()
+            return True
+
+    def _next_event(self):
+        with self._cond:
+            while not self._stopping and not self._queue and not self._lagged_pending:
+                self._cond.wait()
+            if self._stopping:
+                return None
+            if self._lagged_pending:
+                # Marker jumps the queue on purpose: it says "you missed some, re-read the
+                # durable source", and it carries no message body for the same reason the
+                # normal events don't — the mailbox is the only place text comes from.
+                dropped, self._dropped, self._lagged_pending = self._dropped, 0, False
+                return {"type": CHANNEL_LAGGED, "dropped": dropped}
+            return self._queue.popleft()
+
+    def _run(self):
+        while True:
+            event = self._next_event()
+            if event is None:
+                break
+            try:
+                if getattr(self.conn, "closed", False):
+                    raise OSError("connection closed")
+                self.conn.send(event)
+            except Exception:
+                break
+        with self._cond:
+            self.alive = False
+            self._queue.clear()
+        # The thread owns the connection, so it also owns closing it: a send error is how a
+        # subscriber usually disappears, and subscriber_count prunes the dead sink without
+        # ever touching the handle.
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def close(self):
+        with self._cond:
+            self._stopping = True
+            self.alive = False
+            self._queue.clear()
+            self._lagged_pending = False
+            self._cond.notify_all()
+        _force_shutdown(self.conn)
+        thread = self.thread
+        if thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+
 class SubagentRealtimeChannel:
     """Resident realtime fan-out channel over multiprocessing connections.
 
@@ -293,10 +419,11 @@ class SubagentRealtimeChannel:
     already-persisted events to attached subscribers with lower latency.
     """
 
-    def __init__(self, address, *, authkey=None, backlog=8):
+    def __init__(self, address, *, authkey=None, backlog=8, queue_size=DEFAULT_QUEUE_SIZE):
         self.address = str(address)
         self.authkey = authkey
         self.backlog = backlog
+        self.queue_size = queue_size
         self._listener = None
         self._thread = None
         self._subscribers = []
@@ -314,34 +441,42 @@ class SubagentRealtimeChannel:
         return self
 
     def publish(self, event):
-        delivered = 0
+        """Hand the event to every subscriber's queue and return how many accepted it.
+
+        Returns the number *queued*, not the number written to a socket: the write happens on
+        each subscriber's own thread, so this call cannot be held up by a subscriber that has
+        stopped reading.
+        """
         with self._lock:
             subscribers = list(self._subscribers)
+        delivered = 0
         broken = []
-        for conn in subscribers:
-            try:
-                if getattr(conn, "closed", False):
-                    raise OSError("connection closed")
-                conn.send(event)
+        for sink in subscribers:
+            if sink.offer(event):
                 delivered += 1
-            except Exception:
-                broken.append(conn)
+            else:
+                broken.append(sink)
         if broken:
-            with self._lock:
-                for conn in broken:
-                    if conn in self._subscribers:
-                        self._subscribers.remove(conn)
-            for conn in broken:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            self._reap(broken)
         return delivered
+
+    def _reap(self, sinks):
+        with self._lock:
+            for sink in sinks:
+                if sink in self._subscribers:
+                    self._subscribers.remove(sink)
+        for sink in sinks:
+            try:
+                sink.close()
+            except Exception:
+                pass
 
     @property
     def subscriber_count(self):
         with self._lock:
-            return len(self._subscribers)
+            live = [sink for sink in self._subscribers if sink.alive]
+            self._subscribers = live
+            return len(live)
 
     def endpoint(self):
         try:
@@ -369,9 +504,9 @@ class SubagentRealtimeChannel:
                 pass
         with self._lock:
             subscribers, self._subscribers = list(self._subscribers), []
-        for conn in subscribers:
+        for sink in subscribers:
             try:
-                conn.close()
+                sink.close()
             except Exception:
                 pass
 
@@ -416,18 +551,13 @@ class SubagentRealtimeChannel:
                 except Exception:
                     pass
                 break
+            # The ack goes out on the sink's own thread, in front of the queue, so a client that
+            # connects and never reads cannot stall the accept loop either.
+            sink = _SubscriberSink(conn, queue_size=self.queue_size)
+            sink.offer({"type": SUBSCRIBED_ACK, "address": self.address})
             with self._lock:
-                self._subscribers.append(conn)
-            try:
-                conn.send({"type": SUBSCRIBED_ACK, "address": self.address})
-            except Exception:
-                with self._lock:
-                    if conn in self._subscribers:
-                        self._subscribers.remove(conn)
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                self._subscribers.append(sink)
+            sink.start()
 
 
 def _is_windows():

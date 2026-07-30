@@ -3,6 +3,8 @@ import os
 import stat
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -78,6 +80,11 @@ class SubagentRealtimeChannelTest(unittest.TestCase):
             for _ in range(3):
                 channel.publish({"type": "after_close"})
 
+            # Delivery is asynchronous (see ChannelSlowSubscriberTest), so the broken pipe is
+            # discovered by the sender thread rather than inside publish().
+            deadline = time.time() + 5
+            while channel.subscriber_count and time.time() < deadline:
+                time.sleep(0.02)
             self.assertEqual(channel.subscriber_count, 0)
 
     def test_close_stops_listening_and_reports_closed_endpoint(self):
@@ -641,6 +648,135 @@ class ChannelTransportHardeningTest(unittest.TestCase):
         from subagent_realtime_ipc import validate_channel_owner
 
         self.assertIsNone(validate_channel_owner(object(), "/tmp/ga_subagent_run_x.sock"))
+
+
+class ChannelSlowSubscriberTest(unittest.TestCase):
+    """B1: publish() used to send inline, so one subscriber that stopped reading froze the caller.
+
+    Measured before the fix (docs/ga_subagent_control_plane_defects_2026-07-30.md §2): a real
+    ``message_queued`` event pickles to 329 bytes and the pipe buffer swallowed exactly 24 of
+    them; event 25 parked ``publish()`` — and therefore the parent's tool handler — until the
+    child read. Dropping events is safe here and blocking is not: R2 makes the durable
+    mailbox/event bus authoritative and the realtime event only a "go re-read" signal, so a
+    dropped event costs latency while a blocked publish costs the parent its turn.
+    Codex draws the same line in `app-server-client/src/lib.rs` (`AppServerEvent::Lagged`) and
+    `app-server/src/transport.rs` (`try_send`, never an awaited send).
+    """
+
+    AUTHKEY = b"b1" * 16
+
+    def _channel(self, td, run_id, **kwargs):
+        channel = SubagentRealtimeChannel(
+            default_channel_address(Path(td) / "channels", run_id), authkey=self.AUTHKEY, **kwargs
+        )
+        channel.start()
+        self.addCleanup(channel.close)
+        return channel
+
+    def _subscribe(self, channel):
+        client = connect_realtime_channel(channel.address, authkey=self.AUTHKEY)
+        self.addCleanup(client.close)
+        deadline = time.time() + 5
+        while channel.subscriber_count < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        return client
+
+    def _drain(self, client, timeout=1.0):
+        received = []
+        while client.poll(timeout):
+            received.append(client.recv())
+            timeout = 0.2
+        return received
+
+    @staticmethod
+    def _event(seq):
+        return {
+            "type": "message_queued",
+            "event_seq": seq,
+            "agent_path": "/root/slow",
+            "payload": {"message_id": f"m{seq:04d}", "author": "/root", "delivery_mode": "trigger_turn"},
+        }
+
+    def test_publish_returns_promptly_when_a_subscriber_has_stopped_reading(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b1_block", queue_size=4)
+            self._subscribe(channel)
+
+            started = time.time()
+            for seq in range(200):
+                channel.publish(self._event(seq))
+            elapsed = time.time() - started
+
+            self.assertLess(elapsed, 5.0, f"200 publishes took {elapsed:.2f}s against a non-reading subscriber")
+
+    def test_a_lagging_subscriber_is_told_it_lagged_instead_of_silently_losing_its_place(self):
+        """A silent gap is indistinguishable from "nothing happened"; the marker forces a re-read."""
+        from subagent_realtime_ipc import CHANNEL_LAGGED
+
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b1_lag", queue_size=4)
+            client = self._subscribe(channel)
+
+            for seq in range(200):
+                channel.publish(self._event(seq))
+
+            received = self._drain(client, timeout=3.0)
+            lagged = [event for event in received if event.get("type") == CHANNEL_LAGGED]
+            self.assertTrue(lagged, f"no {CHANNEL_LAGGED} marker in {len(received)} received events")
+            self.assertGreater(lagged[0].get("dropped", 0), 0)
+            self.assertLess(len(received), 200, "a bounded queue must actually drop, not buffer everything")
+
+    def test_the_lagged_marker_carries_no_message_body(self):
+        """R2: realtime payloads are signals. A marker that carried text would leak past the mailbox."""
+        from subagent_realtime_ipc import CHANNEL_LAGGED
+
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b1_body", queue_size=4)
+            client = self._subscribe(channel)
+
+            for seq in range(200):
+                channel.publish(self._event(seq))
+
+            marker = next(e for e in self._drain(client, timeout=3.0) if e.get("type") == CHANNEL_LAGGED)
+
+            self.assertEqual(set(marker) - {"type", "dropped"}, set(), f"unexpected keys in marker: {marker}")
+
+    def test_a_stalled_subscriber_does_not_delay_delivery_to_a_healthy_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b1_isolate", queue_size=4)
+            stalled = self._subscribe(channel)
+            healthy = connect_realtime_channel(channel.address, authkey=self.AUTHKEY)
+            self.addCleanup(healthy.close)
+            deadline = time.time() + 5
+            while channel.subscriber_count < 2 and time.time() < deadline:
+                time.sleep(0.01)
+
+            drained = []
+            for seq in range(200):
+                channel.publish(self._event(seq))
+                while healthy.poll(0):
+                    drained.append(healthy.recv())
+            deadline = time.time() + 3
+            while len(drained) < 200 and healthy.poll(0.2) and time.time() < deadline:
+                drained.append(healthy.recv())
+
+            self.assertNotIn(None, drained)
+            seqs = [e["event_seq"] for e in drained if e.get("type") == "message_queued"]
+            self.assertEqual(seqs, sorted(seqs), "the healthy subscriber must still see events in order")
+            self.assertGreaterEqual(len(seqs), 100, f"healthy subscriber starved by the stalled one: {len(seqs)}")
+            self.assertFalse(stalled.closed)
+
+    def test_close_joins_the_sender_threads(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b1_close", queue_size=4)
+            self._subscribe(channel)
+            for seq in range(200):
+                channel.publish(self._event(seq))
+
+            channel.close()
+
+            lingering = [t for t in threading.enumerate() if "ga-subagent-realtime" in t.name and t.is_alive()]
+            self.assertEqual(lingering, [], f"threads left running after close: {[t.name for t in lingering]}")
 
 
 if __name__ == "__main__":

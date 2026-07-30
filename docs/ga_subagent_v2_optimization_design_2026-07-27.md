@@ -93,6 +93,13 @@
 > 落地细节见规划文档 §1.5。同一轮复核还校准了 B1 的真实爆炸半径
 > （单 agent 局部风险，24 条未读事件即阻塞，而非文档原先推断的全局链路风险）
 > 并量到 B3 的写放大（`wait_agents` 每秒 20 次原子写，正在喂 M5 的竞态）。
+>
+> **B1 已修复（2026-07-30）**：`publish()` 改为 per-subscriber bounded 队列 + 独立发送线程，
+> 队列满丢最老一条并插队投出 `channel_lagged`（只带 `type` / `dropped`，不带正文，
+> 与 R2 一致）；`close()` 通过 `os.dup` + `shutdown(SHUT_RDWR)` 叫回卡在 POSIX `send()`
+> 里的线程。复验：`queue_size=4` + 不读的订阅者下 200 次 publish 全部快速返回
+> （修复前第 24 条即卡死），同通道上的健康订阅者不受影响且事件仍有序。
+> 落地细节见规划文档 §6 的"B1 落地记录"。P2 仅剩 B3、B2。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；

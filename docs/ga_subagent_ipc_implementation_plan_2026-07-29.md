@@ -50,7 +50,7 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 | R3 | P1 | 轮询粒度与空转寿命解耦（`poll_interval_s` / `idle_timeout_s`） | 实时性 | R1 |
 | R4 | P1 | realtime 不可用时优雅退回轮询，且状态可观测 | 健壮性 | R1 |
 | G1 | **P1** | agent 深度 / 总数上限守护 | 安全 | — |
-| B1 | P2 | realtime channel 补 bounded + Lagged 背压 | 健壮性 | R1 |
+| B1 | P2 | realtime channel 补 bounded + Lagged 背压（**✅ 2026-07-30 已完成**） | 健壮性 | R1 |
 | B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构 | 控制面 | — |
 | B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义 | 控制面 | R1, B2 |
 
@@ -640,6 +640,38 @@ realtime 已经保证低延迟，轮询间隔本该放大以省 CPU，但放大�
 > **修正后的结论**：B1 该修（阻塞是真的，且 `publish` 在 `append_event` 释放锁之后、
 > 在调用方栈上同步执行），但它是**单 agent 局部风险**而非全局链路风险，
 > 优先级维持 P2，排在 M5 之后。
+
+#### B1 落地记录（2026-07-30，已完成）
+
+`subagent_realtime_ipc.py` 新增 `_SubscriberSink`：每个订阅者一条 bounded
+`collections.deque`（`queue_size`，默认 `DEFAULT_QUEUE_SIZE=64`）+ 一条自己的
+`ga-subagent-realtime-send` 发送线程 + 一个 `threading.Condition`。
+`publish()` 只做 `offer()`（入队，不阻塞、不抛错），返回值语义由"已写入 socket 条数"
+改为"已入队条数"；真正的 `conn.send()` 挪到订阅者自己的线程上。队列满时丢最老的一条并
+置 `_lagged_pending`，下一次出队时**插队**投出 `{"type": CHANNEL_LAGGED, "dropped": n}`。
+
+三条实现决定：
+
+1. **lagged 标记插队而不是排队**。标记的语义是"你落后了，回读 durable 源"，
+   排在一队即将被丢弃的旧事件后面等于延迟通知；插队让订阅者尽早知道要回读。
+   标记只带 `type` + `dropped` 两个键，与 R2 的"realtime 不携带正文"一致
+   —— 已用 `test_the_lagged_marker_carries_no_message_body` 锁死键集合。
+2. **连接归发送线程所有**。send 失败是订阅者消失的主要方式，线程在自己的 `finally`
+   里 `conn.close()` 并置 `alive=False`；`subscriber_count` 顺带剪掉死 sink，
+   所以调用方永远不从别的线程碰这个 handle。副作用：`publish()` 不再同步发现断开的订阅者，
+   原有的 `test_publish_drops_closed_subscriber_without_raising` 改为轮询等待收敛。
+3. **`close()` 必须能叫回卡在 `send()` 里的线程**。仅 `conn.close()` 在 Windows 上够用
+   （挂起的 overlapped write 被取消），但 POSIX 的 socket send 不会因为 fd 被关就返回，
+   所以 `_force_shutdown()` 先 `os.dup(fileno())` 出一个 fd 包成 socket 做
+   `shutdown(SHUT_RDWR)`（shutdown 作用于 socket 本身而非某个 fd），再关闭连接。
+
+`_accept_loop()` 里的 `SUBSCRIBED_ACK` 也改为 `offer()` 后再 `start()` 线程 ——
+连上就不读的客户端此前能卡住 accept 循环本身。
+
+验收（`tests/test_subagent_realtime_ipc.py::ChannelSlowSubscriberTest`，5 条）：
+`queue_size=4` + 不读的订阅者下 200 次 publish 全部快速返回（修复前第 24 条即卡死）；
+lagged 标记必现且 `dropped > 0`；停滞订阅者不拖慢同一通道上的健康订阅者，
+健康侧事件仍严格有序；`close()` 后无 `ga-subagent-realtime*` 线程残留。
 
 ### B2 显式 Op 结构
 

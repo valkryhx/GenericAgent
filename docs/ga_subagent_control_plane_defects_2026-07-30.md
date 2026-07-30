@@ -13,7 +13,7 @@ P2 项（B1/B2/B3）做实测验证，结果推翻了原有优先级排序 —�
 | ID | 缺陷 | 优先级 | 文档此前状态 | 实测结论 |
 | --- | --- | --- | --- | --- |
 | **M5** | `registry.json` 无锁读改写：丢行 + `run_id` 碰撞 + Windows `os.replace` 抛错 | **P0 正确性 + 安全** | **完全未记录** | 4 writer × 40 轮：**丢 120/160 行（75%）**，120 次调用只发出 **48 个不同 run_id**，**41 个 run_id 被 ≥2 个 agent 共用**（最多复用 4 次），并直接抛 `PermissionError [WinError 5]`。**✅ 已修复（2026-07-30）** |
-| **B1** | `publish()` 同步 fan-out 会阻塞在慢订阅者上 | P2 健壮性 | 规划文档 §6 已列，未实现 | **前提为真**：真实 `message_queued` 事件（pickle 329 字节）**24 条未读即卡死**；但"拖慢整个事件写入链路"的推断**未复现**，实际爆炸半径远小于文档描述 |
+| **B1** | `publish()` 同步 fan-out 会阻塞在慢订阅者上 | P2 健壮性 | 规划文档 §6 已列，未实现 | **前提为真**：真实 `message_queued` 事件（pickle 329 字节）**24 条未读即卡死**；但"拖慢整个事件写入链路"的推断**未复现**，实际爆炸半径远小于文档描述。**✅ 已修复（2026-07-30）** |
 | **B3** | `wait_agents()` 轮询 `state.json` 而非 watch 语义 | P2 控制面 | 规划文档 §6 已列，未实现 | 顺带量到写放大：4 agent / 2s / 0.5s 间隔 → **40 次原子写（每秒 20 次）**，且这些写正是 M5 竞态的主要喂食者 |
 
 **由此得出的顺序：M5 → B1 → B3 → （B2 继续后放）**。理由见第 4 节。
@@ -161,6 +161,24 @@ VERDICT: no parent stall observed
 调用方栈上同步执行），但它是**单 agent 局部风险**，不是文档描述的全局链路风险。
 优先级维持 P2，排在 M5 之后。
 
+### 2.3 修复结果（2026-07-30，已完成）
+
+`_SubscriberSink`：每订阅者一条 bounded deque（`queue_size` 默认 64）+ 独立发送线程；
+`publish()` 退化为纯入队，返回值语义改为"已入队条数"；队列满丢最老一条并**插队**投出
+`{"type": CHANNEL_LAGGED, "dropped": n}`（只有这两个键，维持 R2 的"realtime 不带正文"）。
+`close()` 用 `os.dup` + `shutdown(SHUT_RDWR)` 把卡在 POSIX `send()` 里的线程叫回来。
+落地细节与三条实现决定见规划文档 §6 的"B1 落地记录"。同规模复验（`queue_size=4`，
+订阅者收完 ack 后不再 recv）：
+
+```
+200 publishes against a non-reading subscriber: all returned promptly (pre-fix: blocked at #24)
+CHANNEL_LAGGED marker delivered with dropped > 0
+healthy subscriber on the same channel still received events in order
+no ga-subagent-realtime* threads left alive after close()
+```
+
+五条测试固化在 `tests/test_subagent_realtime_ipc.py::ChannelSlowSubscriberTest`。
+
 ## 3. B3：顺带量到的写放大
 
 `wait_agents()` 每个 poll 周期对每个 target 调 `read_agent()`，而 `read_agent()` 无条件
@@ -185,7 +203,7 @@ by file = {'registry.json': 20, 'state.json': 20}
    **✅ 已完成（2026-07-30）**，见 §1.6。
 2. **B1（P2）**：阻塞前提已证实（24 条阈值），改 per-subscriber bounded 队列 + lagged 标记。
    与 R2 的"realtime 只发空信号、正文永远从 durable mailbox 读"天然契合 ——
-   **丢事件不丢消息**，所以队列满时直接丢弃是安全的。
+   **丢事件不丢消息**，所以队列满时直接丢弃是安全的。**✅ 已完成（2026-07-30）**，见 §2.3。
 3. **B3（P2）**：改 watch 语义，顺带砍掉每秒 20 次原子写。必须排在 M5 之后。
 4. **B2 继续后放**：要动 `subagent_manager.py` 与 13 个工具 handler，纯结构收益，
    没有实测出来的正确性问题。
