@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_state import append_jsonl_event, atomic_write_json  # noqa: E402
+from subagent_state import append_jsonl_event, atomic_write_json, read_json_or_none  # noqa: E402
 from subagent_manager import SubagentManager  # noqa: E402
 
 
@@ -1167,6 +1167,236 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             self.assertEqual([row["trigger_turn"] for row in mailbox_rows], [False, True])
             self.assertTrue(all(row["author"] == "/root" for row in mailbox_rows))
             self.assertFalse((task_dir / "reply.txt").exists())
+
+
+class WaitAgentsWriteAmplificationTest(unittest.TestCase):
+    """B3: every wait poll called read_agent(), which writes state.json *and* registry.json.
+
+    Measured (docs/ga_subagent_control_plane_defects_2026-07-30.md §3): 4 agents, a 2s wait at
+    0.5s intervals produced 40 atomic writes — 20 to state.json, 20 to registry.json, i.e. 20
+    writes/sec of tmp-file + os.replace for a loop that is supposed to be *observing*. Those
+    registry writes were also the main feeder of the M5 race. Waiting must not write.
+    """
+
+    def _running_agent(self, td, name, pid):
+        task_dir = Path(td) / "temp" / name
+        task_dir.mkdir(parents=True)
+        # No [ROUND END]: a mid-turn agent is the only case where a wait loop actually spins.
+        (task_dir / "output.txt").write_text(f"{name} working", encoding="utf-8")
+        atomic_write_json(
+            task_dir / "state.json",
+            {
+                "schema_version": 1,
+                "task_name": name,
+                "agent_path": f"/root/{name}",
+                "pid": pid,
+                "round": 0,
+                "turn_status": "running",
+                "process_status": "alive",
+            },
+        )
+        return task_dir
+
+    def _count_writes(self):
+        """Count atomic_write_json across every module the wait loop can reach."""
+        import subagent_manager
+        import subagent_registry
+        import subagent_state
+
+        counts = []
+        patches = []
+        for module in (subagent_state, subagent_manager, subagent_registry):
+            real = module.atomic_write_json
+
+            def counting(path, data, _real=real):
+                counts.append(Path(path).name)
+                return _real(path, data)
+
+            patches.append((module, real, counting))
+            module.atomic_write_json = counting
+
+        def restore():
+            for module, real, _counting in patches:
+                module.atomic_write_json = real
+
+        self.addCleanup(restore)
+        return counts
+
+    def test_a_timing_out_wait_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            for index in range(4):
+                self._running_agent(td, f"w{index}", 100 + index)
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+            writes = self._count_writes()
+
+            result = manager.wait_agents(["w0", "w1", "w2", "w3"], timeout_s=0.3, poll_interval_s=0.01)
+
+            self.assertTrue(result.timed_out)
+            self.assertEqual(writes, [], f"wait wrote {len(writes)} files: {sorted(set(writes))}")
+
+    def test_wait_still_reports_a_finished_agent_with_its_full_state(self):
+        """The cheap probe is only for detection; the returned state must stay the real one."""
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._running_agent(td, "done", 200)
+            (task_dir / "output.txt").write_text("answer\n\n[ROUND END]\n", encoding="utf-8")
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+
+            result = manager.wait_agents(["done"], timeout_s=1, poll_interval_s=0.01)
+
+            self.assertFalse(result.timed_out)
+            self.assertEqual([state.task_name for state in result.changed_agents], ["done"])
+            state = result.changed_agents[0]
+            self.assertEqual(state.turn_status, "completed")
+            self.assertEqual(state.final_output_path, str(task_dir / "output.txt"))
+            persisted = read_json_or_none(task_dir / "state.json")
+            self.assertEqual(persisted.get("turn_status"), "completed", "a state worth returning is worth persisting")
+            self.assertTrue(persisted.get("final_output_sha256"))
+
+    def test_read_agent_still_persists_when_called_directly(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._running_agent(td, "direct", 300)
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: False, sleep=lambda _: None)
+
+            manager.read_agent("direct")
+            # Twice on purpose: the first call creates the registry row (create_child carries no
+            # status fields), the second is the update path that must still land.
+            manager.read_agent("direct")
+
+            self.assertEqual(read_json_or_none(task_dir / "state.json").get("process_status"), "exited")
+            self.assertEqual(manager.registry.get("/root/direct").process_status, "exited")
+
+    def test_probe_agent_reports_the_same_status_as_read_agent_without_writing(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._running_agent(td, "probe", 400)
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: False, sleep=lambda _: None)
+            before = (task_dir / "state.json").read_text(encoding="utf-8")
+            writes = self._count_writes()
+
+            probed = manager.probe_agent("probe")
+
+            self.assertEqual(writes, [])
+            self.assertEqual((task_dir / "state.json").read_text(encoding="utf-8"), before)
+            self.assertEqual((probed.turn_status, probed.process_status), ("running", "exited"))
+
+
+class WaitAgentsWatchTest(unittest.TestCase):
+    """B3 watch half: a wait holding live channels must sleep on them, not on a timer.
+
+    Codex `control.rs` `subscribe_status` hands out a `watch::Receiver` for exactly this. The
+    fallback matters as much as the wake: with no channel (ipc_mode=file, or realtime refused)
+    the loop must keep its blind sleep, or the file transport stops working.
+    """
+
+    def _agent(self, td, name, pid=500):
+        task_dir = Path(td) / "temp" / name
+        task_dir.mkdir(parents=True)
+        (task_dir / "output.txt").write_text(f"{name} working", encoding="utf-8")
+        atomic_write_json(
+            task_dir / "state.json",
+            {
+                "schema_version": 1,
+                "task_name": name,
+                "agent_path": f"/root/{name}",
+                "pid": pid,
+                "round": 0,
+                "turn_status": "running",
+                "process_status": "alive",
+            },
+        )
+        return task_dir
+
+    def test_wait_blind_sleeps_when_the_agent_has_no_realtime_channel(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "filed")
+            slept = []
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
+
+            result = manager.wait_agents(["filed"], timeout_s=0.05, poll_interval_s=0.02)
+
+            self.assertTrue(result.timed_out)
+            self.assertTrue(slept, "the file transport lost its poll loop")
+
+    def test_wait_sleeps_on_the_channel_when_one_exists(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "piped")
+            slept = []
+            waited = []
+
+            class FakeChannel:
+                def wait_for_signal(self, timeout):
+                    waited.append(timeout)
+                    return False
+
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
+            manager._realtime_channels["/root/piped"] = FakeChannel()
+
+            result = manager.wait_agents(["piped"], timeout_s=0.05, poll_interval_s=0.02)
+
+            self.assertTrue(result.timed_out)
+            self.assertTrue(waited, "wait ignored the live channel and fell back to sleeping")
+            self.assertEqual(slept, [], "wait both watched the channel and blind-slept")
+
+    def test_a_signal_ends_the_wait_early_so_the_change_is_seen_at_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._agent(td, "woken")
+            observed = []
+
+            class SignallingChannel:
+                def wait_for_signal(self, timeout):
+                    observed.append(timeout)
+                    (task_dir / "events.jsonl").write_text('{"type":"turn_completed"}\n', encoding="utf-8")
+                    return True
+
+            manager = SubagentManager(
+                root_dir=td,
+                process_exists=lambda _pid: True,
+                sleep=lambda _: self.fail("a woken wait must not also sleep"),
+            )
+            manager._realtime_channels["/root/woken"] = SignallingChannel()
+
+            result = manager.wait_agents(["woken"], timeout_s=5, poll_interval_s=2)
+
+            self.assertFalse(result.timed_out)
+            self.assertEqual([state.task_name for state in result.changed_agents], ["woken"])
+            self.assertEqual(len(observed), 1, "the wait should need exactly one wake, not a poll cycle")
+
+    def test_the_channel_wait_never_overruns_the_deadline(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "bounded")
+            waited = []
+
+            class FakeChannel:
+                def wait_for_signal(self, timeout):
+                    waited.append(timeout)
+                    return False
+
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+            manager._realtime_channels["/root/bounded"] = FakeChannel()
+
+            manager.wait_agents(["bounded"], timeout_s=0.05, poll_interval_s=30)
+
+            self.assertTrue(waited)
+            self.assertTrue(
+                all(value <= 0.05 + 1e-6 for value in waited),
+                f"wait would have blocked past its own deadline: {waited}",
+            )
+
+    def test_a_broken_channel_falls_back_to_sleeping_instead_of_failing_the_wait(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "broken")
+            slept = []
+
+            class BrokenChannel:
+                def wait_for_signal(self, timeout):
+                    raise OSError("channel is gone")
+
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
+            manager._realtime_channels["/root/broken"] = BrokenChannel()
+
+            result = manager.wait_agents(["broken"], timeout_s=0.05, poll_interval_s=0.02)
+
+            self.assertTrue(result.timed_out)
+            self.assertTrue(slept, "a dead channel must degrade to polling, not break the wait")
 
 
 if __name__ == "__main__":

@@ -782,6 +782,32 @@ def _subagent_transcript_append(task_dir, event_type, payload):
         pass
 
 
+_REALTIME_SUBSCRIBER = None
+
+
+def _set_realtime_subscriber(subscriber):
+    """One process is one agent, so the subscriber is process-wide state.
+
+    _subagent_event is called from eleven places and is the single choke point where this
+    process appends something durable — which is exactly when the parent should be woken.
+    Threading the subscriber through every call site would add a parameter to all of them to
+    say the same thing this module-level handle says once.
+    """
+    global _REALTIME_SUBSCRIBER
+    _REALTIME_SUBSCRIBER = subscriber
+    return subscriber
+
+
+def _signal_parent():
+    subscriber = _REALTIME_SUBSCRIBER
+    if subscriber is None:
+        return False
+    try:
+        return bool(subscriber.signal())
+    except Exception:
+        return False
+
+
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
     task_name = event.get('task_name') or os.path.basename(os.path.normpath(task_dir))
@@ -823,6 +849,8 @@ def _subagent_event(task_dir, event):
         pass
     if event.get('type') in PARENT_INBOX_EVENT_TYPES:
         append_parent_inbox_event(task_dir, event)
+    # Durable write is done; now poke the parent so its wait doesn't sit out the poll interval.
+    _signal_parent()
 
 def _record_child_ipc_status(task_dir, task_name, status, fallback_reason, address=None):
     state_path = os.path.join(task_dir, 'state.json')
@@ -945,6 +973,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     except Exception as e:
         realtime_subscriber = None
         child_ipc_status, child_ipc_fallback_reason = 'fallback', format_error(e)
+    _set_realtime_subscriber(realtime_subscriber)
     existing_state = _record_child_ipc_status(
         task_dir, task_name, child_ipc_status, child_ipc_fallback_reason, getattr(realtime_subscriber, 'address', None)
     )
@@ -1064,13 +1093,15 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                     # A signal carries no payload; it only means "go re-read the durable
                     # mailbox now" instead of waiting out the poll interval.
                     realtime_subscriber.wait(wait_s)
-                    if realtime_subscriber.closed:
-                        # The parent tore the channel down mid-run. Polling still delivers,
-                        # but the degradation has to be visible or it looks healthy.
-                        child_ipc_status, child_ipc_fallback_reason = 'fallback', 'realtime channel disconnected mid-run; durable file event bus stays the transport'
-                        _record_child_ipc_status(task_dir, task_name, child_ipc_status, child_ipc_fallback_reason)
                 else:
                     sleep_fn(wait_s)
+                if realtime_subscriber is not None and realtime_subscriber.closed and child_ipc_status != 'fallback':
+                    # The parent tore the channel down mid-run. Checked here rather than inside
+                    # the wait branch because the disconnect is now just as likely to surface on
+                    # an outbound signal from _subagent_event. Polling still delivers, but the
+                    # degradation has to be visible or it looks healthy.
+                    child_ipc_status, child_ipc_fallback_reason = 'fallback', 'realtime channel disconnected mid-run; durable file event bus stays the transport'
+                    _record_child_ipc_status(task_dir, task_name, child_ipc_status, child_ipc_fallback_reason)
                 if consume_file(task_dir, '_stop'):
                     _subagent_state(task_dir, task_name, nround, 'completed', 'shutdown', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
                     _subagent_event(task_dir, {'type': 'agent_shutdown', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
@@ -1107,9 +1138,11 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
             if realtime_subscriber is not None:
                 realtime_subscriber.close()
+            _set_realtime_subscriber(None)
             raise
     if realtime_subscriber is not None:
         realtime_subscriber.close()
+    _set_realtime_subscriber(None)
 
 def start_task_background(
     task_name,

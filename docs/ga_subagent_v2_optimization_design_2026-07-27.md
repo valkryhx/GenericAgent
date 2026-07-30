@@ -100,6 +100,12 @@
 > 里的线程。复验：`queue_size=4` + 不读的订阅者下 200 次 publish 全部快速返回
 > （修复前第 24 条即卡死），同通道上的健康订阅者不受影响且事件仍有序。
 > 落地细节见规划文档 §6 的"B1 落地记录"。P2 仅剩 B3、B2。
+>
+> **B3 已修复（2026-07-30）**：分两半 —— `probe_agent()` 让 `wait_agents` 的检测循环
+> 不再写盘（同规模复验 40 次原子写 → **0 次**），`wait_for_signal()` / `signal()` 让父子
+> 在已有通道上双向唤醒（先用 300 轮交错 send/recv 探针验证了单 Connection 双向并发安全）。
+> 无通道时保留盲 sleep，`event_seq` cursor 语义不动 —— watch 负责唤醒，cursor 负责不漏。
+> 落地细节见规划文档 §6 的"B3 落地记录"。P2 仅剩 B2。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；

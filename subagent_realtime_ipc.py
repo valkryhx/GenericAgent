@@ -4,12 +4,14 @@ import collections
 import os
 import secrets
 import threading
-from multiprocessing.connection import Client, Listener, address_type
+from multiprocessing.connection import Client, Listener, address_type, wait as _wait
 from pathlib import Path
+from time import monotonic as _monotonic, sleep as _sleep
 
 
 SUBSCRIBED_ACK = "channel_subscribed"
 CHANNEL_LAGGED = "channel_lagged"
+CHILD_SIGNAL = "child_signal"
 DEFAULT_QUEUE_SIZE = 64
 AUTHKEY_FILENAME = "ipc_authkey"
 AUTHKEY_BYTES = 32
@@ -240,6 +242,26 @@ class SubagentRealtimeSubscriber:
             return self.received > 0
         except Exception:
             self.close()
+            return False
+
+    def signal(self):
+        """Poke the parent: "I changed something durable, go re-read." Best effort.
+
+        Same connection as the downstream events, in the other direction — a probe over 300
+        interleaved rounds showed concurrent send/recv on one Connection is safe on both
+        families. Carries no state for the same reason downstream events don't: the parent
+        re-reads state.json / events.jsonl, so a lost signal costs a poll interval, not
+        correctness.
+        """
+        if self.closed or self.conn is None:
+            return False
+        try:
+            self.conn.send({"type": CHILD_SIGNAL})
+            return True
+        except (EOFError, OSError):
+            self.close()
+            return False
+        except Exception:
             return False
 
     def close(self):
@@ -477,6 +499,48 @@ class SubagentRealtimeChannel:
             live = [sink for sink in self._subscribers if sink.alive]
             self._subscribers = live
             return len(live)
+
+    def wait_for_signal(self, timeout):
+        """Block up to ``timeout`` for any subscriber to poke us. True means "go re-read".
+
+        The watch half of B3: `wait_agents()` polled state.json on a timer, so a child's
+        turn_completed cost a full poll interval and 20 atomic writes/sec of registry churn.
+        Reading happens here, on the caller's thread, while each sink's own thread writes — the
+        duplex probe (300 interleaved rounds, both families) showed that is safe. Signals carry
+        no state, so draining several and reporting one wake is correct.
+        """
+        deadline = _monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._lock:
+                conns = [sink.conn for sink in self._subscribers if sink.alive]
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                return False
+            if not conns:
+                # No subscribers to watch, but the caller asked to wait: honour the timeout
+                # rather than spinning, and re-check in case one connects meanwhile.
+                _sleep(min(remaining, 0.05))
+                continue
+            try:
+                ready = _wait(conns, min(remaining, 0.5))
+            except Exception:
+                _sleep(min(remaining, 0.05))
+                continue
+            woke = False
+            for conn in ready:
+                try:
+                    conn.recv()
+                    woke = True
+                except Exception:
+                    # A dead peer is the sender thread's problem; it will notice on its next
+                    # send and drop itself. Never close another thread's connection here.
+                    self._reap_dead()
+            if woke:
+                return True
+
+    def _reap_dead(self):
+        with self._lock:
+            self._subscribers = [sink for sink in self._subscribers if sink.alive]
 
     def endpoint(self):
         try:

@@ -338,6 +338,21 @@ class SubagentManager:
         self._write_registry_entry(task_name, refreshed, task_dir)
         return self._agent_state_from_dict(task_name, task_dir, refreshed)
 
+    def probe_agent(self, target):
+        """Same derived status as ``read_agent``, without writing anything.
+
+        ``read_agent`` persists on every call, so a wait loop polling four agents produced 20
+        state.json + 20 registry.json atomic writes per second — and those registry writes were
+        the main feeder of the M5 race (docs/ga_subagent_control_plane_defects_2026-07-30.md §3).
+        Observing must not write; the write only happens once a wait actually has something to
+        report, via read_agent.
+        """
+        task_name = self._task_name_from_target(target)
+        task_dir = self.temp_dir / task_name
+        raw = read_json_or_none(task_dir / "state.json") or {}
+        refreshed = self._refresh_state(task_name, task_dir, raw, persist_side_effects=False)
+        return self._agent_state_from_dict(task_name, task_dir, refreshed)
+
     def spawn_agent(
         self,
         task_name,
@@ -909,7 +924,10 @@ class SubagentManager:
             changed = []
             state_events = []
             for target in targets:
-                state = self.read_agent(target)
+                # probe_agent, not read_agent: detection runs every poll interval and must not
+                # write. Once something is worth reporting, _states_for_events re-reads through
+                # read_agent so the returned state is still the persisted one.
+                state = self.probe_agent(target)
                 if self._is_notify_state(state):
                     changed.append(state)
                     state_events.append({"type": "state_notify", "task_name": state.task_name, "agent_path": state.agent_path})
@@ -917,10 +935,59 @@ class SubagentManager:
                     changed.append(state)
                     state_events.append({"type": "task_event_file_changed", "task_name": state.task_name, "agent_path": state.agent_path})
             if changed:
-                return WaitResult(False, changed, "Subagent state update received.", state_events, self.event_bus.last_event_seq())
+                return WaitResult(
+                    False,
+                    self._states_for_events(state_events, targets),
+                    "Subagent state update received.",
+                    state_events,
+                    self.event_bus.last_event_seq(),
+                )
             if time.monotonic() >= deadline:
                 return WaitResult(True, [], "Wait timed out.", [], self.event_bus.last_event_seq())
+            self._wait_for_change(targets, poll_interval_s, deadline)
+
+    def _wait_for_change(self, targets, poll_interval_s, deadline):
+        """Sleep until something might have changed: on the channels if there are any.
+
+        With live channels this is the watch half of B3 — the child signals over the same
+        connection it already subscribes on, so a turn_completed no longer costs a poll
+        interval. Without them (ipc_mode=file, or realtime refused) the blind sleep has to
+        stay, because the file transport has nothing to be woken by.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        budget = min(float(poll_interval_s), remaining)
+        channels = self._channels_for(targets)
+        if not channels:
             self.sleep(poll_interval_s)
+            return False
+        # One thread cannot block on several channels at once, so the budget is split: each
+        # channel gets a slice, and any signal ends the wait immediately.
+        slice_s = max(budget / len(channels), 0.0)
+        woken = False
+        for channel in channels:
+            try:
+                if channel.wait_for_signal(slice_s):
+                    woken = True
+                    break
+            except Exception:
+                # A dead channel degrades to polling rather than failing the wait.
+                self.sleep(slice_s)
+        return woken
+
+    def _channels_for(self, targets):
+        """_realtime_channels is keyed by agent_path; wait_agents works in task names."""
+        if not self._realtime_channels:
+            return []
+        names = {self._task_name_from_target(target) for target in targets}
+        channels = []
+        for agent_path, channel in self._realtime_channels.items():
+            if channel is None:
+                continue
+            if str(agent_path).rstrip("/").split("/")[-1] in names:
+                channels.append(channel)
+        return channels
 
     def interrupt_agent(self, target, reason="parent_interrupt"):
         previous = self.read_agent(target)
@@ -1469,8 +1536,9 @@ class SubagentManager:
             "killed",
         }
 
-    def _refresh_state(self, task_name, task_dir, raw):
-        task_dir.mkdir(parents=True, exist_ok=True)
+    def _refresh_state(self, task_name, task_dir, raw, *, persist_side_effects=True):
+        if persist_side_effects:
+            task_dir.mkdir(parents=True, exist_ok=True)
         output_path = self._resolve_output_path(task_dir, raw)
         has_round_end = self._has_round_end(output_path)
         pid = raw.get("pid")
@@ -1550,7 +1618,13 @@ class SubagentManager:
                 "updated_at": now_iso(),
             }
         )
-        if refreshed.get("isolation") == "worktree" and refreshed.get("worktree_path") and not refreshed.get("worktree_cleanup"):
+        if (
+            persist_side_effects
+            and refreshed.get("isolation") == "worktree"
+            and refreshed.get("worktree_path")
+            and not refreshed.get("worktree_cleanup")
+        ):
+            # Shelling out to git is exactly the kind of work a poll loop must not repeat.
             refreshed["worktree_summary"] = self._summarize_worktree(refreshed.get("worktree_path"))
         return refreshed
 

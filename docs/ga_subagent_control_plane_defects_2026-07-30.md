@@ -14,7 +14,7 @@ P2 项（B1/B2/B3）做实测验证，结果推翻了原有优先级排序 —�
 | --- | --- | --- | --- | --- |
 | **M5** | `registry.json` 无锁读改写：丢行 + `run_id` 碰撞 + Windows `os.replace` 抛错 | **P0 正确性 + 安全** | **完全未记录** | 4 writer × 40 轮：**丢 120/160 行（75%）**，120 次调用只发出 **48 个不同 run_id**，**41 个 run_id 被 ≥2 个 agent 共用**（最多复用 4 次），并直接抛 `PermissionError [WinError 5]`。**✅ 已修复（2026-07-30）** |
 | **B1** | `publish()` 同步 fan-out 会阻塞在慢订阅者上 | P2 健壮性 | 规划文档 §6 已列，未实现 | **前提为真**：真实 `message_queued` 事件（pickle 329 字节）**24 条未读即卡死**；但"拖慢整个事件写入链路"的推断**未复现**，实际爆炸半径远小于文档描述。**✅ 已修复（2026-07-30）** |
-| **B3** | `wait_agents()` 轮询 `state.json` 而非 watch 语义 | P2 控制面 | 规划文档 §6 已列，未实现 | 顺带量到写放大：4 agent / 2s / 0.5s 间隔 → **40 次原子写（每秒 20 次）**，且这些写正是 M5 竞态的主要喂食者 |
+| **B3** | `wait_agents()` 轮询 `state.json` 而非 watch 语义 | P2 控制面 | 规划文档 §6 已列，未实现 | 顺带量到写放大：4 agent / 2s / 0.5s 间隔 → **40 次原子写（每秒 20 次）**，且这些写正是 M5 竞态的主要喂食者。**✅ 已修复（2026-07-30）** |
 
 **由此得出的顺序：M5 → B1 → B3 → （B2 继续后放）**。理由见第 4 节。
 
@@ -196,6 +196,28 @@ by file = {'registry.json': 20, 'state.json': 20}
 也就是说 `wait_agents` 自己在高频喂 M5 的竞态。**先修 M5，B3 才是纯优化；
 反过来先做 B3 只是在竞态之上叠优化。**
 
+### 3.1 修复结果（2026-07-30，已完成）
+
+写放大半：新增 `SubagentManager.probe_agent()`（`_refresh_state(persist_side_effects=False)`），
+`wait_agents` 的检测循环改用它；真要上报时 `_states_for_events()` 仍走 `read_agent()` 落盘。
+watch 半：`SubagentRealtimeChannel.wait_for_signal()` +
+`SubagentRealtimeSubscriber.signal()` 双向复用同一条 Connection，
+子侧在 `agentmain._subagent_event()` 末尾统一 `_signal_parent()`；
+无通道时保留盲 sleep。**先用探针验证了双向复用的安全性**（300 轮交错 send/recv，
+父侧 `wait()` 阻塞读 + sink 线程并发写同一 handle，零错误、300/300 信号到达），
+否则这条路根本不能走。落地细节与四条实现决定见规划文档 §6 的"B3 落地记录"。
+同规模复验（4 agent / 2s / 0.5s）：
+
+```
+agents=4 timeout=2.0s interval=0.5s timed_out=True
+total atomic_write_json during wait = 0
+by file = {}
+VERDICT: wait is write-free
+```
+
+15 条测试固化在 `WaitAgentsWriteAmplificationTest` / `WaitAgentsWatchTest`（manager）与
+`ChannelUpstreamSignalTest` / `ChildEventSignalsTheParentTest`（realtime ipc）。
+
 ## 4. 优先级判断
 
 1. **M5（P0）**：实测 75% 丢行 + run_id 碰撞绕过 S1/S2 的隔离粒度 + Windows 直接抛错。
@@ -205,6 +227,7 @@ by file = {'registry.json': 20, 'state.json': 20}
    与 R2 的"realtime 只发空信号、正文永远从 durable mailbox 读"天然契合 ——
    **丢事件不丢消息**，所以队列满时直接丢弃是安全的。**✅ 已完成（2026-07-30）**，见 §2.3。
 3. **B3（P2）**：改 watch 语义，顺带砍掉每秒 20 次原子写。必须排在 M5 之后。
+   **✅ 已完成（2026-07-30）**，见 §3.1。
 4. **B2 继续后放**：要动 `subagent_manager.py` 与 13 个工具 handler，纯结构收益，
    没有实测出来的正确性问题。
 
@@ -221,6 +244,7 @@ S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保
 | registry run_id | 同上，但记录每次 `create_child()` **返回值**的 `(agent_path, run_id, artifact_dir)` | `Counter(run_id)` 里 `n > 1` 的个数 |
 | publish 阻塞 | 订阅者收完 ack 后不再 recv，工作线程持续 publish，主线程 `join(timeout)` | 线程是否在超时内跑完 + 卡死前发出的条数 |
 | wait 写放大 | monkeypatch `subagent_state/manager/registry` 三处 `atomic_write_json` 计数，跑一次 `wait_agents` 超时周期 | 按文件名分类的写次数 |
+| 通道双向复用 | 父侧线程 `multiprocessing.connection.wait([sink.conn])` 阻塞读，同时 sink 发送线程持续写同一 handle，子侧交错 recv/send 300 轮 | 有无异常 + 上行信号到达数 |
 
 写并发探针时有一处要注意：`SubagentRegistry` 默认 `max_active_agents=8`，
 不显式传 `max_depth=0, max_active_agents=0` 关掉上限的话，探针会先撞 G1 的

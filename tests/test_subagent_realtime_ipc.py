@@ -779,5 +779,150 @@ class ChannelSlowSubscriberTest(unittest.TestCase):
             self.assertEqual(lingering, [], f"threads left running after close: {[t.name for t in lingering]}")
 
 
+class ChannelUpstreamSignalTest(unittest.TestCase):
+    """B3: the parent had no way to be *woken* by a child, only to re-read files on a timer.
+
+    `wait_agents()` polled state.json every 0.5s, which is both slow and (measured) 20 atomic
+    writes/sec. The realtime channel already exists and the duplex probe showed one Connection
+    carries concurrent send+recv safely, so the child can wake the parent over the same socket
+    it already subscribes on. Same shape as Codex `control.rs` `subscribe_status` →
+    `watch::Receiver<AgentStatus>`: the signal carries no state, it only says "re-read".
+    """
+
+    AUTHKEY = b"b3" * 16
+
+    def _channel(self, td, run_id):
+        channel = SubagentRealtimeChannel(default_channel_address(Path(td) / "channels", run_id), authkey=self.AUTHKEY)
+        channel.start()
+        self.addCleanup(channel.close)
+        return channel
+
+    def _subscriber(self, channel):
+        from subagent_realtime_ipc import SubagentRealtimeSubscriber
+
+        conn = connect_realtime_channel(channel.address, authkey=self.AUTHKEY)
+        subscriber = SubagentRealtimeSubscriber(conn, address=channel.address)
+        self.addCleanup(subscriber.close)
+        deadline = time.time() + 5
+        while channel.subscriber_count < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        return subscriber
+
+    def test_wait_for_signal_times_out_when_nobody_signals(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b3_idle")
+            self._subscriber(channel)
+
+            started = time.time()
+            woke = channel.wait_for_signal(0.2)
+
+            self.assertFalse(woke)
+            self.assertGreaterEqual(time.time() - started, 0.15, "wait_for_signal returned before its timeout")
+
+    def test_a_child_signal_wakes_the_parent_before_the_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b3_wake")
+            subscriber = self._subscriber(channel)
+
+            def signal_later():
+                time.sleep(0.05)
+                subscriber.signal()
+
+            thread = threading.Thread(target=signal_later)
+            thread.start()
+            started = time.time()
+            woke = channel.wait_for_signal(5.0)
+            thread.join(timeout=2)
+
+            self.assertTrue(woke, "parent slept through a child signal")
+            self.assertLess(time.time() - started, 3.0)
+
+    def test_wait_for_signal_returns_false_without_subscribers_instead_of_busy_looping(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b3_empty")
+
+            started = time.time()
+
+            self.assertFalse(channel.wait_for_signal(0.2))
+            self.assertGreaterEqual(time.time() - started, 0.15, "an empty channel must still honour the timeout")
+
+    def test_signalling_is_best_effort_and_never_raises_after_the_channel_is_gone(self):
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b3_gone")
+            subscriber = self._subscriber(channel)
+            channel.close()
+
+            for _ in range(3):
+                self.assertIsInstance(subscriber.signal(), bool)
+
+    def test_upstream_signals_do_not_disturb_downstream_delivery(self):
+        """Both directions share one Connection; a signal must not eat an event or vice versa."""
+        with tempfile.TemporaryDirectory() as td:
+            channel = self._channel(td, "run_b3_duplex")
+            subscriber = self._subscriber(channel)
+
+            for seq in range(20):
+                subscriber.signal()
+                channel.publish({"type": "message_queued", "event_seq": seq, "agent_path": "/root/duplex"})
+            woke = channel.wait_for_signal(2.0)
+
+            self.assertTrue(woke)
+            self.assertTrue(subscriber.wait(2.0), "downstream events stopped arriving once signals were in flight")
+            self.assertFalse(subscriber.closed)
+
+
+class ChildEventSignalsTheParentTest(unittest.TestCase):
+    """Every durable event the child appends must also poke the parent; otherwise the parent's
+    watch only wakes for the few events the *parent itself* publishes, and the child's
+    turn_completed still costs a full poll interval."""
+
+    AUTHKEY = b"b3c" * 10 + b"aa"
+
+    def test_worker_loop_signals_the_parent_when_it_appends_an_event(self):
+        from agentmain import run_task_worker_loop
+
+        with tempfile.TemporaryDirectory() as td:
+            channel = SubagentRealtimeChannel(
+                default_channel_address(Path(td) / "channels", "run_b3_child"), authkey=self.AUTHKEY
+            )
+            channel.start()
+            self.addCleanup(channel.close)
+            task_dir = Path(td) / "temp" / "signal_child"
+            task_dir.mkdir(parents=True)
+            (task_dir / "input.txt").write_text("initial", encoding="utf-8")
+            write_channel_authkey(task_dir, self.AUTHKEY)
+            atomic_write_json(task_dir / "state.json", {"task_name": "signal_child", "ipc_endpoint": channel.endpoint()})
+
+            class DoneQueue:
+                def get(self, timeout=None):
+                    return {"done": "ok"}
+
+            class FakeAgent:
+                peer_hint = True
+                task_dir = None
+                subagent_permission_policy = None
+
+                def put_task(self, raw, source="task"):
+                    return DoneQueue()
+
+            woke = []
+
+            def watch():
+                while len(woke) < 1:
+                    if channel.wait_for_signal(0.1):
+                        woke.append(True)
+                    elif len(woke) == 0 and not channel.subscriber_count:
+                        break
+
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            run_task_worker_loop(
+                FakeAgent(), task_dir, reply_wait_iterations=1, reply_sleep_s=0, sleep_fn=lambda _: None
+            )
+            watcher.join(timeout=5)
+
+            self.assertEqual(woke, [True], "the child appended durable events without waking the parent")
+
+
 if __name__ == "__main__":
     unittest.main()

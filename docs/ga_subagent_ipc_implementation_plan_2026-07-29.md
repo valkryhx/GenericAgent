@@ -52,7 +52,7 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 | G1 | **P1** | agent 深度 / 总数上限守护 | 安全 | — |
 | B1 | P2 | realtime channel 补 bounded + Lagged 背压（**✅ 2026-07-30 已完成**） | 健壮性 | R1 |
 | B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构 | 控制面 | — |
-| B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义 | 控制面 | R1, B2 |
+| B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义（**✅ 2026-07-30 已完成**） | 控制面 | R1, B2 |
 
 **不在范围内**：同进程运行时 / asyncio 化（4.2.1 阶段 C，除非出现第 5 节的切换信号）；
 `workflow_runtime.py` / `workflow_scheduler.py` / `workflow_child_agent.py` 重构（本 feat 明确边界）。
@@ -704,6 +704,47 @@ watch 负责唤醒，cursor 负责保证不漏事件。
 > 也就是说 `wait_agents` 自己在高频喂竞态。**B3 必须排在 M5 之后**——
 > 先修锁，B3 才是纯优化；反过来先做 B3 只是在竞态之上叠优化。
 
+#### B3 落地记录（2026-07-30，已完成）
+
+分两半做，因为两半解决的是两件事：**写放大**（观察不该写）与 **watch 语义**（等待不该靠计时器）。
+
+**写放大半**：`SubagentManager.probe_agent()` —— 与 `read_agent()` 走同一条
+`_refresh_state()` 派生逻辑，但 `persist_side_effects=False`：不 `mkdir`、不写 `state.json`、
+不写 registry、不 shell 出去 `git` 算 worktree summary。`wait_agents` 的检测循环改调它。
+一旦真的有东西要报，`_states_for_events()` 仍走 `read_agent()` 落盘 ——
+**值得返回的状态就值得持久化**，所以返回值和以前完全一样。
+
+**watch 半**：`SubagentRealtimeChannel.wait_for_signal(timeout)` +
+`SubagentRealtimeSubscriber.signal()`，双向复用同一条 Connection。
+`wait_agents` 的 sleep 点换成 `_wait_for_change()`：有活通道就在通道上阻塞，
+没有（`ipc_mode=file` 或 realtime 被拒）就保留原来的盲 sleep。
+子侧在 `agentmain._subagent_event()` 末尾统一 `_signal_parent()` ——
+那是本进程唯一的"我写了 durable 东西"choke point，11 个调用点全覆盖。
+
+四条实现决定：
+
+1. **双向复用一条 Connection，先探针验证再动手**。300 轮交错 send/recv 探针
+   （父侧 `wait()` 阻塞读 + sink 线程并发写同一 handle）零错误、300/300 信号到达，
+   两个 family 都通过。否则要么另开一条反向通道，要么退回文件 mtime watch。
+2. **信号不带状态**。`{"type": "child_signal"}`，与下行事件同理：父侧被叫醒后回读
+   `state.json` / `events.jsonl`，所以丢信号只损失一个 poll 间隔，不损失正确性。
+   `event_seq` cursor 语义完全不动 —— watch 负责唤醒，cursor 负责不漏。
+3. **多通道时按 budget 切片轮询**。一条线程不能同时阻塞在多个通道上，
+   所以 `poll_interval_s` 被 N 个通道均分，任一信号立即结束等待；
+   通道抛错则退回 sleep 该切片，绝不让死通道把整个 wait 弄挂。
+4. **子进程的 subscriber 存在模块级变量里**。`_subagent_event` 有 11 个调用点，
+   给每个都加一个参数只是在重复说同一件事；一个进程就是一个 agent，
+   所以进程级句柄是这里的正确粒度。副作用：mid-run 掉线的检测点从
+   `subscriber.wait()` 分支内挪到循环体，因为现在出站 `signal()` 一样会先发现掉线。
+
+验收：`WaitAgentsWriteAmplificationTest`（4 条）+ `WaitAgentsWatchTest`（5 条）+
+`ChannelUpstreamSignalTest`（5 条）+ `ChildEventSignalsTheParentTest`（1 条）。
+同规模复验（4 agent / 2s / 0.5s）：
+
+```
+total atomic_write_json during wait = 0   (修复前 40：registry.json 20 + state.json 20)
+```
+
 ## 7. 实施顺序与验收
 
 ### 建议切片顺序
@@ -727,6 +768,9 @@ watch 负责唤醒，cursor 负责保证不漏事件。
 > 6. **切片 6（P0 正确性 + 安全）**：**M5**（§1.5）。插在切片 5 之前 ——
 >    它是唯一还没修的 P0，且 B3 的写放大正在高频喂它的竞态。
 > 7. **切片 7（P2）**：B1 → B3 → B2，顺序不变，但都排在 M5 之后。
+>    **B1、B3 已于 2026-07-30 完成**（落地记录见 §6 对应小节），仅剩 B2。
+>    原表把 B2 列为 B3 的依赖，实测不成立：B3 只需要 R1 的通道，不需要 `Op` 结构，
+>    所以按 B1 → B3 → B2 的顺序做时 B3 并未被 B2 阻塞。
 >
 > 依据全部来自实测，见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`。
 
