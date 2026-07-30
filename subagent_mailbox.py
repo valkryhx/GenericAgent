@@ -26,6 +26,7 @@ class SubagentMailbox:
         message_id=None,
         reply_to=None,
         source_tool=None,
+        other_recipients=None,
     ):
         delivery_mode = TRIGGER_TURN if str(delivery_mode) == TRIGGER_TURN else QUEUE_ONLY
         # The parent enqueues while the child consumes, and both rewrite the whole
@@ -41,6 +42,10 @@ class SubagentMailbox:
                 "id": message_id,
                 "author": author,
                 "recipient": recipient,
+                # Who else was told the same thing. Codex carries this in
+                # InterAgentCommunication.other_recipients so a recipient can avoid duplicating
+                # a peer's work; without it every agent assumes it is the only one who knows.
+                "other_recipients": list(other_recipients or []),
                 "content": str(content),
                 "delivery_mode": delivery_mode,
                 "trigger_turn": delivery_mode == TRIGGER_TURN,
@@ -54,6 +59,32 @@ class SubagentMailbox:
             rows.append(row)
             self._write_rows(rows)
             return row
+
+    def annotate(self, message_id, *, other_recipients=None):
+        """Attach peer context to an already-queued row; returns the row or None.
+
+        Separate from enqueue because a multicast only knows the full peer list after every
+        recipient has been resolved, and the annotation must never be able to fail the delivery
+        that already happened.
+        """
+        if not message_id:
+            return None
+        with self._locked():
+            rows = self._read_rows()
+            updated = None
+            for index, row in enumerate(rows):
+                if row.get("message_id") != message_id:
+                    continue
+                row = dict(row)
+                if other_recipients is not None:
+                    row["other_recipients"] = list(other_recipients)
+                rows[index] = row
+                updated = row
+                break
+            if updated is None:
+                return None
+            self._write_rows(rows)
+            return updated
 
     def consume_trigger_turn(self):
         with self._locked():
@@ -119,6 +150,7 @@ class SubagentMailbox:
             row.setdefault("trigger_turn", row.get("delivery_mode") == TRIGGER_TURN)
             row.setdefault("consumed_at", None)
             row.setdefault("acknowledged_at", None)
+            row.setdefault("other_recipients", [])
             seen.add(message_id)
             rows.append(row)
         return rows

@@ -15,6 +15,7 @@ P2 项（B1/B2/B3）做实测验证，结果推翻了原有优先级排序 —�
 | **M5** | `registry.json` 无锁读改写：丢行 + `run_id` 碰撞 + Windows `os.replace` 抛错 | **P0 正确性 + 安全** | **完全未记录** | 4 writer × 40 轮：**丢 120/160 行（75%）**，120 次调用只发出 **48 个不同 run_id**，**41 个 run_id 被 ≥2 个 agent 共用**（最多复用 4 次），并直接抛 `PermissionError [WinError 5]`。**✅ 已修复（2026-07-30）** |
 | **B1** | `publish()` 同步 fan-out 会阻塞在慢订阅者上 | P2 健壮性 | 规划文档 §6 已列，未实现 | **前提为真**：真实 `message_queued` 事件（pickle 329 字节）**24 条未读即卡死**；但"拖慢整个事件写入链路"的推断**未复现**，实际爆炸半径远小于文档描述。**✅ 已修复（2026-07-30）** |
 | **B3** | `wait_agents()` 轮询 `state.json` 而非 watch 语义 | P2 控制面 | 规划文档 §6 已列，未实现 | 顺带量到写放大：4 agent / 2s / 0.5s 间隔 → **40 次原子写（每秒 20 次）**，且这些写正是 M5 竞态的主要喂食者。**✅ 已修复（2026-07-30）** |
+| **B2** | 控制面 op 没有提交身份，重放即重复执行 | P2 控制面 → **实测为正确性问题** | 规划文档 §6 已列，本文初版判为"纯结构收益，无实测正确性问题" | 重放 `followup_task` → **2 条 trigger_turn 行（任务干两遍）**；重放 `spawn_agent` → **两个真实进程、两个 run_id**；`enqueue` 的 `message_id` 去重分支存在但 13 个 handler 从未使用。**✅ 已修复（2026-07-30）** |
 
 **由此得出的顺序：M5 → B1 → B3 → （B2 继续后放）**。理由见第 4 节。
 
@@ -218,6 +219,45 @@ VERDICT: wait is write-free
 15 条测试固化在 `WaitAgentsWriteAmplificationTest` / `WaitAgentsWatchTest`（manager）与
 `ChannelUpstreamSignalTest` / `ChildEventSignalsTheParentTest`（realtime ipc）。
 
+## 3.2 B2：实测推翻"纯结构收益"的判断
+
+本文初版把 B2 记为"纯结构收益，没有实测出来的正确性问题"（见 §4 第 4 条的原文）。
+真去测之后这个判断不成立——**控制面 op 没有身份，重放就重复执行**：
+
+```
+followup_task 同一逻辑提交重放两次 → mailbox rows = 2, trigger_turn rows = 2   （子 agent 把任务干了两遍）
+spawn_agent   同一逻辑提交重放两次 → /root/dup + /root/dup_1, run_000001 + run_000002 （两个真实进程、两份 LLM 花费）
+SubagentMailbox.enqueue 已有 message_id 去重分支，但上层 13 个 handler 从未有人传过 id
+SubagentMailbox.enqueue 没有 other_recipients 参数（Codex Op::InterAgentCommunication 有）
+```
+
+第三行是关键：去重能力一直在，只是没有任何调用方使用它。Codex 给每个 op 都挂
+`Submission { id, op, trace }`（`codex-rs/protocol/src/protocol.rs`）正是为此 ——
+op 自带身份，而不是让调用方祈祷它只到达一次。
+
+### 3.3 B2 修复结果（2026-07-30，已完成）
+
+- 消息面：`_submission_message_id()` 把提交 id 推导成 `sub_<id>_<recipient>` 的 mailbox 行 id，
+  复用 mailbox 已有的 `message_id` 去重分支 —— 去重发生在唯一真相源上，不另立账本。
+- spawn / close：新增 `subagent_submissions.py::SubagentSubmissionLog`
+  （`submissions.jsonl` + `cross_process_lock`，首写为准，`MAX_ROWS=2000`）；
+  `spawn_agent` / `close_agent` 入口查重、出口记 `asdict()` 快照，
+  重放时用 `dataclasses.fields` 过滤重建首次返回值，**任务目录已被删掉也不抛错**。
+- 多播：`enqueue` 落 `other_recipients`，`SubagentMailbox.annotate()` 事后补同收者列表
+  （多播只有解析完所有收件人才知道完整 peer 列表，而补写绝不能让已成功的投递失败）。
+
+同规模复验：
+
+```
+followup_task 重放 → trigger_turn rows = 1（首次 message_id 与重放返回值一致）
+spawn_agent   重放 → popen 调用 1 次，agent_path/run_id 与首次相同，list_agents() = 1
+close_agent   重放（且已 rmtree 任务目录）→ 不抛错，previous_state.agent_path = /root/vanishing
+无 submission_id 时两次同文本 followup_task 仍是 2 条 —— 去重靠 id，不靠文本
+```
+
+16 条测试固化在 `tests/test_subagent_submissions.py::SubmissionLogTest`（6）、
+`tests/test_subagent_manager.py::SubmissionIdempotencyTest`（5）与 `MulticastMessageTest`（5）。
+
 ## 4. 优先级判断
 
 1. **M5（P0）**：实测 75% 丢行 + run_id 碰撞绕过 S1/S2 的隔离粒度 + Windows 直接抛错。
@@ -228,15 +268,16 @@ VERDICT: wait is write-free
    **丢事件不丢消息**，所以队列满时直接丢弃是安全的。**✅ 已完成（2026-07-30）**，见 §2.3。
 3. **B3（P2）**：改 watch 语义，顺带砍掉每秒 20 次原子写。必须排在 M5 之后。
    **✅ 已完成（2026-07-30）**，见 §3.1。
-4. **B2 继续后放**：要动 `subagent_manager.py` 与 13 个工具 handler，纯结构收益，
-   没有实测出来的正确性问题。
+4. **B2（P2 → 实测为正确性问题）**：本文初版判为"纯结构收益，没有实测出来的正确性问题"，
+   实测推翻 —— 重放 `followup_task` 让子 agent 干两遍任务、重放 `spawn_agent` 起第二个进程。
+   **✅ 已完成（2026-07-30）**，实测证据见 §3.2，修复见 §3.3。
 
 同样维持后放：S8（subagent 与 workflow child agent 抽象统一，文档自评"v2 稳定后再做"）、
 S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保留、P2 移除）。
 
 ## 5. 探针复现方式
 
-四个探针脚本按既有约定用后即删（`temp/_probe_*.py`），要点记录在此以便复现：
+探针脚本按既有约定用后即删（`temp/_probe_*.py`），要点记录在此以便复现：
 
 | 探针 | 做法 | 关键断言 |
 | --- | --- | --- |
@@ -245,6 +286,7 @@ S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保
 | publish 阻塞 | 订阅者收完 ack 后不再 recv，工作线程持续 publish，主线程 `join(timeout)` | 线程是否在超时内跑完 + 卡死前发出的条数 |
 | wait 写放大 | monkeypatch `subagent_state/manager/registry` 三处 `atomic_write_json` 计数，跑一次 `wait_agents` 超时周期 | 按文件名分类的写次数 |
 | 通道双向复用 | 父侧线程 `multiprocessing.connection.wait([sink.conn])` 阻塞读，同时 sink 发送线程持续写同一 handle，子侧交错 recv/send 300 轮 | 有无异常 + 上行信号到达数 |
+| 提交重放 | 对同一逻辑提交重复调 `followup_task` / `spawn_agent`，统计 mailbox `trigger_turn` 行数与 `popen` 调用次数 | 行数 / 进程数是否 > 1 |
 
 写并发探针时有一处要注意：`SubagentRegistry` 默认 `max_active_agents=8`，
 不显式传 `max_depth=0, max_active_agents=0` 关掉上限的话，探针会先撞 G1 的

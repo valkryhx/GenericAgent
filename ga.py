@@ -736,6 +736,7 @@ class GenericAgentHandler(BaseHandler):
                 background=bool(args.get("background", True)),
                 ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "file",
                 isolation=args.get("isolation"),
+                submission_id=args.get("submission_id") or args.get("submissionId"),
             )
             result = {
                 "status": "started",
@@ -791,7 +792,13 @@ class GenericAgentHandler(BaseHandler):
         if not target or not message:
             return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
         manager = self._get_subagent_manager()
-        row = manager.send_message(target, message, author="/root")
+        row = manager.send_message(
+            target,
+            message,
+            author="/root",
+            other_recipients=self._other_recipients_arg(args),
+            submission_id=args.get("submission_id") or args.get("submissionId"),
+        )
         yield f"[Status] Message queued for {row.get('recipient')}.\n"
         return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
@@ -802,9 +809,25 @@ class GenericAgentHandler(BaseHandler):
         if not target or not message:
             return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
         manager = self._get_subagent_manager()
-        row = manager.followup_task(target, message, author="/root")
+        row = manager.followup_task(
+            target,
+            message,
+            author="/root",
+            other_recipients=self._other_recipients_arg(args),
+            submission_id=args.get("submission_id") or args.get("submissionId"),
+        )
         yield f"[Status] Follow-up task queued for {row.get('recipient')}.\n"
         return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    @staticmethod
+    def _other_recipients_arg(args):
+        """Accept a list or a comma-separated string; models emit both for array params."""
+        raw = args.get("other_recipients") or args.get("otherRecipients")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        return [str(part).strip() for part in raw if str(part).strip()]
 
     def do_wait_agent(self, args, response):
         '''等待子智能体 mailbox/status 更新；不读取最终输出正文。'''
@@ -1086,7 +1109,12 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         try:
             result = manager.close_agent(
-                target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree, cascade=cascade
+                target,
+                reason=reason,
+                grace_s=grace_s,
+                cleanup_worktree=cleanup_worktree,
+                cascade=cascade,
+                submission_id=args.get("submission_id") or args.get("submissionId"),
             )
             data = {
                 "status": "closed",

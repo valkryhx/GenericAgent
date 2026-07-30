@@ -2,7 +2,7 @@ import json
 import os
 import signal
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 
 from subagent_agent_path import AgentPath
@@ -11,6 +11,7 @@ from subagent_event_bus import SubagentEventBus
 from subagent_mailbox import QUEUE_ONLY, TRIGGER_TURN, SubagentMailbox
 from subagent_permissions import INHERIT_CURRENT_PERMISSIONS, normalize_permission_metadata
 from subagent_registry import SubagentRegistry
+from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 
@@ -372,7 +373,14 @@ class SubagentManager:
         ipc_mode="file",
         isolation=None,
         worktree_path=None,
+        submission_id=None,
     ):
+        replay = self._replayed_submission(submission_id, op="spawn_agent", target=task_name)
+        if replay is not None:
+            # Spawning is the least idempotent op there is: a replay would start a second OS
+            # process, burn an active-agent slot and duplicate the real LLM spend.
+            return self._handle_from_submission(replay.get("result"))
+
         task_name = self._next_available_task_name(self._task_name_from_target(task_name))
         permission_metadata = normalize_permission_metadata(
             {"permission_profile": permission_profile, "permission_options": permission_options or {}, "parent_permission_mode": parent_permission_mode}
@@ -645,7 +653,7 @@ class SubagentManager:
         state["last_event_seq"] = bus_event["event_seq"]
         atomic_write_json(state_path, state)
         self._write_registry_entry(task_name, state, task_dir)
-        return AgentHandle(
+        handle = AgentHandle(
             task_name,
             state["agent_path"],
             pid,
@@ -667,6 +675,8 @@ class SubagentManager:
             worktree_path=state.get("worktree_path"),
             ipc_endpoint=state.get("ipc_endpoint"),
         )
+        self._record_submission(submission_id, op="spawn_agent", target=state["agent_path"], result={"handle": asdict(handle)})
+        return handle
 
     def register_agent(self, task_name, state, task_dir=None):
         task_name = self._task_name_from_target(task_name)
@@ -710,11 +720,15 @@ class SubagentManager:
             states.append(state)
         return states
 
-    def send_message(self, target, message, *, author="/root"):
-        return self._queue_message(target, message, author=author, trigger_turn=False)
+    def send_message(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
+        return self._queue_message(
+            target, message, author=author, trigger_turn=False, other_recipients=other_recipients, submission_id=submission_id
+        )
 
-    def followup_task(self, target, message, *, author="/root"):
-        return self._queue_message(target, message, author=author, trigger_turn=True)
+    def followup_task(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
+        return self._queue_message(
+            target, message, author=author, trigger_turn=True, other_recipients=other_recipients, submission_id=submission_id
+        )
 
     def resume_agent(self, target, message, *, author="/root"):
         previous = self.read_agent(target)
@@ -1132,7 +1146,7 @@ class SubagentManager:
         self._write_registry_entry(previous.task_name, raw, task_dir)
         return HandoffResult(previous.agent_path, previous, updated, handoff_mode, reason)
 
-    def close_agent(self, target, reason="parent_cleanup", grace_s=2.0, cleanup_worktree=False, cascade=False):
+    def close_agent(self, target, reason="parent_cleanup", grace_s=2.0, cleanup_worktree=False, cascade=False, submission_id=None):
         """Close ``target``; with ``cascade=True`` close everything below it first.
 
         Without cascade, closing a middle-tier agent orphans its children: they keep running
@@ -1144,6 +1158,11 @@ class SubagentManager:
         """
         if str(target or "").strip().replace("\\", "/").rstrip("/") in {"root", "/root"}:
             raise ValueError("cannot close root agent")
+        replay = self._replayed_submission(submission_id, op="close_agent", target=target)
+        if replay is not None:
+            # A replayed close must be safe even once the task dir is gone: the first call
+            # already did the work, so the recorded outcome is the truthful answer.
+            return self._close_result_from_submission(target, replay.get("result"))
         closed_descendants = []
         if cascade:
             closed_descendants = self._close_descendants(
@@ -1153,6 +1172,17 @@ class SubagentManager:
             target, reason=reason, grace_s=grace_s, cleanup_worktree=cleanup_worktree
         )
         result.closed_descendants = closed_descendants
+        self._record_submission(
+            submission_id,
+            op="close_agent",
+            target=result.previous_state.agent_path,
+            result={
+                "previous_state": asdict(result.previous_state),
+                "closed_state": asdict(result.closed_state),
+                "final_output_path": result.final_output_path,
+                "closed_descendants": closed_descendants,
+            },
+        )
         return result
 
     def _close_descendants(self, target, *, grace_s, cleanup_worktree):
@@ -1302,16 +1332,22 @@ class SubagentManager:
         self._close_realtime_channel(previous.agent_path, task_dir=task_dir)
         return CloseResult(target, previous, closed, previous.final_output_path)
 
-    def _queue_message(self, target, message, *, author, trigger_turn):
+    def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)
+        primary_path = f"/root/{task_name}"
+        extra_paths = self._resolve_other_recipients(other_recipients, exclude=primary_path) if _fanout else []
         task_dir = self.temp_dir / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
         delivery_mode = TRIGGER_TURN if trigger_turn else QUEUE_ONLY
         row = SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
             message,
             author=author,
-            recipient=f"/root/{task_name}",
+            recipient=primary_path,
             delivery_mode=delivery_mode,
+            # Same id derives the mailbox row id, so a replay is deduped by the mailbox itself
+            # rather than by a second bookkeeping layer that could disagree with it.
+            message_id=self._submission_message_id(submission_id, primary_path),
+            other_recipients=[p for p in ([primary_path] + extra_paths) if p != primary_path] or None,
             source_tool="followup_task" if trigger_turn else "send_message",
         )
         event = {
@@ -1325,12 +1361,144 @@ class SubagentManager:
         append_jsonl_event(task_dir / "events.jsonl", event)
         bus_event = self.event_bus.append_event(
             "message_queued",
-            agent_path=f"/root/{task_name}",
+            agent_path=primary_path,
             task_name=task_name,
             payload=event,
         )
         row["event_seq"] = bus_event["event_seq"]
+        if extra_paths:
+            row["other_deliveries"] = self._fanout_message(
+                extra_paths,
+                message,
+                author=author,
+                trigger_turn=trigger_turn,
+                submission_id=submission_id,
+                primary_path=primary_path,
+            )
         return row
+
+    def _resolve_other_recipients(self, other_recipients, *, exclude):
+        """Normalize to /root/<name>, drop duplicates and the primary recipient.
+
+        A recipient named twice must not receive the message twice, and naming the primary in
+        other_recipients is the natural way to write "everyone including a".
+        """
+        paths = []
+        for entry in other_recipients or []:
+            if not str(entry).strip():
+                continue
+            try:
+                path = f"/root/{self._task_name_from_target(entry)}"
+            except ValueError:
+                continue
+            if path == exclude or path in paths:
+                continue
+            paths.append(path)
+        return paths
+
+    def _fanout_message(self, paths, message, *, author, trigger_turn, submission_id, primary_path):
+        """Deliver the same message to the extra recipients; one failure never loses the rest.
+
+        Codex carries the peer list in `InterAgentCommunication.other_recipients`; the value is
+        that each recipient can see who else was told, so they don't duplicate each other's work.
+        """
+        deliveries = []
+        for path in paths:
+            peers = [p for p in ([primary_path] + paths) if p != path]
+            entry = {"recipient": path}
+            try:
+                copy = self._queue_message(
+                    path,
+                    message,
+                    author=author,
+                    trigger_turn=trigger_turn,
+                    submission_id=f"{submission_id}:{path}" if submission_id else None,
+                    _fanout=False,
+                )
+                # Written after the row exists: the peer list is context, not a delivery
+                # precondition, so it must not be able to block the delivery itself.
+                self._annotate_other_recipients(path, copy.get("message_id"), peers)
+                entry.update({"status": "queued", "message_id": copy.get("message_id"), "event_seq": copy.get("event_seq")})
+            except Exception as exc:
+                # A broken sibling mailbox must not cost the other recipients their copy, and
+                # must not undo the primary delivery that already succeeded.
+                entry.update({"status": "error", "msg": f"{type(exc).__name__}: {exc}"})
+            deliveries.append(entry)
+        return deliveries
+
+    def _annotate_other_recipients(self, agent_path, message_id, peers):
+        if not message_id:
+            return
+        task_name = self._task_name_from_target(agent_path)
+        mailbox = SubagentMailbox(self.temp_dir / task_name / "mailbox.jsonl")
+        try:
+            mailbox.annotate(message_id, other_recipients=peers)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _submission_message_id(submission_id, recipient_path):
+        """One submission maps to one mailbox row per recipient, so a replay is a no-op."""
+        submission_id = str(submission_id or "").strip()
+        if not submission_id:
+            return None
+        return f"sub_{submission_id}_{recipient_path.rstrip('/').split('/')[-1]}"
+
+    @property
+    def submissions(self):
+        """Lazily built: the log touches the filesystem, and most managers never dedup at all."""
+        log = getattr(self, "_submission_log", None)
+        if log is None:
+            log = SubagentSubmissionLog(self.temp_dir / "subagents")
+            self._submission_log = log
+        return log
+
+    def _replayed_submission(self, submission_id, *, op, target):
+        """Return the recorded row if this submission already ran, else None.
+
+        The op is part of the answer: reusing one id across two different ops would otherwise
+        make a close look like an already-done spawn.
+        """
+        if SubagentSubmissionLog.normalize_id(submission_id) is None:
+            return None
+        try:
+            row = self.submissions.find(submission_id)
+        except Exception:
+            # A broken dedup log must degrade to "run it" rather than refuse the op.
+            return None
+        if not row or row.get("op") != str(op):
+            return None
+        return row
+
+    def _record_submission(self, submission_id, *, op, target, result):
+        if SubagentSubmissionLog.normalize_id(submission_id) is None:
+            return None
+        try:
+            return self.submissions.record(submission_id, op=op, target=target, result=result)
+        except Exception:
+            # The op already succeeded; failing to record only costs idempotency on a replay.
+            return None
+
+    def _handle_from_submission(self, result):
+        """Rebuild the handle the first spawn returned, so the replay is indistinguishable."""
+        payload = (result or {}).get("handle") or {}
+        fields = {f.name for f in dataclass_fields(AgentHandle)}
+        return AgentHandle(**{k: v for k, v in payload.items() if k in fields})
+
+    def _close_result_from_submission(self, target, result):
+        result = result or {}
+        return CloseResult(
+            target,
+            self._agent_state_from_submission(result.get("previous_state")),
+            self._agent_state_from_submission(result.get("closed_state")),
+            result.get("final_output_path"),
+            closed_descendants=list(result.get("closed_descendants") or []),
+        )
+
+    @staticmethod
+    def _agent_state_from_submission(payload):
+        fields = {f.name for f in dataclass_fields(AgentState)}
+        return AgentState(**{k: v for k, v in (payload or {}).items() if k in fields})
 
     def _write_registry_entry(self, task_name, state, task_dir):
         agent_path = state.get("agent_path") or f"/root/{task_name}"

@@ -1399,5 +1399,207 @@ class WaitAgentsWatchTest(unittest.TestCase):
             self.assertTrue(slept, "a dead channel must degrade to polling, not break the wait")
 
 
+class SubmissionIdempotencyTest(unittest.TestCase):
+    """B2: without a submission id, a replayed control-plane call executes twice.
+
+    Measured: two followup_task calls for the same logical submission queued two trigger_turn
+    rows — the child ran the task twice. The mailbox already had a message_id dedup branch, but
+    nothing above it ever passed an id. Codex attaches `Submission { id, op, trace }` to every op.
+    """
+
+    def _manager(self, td):
+        class FakeProcess:
+            next_pid = 8000
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+        )
+
+    def _mailbox_rows(self, td, name="worker"):
+        from subagent_mailbox import SubagentMailbox
+
+        return SubagentMailbox(Path(td) / "temp" / name / "mailbox.jsonl")._read_rows()
+
+    def test_replayed_followup_task_queues_the_task_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("worker", "initial")
+
+            first = manager.followup_task("worker", "do the thing", author="/root", submission_id="sub_a")
+            second = manager.followup_task("worker", "do the thing", author="/root", submission_id="sub_a")
+
+            triggers = [row for row in self._mailbox_rows(td) if row.get("trigger_turn")]
+            self.assertEqual(len(triggers), 1, "a replayed submission ran the task twice")
+            self.assertEqual(first["message_id"], second["message_id"])
+
+    def test_without_a_submission_id_two_calls_stay_two_messages(self):
+        """Two genuinely different asks must not be collapsed just because the text matches."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("worker", "initial")
+
+            manager.followup_task("worker", "same text", author="/root")
+            manager.followup_task("worker", "same text", author="/root")
+
+            self.assertEqual(len([row for row in self._mailbox_rows(td) if row.get("trigger_turn")]), 2)
+
+    def test_replayed_spawn_agent_does_not_start_a_second_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            spawned = []
+
+            class FakeProcess:
+                def __init__(self):
+                    self.pid = 8100 + len(spawned)
+
+            def popen(*_a, **_kw):
+                spawned.append(1)
+                return FakeProcess()
+
+            manager = SubagentManager(root_dir=td, popen=popen, python_executable="python-test", sleep=lambda _: None)
+
+            first = manager.spawn_agent("dup", "same task", submission_id="sub_spawn")
+            second = manager.spawn_agent("dup", "same task", submission_id="sub_spawn")
+
+            self.assertEqual(len(spawned), 1, "a replayed spawn started a second real process")
+            self.assertEqual(first.agent_path, second.agent_path)
+            self.assertEqual(first.run_id, second.run_id)
+            self.assertEqual(len(manager.list_agents()), 1)
+
+    def test_replayed_close_agent_reports_the_first_close(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("closing", "task")
+            terminated = []
+            manager.terminate_process = terminated.append
+            manager.process_exists = lambda _pid: False
+
+            first = manager.close_agent("closing", reason="done", submission_id="sub_close")
+            second = manager.close_agent("closing", reason="done", submission_id="sub_close")
+
+            self.assertEqual(second.previous_state.agent_path, first.previous_state.agent_path)
+            self.assertEqual(second.closed_state.process_status, first.closed_state.process_status)
+
+    def test_a_replayed_close_of_a_gone_agent_does_not_raise(self):
+        """The replay's whole job is to be safe after the first call already finished the work."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("vanishing", "task")
+            manager.process_exists = lambda _pid: False
+            manager.terminate_process = lambda _pid: None
+            manager.close_agent("vanishing", reason="done", submission_id="sub_gone")
+
+            import shutil
+
+            shutil.rmtree(Path(td) / "temp" / "vanishing")
+
+            replay = manager.close_agent("vanishing", reason="done", submission_id="sub_gone")
+
+            self.assertEqual(replay.previous_state.agent_path, "/root/vanishing")
+
+
+class MulticastMessageTest(unittest.TestCase):
+    """B2's other half: Codex `InterAgentCommunication` carries `other_recipients`; GA had no
+    multicast at all, so telling three agents one thing meant three separate submissions with
+    three separate ids to keep straight."""
+
+    def _manager(self, td):
+        class FakeProcess:
+            next_pid = 9000
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+        )
+
+    def _rows(self, td, name):
+        from subagent_mailbox import SubagentMailbox
+
+        return SubagentMailbox(Path(td) / "temp" / name / "mailbox.jsonl")._read_rows()
+
+    def test_one_send_reaches_every_recipient(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            for name in ("a", "b", "c"):
+                manager.spawn_agent(name, "initial")
+
+            result = manager.send_message("a", "shared context", author="/root", other_recipients=["b", "c"])
+
+            for name in ("a", "b", "c"):
+                rows = [row for row in self._rows(td, name) if row.get("content") == "shared context"]
+                self.assertEqual(len(rows), 1, f"{name} did not get the multicast exactly once")
+            self.assertEqual(result["recipient"], "/root/a")
+            self.assertEqual(
+                [row["recipient"] for row in result["other_deliveries"]], ["/root/b", "/root/c"]
+            )
+
+    def test_every_copy_records_who_else_received_it(self):
+        """A recipient that cannot see the other recipients cannot avoid duplicating their work."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            for name in ("a", "b"):
+                manager.spawn_agent(name, "initial")
+
+            manager.send_message("a", "shared", author="/root", other_recipients=["b"])
+
+            row_a = next(row for row in self._rows(td, "a") if row["content"] == "shared")
+            row_b = next(row for row in self._rows(td, "b") if row["content"] == "shared")
+            self.assertEqual(row_a["other_recipients"], ["/root/b"])
+            self.assertEqual(row_b["other_recipients"], ["/root/a"])
+
+    def test_a_duplicated_or_self_naming_recipient_is_delivered_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            for name in ("a", "b"):
+                manager.spawn_agent(name, "initial")
+
+            manager.send_message("a", "once", author="/root", other_recipients=["a", "b", "b", "/root/a"])
+
+            self.assertEqual(len([row for row in self._rows(td, "a") if row["content"] == "once"]), 1)
+            self.assertEqual(len([row for row in self._rows(td, "b") if row["content"] == "once"]), 1)
+
+    def test_a_failing_extra_recipient_does_not_lose_the_primary_delivery(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "initial")
+            real_queue = manager._queue_message
+
+            def flaky(target, message, **kwargs):
+                if manager._task_name_from_target(target) == "broken":
+                    raise OSError("mailbox is unwritable")
+                return real_queue(target, message, **kwargs)
+
+            manager._queue_message = flaky
+
+            result = manager.send_message("a", "still lands", author="/root", other_recipients=["broken"])
+
+            self.assertEqual(len([row for row in self._rows(td, "a") if row["content"] == "still lands"]), 1)
+            self.assertEqual(result["other_deliveries"][0]["status"], "error")
+
+    def test_multicast_followup_triggers_a_turn_for_every_recipient(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            for name in ("a", "b"):
+                manager.spawn_agent(name, "initial")
+
+            manager.followup_task("a", "go", author="/root", other_recipients=["b"])
+
+            for name in ("a", "b"):
+                row = next(row for row in self._rows(td, name) if row["content"] == "go")
+                self.assertTrue(row["trigger_turn"], f"{name} got the multicast without being woken")
+
+
 if __name__ == "__main__":
     unittest.main()

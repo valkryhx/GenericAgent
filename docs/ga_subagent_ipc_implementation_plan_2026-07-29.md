@@ -51,7 +51,7 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 | R4 | P1 | realtime 不可用时优雅退回轮询，且状态可观测 | 健壮性 | R1 |
 | G1 | **P1** | agent 深度 / 总数上限守护 | 安全 | — |
 | B1 | P2 | realtime channel 补 bounded + Lagged 背压（**✅ 2026-07-30 已完成**） | 健壮性 | R1 |
-| B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构 | 控制面 | — |
+| B2 | P2 | `spawn/send/close/interrupt` 收敛为显式 `Op` 结构（**✅ 2026-07-30 已完成**） | 控制面 | — |
 | B3 | P2 | 状态订阅从轮询 `state.json` 改 watch 语义（**✅ 2026-07-30 已完成**） | 控制面 | R1, B2 |
 
 **不在范围内**：同进程运行时 / asyncio 化（4.2.1 阶段 C，除非出现第 5 节的切换信号）；
@@ -216,8 +216,8 @@ POSIX socket 直接返回 `None`——它的防线是 `0o700` 目录，不是 SI
 `Ran 781 tests in 117.700s ... OK (skipped=3)`。（新增 skip 是两条 Windows-only /
 POSIX-only 的平台守卫测试，在当前 Windows 环境下 POSIX 权限那两条被跳过。）
 
-下一步：规划内 P0/P1 已全部完成。剩余为显式排除项（P2 的 B1-B3：realtime channel
-背压、显式 `Op` 结构、watch 语义状态订阅）。
+下一步：规划内 P0/P1 已全部完成。P2 的 B1 / B3 / B2 也已于 2026-07-30 全部落地
+（realtime channel 背压、watch 语义状态订阅、显式提交身份 + 多播），落地记录见 §6。
 
 ### 1.2 真实 API E2E 验收（2026-07-29）
 
@@ -684,6 +684,49 @@ GA 的 mailbox 消息字段已与 `Op::InterAgentCommunication`
 收益：控制面可审计、可重放、可测试；代价：触及 `subagent_manager.py`（1544 行）
 与 13 个工具 handler，建议在 P0/P1 全绿后单独一个切片做。
 
+#### B2 落地记录（2026-07-30，已完成）
+
+先实测再动手，因为原文把 B2 记为"纯结构收益"。实测结果推翻了这个判断
+（详见 `docs/ga_subagent_control_plane_defects_2026-07-30.md` §2.4）：
+
+```
+followup_task 重放同一逻辑提交 → mailbox rows = 2, trigger_turn rows = 2   （子 agent 把任务干了两遍）
+spawn_agent   重放同一逻辑提交 → /root/dup + /root/dup_1, run_000001 + run_000002 （两个真实进程）
+enqueue 已有 message_id 去重分支，但上层从未有人传过 id
+enqueue 没有 other_recipients 参数
+```
+
+也就是说 B2 不是重构，而是修一个可测的正确性缺陷：**控制面 op 没有身份，重放就重复执行**。
+
+三块落地：
+
+1. **`subagent_submissions.py`（新）**：`SubagentSubmissionLog`，`submissions.jsonl` +
+   `cross_process_lock`，`record()` 首写为准、`find()` 查重、`normalize_id()` 把空 id 当作
+   "别给我去重"（否则不相干的调用会撞在 `""` 上）。`MAX_ROWS=2000` 截断 —— 它是重放判据，
+   不是审计流水。`_serializable()` 在结果无法 JSON 化时降级成 `{"repr": ...}`：
+   **去重比载荷重要**，少一行记录就等于重放会再执行一次。
+2. **消息面走 mailbox 自己的去重**：`_submission_message_id(submission_id, recipient)` 把提交 id
+   推导成 `sub_<id>_<recipient>` 的 mailbox 行 id，交给 `SubagentMailbox.enqueue` 已有的
+   `message_id` 分支。这样去重发生在唯一的真相源上，而不是再加一层可能与 mailbox 不一致的账本。
+3. **`spawn_agent` / `close_agent` 走提交日志**：入口 `_replayed_submission()` 命中就重建首次结果
+   （`_handle_from_submission` / `_close_result_from_submission` 用 `dataclasses.fields` 过滤字段，
+   老记录多/少字段都不炸），出口 `_record_submission()` 落 `asdict(...)` 快照。
+   op 名参与判定 —— 同一个 id 复用到两个不同 op 上，不能让 close 看起来像"已完成的 spawn"。
+   读写提交日志的异常都被吞成"照常执行"：坏账本只该损失幂等，不该让 op 本身失败。
+
+多播（`other_recipients`）作为 Codex `Op::InterAgentCommunication` 的对齐项一并补上：
+`enqueue` 落 `other_recipients` 字段，新增 `SubagentMailbox.annotate()` 事后补同收者列表
+—— 多播只有在所有收件人都解析完之后才知道完整 peer 列表，而这个补写**绝不能**有本事让
+已经成功的投递失败。`_fanout_message()` 里单个兄弟 mailbox 坏掉只记 `status: error`，
+不影响其它收件人和主投递。
+
+验收：`tests/test_subagent_submissions.py::SubmissionLogTest`（6 条）+
+`tests/test_subagent_manager.py::SubmissionIdempotencyTest`（5 条）+
+`MulticastMessageTest`（5 条）。回归 `Ran 843 tests ... OK (skipped=3)`。
+工具层同步：`ga.py` 的 `do_spawn_agent` / `do_send_message` / `do_followup_task` /
+`do_close_agent` 透传 `submission_id`（`other_recipients` 兼容 list 与逗号串两种形态，
+模型对 array 参数两种都会发），两份 `assets/tools_schema*.json` 补齐字段说明。
+
 ### B3 状态订阅改 watch 语义
 
 `wait_agents()`（`subagent_manager.py:775-830`）目前轮询
@@ -768,9 +811,11 @@ total atomic_write_json during wait = 0   (修复前 40：registry.json 20 + sta
 > 6. **切片 6（P0 正确性 + 安全）**：**M5**（§1.5）。插在切片 5 之前 ——
 >    它是唯一还没修的 P0，且 B3 的写放大正在高频喂它的竞态。
 > 7. **切片 7（P2）**：B1 → B3 → B2，顺序不变，但都排在 M5 之后。
->    **B1、B3 已于 2026-07-30 完成**（落地记录见 §6 对应小节），仅剩 B2。
+>    **B1、B3、B2 已于 2026-07-30 全部完成**（落地记录见 §6 对应小节），切片 7 收尾。
 >    原表把 B2 列为 B3 的依赖，实测不成立：B3 只需要 R1 的通道，不需要 `Op` 结构，
 >    所以按 B1 → B3 → B2 的顺序做时 B3 并未被 B2 阻塞。
+>    B2 原本被记为"纯结构收益"，实测推翻：无提交身份时重放 `followup_task` 会让子 agent
+>    把任务干两遍、重放 `spawn_agent` 会起第二个进程，所以它是正确性修复而非重构。
 >
 > 依据全部来自实测，见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`。
 

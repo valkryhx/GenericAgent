@@ -71,7 +71,7 @@
 > **修复状态（2026-07-29）**：缺陷 3 / 4 / 5（P0 正确性，M1-M4）、缺陷 6（P0 安全，S1+S2）、
 > 缺陷 1（死通道，R1+R2+R4）、缺陷 2（轮询耦合，R3）、缺陷 7（上限守护，G1）
 > **已按 TDD 修复并全绿**，下面对应条目保留原始诊断以备回溯，并在条目末尾标注实际落地方式。
-> 规划内 P0/P1 全部完成；仅剩 P2 的 B1-B3（显式排除项），见规划文档 1.1 节进度表。
+> 规划内 P0/P1 全部完成；P2 的 B1-B3 也已于 2026-07-30 全部落地，见规划文档 1.1 节进度表。
 > 真实 API E2E 已通过（`claude-opus-5` / `provider: gorouter`），实测父→子唤醒
 > **0.25 秒**（轮询间隔故意设成 30 秒，所以只可能来自 realtime 信号）；
 > E2E 另外暴露并修掉两个规划外缺陷（registry 陈旧行占满活跃额度、
@@ -106,6 +106,17 @@
 > 在已有通道上双向唤醒（先用 300 轮交错 send/recv 探针验证了单 Connection 双向并发安全）。
 > 无通道时保留盲 sleep，`event_seq` cursor 语义不动 —— watch 负责唤醒，cursor 负责不漏。
 > 落地细节见规划文档 §6 的"B3 落地记录"。P2 仅剩 B2。
+>
+> **B2 已修复（2026-07-30）**：先实测再动手，结果推翻了"纯结构收益"的原判 ——
+> 重放同一逻辑提交时 `followup_task` 会写出 2 条 `trigger_turn` 行（子 agent 把任务干两遍），
+> `spawn_agent` 会起第二个真实进程和第二个 `run_id`；`enqueue` 的 `message_id` 去重分支
+> 一直存在，但 13 个 handler 从未有人传过 id。修法对齐 Codex `Submission { id, op, trace }`：
+> 消息面把提交 id 推导成 mailbox 行 id 复用既有去重（不另立账本），spawn/close 走新的
+> `subagent_submissions.py::SubagentSubmissionLog`（首写为准，重放用 `dataclasses.fields`
+> 过滤重建首次返回值，任务目录已删也不抛错）。顺带补上 Codex
+> `Op::InterAgentCommunication` 的 `other_recipients` 多播 ——
+> 同收者列表事后 `annotate()` 补写，绝不让它有本事让已成功的投递失败。
+> 落地细节见规划文档 §6 的"B2 落地记录"。**P2 的 B1/B2/B3 至此全部完成。**
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；
