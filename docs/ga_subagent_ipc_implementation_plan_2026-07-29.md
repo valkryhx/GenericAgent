@@ -42,6 +42,7 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 | M2 | **P0** | mailbox 落盘改原子替换，消除截断脏读 | 正确性 | M1 |
 | M3 | **P0** | 消除 `message_id` 行数派生碰撞 | 正确性 | M1 |
 | M4 | **P0** | 统一两套分叉的 mailbox 消费实现，删死代码 | 正确性 | M1, M2 |
+| **M5** | **P0** | `registry.json` 加跨进程锁，消除并发丢行与 `run_id` 碰撞 | 正确性 + **安全** | — |
 | S1 | **P0** | realtime channel 加 per-run authkey 认证 | **安全** | — |
 | S2 | P1 | POSIX socket 目录权限 0o700 / Windows server owner 校验 | 安全 | S1 |
 | R1 | **P1** | 子 agent 订阅 realtime channel（接通现有死通道） | 实时性 | S1 |
@@ -55,6 +56,12 @@ P0 是正确性/安全，必须先做；P1 是本次要达成的实时性目标�
 
 **不在范围内**：同进程运行时 / asyncio 化（4.2.1 阶段 C，除非出现第 5 节的切换信号）；
 `workflow_runtime.py` / `workflow_scheduler.py` / `workflow_child_agent.py` 重构（本 feat 明确边界）。
+
+> **M5 是 2026-07-30 复核时新增的（原表 14 项 → 15 项）**，不是原始规划的一部分。
+> 它与 M1 是同一种结构缺陷（无锁读改写），但作用在 `registry.json` 而非 mailbox 上，
+> 且后果更重：`run_id` 碰撞会让 S1/S2 建立的"每 run 一把密钥"隔离粒度被悄悄放大。
+> 实测证据见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`，任务详情见本文 §1.5。
+> 同一轮复核还实测校准了 B1 的真实爆炸半径、量到了 B3 的写放大，结论都在那份文档里。
 
 ### 1.1 实施进度（2026-07-29）
 
@@ -296,6 +303,84 @@ registry 4 + manager 6 + 工具层 2）。
 
 至此 v2 设计 §6 的 P0 条目全部落地，`memory/supervisor_sop.md` 的收尾条目已改为在目标
 派生过子 agent 时使用 `cascade=true`。
+
+### 1.5 M5（P0）registry.json 加跨进程锁 —— 2026-07-30 复核新增
+
+**实测证据全文见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`**，此处只列任务要求。
+
+**问题**：`subagent_registry.py:321-329` 的 `_load()` / `_save()` 是无锁读改写，
+`create_child()` / `update()` / `mark_closed()` / `_reap_stale_agents()` 全走这条路，
+全仓 grep 不到 registry 使用 `cross_process_lock`。而 `agentmain.py:1132` 里每个会 spawn
+子 agent 的子进程都自建 `SubagentManager`，即自建一个 registry 写者，
+`temp/subagents/registry.json` 是整棵树共享的单一文件。
+
+**实测（4 writer × 40 轮，`threading.Barrier` 对齐）**：
+- 丢行：**160 行只存活 40 行（丢 75%）**，丢失量 = `(writers-1)×rounds`，与 M1 修复前
+  mailbox 的数字和公式完全一致 —— 结构性必然，不是偶发竞态。
+- **`run_id` 碰撞：120 次调用只发出 48 个不同 run_id，41 个被 ≥2 个 agent 共用（最多 4 次）。**
+- Windows 上并发写直接抛 `PermissionError [WinError 5] @ subagent_state.py:62, _replace_file`。
+
+**为什么是 P0 而不是 P1**：`run_id` 决定三样东西 —— `artifact_dir`
+（`registry_dir/runs/<run_id>`）、realtime 通道地址（`ga_subagent_<run_id>`）、
+authkey 侧车路径。碰撞后两个 agent 共享 artifact 目录、抢同一个管道地址、读同一份密钥。
+第三条**直接放大了 S1/S2 建立的隔离粒度**：S1 立论是"每 run 一把独立密钥"，
+碰撞让它变成"三个 run 一把"；S2 的 owner 校验只验用户身份，验不出"这条管道属于哪个 run"。
+两道防线都还在，但保护粒度被悄悄改变了。
+
+**方案**：
+- `SubagentRegistry` 持 `registry.json.lock`，复用 `subagent_state.cross_process_lock`
+  （M1 已把它做成共享实现，不要写第二套锁）。
+- 锁必须覆盖**整个** read-modify-write：`_load()` → 改 dict → `_save()` 不能被拆开加锁，
+  否则 run_no 分配与行写入之间仍有窗口。`create_child()` 里
+  `_check_tree_limits` → 分配 `next_run_no` → 写 entry 必须在同一把锁内。
+- `_reap_stale_agents()` 已经 mutate `data` 后由调用方 `_save()`，加锁时注意别把
+  "reap 后不保存"的既有路径改坏（`tests/test_subagent_registry.py` 有断言锁定）。
+- Windows `os.replace` 的 `PermissionError` 加锁后自然消失（并发写被序列化），
+  **不需要再动 `_WINDOWS_REPLACE_RETRY_DELAYS`** —— M2 那次调整针对的是"写入期持续并发读"。
+
+**TDD**：先写并发红测。写红测时注意 `SubagentRegistry` 默认 `max_active_agents=8`，
+不显式传 `max_depth=0, max_active_agents=0` 关掉上限的话，测试会先撞
+`SubagentTreeLimitError` 而不是测到竞态。至少三条：
+1. 并发 `create_child()` 后所有行都在（丢行红测）。
+2. 并发 `create_child()` 返回的 `run_id` 互不相同（碰撞红测 —— 这条比第 1 条重要，
+   因为它检查的是**返回值**而不是幸存者）。
+3. 并发 `update()` 不互相覆盖字段。
+
+**回归注意**：现有 21 个 registry 测试全部单线程，加锁不应改变任何单线程语义。
+
+#### M5 落地记录（2026-07-30，已完成）
+
+| 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- |
+| ✅ 完成 | `SubagentRegistry` 新增 `lock_path`（`registry.json.lock`）与 `_write_locked()` 上下文管理器，委托 M1 的共享 `subagent_state.cross_process_lock`（**不新增第二套锁实现**）；`create_child` / `update` / `mark_closed` / `mark_running` 四个读改写全程持锁；`_unique_child_name` 改名为 `_unique_child_name_unlocked` 并在文档串里声明"调用方必须已持锁" | `expected 48 persisted rows, got 12`；`12 != 48 : 36 run_id(s) handed to >1 agent`；`None != 1000 : agent0 lost its pid update` |
+
+**锁边界的关键决定**：`create_child()` 里"名字分配 → `_check_tree_limits` → `next_run_no`
+分配 → 写行"必须在**同一把锁内**。把 `_unique_child_name()` 留在锁外（它自己也 `_load()`）
+就等于保留了原来的窗口 —— 两个调用方仍可能读到同一个 `next_run_no`。
+把它改成 `_unique_child_name_unlocked()` 而不是让它自己取锁，是因为
+`cross_process_lock` 在 Windows 上是 `msvcrt.locking` 自旋、不可重入，
+嵌套取锁会**死锁**。方法名里带 `_unlocked` 是为了让这个约束在调用点可见。
+
+**读路径没加锁，是有意的**：`get()` / `list_agents()` / `descendants()` 仍是无锁读。
+M2 已让 `_save()` 走 `atomic_write_json`（tmp + `os.replace`），所以读者只会看到
+某个完整版本，不会看到半个文件；给读加锁只会让 `wait_agents` 每秒 20 次的读把写者饿死。
+
+**Windows `PermissionError` 确认消失**：加锁后并发写被序列化，探针里那条
+`PermissionError [WinError 5] @ _replace_file` 不再出现，`_WINDOWS_REPLACE_RETRY_DELAYS`
+未做任何改动（M2 那次调整针对的是"写入期持续并发读"，与本项无关）。
+
+**验证**：3 条并发红测转绿（正式测试用 4 writer × 12 轮以控制 CI 时长）。
+另用一次性探针在 4 writer × 60 轮下复验：
+
+```
+expected=240 persisted=240 returned=240 distinct_run_ids=240 errors=0
+```
+
+修复前同规模是 75% 丢行 + 大量 run_id 复用。
+
+**回归**：`tests.test_subagent_registry` `Ran 24 tests ... OK`（21 → 24）；
+全量 `Ran 807 tests in 126.270s ... OK (skipped=3)`（804 → 807）。
+现有 21 个单线程 registry 测试全部未受影响，单线程语义未变。
 
 ## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
 
@@ -541,6 +626,21 @@ realtime 已经保证低延迟，轮询间隔本该放大以省 CPU，但放大�
 "你落后了，请回读 durable"的 lagged 标记。这与 R2 的"trigger 不携带内容"设计天然契合——
 丢事件不丢消息。
 
+> **2026-07-30 实测校准**（详见 `docs/ga_subagent_control_plane_defects_2026-07-30.md` §2）：
+> **阻塞前提为真**：订阅者收完 ack 后不再 recv，用真实 `message_queued` 事件形状
+> （pickle 后 **329 字节**）持续 publish，**第 24 条即卡死**。24 条是管道缓冲的真实容量，
+> 这才是评估风险的依据（第一版探针用 4KB 填充事件，第 2 条就卡，但那不是 GA 的真实事件大小）。
+>
+> **但本节"一个卡住的订阅者能拖慢整个事件写入链路"的推断未能复现。** 让子 agent 处于
+> "已订阅但忙在 LLM turn 里不读通道"的状态，父侧连发 4 次 `followup_task` 全部
+> 0.01–0.03s 完成。原因在 `subagent_manager.py` `_publish_realtime_event()`：
+> 它按 `event["agent_path"]` 只 fan-out 给**那一个** agent 的通道，且每个通道只有 1 个订阅者，
+> 所以不存在"一个慢订阅者影响其他 agent"的路径。
+>
+> **修正后的结论**：B1 该修（阻塞是真的，且 `publish` 在 `append_event` 释放锁之后、
+> 在调用方栈上同步执行），但它是**单 agent 局部风险**而非全局链路风险，
+> 优先级维持 P2，排在 M5 之后。
+
 ### B2 显式 Op 结构
 
 把 `spawn/send/close/interrupt/resume` 收敛成显式提交对象（参考 Codex
@@ -563,6 +663,15 @@ GA 的 mailbox 消息字段已与 `Op::InterAgentCommunication`
 （`subagent_event_bus.py:40,55`）不能因此丢——两者要共存：
 watch 负责唤醒，cursor 负责保证不漏事件。
 
+> **2026-07-30 实测补充**（详见 `docs/ga_subagent_control_plane_defects_2026-07-30.md` §3）：
+> `wait_agents()` 每个 poll 周期对每个 target 调 `read_agent()`，而 `read_agent()` 无条件
+> `atomic_write_json(state.json)` + `_write_registry_entry()`。4 agent / 2s 超时 / 0.5s 间隔实测：
+> **40 次原子写 = registry.json 20 次 + state.json 20 次，即每秒 20 次 tmp+os.replace。**
+>
+> 这改变了 B3 的性质：那 20 次 `registry.json` 写正是 M5 无锁竞态的主要喂食者，
+> 也就是说 `wait_agents` 自己在高频喂竞态。**B3 必须排在 M5 之后**——
+> 先修锁，B3 才是纯优化；反过来先做 B3 只是在竞态之上叠优化。
+
 ## 7. 实施顺序与验收
 
 ### 建议切片顺序
@@ -579,6 +688,15 @@ watch 负责唤醒，cursor 负责保证不漏事件。
    R3 最后做因为它要改被测试直接调用的签名。
 4. **切片 4（P1 守护）**：G1 + S2。独立于上面，可并行。
 5. **切片 5（P2）**：B1 → B3 → B2。B2 最大，放最后。
+
+> **2026-07-30 复核后的顺序修订**：切片 1-4 已全部完成，规划外补了
+> `close_agent(cascade=true)`（§1.4）。剩余工作的实际顺序改为：
+>
+> 6. **切片 6（P0 正确性 + 安全）**：**M5**（§1.5）。插在切片 5 之前 ——
+>    它是唯一还没修的 P0，且 B3 的写放大正在高频喂它的竞态。
+> 7. **切片 7（P2）**：B1 → B3 → B2，顺序不变，但都排在 M5 之后。
+>
+> 依据全部来自实测，见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`。
 
 ### 每切片的回归要求
 
@@ -642,6 +760,7 @@ S1 落地后要额外确认 authkey 不出现在任何 E2E 输出、日志、`st
 ## 10. 相关文档
 
 - `docs/ga_subagent_claudecode_codex_ipc_reference_2026-07-29.md`——源码级调研与缺陷实测证据
+- `docs/ga_subagent_control_plane_defects_2026-07-30.md`——M5 / B1 / B3 的 2026-07-30 实测证据与优先级判断
 - `docs/ga_subagent_v2_optimization_design_2026-07-27.md`——本 feat 主设计与进度
 - `docs/ga_subagent_mechanism_research_2026-07-27.md`
 - `docs/ga_subagent_codex_reference_2026-07-13.md`

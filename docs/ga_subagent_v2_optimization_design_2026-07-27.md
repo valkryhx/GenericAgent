@@ -82,6 +82,17 @@
 > `SubagentRegistry.descendants()` + `SubagentManager.close_agent(cascade=True)`，
 > 后代由深到浅先关、目标最后关，单个后代失败只记录不中断整棵树的收尾。
 > 至此 §6 的 P0 条目全部落地。
+>
+> **同日复核发现一项新的 P0（M5），已修复**：`registry.json` 的 `_load()`/`_save()` 是无锁读改写，
+> 与 M1 修复前的 mailbox 同构。实测 4 writer × 40 轮**丢 75% 的行**，且
+> **41 个 `run_id` 被 ≥2 个 agent 共用** —— `run_id` 决定 `artifact_dir`、realtime 通道地址
+> 与 authkey 侧车路径，碰撞会把 S1/S2 建立的"每 run 一把密钥"隔离粒度悄悄放大。
+> 已按 TDD 加 `registry.json.lock`（复用 M1 的共享 `cross_process_lock`），
+> 复验 4 writer × 60 轮：240 行全存活、240 个 run_id 全不同、零错误。
+> 实测证据见 `docs/ga_subagent_control_plane_defects_2026-07-30.md`，
+> 落地细节见规划文档 §1.5。同一轮复核还校准了 B1 的真实爆炸半径
+> （单 agent 局部风险，24 条未读事件即阻塞，而非文档原先推断的全局链路风险）
+> 并量到 B3 的写放大（`wait_agents` 每秒 20 次原子写，正在喂 M5 的竞态）。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；

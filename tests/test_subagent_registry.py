@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -379,6 +380,113 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
             manager = SubagentManager(root_dir=td, process_exists=probe, python_executable="python-test")
 
             self.assertIs(manager.registry.process_exists, probe)
+
+
+class RegistryConcurrencyTest(unittest.TestCase):
+    """M5: `registry.json` is an unlocked read-modify-write, exactly like the mailbox was.
+
+    `_load()` -> mutate dict -> `_save()` has no cross-process lock, and every child that
+    spawns children of its own builds a `SubagentManager` (agentmain.py) and therefore a
+    second writer against the one shared `temp/subagents/registry.json`.
+
+    Measured before the fix, 4 writers x 40 rounds: 160 rows became 40 (the same
+    `(writers-1)*rounds` loss the mailbox showed), 120 create_child calls handed out only 48
+    distinct run_ids, and Windows raised `PermissionError [WinError 5]` from `os.replace`.
+
+    The run_id collision is the reason this is P0 rather than P1: run_id derives
+    `artifact_dir`, the realtime channel address (`ga_subagent_<run_id>`) and the authkey
+    sidecar path, so two agents sharing one run_id share all three — which widens the
+    per-run isolation S1/S2 were built to provide.
+    """
+
+    WRITERS = 4
+    ROUNDS = 12
+
+    def _run_writers(self, registry_dir, td, body):
+        """Run WRITERS threads, each with its own registry instance, aligned on a barrier."""
+        barrier = threading.Barrier(self.WRITERS)
+        failures = []
+
+        def worker(index):
+            # A separate instance per thread is what separate OS processes actually have.
+            registry = SubagentRegistry(registry_dir, max_depth=0, max_active_agents=0)
+            barrier.wait()
+            try:
+                body(registry, index)
+            except Exception as exc:  # pragma: no cover - only on a real defect
+                failures.append(f"{type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(self.WRITERS)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return failures
+
+    def test_concurrent_create_child_persists_every_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry_dir = Path(td) / "temp" / "subagents"
+
+            def body(registry, index):
+                for round_no in range(self.ROUNDS):
+                    name = f"w{index}_{round_no}"
+                    registry.create_child(
+                        "/root", name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json", pid=1
+                    )
+
+            failures = self._run_writers(registry_dir, td, body)
+
+            self.assertEqual(failures, [])
+            rows = SubagentRegistry(registry_dir, max_depth=0, max_active_agents=0).list_agents(include_closed=True)
+            expected = self.WRITERS * self.ROUNDS
+            self.assertEqual(len(rows), expected, f"expected {expected} persisted rows, got {len(rows)}")
+
+    def test_concurrent_create_child_never_hands_the_same_run_id_to_two_agents(self):
+        """Checks the *return values*, not the survivors: a caller acts on what it was given."""
+        with tempfile.TemporaryDirectory() as td:
+            registry_dir = Path(td) / "temp" / "subagents"
+            handed_out = []
+            lock = threading.Lock()
+
+            def body(registry, index):
+                for round_no in range(self.ROUNDS):
+                    name = f"w{index}_{round_no}"
+                    entry = registry.create_child(
+                        "/root", name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json", pid=1
+                    )
+                    with lock:
+                        handed_out.append((str(entry.agent_path), entry.run_id, entry.artifact_dir))
+
+            failures = self._run_writers(registry_dir, td, body)
+
+            self.assertEqual(failures, [])
+            run_ids = [run_id for _path, run_id, _artifact in handed_out]
+            self.assertEqual(
+                len(set(run_ids)), len(run_ids), f"{len(run_ids) - len(set(run_ids))} run_id(s) handed to >1 agent"
+            )
+            artifact_dirs = [artifact for _path, _run_id, artifact in handed_out]
+            self.assertEqual(len(set(artifact_dirs)), len(artifact_dirs), "two agents share one artifact_dir")
+
+    def test_concurrent_updates_to_different_agents_do_not_overwrite_each_other(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry_dir = Path(td) / "temp" / "subagents"
+            seed = SubagentRegistry(registry_dir, max_depth=0, max_active_agents=0)
+            for index in range(self.WRITERS):
+                name = f"agent{index}"
+                seed.create_child("/root", name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json")
+
+            def body(registry, index):
+                for round_no in range(self.ROUNDS):
+                    registry.update(f"/root/agent{index}", pid=1000 + index, turn_status=f"round_{round_no}")
+
+            failures = self._run_writers(registry_dir, td, body)
+
+            self.assertEqual(failures, [])
+            final = SubagentRegistry(registry_dir, max_depth=0, max_active_agents=0)
+            for index in range(self.WRITERS):
+                entry = final.get(f"/root/agent{index}")
+                self.assertEqual(entry.pid, 1000 + index, f"agent{index} lost its pid update")
+                self.assertEqual(entry.turn_status, f"round_{self.ROUNDS - 1}", f"agent{index} lost its last update")
 
 
 if __name__ == "__main__":

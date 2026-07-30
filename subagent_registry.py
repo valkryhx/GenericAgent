@@ -1,8 +1,9 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from subagent_agent_path import AgentPath
-from subagent_state import atomic_write_json, now_iso, read_json_or_none
+from subagent_state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
 
 
 DEFAULT_MAX_DEPTH = 3
@@ -93,12 +94,24 @@ class SubagentRegistry:
     def __init__(self, registry_dir, *, max_depth=DEFAULT_MAX_DEPTH, max_active_agents=DEFAULT_MAX_ACTIVE_AGENTS, process_exists=None):
         self.registry_dir = Path(registry_dir)
         self.path = self.registry_dir / "registry.json"
+        # Every read-modify-write on registry.json goes through this lock. One shared
+        # registry.json backs the whole agent tree, and each child that spawns children of
+        # its own builds a SubagentManager (agentmain.py) and thus a second writer, so the
+        # unlocked _load/_save cycle lost rows and handed the same run_id to several agents.
+        self.lock_path = self.registry_dir / "registry.json.lock"
         self.max_depth = int(max_depth)
         self.max_active_agents = int(max_active_agents)
         # Liveness probe for the active-agent cap. Without it the cap counts rows, and a row
         # only becomes "closed" when close_agent runs — crashes, kills and reboots leave it
         # behind forever, so the cap eventually refuses every spawn.
         self.process_exists = process_exists or _default_process_exists
+
+    @contextmanager
+    def _write_locked(self):
+        """Serialize one whole read-modify-write cycle; never nest these."""
+        self.registry_dir.mkdir(parents=True, exist_ok=True)
+        with cross_process_lock(self.lock_path):
+            yield
 
     def create_child(
         self,
@@ -123,49 +136,53 @@ class SubagentRegistry:
         worktree_path=None,
     ):
         parent = _coerce_agent_path(parent_path)
-        child_name = self._unique_child_name(parent, task_name)
-        agent_path = parent.join(child_name)
-        data = self._load()
-        self._check_tree_limits(data, agent_path)
-        data.setdefault("next_run_no", 1)
-        run_no = int(data["next_run_no"])
-        data["next_run_no"] = run_no + 1
-        created_at = now_iso()
-        run_id = f"run_{run_no:06d}"
-        entry = {
-            "task_name": child_name,
-            "agent_path": str(agent_path),
-            "parent_path": str(parent),
-            "run_id": run_id,
-            "artifact_dir": str(self.registry_dir / "runs" / run_id),
-            "task_dir": str(Path(task_dir)),
-            "state_path": str(Path(state_path)),
-            "status": "running",
-            "pid": pid,
-            "parent_session_id": parent_session_id,
-            "last_task_message": last_task_message,
-            "turn_status": None,
-            "process_status": None,
-            "parent_permission_mode": parent_permission_mode,
-            "permission_profile": permission_profile,
-            "permission_options": dict(permission_options or {}),
-            "agent_type": agent_type,
-            "role_source_path": role_source_path,
-            "background": bool(background),
-            "ipc_mode": ipc_mode,
-            "effective_ipc_mode": effective_ipc_mode,
-            "ipc_fallback_reason": ipc_fallback_reason,
-            "isolation": isolation,
-            "worktree_path": worktree_path,
-            "previous_status": None,
-            "closed_status": None,
-            "created_at": created_at,
-            "updated_at": created_at,
-            "closed_at": None,
-        }
-        data["agents"][str(agent_path)] = entry
-        self._save(data)
-        return _entry_from_dict(entry)
+        with self._write_locked():
+            # Name allocation, run_no allocation and the row write must share one lock: a gap
+            # between them is exactly how two callers walked away with the same run_id, and
+            # run_id derives artifact_dir, the realtime channel address and the authkey path.
+            child_name = self._unique_child_name_unlocked(parent, task_name)
+            agent_path = parent.join(child_name)
+            data = self._load()
+            self._check_tree_limits(data, agent_path)
+            data.setdefault("next_run_no", 1)
+            run_no = int(data["next_run_no"])
+            data["next_run_no"] = run_no + 1
+            created_at = now_iso()
+            run_id = f"run_{run_no:06d}"
+            entry = {
+                "task_name": child_name,
+                "agent_path": str(agent_path),
+                "parent_path": str(parent),
+                "run_id": run_id,
+                "artifact_dir": str(self.registry_dir / "runs" / run_id),
+                "task_dir": str(Path(task_dir)),
+                "state_path": str(Path(state_path)),
+                "status": "running",
+                "pid": pid,
+                "parent_session_id": parent_session_id,
+                "last_task_message": last_task_message,
+                "turn_status": None,
+                "process_status": None,
+                "parent_permission_mode": parent_permission_mode,
+                "permission_profile": permission_profile,
+                "permission_options": dict(permission_options or {}),
+                "agent_type": agent_type,
+                "role_source_path": role_source_path,
+                "background": bool(background),
+                "ipc_mode": ipc_mode,
+                "effective_ipc_mode": effective_ipc_mode,
+                "ipc_fallback_reason": ipc_fallback_reason,
+                "isolation": isolation,
+                "worktree_path": worktree_path,
+                "previous_status": None,
+                "closed_status": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "closed_at": None,
+            }
+            data["agents"][str(agent_path)] = entry
+            self._save(data)
+            return _entry_from_dict(entry)
 
     def get(self, agent_path):
         path = str(_coerce_agent_path(agent_path))
@@ -201,59 +218,62 @@ class SubagentRegistry:
 
     def update(self, agent_path, **updates):
         path = str(_coerce_agent_path(agent_path))
-        data = self._load()
-        if path not in data["agents"]:
-            raise FileNotFoundError(path)
-        raw = dict(data["agents"][path])
-        for key, value in updates.items():
-            if not hasattr(RegistryEntry, "__dataclass_fields__") or key in RegistryEntry.__dataclass_fields__:
-                raw[key] = value
-        raw["updated_at"] = now_iso()
-        data["agents"][path] = raw
-        self._save(data)
-        return _entry_from_dict(raw)
+        with self._write_locked():
+            data = self._load()
+            if path not in data["agents"]:
+                raise FileNotFoundError(path)
+            raw = dict(data["agents"][path])
+            for key, value in updates.items():
+                if not hasattr(RegistryEntry, "__dataclass_fields__") or key in RegistryEntry.__dataclass_fields__:
+                    raw[key] = value
+            raw["updated_at"] = now_iso()
+            data["agents"][path] = raw
+            self._save(data)
+            return _entry_from_dict(raw)
 
     def mark_closed(self, agent_path, *, previous_status, closed_status):
         path = str(_coerce_agent_path(agent_path))
-        data = self._load()
-        if path not in data["agents"]:
-            raise FileNotFoundError(path)
-        raw = dict(data["agents"][path])
-        now = now_iso()
-        raw.update(
-            {
-                "status": "closed",
-                "previous_status": previous_status,
-                "closed_status": closed_status,
-                "closed_at": now,
-                "updated_at": now,
-            }
-        )
-        data["agents"][path] = raw
-        self._save(data)
-        return _entry_from_dict(raw)
+        with self._write_locked():
+            data = self._load()
+            if path not in data["agents"]:
+                raise FileNotFoundError(path)
+            raw = dict(data["agents"][path])
+            now = now_iso()
+            raw.update(
+                {
+                    "status": "closed",
+                    "previous_status": previous_status,
+                    "closed_status": closed_status,
+                    "closed_at": now,
+                    "updated_at": now,
+                }
+            )
+            data["agents"][path] = raw
+            self._save(data)
+            return _entry_from_dict(raw)
 
     def mark_running(self, agent_path, *, pid=None, turn_status="pending", process_status="alive"):
         path = str(_coerce_agent_path(agent_path))
-        data = self._load()
-        if path not in data["agents"]:
-            raise FileNotFoundError(path)
-        raw = dict(data["agents"][path])
-        raw.update(
-            {
-                "status": "running",
-                "pid": pid,
-                "turn_status": turn_status,
-                "process_status": process_status,
-                "previous_status": raw.get("status"),
-                "closed_status": None,
-                "closed_at": None,
-                "updated_at": now_iso(),
-            }
-        )
-        data["agents"][path] = raw
-        self._save(data)
-        return _entry_from_dict(raw)
+        with self._write_locked():
+            data = self._load()
+            if path not in data["agents"]:
+                raise FileNotFoundError(path)
+            raw = dict(data["agents"][path])
+            raw.update(
+                {
+                    "status": "running",
+                    "pid": pid,
+                    "turn_status": turn_status,
+                    "process_status": process_status,
+                    "previous_status": raw.get("status"),
+                    "closed_status": None,
+                    "closed_at": None,
+                    "updated_at": now_iso(),
+                }
+            )
+            data["agents"][path] = raw
+            self._save(data)
+            return _entry_from_dict(raw)
 
     def _check_tree_limits(self, data, agent_path):
         # Depth counts subagent hops, so /root/a is depth 1 and /root itself is not an agent.
@@ -306,7 +326,8 @@ class SubagentRegistry:
             reaped += 1
         return active, reaped
 
-    def _unique_child_name(self, parent, task_name):
+    def _unique_child_name_unlocked(self, parent, task_name):
+        """Caller must already hold the write lock — see create_child."""
         base = parent.join(task_name).name
         data = self._load()
         if str(parent.join(base)) not in data.get("agents", {}):
