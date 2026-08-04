@@ -6,6 +6,13 @@ import shutil
 from pathlib import Path
 
 from sensitive_redaction import sanitize
+from subagent_state import (
+    atomic_write_json,
+    atomic_write_text,
+    cross_process_lock,
+    read_json_retrying,
+    read_text_retrying,
+)
 from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
 
 
@@ -31,7 +38,7 @@ class WorkflowStore:
         run.artifact_dir = str(artifact_dir)
         self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))
         self._write_json(artifact_dir / "state.json", sanitize(run.to_dict()))
-        (artifact_dir / "script.js").write_text(run.script or "", encoding="utf-8")
+        self._write_text(artifact_dir / "script.js", run.script or "")
         (artifact_dir / "journal.jsonl").touch(exist_ok=True)
         final_result = artifact_dir / "final-result.json"
         if not final_result.exists():
@@ -42,10 +49,15 @@ class WorkflowStore:
         artifact_dir = self._run_dir(run)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = str(artifact_dir)
-        self._preserve_external_kill(run, artifact_dir)
-        self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))
-        self._write_json(artifact_dir / "state.json", sanitize(run.to_dict()))
-        (artifact_dir / "script.js").write_text(run.script or "", encoding="utf-8")
+        # The kill guard is a read-modify-write, so it only works while it is the only one running.
+        # Without this lock the scheduler's ~20ms `save_run` could read `state.json` before an
+        # external kill landed and write `running` back over it, and the workflow ran to its
+        # deadline after the user pressed stop. Same defect class as the subagent registry (M5).
+        with cross_process_lock(self._run_lock_path(artifact_dir)):
+            self._preserve_external_kill(run, artifact_dir)
+            self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))
+            self._write_json(artifact_dir / "state.json", sanitize(run.to_dict()))
+            self._write_text(artifact_dir / "script.js", run.script or "")
         return run
 
     def load_run(self, run_id: str) -> WorkflowRun:
@@ -53,12 +65,12 @@ class WorkflowStore:
         data_path = artifact_dir / "state.json"
         if not data_path.exists():
             data_path = artifact_dir / "run.json"
-        data = json.loads(data_path.read_text(encoding="utf-8"))
+        data = read_json_retrying(data_path)
         run = WorkflowRun.from_dict(data)
         run.artifact_dir = str(artifact_dir)
         script_path = artifact_dir / "script.js"
         if script_path.exists():
-            run.script = script_path.read_text(encoding="utf-8")
+            run.script = read_text_retrying(script_path)
         return run
 
     def append_event(self, run: WorkflowRun | str, event: WorkflowEvent) -> WorkflowEvent:
@@ -382,17 +394,35 @@ class WorkflowStore:
         return max((event.sequence for event in self.replay_events(run_id)), default=0) + 1
 
     def _preserve_external_kill(self, run: WorkflowRun, artifact_dir: Path) -> None:
+        """Carry a `killed` status that landed on disk onto the row about to be written.
+
+        Callers must already hold `_run_lock_path`: this reads the row it is about to overwrite,
+        so an unserialized copy loses exactly the kill it exists to preserve.
+        """
         if run.status == "killed":
             return
         state_path = artifact_dir / "state.json"
         if not state_path.exists():
             return
-        current = WorkflowRun.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+        current = WorkflowRun.from_dict(read_json_retrying(state_path))
         if current.status != "killed":
             return
         run.status = "killed"
         run.error = current.error
 
     @staticmethod
+    def _run_lock_path(artifact_dir: Path) -> Path:
+        # Leading dot so it never matches the `*/workflows/*/state.json` scan in the Ink bridge.
+        return artifact_dir / ".run.lock"
+
+    @staticmethod
     def _write_json(path: Path, data: dict):
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # tmp + os.replace, so a concurrent `load_run` sees either the old row or the new one.
+        # `write_text` truncates first, which produced 11k+ JSONDecodeErrors in 2 seconds under
+        # three writers — and `WorkflowRuntime._safe_load_current_run` turns each one into a
+        # silently stale row, i.e. another way to miss a kill.
+        atomic_write_json(path, data)
+
+    @staticmethod
+    def _write_text(path: Path, text: str):
+        atomic_write_text(path, text)

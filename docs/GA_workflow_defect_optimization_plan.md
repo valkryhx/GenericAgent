@@ -3520,3 +3520,74 @@ real-api-regression-tested
 ```
 
 这时 GA workflow 才不只是“能运行多 agent”，而是能稳定支撑真实软件开发任务的工程工作流系统。
+
+---
+
+## 14. 补充修复：外部 kill 被并发 `save_run` 覆盖（P0）【已完成：待提交】
+
+> 日期：2026-08-04
+> 触发：`tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_runtime_observes_external_kill_state` 间歇失败（`AssertionError: 'killed' not found in 'workflow runtime deadline exceeded'`），追查到 `workflow_scheduler.py:224` / `:265` 是覆盖者。
+
+### 14.1 用户可见症状
+
+按下停止后 workflow 不停，一直跑到 `timeout_seconds` 才以 deadline 错误结束。
+
+### 14.2 根因：`WorkflowStore` 上的两条独立竞态
+
+`state.json` 有多个写者：外部 kill（`WorkflowController.stop` 写 `status="killed"`）和 runtime 自己（`scheduler.tick()` 每约 20ms 整行 `save_run(self.run)`，带着内存里的 `status="running"`）。
+
+**竞态 A：lost kill update。** `save_run` 本来就有 `_preserve_external_kill()` 守卫——读 `state.json`，若已是 `killed` 就把它抄到即将写出的行上。但这是一个无锁 read-modify-write：kill 落在“读之后、写之前”就被整行覆盖回 `running`，`_raise_if_externally_killed` 再也看不到它。
+
+**竞态 B：torn read。** `_write_json` 是 `path.write_text(...)`，先截断再写。并发 `load_run` 会读到空文件或半个文件。这不是纯观感问题：`WorkflowRuntime._safe_load_current_run` 把异常吞掉并返回**内存里的旧行**，于是这是第二条独立的“漏掉 kill”路径。守卫自身也读文件，所以写侧同样会炸。
+
+两条都属于 M5 缺陷类（多写者文件上的无锁读改写），M5 的解法正是 `cross_process_lock` + `atomic_write_json`。
+
+### 14.3 修复前后的实测数字
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| kill 被回退（3 写者 × 40 轮） | `verdict=reverted` 9/9 | `verdict=held` 3/3 |
+| `JSONDecodeError`（3 写者 + 3 读者，2-3 秒） | 11457 / 12493 | 0 |
+| 并发 kill 是否回滚 `jobs` 列表 | `jobsListRegressions=0`（6/6，本来就不回滚） | 同 |
+| 原 flaky 用例连跑 | 12 次中 1 次失败（stash 验证为既有缺陷，非本次改动引入） | 15/15 OK |
+
+第三行决定了修复范围：覆盖只发生在 status 字段上，不需要为整行做单调性合并。
+
+### 14.4 实际改动
+
+```text
+subagent_state.py     新增 read_text_retrying / read_json_retrying / atomic_write_text
+workflow_store.py     save_run 全程持 .run.lock；_write_json 改 atomic_write_json；
+                      load_run / _preserve_external_kill 改 retrying 读
+```
+
+- `save_run` 把 `_preserve_external_kill` + 三次写一起放进 `cross_process_lock(artifact_dir / ".run.lock")`。锁文件带前导点，不会被 `frontends/ink_bridge.py:958` 的 `*/workflows/*/state.json` 扫描命中。
+- `_write_json` 改成 tmp + `os.replace`，读者只会看到旧行或新行。
+- Windows 上 `os.replace` 与读者的 open 是**双向**竞争的：`_replace_file` 已经会在读者句柄挡住写者时重试，反向那半边（读者正好在 replace 期间 open，拿到 `PermissionError` 而不是残文件）此前没人处理。去掉截断写之后它立刻显形——store 并发用例里 62 次 `read PermissionError`。所以补了 `read_text_retrying`，与 `_replace_file` 共用同一套退避预算。
+- `read_json_retrying` 故意不写成 `read_json_or_none`：判断“这个 run 是否被 kill 了”的调用方不能把损坏的行读成“盘上没有 kill”。
+- `script.js` 用 `atomic_write_text` 而不是 `atomic_write_lines`——后者会给每行补换行，而 `load_run` 把 `script.js` 原样读回 `run.script` 做相等比较。
+
+### 14.5 新增测试
+
+```text
+tests/test_workflow_store.py  WorkflowStoreConcurrencyTest（2 条，先红后绿）
+  test_an_external_kill_survives_concurrent_whole_row_writers
+  test_a_concurrent_reader_never_sees_a_half_written_row
+tests/test_subagent_state.py  4 条
+  test_read_text_retrying_retries_the_windows_replace_window
+  test_read_json_retrying_raises_rather_than_hiding_a_corrupt_file
+  test_atomic_write_text_preserves_exact_bytes_without_adding_a_newline
+  test_atomic_write_text_replaces_a_longer_file_in_one_step
+```
+
+两条并发用例在修复前 100% 红（`reverted=[0]`、8521 次 torn read），修复后连跑 6 次全绿。
+
+### 14.6 引入的依赖方向
+
+`workflow_store.py` 原先只依赖 `sensitive_redaction` + `workflow_models`，现在多了 `subagent_state`。此前唯一的跨族依赖走的是反方向（`subagent_permissions.py → workflow_permissions.py`）。选复用而不是在 store 里再写一份锁/原子写，理由是这四个原语已经在 registry、mailbox、event bus、submissions 上跑了四轮，重写只会让两份实现各自漂移——这正是 mailbox 双实现留下的教训。
+
+### 14.7 验收
+
+- 全量回归 875 用例 `OK (skipped=3)`。
+- 原 flaky 的 `test_runtime_observes_external_kill_state` 连跑 15 次全绿。
+- probe 复测（`temp/_probe_wf_store_race.py`，用后已删）：`verdict=held` ×3、`failures=0`。

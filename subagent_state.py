@@ -103,6 +103,47 @@ def atomic_write_lines(path, lines):
     _replace_file(tmp, path)
 
 
+def read_text_retrying(path):
+    """Read a file that another process may be replacing right now.
+
+    `_replace_file` retries when a reader's open handle blocks `os.replace`; this is the mirror
+    image, because on Windows a reader that opens *during* the replace gets PermissionError rather
+    than a torn file. Same delay budget, so the two sides back off over the same window.
+    """
+    path = Path(path)
+    delays = _WINDOWS_REPLACE_RETRY_DELAYS if os.name == "nt" else ()
+    for attempt in range(len(delays) + 1):
+        try:
+            return path.read_bytes().decode("utf-8")
+        except PermissionError:
+            if attempt >= len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
+def read_json_retrying(path):
+    """read_text_retrying + json.loads, propagating a decode error instead of hiding it.
+
+    Deliberately not read_json_or_none: a caller asking "was this run killed?" must not read a
+    corrupt row as "no kill on disk".
+    """
+    return json.loads(read_text_retrying(path))
+
+
+def atomic_write_text(path, text):
+    """Replace a whole text file in one step, byte-for-byte as given.
+
+    Sibling of atomic_write_lines for content that is read back and compared verbatim (the
+    workflow `script.js` becomes `run.script`), so it must not append a trailing newline.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    _replace_file(tmp, path)
+
+
 def append_jsonl_event(path, event):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 import subagent_state  # noqa: E402
-from subagent_state import append_jsonl_event, atomic_write_json, read_json_or_none, sha256_file  # noqa: E402
+from subagent_state import append_jsonl_event, atomic_write_json, atomic_write_text, read_json_or_none, sha256_file  # noqa: E402
 
 
 class SubagentStateTest(unittest.TestCase):
@@ -50,6 +50,74 @@ class SubagentStateTest(unittest.TestCase):
             self.assertEqual(len(replace_calls), 2)
             sleep_mock.assert_called_once_with(subagent_state._WINDOWS_REPLACE_RETRY_DELAYS[0])
             self.assertEqual(list(Path(td).glob("*.tmp")), [])
+
+    def test_read_text_retrying_retries_the_windows_replace_window(self):
+        """os.replace and a reader's open race in *both* directions on Windows.
+
+        `_replace_file` already retries when a reader's handle blocks the writer. The reverse also
+        happens: a reader that opens during the replace gets PermissionError, not a torn file. That
+        surfaced as 62 `read PermissionError`s in the workflow store's concurrency test once the
+        truncating write was gone — so an atomic write needs a retrying read to pair with it.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text("done", encoding="utf-8")
+            calls = []
+            real_read_bytes = Path.read_bytes
+
+            def flaky_read_bytes(self):
+                calls.append(self)
+                if len(calls) == 1:
+                    raise PermissionError("replace in progress")
+                return real_read_bytes(self)
+
+            with patch.object(subagent_state.os, "name", "nt"):
+                with patch.object(subagent_state.time, "sleep") as sleep_mock:
+                    with patch.object(Path, "read_bytes", flaky_read_bytes):
+                        self.assertEqual("done", subagent_state.read_text_retrying(path))
+
+            self.assertEqual(2, len(calls))
+            sleep_mock.assert_called_once_with(subagent_state._WINDOWS_REPLACE_RETRY_DELAYS[0])
+
+    def test_read_json_retrying_raises_rather_than_hiding_a_corrupt_file(self):
+        """Unlike read_json_or_none: a caller deciding whether a run was killed must not get None.
+
+        Swallowing the error there turns a real corrupt row into "no kill on disk", which is the
+        exact failure the retry exists to prevent.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text("{not json", encoding="utf-8")
+
+            with self.assertRaises(json.JSONDecodeError):
+                subagent_state.read_json_retrying(path)
+
+            atomic_write_json(path, {"status": "killed"})
+            self.assertEqual({"status": "killed"}, subagent_state.read_json_retrying(path))
+
+    def test_atomic_write_text_preserves_exact_bytes_without_adding_a_newline(self):
+        """The workflow script round-trips through this, so an added newline would change the row.
+
+        `atomic_write_lines` newline-terminates every line, which is right for JSONL bodies and
+        wrong for a file whose content is compared verbatim (`load_run` reads `script.js` back into
+        `run.script`).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "script.js"
+
+            atomic_write_text(path, "phase('A')")
+
+            self.assertEqual("phase('A')", path.read_text(encoding="utf-8"))
+            self.assertEqual([], list(Path(td).glob("*.tmp")))
+
+    def test_atomic_write_text_replaces_a_longer_file_in_one_step(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "script.js"
+
+            atomic_write_text(path, "x" * 4000)
+            atomic_write_text(path, "short")
+
+            self.assertEqual("short", path.read_text(encoding="utf-8"))
 
     def test_append_jsonl_event_writes_one_json_object_per_line(self):
         with tempfile.TemporaryDirectory() as td:

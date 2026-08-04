@@ -1,5 +1,7 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -464,6 +466,110 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertEqual("interrupted", data["status"])
             self.assertEqual("stale", data["workflowProgress"][0]["state"])
             self.assertEqual("agent_1", data["workflowProgress"][0]["jobId"])
+
+
+class WorkflowStoreConcurrencyTest(unittest.TestCase):
+    """`state.json` has several writers, so a whole-row `save_run` needs the M5 treatment.
+
+    Symptom users hit: pressing stop leaves the workflow running to its deadline.
+    `WorkflowController.stop` writes `status="killed"`, but `scheduler.tick()` saves the whole row
+    roughly every 20ms carrying its in-memory `status="running"`. `save_run` guards against that
+    with `_preserve_external_kill`, which reads `state.json` and copies a `killed` status forward —
+    but that read-modify-write holds no lock, so a kill landing between the read and the write is
+    lost. Measured on this code before the fix: 9/9 attempts reverted `killed` back to `running`.
+    """
+
+    def test_an_external_kill_survives_concurrent_whole_row_writers(self):
+        WRITERS, ROUNDS = 3, 40
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_race", session_id="s", script="x", status="running"))
+            stop = threading.Event()
+            barrier = threading.Barrier(WRITERS + 1)
+            writer_errors = []
+
+            def busy_writer():
+                # Mirrors `scheduler.tick`: one snapshot loaded up front, then saved over and over.
+                row = store.load_run("wf_race")
+                barrier.wait()
+                while not stop.is_set():
+                    try:
+                        row.status = "running"
+                        store.save_run(row)
+                    except Exception as exc:  # pragma: no cover - only on a real defect
+                        writer_errors.append(f"{type(exc).__name__}: {exc}")
+                        return
+
+            threads = [threading.Thread(target=busy_writer, daemon=True) for _ in range(WRITERS)]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            reverted = []
+            try:
+                for round_no in range(ROUNDS):
+                    killer = WorkflowRun(run_id="wf_race", session_id="s", script="x", status="killed", error="user requested stop")
+                    killer.artifact_dir = run.artifact_dir
+                    store.save_run(killer)
+                    time.sleep(0.004)
+                    if store.load_run("wf_race").status != "killed":
+                        reverted.append(round_no)
+                        break
+                    # Back to running, so the next round measures a fresh kill rather than a sticky one.
+                    revive = WorkflowRun(run_id="wf_race", session_id="s", script="x", status="running")
+                    revive.artifact_dir = run.artifact_dir
+                    store.save_run(revive)
+            finally:
+                stop.set()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+            self.assertEqual([], writer_errors)
+            self.assertEqual([], reverted, "a concurrent save_run reverted an external kill back to running")
+
+    def test_a_concurrent_reader_never_sees_a_half_written_row(self):
+        """`_write_json` used `path.write_text`, which truncates before writing.
+
+        A reader landing in that window gets an empty or partial file. That is not cosmetic:
+        `WorkflowRuntime._safe_load_current_run` swallows the exception and returns the *stale*
+        in-memory row, which is a second, independent way to miss a kill. Measured before the fix:
+        11457 and 12493 `JSONDecodeError`s in 2-3 seconds with 3 writers and 3 readers.
+        """
+        WRITERS, READERS, SECONDS = 3, 3, 2.0
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            store.create_run(WorkflowRun(run_id="wf_torn", session_id="s", script="y" * 4000, status="running"))
+            stop = threading.Event()
+            failures = []
+
+            def writer(error_text):
+                row = store.load_run("wf_torn")
+                row.error = error_text
+                while not stop.is_set():
+                    try:
+                        store.save_run(row)
+                    except Exception as exc:  # pragma: no cover - only on a real defect
+                        failures.append(f"write {type(exc).__name__}: {exc}")
+                        return
+
+            def reader():
+                while not stop.is_set():
+                    try:
+                        store.load_run("wf_torn")
+                    except Exception as exc:  # pragma: no cover - only on a real defect
+                        failures.append(f"read {type(exc).__name__}: {exc}")
+
+            # Rows of different lengths, so a truncating write leaves a readable prefix of the old row.
+            texts = (None, "short", "x" * 400)[:WRITERS]
+            threads = [threading.Thread(target=writer, args=(text,), daemon=True) for text in texts]
+            threads += [threading.Thread(target=reader, daemon=True) for _ in range(READERS)]
+            for thread in threads:
+                thread.start()
+            time.sleep(SECONDS)
+            stop.set()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertEqual([], failures[:5], f"{len(failures)} torn reads/writes on state.json")
 
 
 if __name__ == "__main__":
