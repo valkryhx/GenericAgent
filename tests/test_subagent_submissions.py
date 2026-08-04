@@ -52,9 +52,36 @@ class SubmissionLogTest(unittest.TestCase):
             log = SubagentSubmissionLog(td)
 
             log.record("sub_2", op="spawn_agent", target="/root/w", result={"run_id": "run_000001"})
-            log.record("sub_2", op="spawn_agent", target="/root/w2", result={"run_id": "run_000002"})
+            log.record("sub_2", op="spawn_agent", target="/root/w", result={"run_id": "run_000002"})
 
-            self.assertEqual(log.find("sub_2")["result"], {"run_id": "run_000001"})
+            self.assertEqual(log.find("sub_2", op="spawn_agent", target="/root/w")["result"], {"run_id": "run_000001"})
+
+    def test_the_same_id_on_a_different_target_is_a_different_submission(self):
+        """This file outlives the process, so a stale row must not answer for another agent.
+
+        Measured on the real guard E2E: a row written 2026-07-30 for one agent made a 2026-08-03
+        call for a different agent look already-done, and the caller got the old agent's result
+        back. The id says "same call"; the op and target say which call.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            log = SubagentSubmissionLog(td)
+
+            log.record("retry", op="spawn_agent", target="/root/alpha", result={"run_id": "run_1"})
+            log.record("retry", op="spawn_agent", target="/root/beta", result={"run_id": "run_2"})
+
+            self.assertEqual(log.find("retry", op="spawn_agent", target="/root/alpha")["result"], {"run_id": "run_1"})
+            self.assertEqual(log.find("retry", op="spawn_agent", target="/root/beta")["result"], {"run_id": "run_2"})
+            self.assertIsNone(log.find("retry", op="spawn_agent", target="/root/gamma"))
+
+    def test_the_same_id_and_target_on_a_different_op_is_a_different_submission(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = SubagentSubmissionLog(td)
+
+            log.record("one_id", op="spawn_agent", target="/root/w", result={"phase": "spawned"})
+            log.record("one_id", op="close_agent", target="/root/w", result={"phase": "closed"})
+
+            self.assertEqual(log.find("one_id", op="close_agent", target="/root/w")["result"], {"phase": "closed"})
+            self.assertEqual(log.find("one_id", op="spawn_agent", target="/root/w")["result"], {"phase": "spawned"})
 
     def test_a_result_that_cannot_be_serialized_is_still_recorded_as_a_replay_marker(self):
         """Dedup matters more than the payload: without a row, the replay re-executes."""

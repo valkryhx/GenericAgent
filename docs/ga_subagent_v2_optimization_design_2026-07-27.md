@@ -72,7 +72,9 @@
 > 缺陷 1（死通道，R1+R2+R4）、缺陷 2（轮询耦合，R3）、缺陷 7（上限守护，G1）
 > **已按 TDD 修复并全绿**，下面对应条目保留原始诊断以备回溯，并在条目末尾标注实际落地方式。
 > 规划内 P0/P1 全部完成；P2 的 B1-B3 也已于 2026-07-30 全部落地，见规划文档 1.1 节进度表。
-> 规划外另补了 M5（registry 锁）、M6/M7（语义唯一性守卫），见规划文档 §1.5 / §1.6。
+> 规划外另补了 M5（registry 锁）、M6/M7（语义唯一性守卫），见规划文档 §1.5 / §1.6，
+> 以及 S12 两条（中途 interrupt 无效、损坏控制文件），见规划文档 §1.8 / §1.9，
+> 与 B2-c（提交去重键漏了 target），见规划文档 §1.11。
 > 真实 API E2E 已通过（`claude-opus-5` / `provider: gorouter`），实测父→子唤醒
 > **0.25 秒**（轮询间隔故意设成 30 秒，所以只可能来自 realtime 信号）；
 > E2E 另外暴露并修掉两个规划外缺陷（registry 陈旧行占满活跃额度、
@@ -156,6 +158,28 @@
 > （`newProcessesAfterRefusal: []`），活 agent 的 `state.json` pid 未被覆盖，
 > 同 `submission_id` 重放 followup/resume 各只生效一次，close 后同名改名且旧
 > `output.txt` 逐字节完好。细节见规划文档 §1.7、缺陷文档 §3.7。
+>
+> **S12 两条已修复并通过真实 API E2E（2026-08-03）**：研究文档 §5.4 的 S12 待补测试清单里
+> 有两条实测出来不是覆盖缺口而是产品缺陷 —— `interrupt_agent` 只在轮次边界生效
+> （长 provider 调用延迟 5.5s == 轮次剩余长度，长工具调用完全无效且又跑一轮 LLM，
+> 修后分别 0.156s / 0.125s），以及损坏的 `_history.json` 直接杀死子 agent、
+> 损坏的 `state.json` 静默丢掉 `run_id` / `artifact_dir`。
+> `tests/real_subagent_s12_e2e.py` 用真实子进程 + 真实 LLM 轮次验收，`passed: true`。
+> 这条 E2E 还证明了一件方法论上的事：它的第一版**通过了负对照**（把 watcher 改回 `None`
+> 仍然绿），因为就绪信号选在了请求发出之前。细节见规划文档 §1.8 / §1.9、缺陷文档 §3.8。
+>
+> **S12 之后的连带验收（2026-08-03）**：watcher 包住的是每个前端共用的那段 `agent_runner_loop`，
+> 所以"没影响 UI"必须实测。`tests/real_ink_bridge_interrupt_e2e.py` 驱动真实
+> `GenericAgentBridge` + 真实 LLM 轮次：`task_dir` 为 None、watcher 线程列表全程为空、
+> ESC 后 **0.093 秒**回到 `idle`（`running → stopping → idle`）、长答案被截断、
+> 中断后第二轮真实轮次照常流式完成。负对照顺带量到 UI 中断有两条各自充分的机制
+> （`abort()` 的 provider 取消、chunk 循环的 `stop_sig` break），只有同时关掉才会红。
+> 见规划文档 §1.10。
+>
+> **B2-c（2026-08-03）**：复跑真实 E2E 时 guard E2E 红了一条，实测不是 S12 回归 ——
+> B2 的提交去重只比 `(submission_id, op)`，而 `submissions.jsonl` 跨进程跨天存活，
+> 于是一行历史脏数据既压掉了对**另一个** agent 的 resume，又把别人的 handle 当返回值交回去。
+> 去重身份已改为 `(submission_id, op, target)`。见规划文档 §1.11、缺陷文档 §3.9。
 
 1. **realtime channel 建了但子 agent 从未订阅（死通道）。** `subagent_realtime_ipc.py:21`
    `connect_realtime_channel()` 在非测试代码里零调用者（`grep` 仅命中定义处）；

@@ -18,6 +18,12 @@ class SubagentSubmissionLog:
     ``Submission { id, op, trace }`` (`codex-rs/protocol/src/protocol.rs`): the op carries its own
     identity rather than the caller hoping it only arrives once.
 
+    Identity is the *triple* ``(submission_id, op, target)``, not the id alone. Measured on the
+    real guard E2E: this file outlives the process, and a row written 2026-07-30 for one agent
+    suppressed a 2026-08-03 call for a different agent — the caller got back the old agent's
+    handle and no process ran. A model retrying an op naturally reuses one id, so the id says
+    "this is the same call", and the op plus target say *which* call.
+
     Deliberately *not* a general audit trail: it stores just enough to answer "did this
     submission already run, and what did it return", capped at MAX_ROWS so an agent tree that
     runs for hours does not grow an unbounded file.
@@ -41,7 +47,7 @@ class SubagentSubmissionLog:
             return None
         with self._locked():
             rows = self._read_rows()
-            existing = next((row for row in rows if row.get("submission_id") == submission_id), None)
+            existing = self._match(rows, submission_id, op=op, target=target)
             if existing is not None:
                 # The first execution is the one that really happened.
                 return existing
@@ -57,13 +63,26 @@ class SubagentSubmissionLog:
             self._write_rows(rows[-self.max_rows :])
             return row
 
-    def find(self, submission_id):
+    def find(self, submission_id, *, op=None, target=None):
+        """Narrow by op/target when given; a bare id still answers "any row for this id"."""
         submission_id = self.normalize_id(submission_id)
         if submission_id is None:
             return None
-        for row in self._read_rows():
-            if row.get("submission_id") == submission_id:
-                return row
+        return self._match(self._read_rows(), submission_id, op=op, target=target, require=False)
+
+    @staticmethod
+    def _match(rows, submission_id, *, op, target, require=True):
+        """`require` distinguishes writing from reading: a record always keys on the full triple,
+        while a caller that passes no op/target is asking a deliberately looser question."""
+        for row in rows:
+            if row.get("submission_id") != submission_id:
+                continue
+            if (require or op is not None) and row.get("op") != str(op):
+                continue
+            if require or target is not None:
+                if row.get("target") != (str(target) if target is not None else None):
+                    continue
+            return row
         return None
 
     def _locked(self):

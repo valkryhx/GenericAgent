@@ -241,6 +241,8 @@ POSIX-only 的平台守卫测试，在当前 Windows 环境下 POSIX 权限那�
 | `tests/real_subagent_terra_e2e.py` | spawn → 真实 LLM 首轮 → close → `resume_agent` 复用同 run_id 第二轮 → artifact / transcript / round 断言 | `passed: true`，`issues: []`，`finalOutputRounds: [0, 1]` |
 | `tests/real_subagent_realtime_e2e.py`（**新增**） | `GA_SUBAGENT_REALTIME_IPC=1` + `ipc_mode=socket` 真实命名管道：authkey 交付 → 子进程订阅 → 真实 LLM 首轮 → `followup_task` 实时唤醒 → authkey 泄漏扫描 → close 后删密钥 | `passed: true`，`issues: []` |
 | `tests/real_subagent_guard_e2e.py`（**新增，2026-07-30**） | M6 / M7 / B2 守卫对真实进程判活：真 pid + 真 registry 行 + `psutil` 扫真实子进程；详见 §1.7 | `passed: true`，`issues: []` |
+| `tests/real_subagent_s12_e2e.py`（**新增，2026-08-03**） | S12 两条：真实 LLM 轮次中途 `interrupt_agent`；真实子进程拿到损坏的 `_history.json` / `state.json`；详见 §1.9 | `passed: true`，`issues: []` |
+| `tests/real_ink_bridge_interrupt_e2e.py`（**新增，2026-08-03**） | UI 路径（Ink bridge）真实 LLM 轮次中途 ESC 中断：`status: running → stopping → idle`、答案被截断、S12 watcher 在 UI 上不启动、中断后仍可用；详见 §1.10 | `passed: true`，`issues: []` |
 
 realtime E2E 的关键数字：`effectiveIpcMode: socket`、`childIpc.status: subscribed`、
 `subscriberCount: 1`、`authkey.bytes: 32`、`authkeyLeaks: []`、
@@ -496,8 +498,224 @@ agent path 直接报错。GA 的 `agent_loop.py:68-92` 也没有任何重放路�
    （否则 `guard_e2e` 会匹配到 `guard_e2e_1`）。这类"测试脚本自身缺陷伪装成产品缺陷"
    的坑，判据是：先确认脚本断言的对象和产品实际创建的对象是同一个。
 
-## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
+### 1.8 S12 两条：中途 interrupt 与损坏的控制文件（2026-08-03）
 
+S12 在研究文档里是"贯穿所有阶段"的测试覆盖项（`docs/ga_subagent_mechanism_research_2026-07-27.md`
+§5.4 S12），八个待补方向里当时还没做的是 `interrupt during running LLM/tool call`
+与 `malformed _history.json / state.json`。去查这两条时发现它们**不是覆盖缺口，是产品缺陷**：
+两个都写了探针实测，两个都真的坏着。
+
+**缺陷 1：`interrupt_agent` 只在轮次边界生效，轮次内部完全无效。**
+
+```
+temp/_probe_interrupt_midturn.py：6 秒的 provider 调用，第 0.5 秒写 _stop
+  → 5.5 秒后才 abort，恰好是调用返回的那一刻。interrupt 延迟 == 轮次长度
+temp/_probe_interrupt_tool.py：6 秒的工具调用，第 0.5 秒写 _stop
+  → agent.stop_sig 从未变成 True，工具从未看到 code_stop_signal，
+    agent 还接着跑了第二轮 LLM。stop_to_done 16 秒
+```
+
+成因是 `_stop` 的唯一检查点在 `agentmain.py` 的 `for chunk in gen:` 里，
+而子 agent 一律以 `verbose=False` 启动（`subagent_manager.py:367`），
+那条路径上 `agent_loop.py:59` 把 provider 调用写成 `response = exhaust(response_gen)`、
+`:79` 把每个工具写成 `exhaust(proxy())` —— **整个调用期间一个 chunk 都不 yield**。
+没有 chunk 就没有检查，文件就在那儿躺着直到调用结束。
+
+修法是 `GenericAgent._start_stop_file_watcher()`：一条 daemon 线程，0.2 秒轮询
+`<task_dir>/_stop`，命中即调用现成的 `self.abort()`（它已经会 `cancel_current_request()`
++ `handler.cancel()` + `permission_runtime.cancel_all()`）。选线程而不是让每个长调用点
+学会取消：后者要改的是 provider 客户端、工具分发、MCP 三处，且每加一个长调用点就要再改一次。
+`for chunk in gen` 里的原检查保留 —— verbose 前台路径本来就靠它，两者互不干扰。
+无 `task_dir` 时（交互前端）返回 `None`，前端照旧直接调 `agent.abort()`。
+
+**缺陷 2：损坏的 `_history.json` 直接杀死子 agent，损坏的 `state.json` 静默丢证据。**
+
+```
+temp/_probe_malformed.py，截断的 _history.json：
+  抛 JSONDecodeError 出 run_task_worker_loop → 没写 state.json 的 turn_status /
+  process_status、没写 last_error、events.jsonl 根本不存在，
+  而且坏文件已经被 consume_file 删掉了 —— 子进程死得无声无息，证据一起没了
+```
+
+`state.json` 侧本来就是容错的：每次读都走 `read_json_or_none()`（`JSONDecodeError` 返回 None）。
+`_history.json` 是裸的 `json.loads`。**两个持久化控制文件，一个有守卫一个没有 —— 不对称本身就是缺陷。**
+
+但 `state.json` 有另一个问题：它不崩，代价是静默。第一次 `_subagent_state()` 写入会
+从 `{}` 重建整个文件，于是 `run_id` / `parent_session_id` / `artifact_dir` 一起消失 ——
+也就是 sidechain transcript 路径和 artifact 关联，而轮次看上去完全健康。
+
+修法两条，都在 `agentmain.py`：
+
+- `_load_forked_history()` 包住 fork/resume 历史的注入。坏了就记 `history_load_failed`
+  事件、把原始字节另存 `_history.json.malformed.<ms>`，然后**继续跑这一轮**。
+  判断依据：损坏的 resume 投影损失的是分叉上下文，不是这个任务 ——
+  轮次仍能在客户端已持有的历史上跑完，而父进程需要看到自己到底递过去了什么。
+- `_quarantine_unreadable_state()` 在 **worker loop 入口**（任何写入之前）跑一次。
+  放在 `_subagent_state` 内部是错的 —— 第一版就这么写，测试红在 `0 != 1`：
+  到那时文件已经被当成 `{}` 读过，原子写一落地原始字节就永久没了。
+
+| 项 | 状态 | 落地内容 | 红测证据 |
+| --- | --- | --- | --- |
+| S12-interrupt | ✅ 完成 | `agentmain.py` 新增 `_start_stop_file_watcher()`（daemon 线程 + `stop_watching` Event，`finally` 里 join），在 `agent_runner_loop` 外层包起来 | `_stop did not cancel the in-flight provider call`；`_stop did not reach code_stop_signal` |
+| S12-malformed | ✅ 完成 | `agentmain.py` 新增 `_load_forked_history()` / `_quarantine_unreadable_state()` / `_quarantine_corrupt_file()`，`_subagent_state` 的读改为 `except FileNotFoundError` + `except Exception` 并注释指向入口隔离 | `JSONDecodeError: Unterminated string`（子 agent 直接死）；`0 != 1`（state 隔离副本不存在） |
+
+**修复前后实测**：
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 长 provider 调用中途 interrupt | 5.5 秒（== 剩余轮次长度） | **0.156 秒** |
+| 长工具调用中途 interrupt | 永不生效，且又跑了一轮 LLM | **0.125 秒**，`tool_saw_stop_signal: True`，无第二轮 |
+| 损坏 `_history.json` | `JSONDecodeError` 抛出循环，无 state、无事件、坏字节被删 | 轮次正常完成 + `history_load_failed` 事件 + 逐字节一致的隔离文件 |
+| 损坏 `state.json` | 不崩，但 `run_id` 静默消失 | `state_load_failed` 事件 + `state.json.malformed.*` 保留 `run_id` |
+
+**验收**：`tests/test_agentmain_subagent_lifecycle.py` 新增
+`MalformedControlFileTest`（3）+ `InterruptDuringRunningTurnTest`（2）。
+后者的 fixture 必须建 `verbose = False` 的真实 `GenericAgent` —— `verbose=True`
+会把缺陷藏在 chunk 流后面。回归 `Ran 864 tests in 122.879s ... OK (skipped=3)`（859 → 864）。
+
+真实 API 验收见 §1.9。
+
+### 1.9 S12 两条的真实 API E2E 验收（2026-08-03）
+
+`tests/real_subagent_s12_e2e.py`（新增，`GA_RUN_REAL_API_E2E=1` 开关，
+`claude-opus-5` / `provider: gorouter`，沿用 `SECRET_RE` / `sanitize()`）。
+
+**为什么必须补**：§1.8 的 5 条单测都用假客户端顶掉了 provider 调用 ——
+而这两个修复的存在理由恰恰是"**真实**的长调用几秒钟不 yield 任何东西"
+和"**真实**的子进程在写任何 state 之前就死了"。被 stub 掉的正是要验的那一环，
+判据与 §1.7 同构。
+
+实跑 `passed: true`，`issues: []`。关键数字：
+
+| 阶段 | 断言 | 实测 |
+| --- | --- | --- |
+| I1 | 请求真的在飞的时候 interrupt | `providerRequestLogged: true`，`turnStatusAtInterrupt: running`，`outputFileAtInterrupt: false` |
+| I1 | 轮次在秒级结束而不是自然边界 | **`secondsToTurnEnd: 0.235`**（自然长度 >300 秒，见下） |
+| I2 | 没跑完那个长答案 | `reachedFinalLine: false`，`finalOutputBytes: 28` |
+| I2 | 子进程仍活着可 followup | `pidStillAliveForFollowup: true`，`processStatusAfterInterrupt: waiting_reply` |
+| H1 | 坏 `_history.json` 没杀死真实子进程 | `turnCompleted: true`，`historyLoadFailedEvents: 1` |
+| H1 | 坏字节被留下且逐字节一致 | `quarantineBytesMatch: true`，`originalRemoved: true` |
+| H2 | 坏 `state.json` 在被覆盖前另存 | `stateLoadFailedEvents: 1`，`quarantinedFiles: [state.json.malformed.*]` |
+| H2 | 隔离副本保住了 run_id，且 state 事后可用 | `quarantineKeepsRunId: true`，`stateUsableAfterRun: true` |
+
+**负对照（这一条是整段验收的关键）**：把 `stop_watcher = self._start_stop_file_watcher()`
+临时改回 `stop_watcher = None`（修复前行为）再跑 I1，必须变红。
+第一版脚本**通过了**这个负对照 —— `secondsToTurnEnd: 7.89`，和有修复时看不出区别。
+原因是它用 `turn_status == "running"` 当就绪信号，而那个状态写在 `agent.put_task` **之前**，
+`agent_loop` 又会在调 `client.chat` 之前先 yield 一句 "Turn 1 ..." 横幅 ——
+于是修复前的 `for chunk in gen` 检查照样能在那个 chunk 上读到 `_stop`。
+改成等 `llmcore._write_llm_log('Prompt', ...)` 在 `temp/model_responses/` 里出现之后
+（那一行紧挨着 `backend.ask(...)`，意味着已经进了 `exhaust(response_gen)`、
+后面不会再有 chunk）负对照才如实变红：`secondsToTurnEnd: null`，60 秒后
+`turn_status` 仍是 `running`。**结论：真实 E2E 自身必须先过负对照，否则"通过"不代表修复生效。**
+
+**脚本跑批中踩到的四件事，都不是 GA 缺陷**：
+
+1. `corrupt_file` 回调在 spawn 时就求值 → `FileNotFoundError: state.json`。
+   注入损坏必须发生在 manager 写完控制文件之后、`Popen` 之前，
+   所以改成包住 `manager.popen`、在里面才 resolve 回调。
+2. 首版长提示（400 行）在这条 profile 上约 25 秒跑完，于是 interrupt 打在一个
+   **已经结束**的轮次上（`reached400: true`，无 `agent_shutdown`）—— 什么都没验到。
+   加大到 2000 行（每行数字+平方+立方），并补一条 `turnStatusAtInterrupt != "running"` 硬断言，
+   让这种失败模式再也不能伪装成通过。顺带量到：不被打断的这一轮**根本跑不完** ——
+   `dq.get(timeout=300)` 超时后子 agent 记 `agent_error`（`Empty @ queue.py:179`）。
+3. 就绪信号试过三种，前两种都在测模型的 flush 时机而不是产品：
+   等 `output.txt` 里 >200 字节 → 180 秒超时（模型首次 flush 前一直在缓冲）；
+   等 `output.txt` 存在 → 同样 180 秒不出现，而子 agent 全程 `turn_status: running`、
+   事件只有 `['agent_started', 'turn_started']`（该文件只在首个 display-queue 项到达时才创建）。
+4. 首版 I1 断言 `agent_shutdown` + 进程退出而失败。这是把 `interrupt_agent` 当成
+   `close_agent` 了：工具描述写的是"请求子智能体中断当前轮次；子进程会尽量保留以便后续
+   `followup_task`"，`agent_shutdown` 只在 close 路径上发。所以正确的断言是
+   **轮次结束**（`turn_completed`）**加上进程仍活着**，后者本身就是契约的一部分。
+
+另外 `check_malformed_state` 不走 manager，直接 `Popen` 一个
+`agentmain.py --task <name> --nobg`：manager 在 `Popen` **之后**还会写两次 `state.json`
+（先 pid，再 `last_event_seq`），所以在 Popen 缝隙注入的损坏会被父进程覆盖回健康字节，
+检查会在一个好文件上静默通过。直接驱动子进程也更贴近真实形状 ——
+这个修复防的是子进程**继承**到一个截断的 state 文件，不管是谁截断的。
+
+### 1.10 S12 之后：UI 路径中断的真实 API E2E（2026-08-03）
+
+S12 把 `_start_stop_file_watcher()` 加在 `agentmain.py` 的轮次外面。那个 watcher 服务的是
+**子 agent** 路径（`_stop` 文件、`verbose=False`），但它包住的是每个前端都在跑的同一段
+`agent_runner_loop`。所以"没影响别的"这句话必须实测，而不是推理。
+
+`tests/real_ink_bridge_interrupt_e2e.py`（新增，`GA_RUN_REAL_API_E2E=1`，
+`claude-opus-5` / `provider: gorouter`，沿用 `SECRET_RE` / `sanitize()`）直接驱动
+`GenericAgentBridge` 而不是手搓一个 agent loop —— 断言的对象就是 Ink UI 真正消费的
+JSONL 事件契约。UI 的中断链路是 Ink ESC → `{"type":"stop"}` → `ink_bridge.stop()` →
+`agent.abort()`，全程在内存里，**没有 `_stop` 文件**，而且 `task_dir` 是 None。
+
+实跑 `passed: true`，`issues: []`。关键数字：
+
+| 断言 | 实测 |
+| --- | --- |
+| U1 请求真的在飞的时候 ESC | `providerRequestLogged: true`，`agentIsRunningAtStop: true` |
+| U1 UI 立刻看到 stopping，并回到 idle | `statusSequence: ["running","stopping","idle"]`，**`secondsToIdle: 0.093`** |
+| U2 长答案被截断 | `reachedFinalLine: false`，`assistantChars: 64` |
+| U3 UI 路径上 watcher 从不启动 | `taskDirIsNone: true`，before/during/after 三处 watcher 线程列表都是 `[]` |
+| U4 中断后 UI 仍可用 | 第二轮真实轮次 `secondTurnCompleted: true`，`markerEchoed: true`，`deltaEvents: 6` |
+| U4 状态没有残留 | `agentIsRunningAfterStop: false`，`stopSigCleared: true`，`finalStatus: idle` |
+
+**负对照跑了三次，头两次都通过了 —— 这不是脚本缺陷，而是量到了一件事实：UI 中断有两条
+彼此独立且各自充分的机制。**
+
+| 临时改动（`temp/_probe_ui_neg_patch.py`，跑完还原） | 结果 |
+| --- | --- |
+| 关掉 `abort()` 里的 `cancel_current_request()` 循环 | 仍通过，`secondsToIdle` 0.094 → 5.234（chunk 循环的 `stop_sig` break 在调用返回后接住） |
+| 关掉 chunk 循环的 `if self.stop_sig: break` | 仍通过，0.093（provider 取消直接结束调用） |
+| **两条都关** | **变红**：`secondsToIdle: null`，状态卡在 `stopping`，`stop_sig` 留 True，下一次 submit 被当 busy 拒绝，流出 12685 字符而不是 582 |
+
+最后一行才是"断言真的会红"的证据。它同时说明 S12 的 watcher 是第三条路径，
+而在 UI 上它按设计是惰性的（U3）。
+
+**踩到的一件事，不是 GA 缺陷**：bridge 的 `_run_agent` 线程持有
+`backend_output_redirect()` 直到进程结束，所以脚本构造完 bridge 之后再 print，
+JSON 会落到 `temp/ink_bridge_backend.log`（首跑量到报告文件 0 字节）。
+脚本改为在 import 时留住 `REAL_STDOUT` 再往它写。
+
+### 1.11 B2 的去重键漏了 target（2026-08-03，真实 E2E 暴露）
+
+跑 §1.7 的 guard E2E 复验时它红了一条 `resume_turn_marker_missing`，而这不是 S12 的回归：
+
+```
+temp/subagents/submissions.jsonl
+2026-07-30T17:16:05+08:00  real_e2e_resume  resume_agent  /root/guard_e2e_1785402922
+```
+
+`submissions.jsonl` 是**跨进程、跨天**存活的（`MAX_ROWS=2000`，没有会话作用域），
+而 `_replayed_submission` 只比 `(submission_id, op)`、**完全忽略 `target`**。
+于是 2026-07-30 为某个 agent 写下的一行，把 2026-08-03 对**另一个** agent 的 resume
+判成"已经跑过"：没起进程（`newProcessCount: 0`），并且把**别的 agent** 的 handle
+当成返回值交给调用方（`runIdMatchesOriginal: false`，`output2.txt` 从未出现）。
+压掉一次 op 已经很糟，**用错的 agent 回答**更糟。
+
+模型侧不能靠"别复用 id"绕过：schema 的措辞本来就是"只要在重试就必须带上同一个
+`submission_id`"（§3.4 的取舍），固定 id 正是被鼓励的行为。消息面反而没这个洞 ——
+`_submission_message_id()` 一直把收件人 leaf 拼进 mailbox 行 id，天然按 target 分域。
+
+**修复（TDD，先红后绿）**：去重身份从 id 变成三元组 `(submission_id, op, target)`。
+
+- `subagent_submissions.py`：`record()` 按三元组查重；`find(id, *, op=None, target=None)`
+  可收窄，不传 op/target 时仍回答"这个 id 有没有行"（`_match` 用 `require` 区分写与读）。
+- `subagent_manager.py`：`_replayed_submission` / `_record_submission` 都过一层
+  `_submission_target()` 统一拼写（调用方 `"alpha"` 和 `"/root/alpha"` 混用），
+  取 task name leaf，与 `_submission_message_id` 的分域方式一致；不是 task name 的 target
+  按原文本入键而不是塌成 None。
+- `spawn_agent` 的键改用**请求的**名字而不是分配到的名字：`_next_available_task_name`
+  可能追加后缀，而查重那一刻只知道调用方要的是什么。
+
+新增 5 条测试（`tests/test_subagent_submissions.py` 2 条 + `SubmissionIdempotencyTest` 3 条），
+先各自实测变红：同 id 换 agent 曾经压掉 spawn（`1 != 2`）、close 曾经回答
+`/root/alpha` 而不是 `/root/beta`。
+
+**真实 E2E 负对照**：把两行历史脏数据都灌回 `temp/subagents/submissions.jsonl`
+（2026-07-30 与 2026-08-03 各一行，`submission_id: real_e2e_resume`）再跑 guard E2E ——
+修复前这必然红，修复后 `passed: true`、`m7Replay.runIdMatchesOriginal: true`、
+`newProcessCount: 1`、`resumeOutputFile: output2.txt`，新行按 target 分域独立落库。
+也就是说这条 E2E 不再自我污染，无需人工清日志。
+
+## 2. P0 mailbox 正确性修复（实测已确认的缺陷）
 ### 2.0 实测证据摘要
 
 一次性探针脚本实测（Python 3.12.4 / Windows，`threading.Barrier` 对齐起跑放大竞态窗口，

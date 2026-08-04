@@ -379,13 +379,14 @@ class SubagentManager:
         worktree_path=None,
         submission_id=None,
     ):
-        replay = self._replayed_submission(submission_id, op="spawn_agent", target=task_name)
+        requested_task_name = self._task_name_from_target(task_name)
+        replay = self._replayed_submission(submission_id, op="spawn_agent", target=requested_task_name)
         if replay is not None:
             # Spawning is the least idempotent op there is: a replay would start a second OS
             # process, burn an active-agent slot and duplicate the real LLM spend.
             return self._handle_from_submission(replay.get("result"))
 
-        task_name = self._next_available_task_name(self._task_name_from_target(task_name))
+        task_name = self._next_available_task_name(requested_task_name)
         permission_metadata = normalize_permission_metadata(
             {"permission_profile": permission_profile, "permission_options": permission_options or {}, "parent_permission_mode": parent_permission_mode}
         )
@@ -679,7 +680,9 @@ class SubagentManager:
             worktree_path=state.get("worktree_path"),
             ipc_endpoint=state.get("ipc_endpoint"),
         )
-        self._record_submission(submission_id, op="spawn_agent", target=state["agent_path"], result={"handle": asdict(handle)})
+        # Keyed on the *requested* name, not the allocated one: `_next_available_task_name` may
+        # have appended a suffix, and the replay lookup only knows what the caller asked for.
+        self._record_submission(submission_id, op="spawn_agent", target=requested_task_name, result={"handle": asdict(handle)})
         return handle
 
     def register_agent(self, task_name, state, task_dir=None):
@@ -1519,25 +1522,40 @@ class SubagentManager:
     def _replayed_submission(self, submission_id, *, op, target):
         """Return the recorded row if this submission already ran, else None.
 
-        The op is part of the answer: reusing one id across two different ops would otherwise
-        make a close look like an already-done spawn.
+        The op and the target are both part of the answer: reusing one id across two ops would
+        make a close look like an already-done spawn, and reusing it across two agents made a
+        stale row suppress a live call. Measured on the real guard E2E — `submissions.jsonl`
+        outlives the process, so a row from 2026-07-30 answered a 2026-08-03 spawn of a
+        *different* agent with the old agent's handle and started nothing.
         """
         if SubagentSubmissionLog.normalize_id(submission_id) is None:
             return None
         try:
-            row = self.submissions.find(submission_id)
+            row = self.submissions.find(submission_id, op=op, target=self._submission_target(target))
         except Exception:
             # A broken dedup log must degrade to "run it" rather than refuse the op.
             return None
-        if not row or row.get("op") != str(op):
-            return None
-        return row
+        return row or None
+
+    def _submission_target(self, target):
+        """One spelling for the dedup key, since callers pass "alpha" and "/root/alpha" alike.
+
+        The leaf name is what identifies the agent inside this manager's own log, the same scoping
+        `_submission_message_id` already uses for mailbox rows. A target that is not a task name
+        at all still keys on its own text rather than collapsing into None.
+        """
+        try:
+            return self._task_name_from_target(target)
+        except (ValueError, AttributeError, TypeError):
+            return str(target) if target is not None else None
 
     def _record_submission(self, submission_id, *, op, target, result):
         if SubagentSubmissionLog.normalize_id(submission_id) is None:
             return None
         try:
-            return self.submissions.record(submission_id, op=op, target=target, result=result)
+            return self.submissions.record(
+                submission_id, op=op, target=self._submission_target(target), result=result
+            )
         except Exception:
             # The op already succeeded; failing to record only costs idempotency on a replay.
             return None

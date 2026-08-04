@@ -496,6 +496,43 @@ class GenericAgent:
             self.handler.permission_mode_policy = build_permission_mode_policy(mode)
         return mode
 
+    def _start_stop_file_watcher(self, interval_s=0.2):
+        """Watch `<task_dir>/_stop` on its own thread while a turn is in flight.
+
+        The only other `_stop` check lives in `for chunk in gen`, which never runs during a
+        provider call or a tool call: a subagent spawns with verbose=False, and there
+        `agent_loop` drives both through `exhaust()`, so nothing is yielded until the whole
+        call is done. Measured, that made interrupt latency equal to turn length for an LLM
+        call, and made a running tool uninterruptible outright (the second turn still went
+        out). A watcher thread is the smallest fix that does not require every long-running
+        call site to learn about cancellation.
+
+        Returns a callable that stops the watcher, or None when there is no task dir (the
+        interactive frontends abort through `agent.abort()` directly).
+        """
+        if not self.task_dir:
+            return None
+        stop_watching = threading.Event()
+
+        def watch():
+            while not stop_watching.wait(interval_s):
+                try:
+                    if consume_file(self.task_dir, '_stop'):
+                        self.abort()
+                        return
+                except Exception:
+                    # A transient read failure must not kill the watcher's turn.
+                    continue
+
+        thread = threading.Thread(target=watch, daemon=True, name='ga-stop-file-watcher')
+        thread.start()
+
+        def cancel():
+            stop_watching.set()
+            thread.join(timeout=interval_s * 5)
+
+        return cancel
+
     def abort(self):
         if not self.is_running: return
         print('Abort current task...')
@@ -668,10 +705,11 @@ class GenericAgent:
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
                                 handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)
+            stop_watcher = self._start_stop_file_watcher()
             try:
                 full_resp = ""; last_pos = 0
                 for chunk in gen:
-                    if consume_file(self.task_dir, '_stop'): self.abort() 
+                    if consume_file(self.task_dir, '_stop'): self.abort()
                     if self.stop_sig: break
                     full_resp += chunk
                     if should_flush_display_delta(full_resp, last_pos, chunk):
@@ -718,6 +756,7 @@ class GenericAgent:
                 except Exception as rec_e:
                     print(f"[WARN] Failed to record session transcript: {rec_e}")
             finally:
+                if stop_watcher is not None: stop_watcher()
                 if self.stop_sig: print('User aborted the task.')
                 self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
@@ -731,7 +770,12 @@ def _subagent_state(task_dir, task_name, nround, turn_status, process_status, ou
     try:
         with open(state_path, encoding='utf-8', errors='replace') as f:
             old = json.load(f)
+    except FileNotFoundError:
+        pass
     except Exception:
+        # Unparsable bytes are quarantined once at worker-loop entry
+        # (_quarantine_unreadable_state); here we just fall back to a fresh dict so the turn
+        # keeps going.
         pass
     old.update({
         'schema_version': 1,
@@ -764,6 +808,81 @@ PARENT_INBOX_EVENT_TYPES = {
     'agent_error',
     'agent_closed',
 }
+
+def _quarantine_unreadable_state(task_dir, task_name):
+    """If `state.json` exists but will not parse, copy it aside and record why.
+
+    Called once at worker-loop entry rather than inside `_subagent_state`, because by the time
+    any writer runs the file has already been re-read as `{}` and the next atomic write drops
+    the original for good.
+    """
+    state_path = os.path.join(task_dir, 'state.json')
+    if not os.path.exists(state_path):
+        return None
+    try:
+        with open(state_path, encoding='utf-8', errors='replace') as f:
+            json.load(f)
+        return None
+    except Exception as e:
+        return _quarantine_corrupt_file(task_dir, task_name, state_path, 'state_load_failed', '', e)
+
+
+def _quarantine_corrupt_file(task_dir, task_name, path, event_type, nround, error):
+    """Copy an unparsable control file aside and say so in the event stream.
+
+    Returns the quarantine path, or None if the copy itself failed. Deliberately best-effort:
+    it exists so a corrupt file leaves evidence instead of vanishing, and must never be the
+    reason a turn fails.
+    """
+    quarantine = f'{path}.malformed.{int(time.time() * 1000)}'
+    try:
+        with open(path, encoding='utf-8', errors='replace') as src:
+            raw = src.read()
+        with open(quarantine, 'w', encoding='utf-8', newline='\n') as dst:
+            dst.write(raw)
+    except OSError:
+        quarantine = None
+    _subagent_event(task_dir, {
+        'type': event_type,
+        'task_name': task_name,
+        'round': int(nround) if isinstance(nround, int) else 0,
+        'path': str(path),
+        'quarantine_path': quarantine,
+        'error': format_error(error),
+    })
+    return quarantine
+
+
+def _load_forked_history(agent, task_dir, task_name, raw_history, nround):
+    """Apply a forked/resumed backend history, surviving a corrupt file.
+
+    Measured: a truncated `_history.json` raised a bare `JSONDecodeError` out of
+    `run_task_worker_loop`, so the child died before writing `state.json`'s turn_status,
+    before any event, and after `consume_file` had already deleted the only copy of the bad
+    bytes. A corrupt resume projection costs the forked context, not the task — the turn
+    still runs on whatever history the client already has, and the file is set aside so the
+    parent can see what it actually handed over.
+    """
+    try:
+        agent.llmclient.backend.history = json.loads(raw_history)
+        return True
+    except Exception as e:
+        quarantine = os.path.join(task_dir, f'_history.json.malformed.{int(time.time() * 1000)}')
+        try:
+            with open(quarantine, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(raw_history)
+        except OSError:
+            quarantine = None
+        _subagent_event(task_dir, {
+            'type': 'history_load_failed',
+            'task_name': task_name,
+            'round': int(nround) if isinstance(nround, int) else 0,
+            'path': os.path.join(task_dir, '_history.json'),
+            'quarantine_path': quarantine,
+            'error': format_error(e),
+        })
+        return False
+
 
 def _subagent_transcript_append(task_dir, event_type, payload):
     try:
@@ -944,6 +1063,11 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     )
     agent.peer_hint = False
     agent.task_dir = task_dir
+    # Must run before anything writes state.json. Every writer in this loop rebuilds the file
+    # from `read_json_or_none(...) or {}`, so the first one silently replaces unparsable bytes
+    # — and with them run_id / parent_session_id / artifact_dir, i.e. the sidechain transcript
+    # path and the artifact linkage. The turn then looks perfectly healthy.
+    _quarantine_unreadable_state(task_dir, task_name)
     if permission_profile is not None or permission_options is not None or parent_permission_mode is not None:
         state_path = os.path.join(task_dir, 'state.json')
         state = read_json_or_none(state_path) or {}
@@ -986,7 +1110,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         with open(infile, 'w', encoding='utf-8') as f: f.write(input_text)
         nround = ''
     if (fh := consume_file(task_dir, '_history.json')):
-        agent.llmclient.backend.history = json.loads(fh)
+        _load_forked_history(agent, task_dir, task_name, fh, nround)
     with open(infile, encoding='utf-8') as f: raw = f.read()
     _subagent_transcript_append(task_dir, 'request', {'task_name': task_name, 'prompt': raw})
     while True:

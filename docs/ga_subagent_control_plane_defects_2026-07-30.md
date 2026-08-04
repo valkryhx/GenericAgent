@@ -18,9 +18,14 @@ P2 项（B1/B2/B3）做实测验证，结果推翻了原有优先级排序 —�
 | **B2** | 控制面 op 没有提交身份，重放即重复执行 | P2 控制面 → **实测为正确性问题** | 规划文档 §6 已列，本文初版判为"纯结构收益，无实测正确性问题" | 重放 `followup_task` → **2 条 trigger_turn 行（任务干两遍）**；重放 `spawn_agent` → **两个真实进程、两个 run_id**；`enqueue` 的 `message_id` 去重分支存在但 13 个 handler 从未使用。**✅ 已修复（2026-07-30）** |
 | **M6** | 同名 spawn 静默改名：活着的 agent 被复制成第二个进程 | **P1 正确性 + 花费** | **完全未记录** | `spawn_agent("reviewer")` 在 `/root/reviewer` 仍在运行时产出 `/root/reviewer_1` —— 第二个 OS 进程、第二个活跃名额、第二份真实 LLM 花费，而模型以为只有一个 agent。Codex 同场景直接报错（`agent/registry.rs:247-250`）。**✅ 已修复（2026-07-30）** |
 | **M7** | `resume_agent` 无任何守卫：可 resume 活着的 agent，且重放不设防 | **P1 正确性 + 花费** | **完全未记录** | resume 一个进程仍活着的 agent 会**再起一个进程并把 `state.json` 的 pid 覆盖成新的**，首个 pid 从此无人引用（wait/interrupt/close 都摸不到），却继续烧真实 LLM 花费；且 B2 给 spawn/close/followup 都加了 `submission_id`，唯独漏了 resume，重放即起第二个进程。**✅ 已修复（2026-07-30）** |
+| **S12-a** | `interrupt_agent` 只在轮次边界生效，轮次内部完全无效 | **P1 正确性 + 花费** | 研究文档只当作"测试覆盖不足" | 6 秒 provider 调用第 0.5 秒写 `_stop` → **5.5 秒后才 abort**（延迟 == 轮次剩余长度）；6 秒工具调用 → **`stop_sig` 从未变 True**，工具从未收到 `code_stop_signal`，agent 还接着跑了第二轮 LLM。成因：唯一的 `_stop` 检查在 `for chunk in gen` 里，而子 agent 的 `verbose=False` 路径用 `exhaust()` 驱动调用，全程零 yield。**✅ 已修复（2026-08-03）** |
+| **S12-b** | 损坏的 `_history.json` 杀死子 agent；损坏的 `state.json` 静默丢证据 | **P1 正确性 + 可观测性** | 研究文档只当作"测试覆盖不足" | 截断的 `_history.json` → `JSONDecodeError` 抛出 worker loop：**无 state 状态、无 `last_error`、`events.jsonl` 不存在，且坏字节已被 `consume_file` 删除**；截断的 `state.json` 不崩，但首次写入从 `{}` 重建文件，**`run_id` / `parent_session_id` / `artifact_dir` 静默消失**。**✅ 已修复（2026-08-03）** |
+| **B2-c** | 提交去重键漏了 `target`：跨天的脏行压掉对**另一个** agent 的 op，并把别人的 handle 当返回值 | **P1 正确性** | B2 落地时未意识到 | `submissions.jsonl` 跨进程跨天存活（`MAX_ROWS=2000`、无会话域），`_replayed_submission` 只比 `(submission_id, op)`。真实 guard E2E 复验时，2026-07-30 写的 `real_e2e_resume` 行把 2026-08-03 对另一个 agent 的 resume 判成已跑过：`newProcessCount: 0`、`runIdMatchesOriginal: false`、`output2.txt` 从未出现。而 schema 措辞本来就要求重试时复用同一个 id。**✅ 已修复（2026-08-03）** |
 
-**由此得出的顺序：M5 → B1 → B3 → B2 → M6 → M7**（M6/M7 是做完 B2 后回头查
-"还有哪个控制面 op 会悄悄多起一个进程" 时发现的）。理由见第 4 节。
+**由此得出的顺序：M5 → B1 → B3 → B2 → M6 → M7 → S12 两条 → B2-c**（M6/M7 是做完 B2 后回头查
+"还有哪个控制面 op 会悄悄多起一个进程" 时发现的；S12 两条是照研究文档的待补测试清单
+逐条实测时发现的 —— 清单上写的是"覆盖不足"，实测出来是产品坏着；B2-c 是 S12 收尾时
+复跑真实 E2E，被一条红断言逼出来的，见 §3.9）。理由见第 4 节。
 
 ## 1. M5：registry.json 的无锁读改写（新发现）
 
@@ -260,6 +265,7 @@ close_agent   重放（且已 rmtree 任务目录）→ 不抛错，previous_sta
 
 16 条测试固化在 `tests/test_subagent_submissions.py::SubmissionLogTest`（6）、
 `tests/test_subagent_manager.py::SubmissionIdempotencyTest`（5）与 `MulticastMessageTest`（5）。
+（2026-08-03 因 §3.9 各加了 2 / 3 条，共 21 条。）
 
 ### 3.4 B2 的遗留问题：去重是 opt-in 的
 
@@ -290,6 +296,9 @@ B2 落地后被问到"重复执行的 bug 修好了吗"，诚实的答案是：*
 
 因此这里的取舍是：**不在分发层造 id，改为补语义唯一性守卫（M6/M7），
 并把 schema 措辞从"可选"改成带触发条件的义务**（Codex 就是靠措辞让模型交出 `item_id` 的）。
+
+这个取舍有个当时没看到的后果：既然措辞鼓励重试时复用同一个 id，去重键就必须能区分
+"同一个 id 对不同 agent"。它没能，见 §3.9。
 
 ## 3.5 M6：活着的同名 agent 被静默改名（新发现）
 
@@ -379,6 +388,71 @@ spawn 一个真实子进程 → 等它跑完一轮真实 LLM 并停在 `waiting_
 `newProcessesAfterRefusal: []` / `newProcesses: []`（拒绝后 OS 层面真的没有新进程）、
 `originalArtifactIntact: true`（close 后改名，旧 agent 的 `output.txt` 逐字节完好）。
 
+## 3.8 S12：中途 interrupt 无效 + 损坏控制文件（2026-08-03 新发现）
+
+去补 S12 那份"测试覆盖不足"清单里剩下的两条时，发现它们不是覆盖缺口而是产品缺陷。
+探针实测（用后即删，做法见 §5）：
+
+```
+temp/_probe_interrupt_midturn.py  6 秒 provider 调用，第 0.5 秒写 _stop
+  → 5.5 秒后才 abort。interrupt 延迟 == 轮次剩余长度
+temp/_probe_interrupt_tool.py     6 秒工具调用，第 0.5 秒写 _stop
+  → stop_sig 从未变 True，工具从未看到 code_stop_signal，还跑了第二轮 LLM
+temp/_probe_malformed.py          截断的 _history.json
+  → JSONDecodeError 抛出 run_task_worker_loop：无 state.json 状态、无 last_error、
+    events.jsonl 不存在，且坏字节已被 consume_file 删除
+```
+
+两个缺陷的共同点是**不对称**：
+
+- `_stop` 有两条可能的检查点，只装了在长调用期间跑不到的那条。
+  `verbose=False`（子 agent 的唯一模式）下 `agent_loop` 用 `exhaust()` 驱动
+  provider 调用和工具，整个调用期间零 yield，而唯一的检查在 `for chunk in gen` 里。
+- 两个持久化控制文件，`state.json` 的每次读都走 `read_json_or_none()`，
+  `_history.json` 是裸 `json.loads`。
+
+`state.json` 不崩，但代价是静默：第一次 `_subagent_state()` 写入从 `{}` 重建文件，
+`run_id` / `parent_session_id` / `artifact_dir` 一起消失（即 sidechain transcript 路径
+与 artifact 关联），而轮次看起来完全健康。所以隔离必须发生在 worker loop **入口**，
+放进 `_subagent_state` 内部太晚 —— 第一版就这么写，红在 `0 != 1`。
+
+修复与实测数字见 `docs/ga_subagent_ipc_implementation_plan_2026-07-29.md` §1.8
+（interrupt 5.5s → 0.156s；工具从"永不生效"→ 0.125s），真实 API 验收见 §1.9。
+
+§1.9 里最值得单独记住的一条：**真实 E2E 自己必须先过负对照**。
+把 watcher 改回 `None`（修复前行为）后，第一版 I1 仍然通过 ——
+它等的是 `turn_status == "running"`，而那个状态写在 `agent.put_task` 之前，
+`agent_loop` 又会先 yield 一句 "Turn 1 ..." 横幅，于是修复前的检查照样命中。
+改成等 `_write_llm_log('Prompt', ...)` 落盘（紧挨 `backend.ask`，意味着已进
+`exhaust(response_gen)`）之后负对照才如实变红。判据与 §3.7 的"被 stub 掉的那一环"同源：
+**一条永远绿的真实 E2E 和没有 E2E 等价。**
+
+## 3.9 B2-c：提交去重键漏了 target（2026-08-03，被真实 E2E 逼出来）
+
+S12 收尾时复跑全部真实 API E2E，guard E2E 红在 `resume_turn_marker_missing`。
+第一反应是 S12 的回归，实测不是 —— 是 B2 自己留的洞：
+
+```
+temp/subagents/submissions.jsonl（跨进程、跨天存活，MAX_ROWS=2000，无会话作用域）
+2026-07-30T17:16:05+08:00  real_e2e_resume  resume_agent  /root/guard_e2e_1785402922
+
+_replayed_submission(submission_id, op=..., target=...)  ← target 收了，但从不比较
+  → 2026-08-03 对另一个 agent 的 resume 被判"已跑过"
+  → newProcessCount: 0，output2.txt 从未出现，
+    且返回给调用方的是 2026-07-30 那个 agent 的 handle（runIdMatchesOriginal: false）
+```
+
+这比"压掉一次 op"更严重：调用方拿到的是**另一个 agent** 的 run_id 与 pid。
+也不能推给调用方"别复用 id" —— §3.4 的取舍本来就是把 schema 措辞写成
+"只要在重试就必须带同一个 `submission_id`"，固定 id 是被鼓励的行为。
+消息面反而没这个洞：`_submission_message_id()` 一直把收件人 leaf 拼进 mailbox 行 id，
+天然按 target 分域。**同一份设计里两个面，一个分了域一个没分，这就是缺陷的形状。**
+
+修复：去重身份从 `submission_id` 变成三元组 `(submission_id, op, target)`，
+`target` 统一取 task name leaf（与 mailbox 分域方式一致）；`spawn_agent` 用**请求的**
+名字入键，因为 `_next_available_task_name` 可能追加后缀，而查重那一刻只知道调用方要什么。
+5 条新测试先各自实测变红。细节与真实 E2E 负对照（把两行历史脏数据灌回去再跑）见规划文档 §1.11。
+
 ## 4. 优先级判断
 
 1. **M5（P0）**：实测 75% 丢行 + run_id 碰撞绕过 S1/S2 的隔离粒度 + Windows 直接抛错。
@@ -402,6 +476,19 @@ spawn 一个真实子进程 → 等它跑完一轮真实 LLM 并停在 `waiting_
 M6 / M7 / B2 三者的真实 API E2E 验收见 §3.7 —— 单测把判活 stub 掉了，
 必须再补一条真对真实进程的链路。
 
+7. **S12 两条（贯穿性 → 实测为产品缺陷）**：`interrupt_agent` 只在轮次边界生效
+   （长 provider 调用延迟 == 轮次长度，长工具调用完全无效且又跑一轮 LLM）；
+   损坏的 `_history.json` 直接杀死子 agent 并连坏字节一起删掉，
+   损坏的 `state.json` 不崩但静默丢掉 `run_id` / `artifact_dir`。
+   **✅ 已完成（2026-08-03）**，见 §3.8，修复与验收见规划文档 §1.8 / §1.9。
+8. **B2-c（P1 正确性）**：提交去重只比 `(submission_id, op)`，而 `submissions.jsonl` 跨天存活，
+   于是脏行既压掉对另一个 agent 的 op，又把别人的 handle 当返回值。是 B2 的补丁而不是新机制，
+   成本极低。**✅ 已完成（2026-08-03）**，见 §3.9，修复与验收见规划文档 §1.11。
+
+UI 路径（Ink bridge）在 S12 之后是否受影响，另有一条真实 API E2E 实测，见规划文档 §1.10：
+`task_dir` 为 None、watcher 从不启动、ESC 0.093 秒回到 idle、中断后第二轮真实轮次照常完成。
+它的负对照顺带量到 UI 中断有两条各自充分的机制，只有同时关掉才会红。
+
 同样维持后放：S8（subagent 与 workflow child agent 抽象统一，文档自评"v2 稳定后再做"）、
 S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保留、P2 移除）。
 
@@ -419,6 +506,12 @@ S11 remote isolation（文档自评优先级低）、`reply.txt` 移除（P1 保
 | 提交重放 | 对同一逻辑提交重复调 `followup_task` / `spawn_agent`，统计 mailbox `trigger_turn` 行数与 `popen` 调用次数 | 行数 / 进程数是否 > 1 |
 | 同名活 agent | 注入 `process_exists=lambda _: True` 让首个 agent 恒定判活，再 spawn 同名 | 第二次拿到的 `agent_path` 与 `popen` 调用次数 |
 | resume 守卫 | 注入 `process_exists` 控制死活，对活着 / 已关闭 / 重放三种情形各跑一次 resume，记录 `popen` pid 序列与 `state.json` 的 pid | 进程数是否增加 + `state.json` 的 pid 是否被覆盖 |
+| 中途 interrupt（LLM） | 假客户端里 `time.sleep(6)` 模拟长 provider 调用，第 0.5 秒写 `_stop`，记 `_stop` → `stop_sig` 的秒数 | 延迟是否等于剩余轮次长度 |
+| 中途 interrupt（工具） | `patch.object(GenericAgentHandler, "do_code_run")` 换成阻塞 6 秒的工具（`permission_mode="full_access"`，`read_only` 会先拒绝分发），第 0.5 秒写 `_stop` | 工具是否看到 `code_stop_signal` + 之后是否还跑第二轮 |
+| 损坏控制文件 | `run_task_worker_loop` 直接跑在临时目录上，事先写入截断的 `_history.json` / `state.json` | 是否抛异常出循环 + 事件/state/隔离副本是否存在 |
+| 真实 E2E 负对照 | 把 `stop_watcher = self._start_stop_file_watcher()` 临时改成 `= None`，只跑 E2E 的 interrupt 段 | **必须变红**；不红说明就绪信号选早了 |
+| UI 中断负对照 | `temp/_probe_ui_neg_patch.py`（`cancel-off` / `break-off` / `restore` 三模式，各自 `assert count(old) == 1`）分别关掉 `abort()` 的 provider 取消循环与 chunk 循环的 `stop_sig` break | 单关任一条**仍绿**（两条各自充分）；**两条都关必须红** |
+| 提交去重脏行 | 把历史 `submissions.jsonl` 行（同 `submission_id`、不同 `target`）灌回去再跑 guard E2E | 修复前必红（`newProcessCount: 0`）；修复后新行按 target 分域独立落库 |
 
 写并发探针时有一处要注意：`SubagentRegistry` 默认 `max_active_agents=8`，
 不显式传 `max_depth=0, max_active_agents=0` 关掉上限的话，探针会先撞 G1 的

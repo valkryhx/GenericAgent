@@ -1095,6 +1095,25 @@ GA 已有不少 subagent 测试，但主要覆盖工具基本行为。更复杂�
 
 优先级判断：**贯穿所有阶段。** 单独看严重度较低，但每个增强阶段都必须先写测试，否则 control plane 会越来越难维护。
 
+**2026-08-03 更新：这份清单里的两条，实测出来不是覆盖缺口而是产品缺陷。**
+`interrupt during running LLM/tool call` —— `interrupt_agent` 只在轮次边界生效，
+长 provider 调用的中断延迟等于轮次剩余长度，长工具调用则完全无效且之后又跑了一轮 LLM。
+`malformed _history.json / state.json` —— 坏的 `_history.json` 直接杀死子 agent 并把
+坏字节一起删掉，坏的 `state.json` 不崩但静默丢掉 `run_id` / `artifact_dir`。
+两条均已按 TDD 修复并通过真实 API E2E（`tests/real_subagent_s12_e2e.py`）。
+实测证据见 `docs/ga_subagent_control_plane_defects_2026-07-30.md` §3.8，
+修复与验收见 `docs/ga_subagent_ipc_implementation_plan_2026-07-29.md` §1.8 / §1.9。
+**这条清单的教训因此要改写一句**：不是"每个增强阶段都必须先写测试"，
+而是"每一条**未覆盖**的路径都要先假定它是坏的，去实测，而不是直接补一条会通过的测试"。
+清单上剩余的 `mailbox.jsonl` 损坏、`final output marker 污染`、
+`Windows 文件锁竞争` 三条尚未逐条实测。
+
+这条教训在同一天又被验证了一次，而且验证方式不是新写测试而是**复跑既有的真实 E2E**：
+guard E2E 红了一条，查出来是 B2 的提交去重只比 `(submission_id, op)` 而不比 `target`，
+`submissions.jsonl` 跨天存活的一行脏数据于是压掉了对另一个 agent 的 resume，
+还把别人的 handle 当返回值交回去（缺陷文档 §3.9、规划文档 §1.11）。
+**所以"未覆盖的路径"不止指没有测试的代码，也指没有人复跑的测试所依赖的持久状态。**
+
 ### 5.5 严重度排序对应的修复优先级
 
 按上述严重度，建议修复顺序不是完全线性的，但第一批必须覆盖 S1-S4：

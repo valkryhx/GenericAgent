@@ -1476,6 +1476,75 @@ class SubmissionIdempotencyTest(unittest.TestCase):
             self.assertEqual(first.run_id, second.run_id)
             self.assertEqual(len(manager.list_agents()), 1)
 
+    def test_the_same_submission_id_on_a_different_agent_still_spawns_it(self):
+        """Measured on the real guard E2E: a row from 2026-07-30 suppressed a 2026-08-03 run.
+
+        `temp/subagents/submissions.jsonl` outlives the process (MAX_ROWS 2000, no session
+        scoping), and the dedup only compared `(submission_id, op)`. So a fixed id — which is
+        exactly what a retrying model produces, and what the schema tells it to send — silently
+        returned the *other* agent's handle: no process started, and the caller got a run_id
+        belonging to an agent it never asked for. Suppressing an op is bad; answering with the
+        wrong agent is worse. The mailbox path already scopes by recipient
+        (`_submission_message_id` appends the leaf), so followup/send never had this hole.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            spawned = []
+
+            class FakeProcess:
+                def __init__(self):
+                    self.pid = 8200 + len(spawned)
+
+            def popen(*_a, **_kw):
+                spawned.append(1)
+                return FakeProcess()
+
+            manager = SubagentManager(root_dir=td, popen=popen, python_executable="python-test", sleep=lambda _: None)
+
+            first = manager.spawn_agent("alpha", "task a", submission_id="retry_1")
+            second = manager.spawn_agent("beta", "task b", submission_id="retry_1")
+
+            self.assertEqual(len(spawned), 2, "a reused id suppressed the spawn of a different agent")
+            self.assertEqual(second.agent_path, "/root/beta")
+            self.assertNotEqual(second.run_id, first.run_id)
+
+    def test_a_reused_submission_id_is_still_idempotent_per_agent(self):
+        """Scoping by target must not cost the guarantee the id exists for."""
+        with tempfile.TemporaryDirectory() as td:
+            spawned = []
+
+            class FakeProcess:
+                def __init__(self):
+                    self.pid = 8300 + len(spawned)
+
+            def popen(*_a, **_kw):
+                spawned.append(1)
+                return FakeProcess()
+
+            manager = SubagentManager(root_dir=td, popen=popen, python_executable="python-test", sleep=lambda _: None)
+
+            manager.spawn_agent("alpha", "task a", submission_id="retry_2")
+            manager.spawn_agent("beta", "task b", submission_id="retry_2")
+            replay_a = manager.spawn_agent("alpha", "task a", submission_id="retry_2")
+            replay_b = manager.spawn_agent("beta", "task b", submission_id="retry_2")
+
+            self.assertEqual(len(spawned), 2, "a genuine replay started another process")
+            self.assertEqual(replay_a.agent_path, "/root/alpha")
+            self.assertEqual(replay_b.agent_path, "/root/beta")
+
+    def test_the_same_submission_id_closes_each_agent_it_names(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("alpha", "task a")
+            manager.spawn_agent("beta", "task b")
+            manager.terminate_process = lambda _pid: None
+            manager.process_exists = lambda _pid: False
+
+            manager.close_agent("alpha", reason="done", submission_id="cleanup")
+            second = manager.close_agent("beta", reason="done", submission_id="cleanup")
+
+            self.assertEqual(second.previous_state.agent_path, "/root/beta")
+            self.assertEqual(second.closed_state.agent_path, "/root/beta")
+
     def test_replayed_close_agent_reports_the_first_close(self):
         with tempfile.TemporaryDirectory() as td:
             manager = self._manager(td)

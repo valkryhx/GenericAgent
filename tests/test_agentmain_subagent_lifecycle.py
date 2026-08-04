@@ -616,6 +616,255 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             self.assertFalse((task_dir / "reply.txt").exists())
 
 
+class MalformedControlFileTest(unittest.TestCase):
+    """S12: a corrupt `_history.json` killed the subagent with a bare JSONDecodeError.
+
+    Measured (temp/_probe_malformed.py) on a truncated `_history.json`:
+      raised JSONDecodeError, no state.json turn_status/process_status, no last_error,
+      events.jsonl absent, and the malformed file already consumed (deleted) — so the child
+      died before writing a single trace of why, and the evidence went with it.
+
+    `state.json` was already tolerant: every read goes through `read_json_or_none()`, which
+    returns None on JSONDecodeError. The asymmetry was the defect — two persisted control
+    files, one guarded and one not.
+    """
+
+    TRUNCATED_HISTORY = '[{"role": "user", "content": "tru'
+
+    def test_malformed_history_does_not_kill_the_child_and_is_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "bad_history"
+            task_dir.mkdir(parents=True)
+            (task_dir / "_history.json").write_text(self.TRUNCATED_HISTORY, encoding="utf-8")
+            agent = FakeAgent("answer despite bad history")
+            agent.llmclient.backend.history = ["PRESET"]
+
+            run_task_worker_loop(
+                agent,
+                task_dir,
+                input_text="do the task",
+                reply_wait_iterations=0,
+                sleep_fn=lambda _: None,
+            )
+
+            # The turn still runs: a corrupt resume projection costs the forked context, not
+            # the task. Losing the whole run would turn a recoverable file into a dead agent.
+            self.assertEqual(
+                (task_dir / "output.txt").read_text(encoding="utf-8"),
+                "answer despite bad history\n\n[ROUND END]\n",
+            )
+            self.assertEqual(agent.llmclient.backend.history, ["PRESET"])
+
+            events = [json.loads(line) for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            corrupt = [e for e in events if e["type"] == "history_load_failed"]
+            self.assertEqual(len(corrupt), 1, f"no history_load_failed event in {[e['type'] for e in events]}")
+            self.assertIn("_history.json", corrupt[0]["path"])
+            self.assertTrue(corrupt[0]["error"])
+
+            # The bad bytes are the only evidence of what the parent tried to hand over, so
+            # they get set aside rather than dropped by consume_file.
+            quarantined = sorted(p.name for p in task_dir.glob("_history.json.*"))
+            self.assertEqual(len(quarantined), 1, f"malformed history was not quarantined: {quarantined}")
+            self.assertEqual(
+                (task_dir / quarantined[0]).read_text(encoding="utf-8"),
+                self.TRUNCATED_HISTORY,
+            )
+            self.assertFalse((task_dir / "_history.json").exists())
+
+    def test_malformed_state_json_still_lets_the_turn_complete(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "bad_state"
+            task_dir.mkdir(parents=True)
+            (task_dir / "state.json").write_text('{"run_id": "run_000007", "parent_sess', encoding="utf-8")
+            agent = FakeAgent("answer despite bad state")
+
+            run_task_worker_loop(
+                agent,
+                task_dir,
+                input_text="do the task",
+                reply_wait_iterations=0,
+                sleep_fn=lambda _: None,
+            )
+
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["turn_status"], "completed")
+            self.assertEqual(state["agent_path"], "/root/bad_state")
+            events = [json.loads(line)["type"] for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn("turn_completed", events)
+
+    def test_malformed_state_json_is_quarantined_before_it_is_overwritten(self):
+        """The corrupt bytes are the only record of run_id / parent_session_id / artifact_dir.
+
+        Measured: a truncated state.json did not crash the child (every read goes through
+        read_json_or_none), but the first `_subagent_state()` write replaced the whole file
+        from an empty dict — so run_id "run_000007" was gone, and with it the sidechain
+        transcript path and the artifact dir. The turn looked healthy and the linkage was
+        silently severed.
+        """
+        corrupt = '{"run_id": "run_000007", "parent_sess'
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "quarantine_state"
+            task_dir.mkdir(parents=True)
+            (task_dir / "state.json").write_text(corrupt, encoding="utf-8")
+            agent = FakeAgent("answer")
+
+            run_task_worker_loop(
+                agent,
+                task_dir,
+                input_text="do the task",
+                reply_wait_iterations=0,
+                sleep_fn=lambda _: None,
+            )
+
+            kept = sorted(p.name for p in task_dir.glob("state.json.malformed.*"))
+            self.assertEqual(len(kept), 1, f"corrupt state.json was overwritten without a copy: {kept}")
+            self.assertEqual((task_dir / kept[0]).read_text(encoding="utf-8"), corrupt)
+            events = [json.loads(line) for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            failures = [e for e in events if e["type"] == "state_load_failed"]
+            self.assertEqual(len(failures), 1, f"no state_load_failed event in {[e['type'] for e in events]}")
+            self.assertIn("state.json", failures[0]["path"])
+            self.assertTrue(failures[0]["error"])
+
+
+class InterruptDuringRunningTurnTest(unittest.TestCase):
+    """S12: `interrupt_agent` only took effect at a turn boundary, never inside one.
+
+    Measured (temp/_probe_interrupt_midturn.py, temp/_probe_interrupt_tool.py):
+      - long provider call: `_stop` written 0.5s into a 6s call → abort observed 5.5s later,
+        i.e. exactly when the call returned. Interrupt latency == turn length.
+      - long tool call: `_stop` written 0.5s into a 6s tool → `agent.stop_sig` never became
+        True at all, the tool never saw `code_stop_signal`, and the agent went on to run a
+        second LLM turn. `stop_stop_to_done` 16s.
+
+    Cause: the only `_stop` check sat inside `for chunk in gen` (`agentmain.py`), and a
+    subagent spawns with `verbose=False`, where `agent_loop` drives both the provider call
+    (`exhaust(response_gen)`) and every tool (`exhaust(proxy())`) without yielding a chunk.
+    No chunk means no check, so the file sat unread for the whole call.
+    """
+
+    def _agent(self, task_dir, client, permission_mode="read_only"):
+        from agentmain import GenericAgent
+
+        agent = GenericAgent.__new__(GenericAgent)
+        agent.lock = threading.Lock()
+        agent.task_dir = str(task_dir)
+        agent.history = []
+        agent.handler = None
+        agent.task_queue = queue.Queue()
+        agent.is_running = False
+        agent.stop_sig = False
+        agent.llm_no = 0
+        agent.inc_out = False
+        # Subagents spawn non-verbose (subagent_manager.spawn_agent verbose=False), which is
+        # the mode where agent_loop swallows every yield. Testing verbose=True would hide
+        # the defect behind the chunk stream.
+        agent.verbose = False
+        agent.peer_hint = False
+        agent.permission_mode = permission_mode
+        agent.subagent_permission_policy = None
+        agent.permission_runtime = None
+        agent.log_path = str(task_dir / "log.txt")
+        agent.session_id = None
+        agent.session_path = None
+        agent.session_turn_id = 0
+        agent.llmclient = client
+        agent.llmclients = [client]
+        return agent
+
+    def test_stop_file_aborts_the_agent_while_the_provider_call_is_still_running(self):
+        class BlockingChatClient:
+            def __init__(self):
+                self.backend = SimpleNamespace(history=[], extra_sys_prompt="")
+                self.last_tools = ""
+                self.entered = threading.Event()
+                self.cancel_requested = threading.Event()
+
+            def chat(self, messages=None, tools=None):
+                self.entered.set()
+                # A real provider call yields nothing until the first bytes arrive; the
+                # fail-safe keeps the test bounded when the abort never comes.
+                self.cancel_requested.wait(20.0)
+                return FakeResponse("late answer")
+                yield
+
+            def cancel_current_request(self):
+                self.cancel_requested.set()
+
+            def reset_cancel(self):
+                self.cancel_requested.clear()
+
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "interrupt_llm"
+            task_dir.mkdir(parents=True)
+            client = BlockingChatClient()
+            agent = self._agent(task_dir, client)
+
+            threading.Thread(target=agent.run, daemon=True).start()
+            agent.put_task("do the task", source="task")
+            self.assertTrue(client.entered.wait(60.0), "provider call never started")
+
+            (task_dir / "_stop").write_text("parent_interrupt", encoding="utf-8")
+
+            self.assertTrue(
+                client.cancel_requested.wait(2.0),
+                "_stop did not cancel the in-flight provider call; interrupt still waits for the turn to end",
+            )
+
+    def test_stop_file_aborts_the_agent_while_a_tool_call_is_still_running(self):
+        class ToolThenDoneClient:
+            def __init__(self):
+                self.backend = SimpleNamespace(history=[], extra_sys_prompt="")
+                self.last_tools = ""
+                self.calls = 0
+
+            def chat(self, messages=None, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse("", [FakeToolCall("code_run", {"code": "probe", "code_type": "python"})])
+                return FakeResponse("second turn should never be reached")
+                yield
+
+            def cancel_current_request(self):
+                pass
+
+            def reset_cancel(self):
+                pass
+
+        entered = threading.Event()
+        saw_stop_signal = threading.Event()
+
+        def blocking_tool(handler_self, args, response=None, **kwargs):
+            from agent_loop import StepOutcome
+
+            entered.set()
+            if handler_self.code_stop_signal.wait(20.0):
+                saw_stop_signal.set()
+            return StepOutcome({"status": "ok"}, next_prompt="continue")
+            yield
+
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "interrupt_tool"
+            task_dir.mkdir(parents=True)
+            client = ToolThenDoneClient()
+            agent = self._agent(task_dir, client, permission_mode="full_access")
+
+            from ga import GenericAgentHandler
+
+            with unittest.mock.patch.object(GenericAgentHandler, "do_code_run", blocking_tool):
+                threading.Thread(target=agent.run, daemon=True).start()
+                agent.put_task("do the task", source="task")
+                self.assertTrue(entered.wait(60.0), "tool never started")
+
+                (task_dir / "_stop").write_text("parent_interrupt", encoding="utf-8")
+
+                self.assertTrue(
+                    saw_stop_signal.wait(2.0),
+                    "_stop did not reach code_stop_signal; a running tool cannot be interrupted",
+                )
+
+            self.assertEqual(client.calls, 1, "the agent kept going and started another LLM turn after _stop")
+
+
 class ReplyWaitSchedulingTest(unittest.TestCase):
     """R3: poll granularity and idle lifetime were one knob doing two unrelated jobs.
 
