@@ -59,21 +59,7 @@ def scan_for_secret_material(root: Path) -> list[dict]:
 
 
 def check_profile(summary: dict) -> bool:
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
-    profile = {
-        "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode", "chat_completions"),
-        "loadLogChars": len(captured.getvalue()),
-    }
-    ok = profile["name"] == EXPECTED_PROFILE_NAME and profile["model"] == EXPECTED_MODEL
-    summary["profile"] = profile
-    summary["profileOk"] = ok
-    return ok
+    return base.check_profile(summary)
 
 
 def parse_rounds(value: str | None = None) -> int:
@@ -246,7 +232,7 @@ def main() -> int:
         return 0
     try:
         if not check_profile(summary):
-            summary["error"] = "profile mismatch; expected configured real API profile/model"
+            summary["error"] = f"profile mismatch; expected {EXPECTED_PROFILE_NAME} / {EXPECTED_MODEL}"
             return 2
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):

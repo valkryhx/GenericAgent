@@ -474,18 +474,81 @@ def summarize_jobs(run: WorkflowRun, artifact_dir: Path) -> list[dict]:
     return jobs
 
 
+def _resolve_profile_metadata(profile_name: str, *, config_path: str | None = None) -> dict[str, str] | None:
+    """Resolve the profile the workflow runner can actually use.
+
+    P8 predates the llm.yaml workflow binding and used mykey-only config names.
+    Keep that fallback for old environments, but prefer the YAML profile whenever
+    it exists so the preflight and child metadata inspect the same binding.
+    """
+    name = str(profile_name or "").strip()
+    if not name:
+        return None
+    try:
+        from llm_config import find_llm_config, load_llm_config
+
+        path = config_path or find_llm_config(start_dir=str(REPO))
+        if path:
+            config = load_llm_config(path)
+            if name in config.profiles:
+                resolved = config.resolve(name)
+                legacy = resolved.to_legacy_cfg()
+                return {
+                    "configName": name,
+                    "name": name,
+                    "model": str(legacy.get("model") or config.profiles[name].model or ""),
+                    "apiMode": str(legacy.get("api_mode") or "chat_completions"),
+                    "source": "llm.yaml",
+                }
+    except Exception:
+        if config_path:
+            raise
+
+    if config_path:
+        return None
+    try:
+        from llmcore import reload_mykeys
+
+        cfg = reload_mykeys()[0].get(name) or {}
+    except Exception:
+        cfg = {}
+    if not cfg:
+        return None
+    return {
+        "configName": name,
+        "name": str(cfg.get("name") or ""),
+        "model": str(cfg.get("model") or ""),
+        "apiMode": str(cfg.get("api_mode") or "chat_completions"),
+        "source": "mykey",
+    }
+
+
+def _wait_for_runtime_thread(thread: threading.Thread, *, timeout_seconds: float = 30.0) -> bool:
+    """Wait for runtime finalization before inspecting its persisted journal."""
+    thread.join(timeout=max(0.0, float(timeout_seconds)))
+    return not thread.is_alive()
+
+
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
-    profile = {
+        try:
+            from workflow_llm import binding_from_env
+
+            binding = binding_from_env()
+            profile = _resolve_profile_metadata(binding.profile_name)
+            if profile is not None and binding.model_id:
+                profile["model"] = binding.model_id
+        except Exception:
+            profile = _resolve_profile_metadata(CONFIG_NAME)
+    profile = profile or {
         "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode", "chat_completions"),
-        "loadLogChars": len(captured.getvalue()),
+        "name": None,
+        "model": None,
+        "apiMode": "chat_completions",
+        "source": None,
     }
+    profile["loadLogChars"] = len(captured.getvalue())
     ok = profile["name"] == EXPECTED_PROFILE_NAME and profile["model"] == EXPECTED_MODEL
     summary["profile"] = profile
     summary["profileOk"] = ok
@@ -544,7 +607,7 @@ def run_inherit_permission_smoke_case(root: Path) -> dict:
         and cache_key.get("permissionPolicyVersion") == "inherit-current-v1"
         and metadata.get("permissionProfile") == "inherit-current-permissions"
         and metadata.get("permissionPolicyVersion") == "inherit-current-v1"
-        and metadata.get("configName") == CONFIG_NAME
+        and metadata.get("configName") == EXPECTED_PROFILE_NAME
         and "transcriptEvents" not in result_data
         and set((result_data.get("toolSummary") or {}).get("allowedTools") or []) <= {"no_tool"}
         and (result_data.get("toolSummary") or {}).get("denied", 0) == 0
@@ -972,6 +1035,7 @@ def run_killed_source_resume_real_api_case(root: Path) -> dict:
             if current.status == "killed" and any(job.status == "cancelled" for job in current.jobs):
                 break
             time.sleep(0.05)
+    _wait_for_runtime_thread(thread, timeout_seconds=30.0)
     elapsed = time.time() - start
     source_loaded = store.load_run(source.run_id)
     source_artifact_dir = Path(source_loaded.artifact_dir)
@@ -1678,7 +1742,7 @@ def main() -> int:
         return 0
     try:
         if not check_profile(summary):
-            summary["error"] = "profile mismatch; expected gpt-native / gpt-5.5"
+            summary["error"] = f"profile mismatch; expected {EXPECTED_PROFILE_NAME} / {EXPECTED_MODEL}"
             return 2
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
