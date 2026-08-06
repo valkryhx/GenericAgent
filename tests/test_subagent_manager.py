@@ -1282,6 +1282,48 @@ class WaitAgentsWriteAmplificationTest(unittest.TestCase):
             self.assertEqual((task_dir / "state.json").read_text(encoding="utf-8"), before)
             self.assertEqual((probed.turn_status, probed.process_status), ("running", "exited"))
 
+    def test_list_agent_snapshots_fallback_scans_without_writing(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._running_agent(td, "snapshot", 450)
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: False, sleep=lambda _: None)
+            before = (task_dir / "state.json").read_text(encoding="utf-8")
+            registry_path = Path(td) / "temp" / "subagents" / "registry.json"
+            writes = self._count_writes()
+
+            snapshots = manager.list_agent_snapshots(include_closed=True)
+
+            self.assertEqual(["snapshot"], [state.task_name for state in snapshots])
+            self.assertEqual("exited", snapshots[0].process_status)
+            self.assertEqual(writes, [])
+            self.assertEqual((task_dir / "state.json").read_text(encoding="utf-8"), before)
+            self.assertFalse(registry_path.exists())
+
+    def test_list_agent_snapshots_uses_registry_filters_without_writing(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(
+                root_dir=td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 451})(),
+                python_executable="python-test",
+                process_exists=lambda _pid: False,
+                sleep=lambda _: None,
+            )
+            handle = manager.spawn_agent("registered", "prompt")
+            manager.close_agent(handle.agent_path, grace_s=0)
+            state_path = Path(handle.task_dir) / "state.json"
+            registry_path = Path(td) / "temp" / "subagents" / "registry.json"
+            state_before = state_path.read_text(encoding="utf-8")
+            registry_before = registry_path.read_text(encoding="utf-8")
+            writes = self._count_writes()
+
+            self.assertEqual([], manager.list_agent_snapshots())
+            snapshots = manager.list_agent_snapshots(path_prefix="/root/reg", include_closed=True)
+
+            self.assertEqual(["/root/registered"], [state.agent_path for state in snapshots])
+            self.assertEqual("shutdown", snapshots[0].process_status)
+            self.assertEqual(writes, [])
+            self.assertEqual(state_before, state_path.read_text(encoding="utf-8"))
+            self.assertEqual(registry_before, registry_path.read_text(encoding="utf-8"))
+
 
 class WaitAgentsWatchTest(unittest.TestCase):
     """B3 watch half: a wait holding live channels must sleep on them, not on a timer.

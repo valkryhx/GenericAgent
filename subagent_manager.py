@@ -692,7 +692,7 @@ class SubagentManager:
         self._write_registry_entry(task_name, state, task_dir)
         return self._registry_entry(task_name, state, task_dir)
 
-    def list_agents(self, path_prefix=None, include_closed=False):
+    def _list_agent_states(self, state_reader, path_prefix=None, include_closed=False):
         registry_entries = self.registry.list_agents(path_prefix=path_prefix, include_closed=True)
         if registry_entries:
             states = []
@@ -700,7 +700,7 @@ class SubagentManager:
                 if not include_closed and entry.status == "closed":
                     continue
                 try:
-                    state = self.read_agent(entry.agent_path)
+                    state = state_reader(entry.agent_path)
                 except (FileNotFoundError, ValueError):
                     continue
                 if not include_closed and state.process_status in {"shutdown", "killed"}:
@@ -717,7 +717,7 @@ class SubagentManager:
                 continue
             try:
                 self._task_name_from_target(child.name)
-                state = self.read_agent(child.name)
+                state = state_reader(child.name)
             except (FileNotFoundError, ValueError):
                 continue
             if path_prefix and not state.agent_path.startswith(path_prefix):
@@ -726,6 +726,13 @@ class SubagentManager:
                 continue
             states.append(state)
         return states
+
+    def list_agents(self, path_prefix=None, include_closed=False):
+        return self._list_agent_states(self.read_agent, path_prefix=path_prefix, include_closed=include_closed)
+
+    def list_agent_snapshots(self, path_prefix=None, include_closed=False):
+        """List derived agent states without persisting state or registry refreshes."""
+        return self._list_agent_states(self.probe_agent, path_prefix=path_prefix, include_closed=include_closed)
 
     def send_message(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
         return self._queue_message(
