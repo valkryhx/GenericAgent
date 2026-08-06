@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
@@ -12,6 +14,42 @@ from workflow_store import WorkflowStore
 
 
 SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+
+
+def normalize_workflow_workspace(args) -> str | None:
+    """Return the canonical workflow workspace from runtime args.
+
+    ``workspacePath`` is the canonical field; ``workspace`` is retained as a
+    compatibility alias.  A supplied workspace must be an existing directory
+    so every child job can safely use it as its working directory.
+    """
+    if not isinstance(args, dict):
+        return None
+
+    supplied = [(field, args[field]) for field in ("workspacePath", "workspace") if field in args]
+    if not supplied:
+        return None
+
+    resolved: list[tuple[str, Path]] = []
+    for field, raw in supplied:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"workflow args {field} must be a non-empty path")
+        try:
+            path = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"workflow args {field} is not a valid path") from exc
+        resolved.append((field, path))
+
+    if len(resolved) == 2:
+        first = os.path.normcase(os.path.normpath(str(resolved[0][1])))
+        second = os.path.normcase(os.path.normpath(str(resolved[1][1])))
+        if first != second:
+            raise ValueError("workflow args workspacePath and workspace must resolve to the same directory")
+
+    workspace = resolved[0][1]
+    if not workspace.is_dir():
+        raise ValueError("workflow workspace must be an existing directory")
+    return str(workspace)
 
 
 @dataclass
@@ -97,6 +135,7 @@ class AgentScheduler:
         self.config = config or SchedulerConfig()
         self.manage_run_completion = bool(manage_run_completion)
         self.args = args
+        self.workspace_path = None
         self.jobs = self.run.jobs
         self._stopping = False
 
@@ -112,19 +151,23 @@ class AgentScheduler:
         if len(self.jobs) >= self.config.max_total:
             self._append("agent_rejected", payload={"reason": "max_total_exceeded", "maxTotal": self.config.max_total})
             raise RuntimeError("workflow agent limit exceeded")
+        workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
+        metadata = {
+            "callIndex": call_index,
+            "label": label,
+            "options": normalize_agent_options(options),
+            "runId": self.run.run_id,
+            "permissionProfile": self.run.permission_profile,
+            "permissionPolicyVersion": self.run.permission_policy_version,
+        }
+        if workspace_path:
+            metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
             job_id=f"agent_{call_index + 1}",
             prompt=prompt,
             status="queued",
-            metadata={
-                "callIndex": call_index,
-                "label": label,
-                "options": normalize_agent_options(options),
-                "runId": self.run.run_id,
-                "permissionProfile": self.run.permission_profile,
-                "permissionPolicyVersion": self.run.permission_policy_version,
-            },
+            metadata=metadata,
         )
         job.metadata["cacheKey"] = self._cache_key(job)
         self.jobs.append(job)
@@ -137,22 +180,26 @@ class AgentScheduler:
         if len(self.jobs) >= self.config.max_total:
             self._append("agent_rejected", payload={"reason": "max_total_exceeded", "maxTotal": self.config.max_total})
             raise RuntimeError("workflow agent limit exceeded")
+        workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
+        metadata = {
+            "callIndex": call_index,
+            "label": label,
+            "options": normalize_agent_options(options),
+            "runId": self.run.run_id,
+            "permissionProfile": self.run.permission_profile,
+            "permissionPolicyVersion": self.run.permission_policy_version,
+            "result": sanitize(result.payload),
+            "cachedFromRunId": source_run_id,
+            "cachedFromJobId": source_job_id,
+        }
+        if workspace_path:
+            metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
             job_id=f"agent_{call_index + 1}",
             prompt=prompt,
             status="cached",
-            metadata={
-                "callIndex": call_index,
-                "label": label,
-                "options": normalize_agent_options(options),
-                "runId": self.run.run_id,
-                "permissionProfile": self.run.permission_profile,
-                "permissionPolicyVersion": self.run.permission_policy_version,
-                "result": sanitize(result.payload),
-                "cachedFromRunId": source_run_id,
-                "cachedFromJobId": source_job_id,
-            },
+            metadata=metadata,
         )
         job.metadata["cacheKey"] = self._cache_key(job)
         cached_result = copy.deepcopy(result)
@@ -184,6 +231,16 @@ class AgentScheduler:
         )
         self.store.write_workflow_progress(self.run)
         return job
+
+    def _sync_workspace_metadata(self) -> str | None:
+        workspace_path = normalize_workflow_workspace(self.args)
+        self.workspace_path = workspace_path
+        if workspace_path:
+            metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
+            metadata["workspacePath"] = workspace_path
+            self.run.metadata = metadata
+            self.store.save_run(self.run)
+        return workspace_path
 
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
         completed: list[WorkflowJob] = []

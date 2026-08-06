@@ -220,6 +220,7 @@ def main() -> int:
         "roundsRequested": rounds,
         "rounds": [],
         "secretScan": [],
+        "scannerMode": base.SECRET_SCANNER_MODE,
         "error": None,
     }
     if not OPT_IN:

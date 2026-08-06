@@ -1,7 +1,9 @@
+import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
+from pathlib import Path
 
 from workflow_child_agent import NativeGPTChildAgentRunner
 from workflow_models import WorkflowJob
@@ -102,6 +104,19 @@ class StubToolClient:
 
 
 class NativeGPTChildAgentRunnerTest(unittest.TestCase):
+    def test_child_cwd_uses_workspace_path_from_job_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_1",
+                prompt="write a relative file",
+                metadata={"runId": "wf_test", "workspacePath": str(workspace)},
+            )
+            runner = NativeGPTChildAgentRunner()
+
+            self.assertEqual(str(workspace.resolve()), runner._child_cwd(job))
+
     def test_child_agent_system_prompt_includes_optional_skill_listing(self):
         runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
 

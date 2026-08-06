@@ -108,6 +108,16 @@ class CountingRunner(FakeChildAgentRunner):
         super().start(job)
 
 
+class WorkspaceRecordingRunner(FakeChildAgentRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.started_jobs = []
+
+    def start(self, job):
+        self.started_jobs.append(job)
+        super().start(job)
+
+
 class FakeStream:
     def __init__(self):
         self.closed = False
@@ -181,6 +191,46 @@ class WorkflowRuntimeTest(unittest.TestCase):
         self.assertEqual("workflow-progress.json", final_result["workflowProgressRef"])
         self.assertTrue((Path(run.artifact_dir) / "workflow-progress.json").exists())
         return loaded, final_result
+
+    def test_runtime_passes_workspace_args_to_child_job_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('write a relative file', {label: 'coder'})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            expected = str(workspace.resolve())
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertEqual(expected, runner.started_jobs[0].metadata["workspacePath"])
+            loaded = store.load_run(run.run_id)
+            self.assertEqual(expected, loaded.metadata["workspacePath"])
+            self.assertEqual(expected, loaded.jobs[0].metadata["workspacePath"])
+
+    def test_runtime_rejects_missing_workspace_directory_before_child_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            missing_workspace = Path(tmp) / "missing-workspace"
+            script = "return await agent('this must not start')"
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            with self.assertRaisesRegex(ValueError, "workspace must be an existing directory"):
+                WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                    run,
+                    args={"workspacePath": str(missing_workspace)},
+                )
+
+            self.assertEqual([], runner.started_jobs)
 
     def test_runtime_large_child_transcripts_stay_out_of_result_and_journal(self):
         class LargeTranscriptRunner:
@@ -403,16 +453,50 @@ throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secr
             for secret in secret_values:
                 self.assertNotIn(secret, combined)
 
-    def test_runtime_rejects_forbidden_script_tokens_before_worker_starts(self):
+    def test_runtime_worker_sandbox_hides_script_capabilities(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
-            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script="return process.env", status="running"))
+            script = """
+return {
+  processType: typeof process,
+  requireType: typeof require,
+  fetchType: typeof fetch,
+  websocketType: typeof WebSocket,
+}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
-            with self.assertRaises(ValueError):
-                runtime.run(run)
+            outcome = runtime.run(run)
 
-            self.assertEqual([], store.replay_events("wf_test"))
+            self.assertEqual(
+                {
+                    "processType": "undefined",
+                    "requireType": "undefined",
+                    "fetchType": "undefined",
+                    "websocketType": "undefined",
+                },
+                outcome.result,
+            )
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
+
+    def test_runtime_allows_script_words_inside_agent_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('Please process this ordinary prompt and explain import and fetch semantics.')
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(
+                store=store,
+                runner=FakeChildAgentRunner(results={"agent_1": {"summary": "accepted"}}),
+            )
+
+            outcome = runtime.run(run)
+
+            self.assertEqual({"summary": "accepted"}, outcome.result)
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
 
     def test_runtime_marks_run_failed_when_worker_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +508,334 @@ throw new Error('HTTP 500 Authorization: Bearer sk-worker-secret; token=tok_secr
                 runtime.run(run)
 
             self.assert_runtime_failed_with_marker(store=store, run=run, marker="boom")
+
+    def test_runtime_required_python_unittest_gate_blocks_success_when_tests_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_gate_failure.py").write_text(
+                "import unittest\n\n"
+                "class GateFailureTest(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.fail('GA_P0_TEST_GATE_FAILURE')\n",
+                encoding="utf-8",
+            )
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', timeoutMs: 5000})
+return {verificationPassed: gate.passed, gatePassed: gate.gatePassed}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+
+            with self.assertRaisesRegex(RuntimeError, "test gate failed"):
+                runtime.run(run, args={"workspacePath": str(workspace)})
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("failed", loaded.status)
+            self.assertIn("GA_P0_TEST_GATE_FAILURE", loaded.error or "")
+            artifact_dir = Path(loaded.artifact_dir)
+            gate_result_path = artifact_dir / "test-gates" / "gate-1.json"
+            self.assertTrue(gate_result_path.exists())
+            gate_result = json.loads(gate_result_path.read_text(encoding="utf-8"))
+            self.assertFalse(gate_result["passed"])
+            self.assertFalse(gate_result["gatePassed"])
+            self.assertIn("GA_P0_TEST_GATE_FAILURE", gate_result["stderr"] + gate_result["stdout"])
+            self.assertTrue((artifact_dir / "TEST_FAILURES.txt").exists())
+            event_types = [event.event_type for event in store.replay_events("wf_test")]
+            self.assertIn("workflow_test_gate_started", event_types)
+            self.assertIn("workflow_test_gate_completed", event_types)
+            self.assertEqual("workflow_failed", event_types[-1])
+
+    def test_runtime_python_unittest_gate_allows_success_when_tests_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_gate_success.py").write_text(
+                "import unittest\n\n"
+                "class GateSuccessTest(unittest.TestCase):\n"
+                "    def test_success(self):\n"
+                "        self.assertEqual(2 + 2, 4)\n",
+                encoding="utf-8",
+            )
+            script = """
+const gate = await runPythonUnittest({workspacePath: args.workspacePath, pattern: 'test_*.py', phase: 'green'})
+return {passed: gate.passed, gatePassed: gate.gatePassed, artifactRef: gate.artifactRef}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertTrue(outcome.result["passed"])
+            self.assertTrue(outcome.result["gatePassed"])
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
+            self.assertTrue((Path(run.artifact_dir) / "test-gates" / "gate-1.json").exists())
+            event_types = [event.event_type for event in store.replay_events("wf_test")]
+            self.assertIn("workflow_test_gate_started", event_types)
+            self.assertIn("workflow_test_gate_completed", event_types)
+            self.assertNotIn("workflow_test_gate_failed", event_types)
+
+    def test_runtime_python_unittest_red_gate_accepts_expected_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_gate_red.py").write_text(
+                "import unittest\n\n"
+                "class GateRedTest(unittest.TestCase):\n"
+                "    def test_red(self):\n"
+                "        self.fail('GA_P0_EXPECTED_RED')\n",
+                encoding="utf-8",
+            )
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', expect: 'fail', phase: 'red'})
+return {passed: gate.passed, gatePassed: gate.gatePassed, expectation: gate.expectation}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertFalse(outcome.result["passed"])
+            self.assertTrue(outcome.result["gatePassed"])
+            self.assertEqual("fail", outcome.result["expectation"])
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
+            self.assertTrue((Path(run.artifact_dir) / "TEST_FAILURES.txt").exists())
+            self.assertNotIn(
+                "workflow_test_gate_failed",
+                [event.event_type for event in store.replay_events("wf_test")],
+            )
+
+    def test_runtime_python_unittest_gate_rejects_workspace_outside_trusted_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            outside = Path(tmp) / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            script = """
+const gate = await runPythonUnittest(args.outsidePath, {pattern: 'test_*.py', expect: 'fail'})
+return {passed: gate.passed, gatePassed: gate.gatePassed}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            with self.assertRaisesRegex(RuntimeError, "outside the allowed workflow workspace"):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(
+                    run,
+                    args={"workspacePath": str(workspace), "outsidePath": str(outside)},
+                )
+
+            gate_result = json.loads(
+                (Path(run.artifact_dir) / "test-gates" / "gate-1.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(gate_result["gatePassed"])
+            self.assertIn("outside the allowed workflow workspace", gate_result["error"])
+
+    def test_runtime_python_unittest_gate_records_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_gate_timeout.py").write_text(
+                "import time\nimport unittest\n\n"
+                "class GateTimeoutTest(unittest.TestCase):\n"
+                "    def test_timeout(self):\n"
+                "        time.sleep(1.0)\n",
+                encoding="utf-8",
+            )
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', timeoutMs: 50})
+return gate
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(
+                    run,
+                    args={"workspacePath": str(workspace)},
+                )
+
+            gate_result = json.loads(
+                (Path(run.artifact_dir) / "test-gates" / "gate-1.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(gate_result["timedOut"])
+            self.assertFalse(gate_result["passed"])
+
+    def test_runtime_python_unittest_gate_truncates_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_gate_output.py").write_text(
+                "import unittest\n\n"
+                "class GateOutputTest(unittest.TestCase):\n"
+                "    def test_output(self):\n"
+                "        print('GA_P0_OUTPUT_' + ('x' * 20000))\n"
+                "        self.fail('GA_P0_OUTPUT_FAILURE')\n",
+                encoding="utf-8",
+            )
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py'})
+return gate
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            with self.assertRaisesRegex(RuntimeError, "test gate failed"):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(
+                    run,
+                    args={"workspacePath": str(workspace)},
+                )
+
+            gate_result = json.loads(
+                (Path(run.artifact_dir) / "test-gates" / "gate-1.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(gate_result["truncated"])
+            self.assertLessEqual(len(gate_result["stdout"]), 12_040)
+            self.assertIn("GA_P0_OUTPUT_", gate_result["stdout"])
+            self.assertIn("[output truncated]", gate_result["stdout"])
+
+    def test_runtime_rejects_explicit_failed_verification_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const verification = await agent('return the verification result')
+return {verificationPassed: verification.verificationPassed}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = FakeChildAgentRunner(results={"agent_1": {"verificationPassed": False}})
+
+            with self.assertRaisesRegex(RuntimeError, "verification failed"):
+                WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("failed", loaded.status)
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["status"])
+            self.assertFalse(final_result["result"]["verificationPassed"])
+
+    def test_runtime_repair_and_retest_reuses_gate_until_repaired(self):
+        class RepairingRunner:
+            def __init__(self, test_path):
+                self.test_path = Path(test_path)
+                self.started_job_ids = []
+                self.repaired = False
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                if not self.repaired:
+                    failure_log = self.test_path.parent / "TEST_FAILURES.txt"
+                    if not failure_log.exists() or "GA_P0_REPAIR_REQUIRED" not in failure_log.read_text(encoding="utf-8"):
+                        raise AssertionError("repair child could not read workspace TEST_FAILURES.txt")
+                    self.test_path.write_text(
+                        "import unittest\n\n"
+                        "class RepairableTest(unittest.TestCase):\n"
+                        "    def test_repaired(self):\n"
+                        "        self.assertTrue(True)\n",
+                        encoding="utf-8",
+                    )
+                    self.repaired = True
+                return AgentResult(job_id=job.job_id, payload={"summary": "repaired"})
+
+            def cancel(self, job):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            test_path = workspace / "test_repairable.py"
+            test_path.write_text(
+                "import unittest\n\n"
+                "class RepairableTest(unittest.TestCase):\n"
+                "    def test_repaired(self):\n"
+                "        self.fail('GA_P0_REPAIR_REQUIRED')\n",
+                encoding="utf-8",
+            )
+            script = """
+const repair = await repairAndRetest({
+  workspacePath: args.workspacePath,
+  pattern: 'test_*.py',
+  maxAttempts: 1,
+  repairPrompt: 'Read TEST_FAILURES.txt and repair the failing test.',
+  labelPrefix: 'repair'
+})
+return {passed: repair.passed, gatePassed: repair.gatePassed, repairAttempts: repair.repairAttempts}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = RepairingRunner(test_path)
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertTrue(outcome.result["passed"])
+            self.assertTrue(outcome.result["gatePassed"])
+            self.assertEqual(1, outcome.result["repairAttempts"])
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
+            self.assertTrue((Path(run.artifact_dir) / "test-gates" / "gate-1.json").exists())
+            self.assertTrue((Path(run.artifact_dir) / "test-gates" / "gate-2.json").exists())
+            self.assertEqual(["agent_1"], runner.started_job_ids)
+            self.assertEqual("repair-1", store.load_run("wf_test").jobs[0].metadata["label"])
+
+    def test_runtime_repair_and_retest_stops_after_bounded_attempts(self):
+        class NonRepairingRunner:
+            def __init__(self):
+                self.started_job_ids = []
+
+            def start(self, job):
+                self.started_job_ids.append(job.job_id)
+
+            def poll(self, job):
+                return AgentResult(job_id=job.job_id, payload={"summary": "unable to repair"})
+
+            def cancel(self, job):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_unrepairable.py").write_text(
+                "import unittest\n\n"
+                "class UnrepairableTest(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.fail('GA_P0_REPAIR_EXHAUSTED')\n",
+                encoding="utf-8",
+            )
+            script = """
+const repair = await repairAndRetest({
+  workspacePath: args.workspacePath,
+  pattern: 'test_*.py',
+  maxAttempts: 2,
+  repairPrompt: 'Read TEST_FAILURES.txt and repair the failing test.'
+})
+return repair
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = NonRepairingRunner()
+
+            with self.assertRaisesRegex(RuntimeError, "test gate failed"):
+                WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                    run,
+                    args={"workspacePath": str(workspace)},
+                )
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("failed", loaded.status)
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual(["repair-1", "repair-2"], [job.metadata["label"] for job in loaded.jobs])
+            self.assertTrue((Path(run.artifact_dir) / "test-gates" / "gate-3.json").exists())
+            final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(2, final_result["result"]["repairAttempts"])
 
     def test_runtime_parallel_thunk_sync_throw_fails_without_agent_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:

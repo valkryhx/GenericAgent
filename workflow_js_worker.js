@@ -6,6 +6,7 @@ const vm = require('vm');
 
 let nextRpcId = 1;
 const pending = new Map();
+let nextRepairGroup = 1;
 
 function emit(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
@@ -39,10 +40,88 @@ function normalizeAgentOptions(options) {
   return options;
 }
 
+function normalizeTestGateParams(workspaceOrSpec, options) {
+  let spec;
+  if (
+    workspaceOrSpec &&
+    typeof workspaceOrSpec === 'object' &&
+    !Array.isArray(workspaceOrSpec) &&
+    options === undefined
+  ) {
+    spec = { ...workspaceOrSpec };
+  } else {
+    spec = { ...(options || {}), workspacePath: workspaceOrSpec };
+  }
+  if (typeof spec.workspacePath !== 'string' || !spec.workspacePath.trim()) {
+    throw new TypeError('runPythonUnittest requires a workspace path');
+  }
+  return spec;
+}
+
+function normalizeRepairParams(spec) {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new TypeError('repairAndRetest requires a plain object');
+  }
+  const maxAttempts = spec.maxAttempts === undefined ? 2 : Number(spec.maxAttempts);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 0 || maxAttempts > 3) {
+    throw new TypeError('repairAndRetest maxAttempts must be an integer between 0 and 3');
+  }
+  const repairPrompt = spec.repairPrompt;
+  if (typeof repairPrompt !== 'string' || !repairPrompt.trim()) {
+    throw new TypeError('repairAndRetest requires repairPrompt');
+  }
+  const labelPrefix = spec.labelPrefix === undefined ? 'repair' : spec.labelPrefix;
+  if (typeof labelPrefix !== 'string' || !/^[A-Za-z0-9_-]{1,32}$/.test(labelPrefix)) {
+    throw new TypeError('repairAndRetest labelPrefix is invalid');
+  }
+  const gateKey = spec.gateKey === undefined ? `repair-loop-${nextRepairGroup++}` : spec.gateKey;
+  if (typeof gateKey !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(gateKey)) {
+    throw new TypeError('repairAndRetest gateKey is invalid');
+  }
+  const gateSpec = { ...spec, gateKey };
+  delete gateSpec.maxAttempts;
+  delete gateSpec.repairPrompt;
+  delete gateSpec.labelPrefix;
+  return { gateSpec, maxAttempts, repairPrompt, labelPrefix, gateKey };
+}
+
 async function executeScript(script, args, options) {
   const sandbox = {
     args,
     agent: (prompt, options) => rpc('agent', { prompt, options: normalizeAgentOptions(options) }),
+    runPythonUnittest: (workspaceOrSpec, options) =>
+      rpc('runPythonUnittest', normalizeTestGateParams(workspaceOrSpec, options)),
+    repairAndRetest: async (spec) => {
+      const normalized = normalizeRepairParams(spec);
+      let gate = await rpc('runPythonUnittest', normalizeTestGateParams(normalized.gateSpec));
+      let repairAttempts = 0;
+      const repairs = [];
+      while (!gate.gatePassed && repairAttempts < normalized.maxAttempts) {
+        repairAttempts += 1;
+        const repair = await rpc('agent', {
+          prompt:
+            `${normalized.repairPrompt}\n` +
+            `Read ${normalized.gateSpec.workspacePath}/TEST_FAILURES.txt and the workspace files, ` +
+            'make the smallest repair, and return a concise result.',
+          options: normalizeAgentOptions({
+            label: `${normalized.labelPrefix}-${repairAttempts}`,
+            phase: 'Repair',
+          }),
+        });
+        repairs.push({ attempt: repairAttempts, result: repair });
+        gate = await rpc('runPythonUnittest', normalizeTestGateParams(normalized.gateSpec));
+      }
+      return {
+        type: 'repair_retest_result',
+        passed: Boolean(gate.passed),
+        gatePassed: Boolean(gate.gatePassed),
+        repairAttempts,
+        maxAttempts: normalized.maxAttempts,
+        gateKey: normalized.gateKey,
+        finalGate: gate,
+        repairs,
+      };
+    },
     phase: (name) => event('phase', { name }),
     log: (message) => event('log', { message }),
     parallel: async (items) => Promise.all((items || []).map((item) => (typeof item === 'function' ? item() : item))),

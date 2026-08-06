@@ -12,6 +12,21 @@ from workflow_store import WorkflowStore
 
 
 class WorkflowPlannerCompilerTest(unittest.TestCase):
+    def test_deterministic_planner_does_not_inject_sensitive_prompt_boundary(self):
+        draft = WorkflowPlanner().plan("调研 workflow 的执行拓扑")
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        prompts = [
+            agent["prompt"]
+            for phase in draft.plan["phases"]
+            for agent in phase["agents"]
+        ]
+        prompt_text = "\n".join(prompts)
+        self.assertNotIn("mykey.py", prompt_text)
+        self.assertNotIn("mykey.json", prompt_text)
+        self.assertNotIn("mcp.json", prompt_text)
+        self.assertNotIn("不要提交", prompt_text)
+
     def test_research_task_plans_validates_renders_persists_and_runs_with_fake_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             planner = WorkflowPlanner()

@@ -34,7 +34,9 @@ EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 REAL_MCP_OPT_IN = os.environ.get("GA_RUN_REAL_MCP_E2E") == "1"
 
-SECRET_PATTERNS = [
+SECRET_SCANNER_MODE = "high-confidence-only"
+
+SANITIZE_PATTERNS = [
     ("bearer", re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)),
     ("x_api_key", re.compile(r"(x-api-key\s*[:=]\s*)[^\s,;\]}]+", re.IGNORECASE)),
     ("api_key_field", re.compile(r"((?:api[_-]?key|apikey|token|secret|password)\s*[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;\]}]+", re.IGNORECASE)),
@@ -42,6 +44,19 @@ SECRET_PATTERNS = [
     ("sk_ant_token", re.compile(r"sk-ant-[A-Za-z0-9_-]{12,}")),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
 ]
+
+# Generic field names are useful when redacting output, but are too noisy for
+# a blocking artifact gate that also scans prompts, transcripts, and schemas.
+SECRET_PATTERNS = SANITIZE_PATTERNS
+BLOCKING_SECRET_PATTERNS = [
+    ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b", re.IGNORECASE)),
+    ("anthropic_key", re.compile(r"\bsk-ant-(?:api|admin)[A-Za-z0-9_-]{12,}\b", re.IGNORECASE)),
+    ("openai_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE)),
+    ("github_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("github_token", re.compile(r"\bghp_[A-Za-z0-9]{20,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b")),
+]
+SKIPPED_ARTIFACT_SUFFIXES = {".pyc", ".pyo"}
 
 RUNTIME_SCRIPT = r'''
 phase('P8 Real API Runtime E2E');
@@ -396,7 +411,7 @@ def sanitize(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     text = value
-    for _name, pattern in SECRET_PATTERNS:
+    for _name, pattern in SANITIZE_PATTERNS:
         def repl(match):
             if match.lastindex:
                 return match.group(1) + "[REDACTED]"
@@ -422,11 +437,13 @@ def scan_for_secret_material(root: Path) -> list[dict]:
     for path in root.rglob("*"):
         if not path.is_file():
             continue
+        if path.suffix.lower() in SKIPPED_ARTIFACT_SUFFIXES:
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        for name, pattern in SECRET_PATTERNS:
+        for name, pattern in BLOCKING_SECRET_PATTERNS:
             if pattern.search(text):
                 hits.append({"file": str(path.relative_to(root)), "pattern": name})
     return hits
@@ -1733,6 +1750,7 @@ def main() -> int:
         "root": str(root),
         "cases": {},
         "secretScan": [],
+        "scannerMode": SECRET_SCANNER_MODE,
         "error": None,
         "diagnostics": {},
     }

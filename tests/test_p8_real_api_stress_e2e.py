@@ -55,6 +55,7 @@ class P8RealApiStressE2ETest(unittest.TestCase):
             code, summary = self.run_main_with_output()
         self.assertEqual(0, code)
         self.assertTrue(summary["passed"])
+        self.assertEqual("high-confidence-only", summary["scannerMode"])
         self.assertEqual(2, summary["contractPassedRounds"])
         self.assertEqual(0, summary["contractFailedRounds"])
         self.assertEqual(2, summary["cleanSuccessRounds"])

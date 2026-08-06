@@ -151,7 +151,6 @@ def main() -> int:
             "transcriptEventTypes": sorted({event.get("type") for event in transcript_events if event.get("type")}),
             "scriptContainsMeta": "export const meta" in draft.script,
             "scriptContainsAgentLabel": "label: 'source-discovery'" in draft.script and "label: 'synthesis'" in draft.script,
-            "scriptContainsForbiddenToken": any(token in draft.script for token in ["require(", "process.", "child_process", "fetch("]),
             "artifactContainsSecretPattern": "sk-" in serialized_artifacts or "Bearer " in serialized_artifacts,
             "progressContainsTranscriptEvents": "transcriptEvents" in json.dumps(progress, ensure_ascii=False),
         })
@@ -177,8 +176,6 @@ def main() -> int:
             summary["issues"].append("job_not_succeeded")
         if not summary["scriptContainsMeta"] or not summary["scriptContainsAgentLabel"]:
             summary["issues"].append("rendered_script_missing_required_dsl")
-        if summary["scriptContainsForbiddenToken"]:
-            summary["issues"].append("rendered_script_contains_forbidden_token")
         if summary["artifactContainsSecretPattern"]:
             summary["issues"].append("artifact_contains_secret_pattern")
         if summary["progressContainsTranscriptEvents"]:

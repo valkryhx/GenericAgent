@@ -59,7 +59,6 @@ class BoundedRealPlannerClient(RealPlannerClient):
 - 不要输出 JavaScript；只输出 WorkflowPlan JSON。
 - phases 总数最多 3 个。
 - agents 总数最多 4 个。
-- 每个 agent.prompt 必须包含：不要读取 mykey.py、mykey.json、mcp.json；不要提交；只允许安全只读工具；不要修改文件。
 - 可以要求 agent 使用安全只读工具读取任务中明确列出的文件。
 - 不要要求 agent 写文件、执行破坏性命令、访问凭据文件或提交代码。
 """

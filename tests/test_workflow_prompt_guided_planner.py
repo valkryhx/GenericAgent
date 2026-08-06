@@ -81,13 +81,33 @@ def invalid_coding_parallel_plan():
     }
 
 
+def omitted_role_coding_parallel_plan():
+    boundary = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。"
+    return {
+        "taskType": "coding",
+        "meta": {"name": "missing-role-coding", "description": "Coding plan without agent roles"},
+        "phases": [
+            {
+                "title": "Build",
+                "agents": [
+                    {"label": "write-failing-tests", "prompt": f"{boundary} 先写红灯测试。", "dependsOn": []},
+                    {"label": "implement-minimal-code", "prompt": f"{boundary} 实现最小代码。", "dependsOn": []},
+                ],
+            }
+        ],
+        "schemas": {},
+        "artifacts": [],
+        "constraints": ["no_secret_files", "no_git_commit"],
+    }
+
+
 def repaired_coding_plan():
     boundary = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。"
     return {
         "taskType": "coding",
         "meta": {"name": "repaired-coding", "description": "TDD ordered coding plan"},
         "phases": [
-            {"title": "Understand", "agents": [{"label": "understand", "prompt": f"{boundary} 理解任务。", "dependsOn": []}]},
+            {"title": "Understand", "agents": [{"label": "understand", "role": "understanding", "prompt": f"{boundary} 理解任务。", "dependsOn": []}]},
             {"title": "Tests", "agents": [{"label": "write-failing-tests", "role": "tests", "prompt": f"{boundary} 先写 failing tests 并确认红灯。", "dependsOn": ["understand"]}]},
             {"title": "Implementation", "agents": [{"label": "implement-minimal-code", "role": "implementation", "prompt": f"{boundary} 红灯后实现最小代码。", "dependsOn": ["write-failing-tests"]}]},
             {"title": "Verification", "agents": [{"label": "run-tests", "role": "verification", "prompt": f"{boundary} 运行相关测试验证绿灯。", "dependsOn": ["implement-minimal-code"]}]},
@@ -182,6 +202,19 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertIn('"classificationHint": "review"', client.calls[0][0]["content"])
         self.assertIn("phases must be a non-empty array", client.calls[0][0]["content"])
 
+    def test_prompt_guided_request_does_not_require_sensitive_prompt_boundary(self):
+        client = FakePlannerClient(responses=[review_plan()])
+        planner = LLMWorkflowPlanner(client=client)
+
+        draft = planner.plan("审查普通 workflow 任务", context={"constraints": ["只读"]})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        request_text = client.calls[0][0]["content"]
+        self.assertNotIn("mykey.py", request_text)
+        self.assertNotIn("mykey.json", request_text)
+        self.assertNotIn("mcp.json", request_text)
+        self.assertNotIn("所有 agent.prompt 必须包含", request_text)
+
     def test_prompt_guided_planner_repairs_invalid_coding_parallel_plan(self):
         client = FakePlannerClient(responses=[invalid_coding_parallel_plan(), repaired_coding_plan()])
         planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
@@ -197,6 +230,21 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertNotIn("coding_tests_parallel_implementation", {issue["code"] for issue in draft.validation["issues"]})
         self.assertEqual(2, len(client.calls))
         self.assertIn("coding_tests_parallel_implementation", client.calls[1][0]["content"])
+
+    def test_prompt_guided_planner_repairs_coding_plan_that_omits_roles(self):
+        client = FakePlannerClient(responses=[omitted_role_coding_parallel_plan(), repaired_coding_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        draft = planner.plan(
+            "实现 workflow controller 的 planned run 入口",
+            context={"constraints": ["不要读取 mykey.py", "不要提交"]},
+        )
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual("repaired-coding", draft.plan["meta"]["name"])
+        self.assertNotIn("await parallel([", draft.script)
+        self.assertEqual(2, len(client.calls))
+        self.assertIn("missing_coding_role", client.calls[1][0]["content"])
 
     def test_prompt_guided_planner_falls_back_to_deterministic_planner_when_client_fails(self):
         client = FakePlannerClient(error=RuntimeError("planner provider down"))
@@ -352,7 +400,9 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
         text = fake_session.messages[0]["content"][0]["text"]
         self.assertIn("planner prompt", text)
         self.assertIn("只输出一个 JSON object", text)
-        self.assertIn("不要读取 mykey.py", text)
+        self.assertNotIn("mykey.py", text)
+        self.assertNotIn("mykey.json", text)
+        self.assertNotIn("mcp.json", text)
         self.assertIn("不要输出 JavaScript", text)
 
     def test_build_workflow_planner_from_env_defaults_to_deterministic(self):

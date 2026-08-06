@@ -42,7 +42,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
             "constraints": ["no_secret_files", "no_git_commit"],
         }
 
-    def test_rejects_undefined_dependency_schema_forbidden_token_and_missing_boundary(self):
+    def test_rejects_undefined_dependency_and_schema_without_prompt_boundary(self):
         plan = self.valid_plan()
         plan["phases"][0]["agents"][0]["schemaRef"] = "MISSING_SCHEMA"
         plan["phases"][0]["agents"][0]["prompt"] = "use process env"
@@ -52,9 +52,27 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         self.assertEqual(
-            {"undefined_schema", "forbidden_token", "missing_safety_boundary", "undefined_dependency"},
+            {"undefined_schema", "undefined_dependency"},
             {issue["code"] for issue in validation["issues"]},
         )
+
+    def test_accepts_agent_prompt_without_sensitive_file_template(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["prompt"] = "分析仓库中的普通 workflow 逻辑。"
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+        self.assertNotIn("missing_safety_boundary", {issue["code"] for issue in validation["issues"]})
+
+    def test_allows_script_words_in_prompt_without_safety_boundary(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["prompt"] = "请 process 这段说明，并比较 import 与 fetch 的语义。"
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+        self.assertNotIn("forbidden_token", {issue["code"] for issue in validation["issues"]})
 
     def test_rejects_coding_plan_that_parallelizes_tests_and_implementation(self):
         plan = self.valid_plan()
@@ -84,6 +102,65 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         self.assertIn("coding_tests_parallel_implementation", {issue["code"] for issue in validation["issues"]})
+
+    def test_rejects_coding_plan_that_omits_roles_even_when_labels_describe_roles(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "coding"
+        plan["phases"] = [
+            {
+                "title": "Build",
+                "agents": [
+                    {
+                        "label": "write-tests",
+                        "prompt": "边界：不要读取 mykey.py；不要提交；先写 failing tests。",
+                        "dependsOn": [],
+                    },
+                    {
+                        "label": "implement-code",
+                        "prompt": "边界：不要读取 mykey.py；不要提交；实现生产代码。",
+                        "dependsOn": [],
+                    },
+                ],
+            }
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertEqual(
+            {"missing_coding_role"},
+            {issue["code"] for issue in validation["issues"]},
+        )
+
+    def test_rejects_noncanonical_coding_role_that_could_bypass_topology_check(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "coding"
+        plan["phases"] = [
+            {
+                "title": "Build",
+                "agents": [
+                    {
+                        "label": "write-tests",
+                        "role": "test-writer",
+                        "prompt": "边界：不要读取 mykey.py；不要提交；先写 failing tests。",
+                        "dependsOn": [],
+                    },
+                    {
+                        "label": "implement-code",
+                        "role": "implementation",
+                        "prompt": "边界：不要读取 mykey.py；不要提交；实现生产代码。",
+                        "dependsOn": [],
+                    },
+                ],
+            }
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("invalid_coding_role", {issue["code"] for issue in validation["issues"]})
 
     def test_renderer_uses_parallel_for_independent_same_phase_agents(self):
         plan = self.valid_plan()

@@ -114,6 +114,25 @@ class WorkflowStore:
         job.result_ref = result_ref
         return result_ref
 
+    def write_test_gate_result(self, run: WorkflowRun, gate_id: str, result: dict) -> str:
+        result_ref = f"test-gates/{gate_id}.json"
+        result_path = self._run_dir(run) / result_ref
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(result_path, sanitize(result))
+        return result_ref
+
+    def write_test_failures(self, run: WorkflowRun, text: str) -> str:
+        result_ref = "TEST_FAILURES.txt"
+        result_path = self._run_dir(run) / result_ref
+        self._write_text(result_path, sanitize(text))
+        return result_ref
+
+    @staticmethod
+    def write_test_failures_to_workspace(workspace: str | Path, text: str) -> str:
+        result_path = Path(workspace) / "TEST_FAILURES.txt"
+        atomic_write_text(result_path, sanitize(text))
+        return "TEST_FAILURES.txt"
+
     def read_agent_result(self, run: WorkflowRun | str, job: WorkflowJob | str) -> AgentResult:
         artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
         if isinstance(job, WorkflowJob):

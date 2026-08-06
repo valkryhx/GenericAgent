@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from types import SimpleNamespace
+from pathlib import Path
 from typing import Protocol
 
 from sensitive_redaction import sanitize, redact_sensitive_text
@@ -443,6 +444,14 @@ class NativeGPTChildAgentRunner:
         }
 
     def _child_cwd(self, job) -> str:
+        workspace_path = job.metadata.get("workspacePath")
+        if workspace_path is not None:
+            if not isinstance(workspace_path, str) or not workspace_path.strip():
+                raise ValueError("job workspacePath must be a non-empty path")
+            workspace = Path(workspace_path).expanduser().resolve()
+            if not workspace.is_dir():
+                raise ValueError("job workspacePath must be an existing directory")
+            return str(workspace)
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp", "workflow_child_agents", str(job.job_id))
 
     def _permission_profile(self, job) -> str:

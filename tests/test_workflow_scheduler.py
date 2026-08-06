@@ -202,6 +202,47 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertNotEqual(job_a.metadata["cacheKey"]["argsHash"], job_b.metadata["cacheKey"]["argsHash"])
         self.assertNotEqual(job_a.metadata["cacheKey"], job_b.metadata["cacheKey"])
 
+    def test_register_agent_records_canonical_workspace_from_runtime_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            scheduler, store, run = self.make_scheduler()
+            scheduler.args = {"workspace": str(workspace)}
+
+            job = scheduler.register_agent(prompt="write relative file", label="coder")
+
+            expected = str(workspace.resolve())
+            self.assertEqual(expected, job.metadata["workspacePath"])
+            self.assertEqual(expected, store.load_run(run.run_id).metadata["workspacePath"])
+
+    def test_register_cached_agent_records_canonical_workspace_from_runtime_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            scheduler, store, run = self.make_scheduler()
+            scheduler.args = {"workspacePath": str(workspace)}
+            result = AgentResult(job_id="source_agent_1", status="succeeded", payload={"summary": "cached"})
+
+            job = scheduler.register_cached_agent(prompt="reuse result", result=result)
+
+            expected = str(workspace.resolve())
+            self.assertEqual(expected, job.metadata["workspacePath"])
+            self.assertEqual(expected, store.load_run(run.run_id).metadata["workspacePath"])
+
+    def test_register_agent_rejects_conflicting_workspace_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_a = Path(tmp) / "workspace-a"
+            workspace_b = Path(tmp) / "workspace-b"
+            workspace_a.mkdir()
+            workspace_b.mkdir()
+            scheduler, _store, _run = self.make_scheduler()
+            scheduler.args = {"workspacePath": str(workspace_a), "workspace": str(workspace_b)}
+
+            with self.assertRaisesRegex(ValueError, "must resolve to the same directory"):
+                scheduler.register_agent(prompt="ambiguous workspace")
+
+            self.assertEqual([], scheduler.jobs)
+
     def test_cache_key_distinguishes_json_values_from_json_like_strings(self):
         scheduler_object, _store_object, _run_object = self.make_scheduler()
         scheduler_string, _store_string, _run_string = self.make_scheduler(run_kwargs={"run_id": "wf_test_string"})

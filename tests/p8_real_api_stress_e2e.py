@@ -229,6 +229,7 @@ def main() -> int:
         "fanout": fanout,
         "rounds": [],
         "secretScan": [],
+        "scannerMode": base.SECRET_SCANNER_MODE,
         "error": None,
     }
     if not OPT_IN:

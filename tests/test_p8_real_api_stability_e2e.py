@@ -59,6 +59,7 @@ class P8RealApiStabilityE2ETest(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertTrue(summary["passed"])
+        self.assertEqual("high-confidence-only", summary["scannerMode"])
         self.assertEqual(3, summary["totalRounds"])
         self.assertEqual(3, summary["passedRounds"])
         self.assertEqual(0, summary["failedRounds"])

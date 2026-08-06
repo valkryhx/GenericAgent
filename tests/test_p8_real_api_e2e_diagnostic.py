@@ -40,6 +40,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
         summary = json.loads(output.getvalue())
         self.assertEqual(0, code)
         self.assertTrue(summary["passed"])
+        self.assertEqual("high-confidence-only", summary["scannerMode"])
         self.assertEqual(bridge_stop_diagnostic, summary["diagnostics"]["realApiBridgeStopResumeDiagnostic"])
         self.assertIn("realApiMidCallStopDiagnostic", summary["diagnostics"])
         self.assertNotIn("realApiMidCallStopDiagnostic", summary["cases"])

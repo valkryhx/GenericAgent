@@ -1838,7 +1838,7 @@ return values
                 marker="GA_P8_PIPELINE_STAGE_THROW",
             )
 
-    def test_workflow_approve_forbidden_script_emits_failed_final_error_and_idle(self):
+    def test_workflow_approve_sandbox_rejects_process_access_and_emits_failed_final_error_and_idle(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -1853,7 +1853,7 @@ return values
                 bridge=bridge,
                 events=events,
                 run_id=run_id,
-                marker="process",
+                marker="Cannot read properties of undefined",
             )
 
     def test_workflow_approve_real_runtime_parallel_thunk_throw_emits_failed_final_error_and_idle(self):
