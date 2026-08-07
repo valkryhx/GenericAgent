@@ -544,3 +544,64 @@ gate-2: passed=true, gatePassed=true
 在同一 `luna / gpt-5.6-luna` 配置下另执行了一次临时 P1-5 workspace probe：workspace 为空，child 只被要求用相对路径写入 `p1_5_cwd_probe.txt`。结果为 `runStatus=succeeded`、`jobStatus=succeeded`，`runWorkspacePath` 与 `jobWorkspacePath` 完全相同，探针在目标 workspace 中存在且内容匹配，child response 非空。
 
 结论：P1-5 的已复现缺陷在 runtime contract 层已闭环。确定性测试确认路径规范化、metadata 传播、cached job 传播和非法 workspace 拒绝；真实 API 测试确认 child 的相对路径确实落在 args 指定 workspace。未提供 workspace args 的旧调用仍使用原有 fallback，因此该修复没有改变旧调用的默认目录语义。
+
+### P2-1：process subagent 与 workflow child agent 控制面不统一（2026-08-07）
+
+状态：**已修复并完成确定性回归和真实 `gpt-5.6-luna` 跨引擎 E2E。** 本轮没有合并两个执行器：process subagent 仍由 `SubagentManager`/`agentmain.py` 执行，workflow child 仍由 `WorkflowRuntime`/`AgentScheduler` 执行；统一的是只读控制面、状态/事件投影、结果引用和能力边界。
+
+实施结果：
+
+- 公共 runtime model：以 engine-scoped opaque `execution_id` 区分 `process_agent`、`workflow_run` 和 `workflow_child`；`AgentRecord`、`AgentResultRecord`、`AgentCapabilities`、`AgentEventBatch` 保留 `source_status`、`cached`、`partial` 和 engine-specific metadata。
+- process read seam：`c60b842` 新增 `list_agent_snapshots()`，adapter 使用 `probe_agent()` 枚举，不写 `state.json` 或 registry；process spawn、wait、mailbox、resume、interrupt/close 和旧 `list_agents()` 行为未改。`5f1a687` 投影 process record、事件和 artifact/transcript 引用。
+- workflow source contract：`a4c8000`/`8dfd7e3` 增加 bounded `childSummary`/`executionOutcome`、handled child failure 的 `partial` 投影、bounded transcript reader 和 per-run `.journal.lock` sequence 分配；并发 writer 通过进程内 path lock 加 OS lock，stable event id 不再依赖调用方预分配 sequence。
+- workflow identity：当前 GA 继续使用 `run_id + job_id`，不伪造 Claude 的 `logical_key`、`attempt_id` 或 attempt counter；resume/cache 来源通过 `cachedFromRunId`/`cachedFromJobId` 保留。
+- read adapters：`ProcessSubagentAdapter` 与 `WorkflowChildAdapter` 分别投影原始执行器；`75a3cfb` 的 `UnifiedAgentControl` 合并 records/events/results，使用 `process` 和 `workflow:<run_id>` source cursor，并按 opaque execution ID 路由。
+- Ink projection：`53fb7ba` 保留 legacy `workflow_*` 事件，additive 增加 `agent_snapshot`/`agent_event`；reducer 对 snapshot/event 去重，status bar 能显示 common `partial` 而不改 raw workflow 状态。
+- lifecycle boundary：`ff3d2eb` 只在 capability 已声明时路由动作。process 保留真实 interrupt/close/message/followup/resume/attach/detach；workflow run 的 stop/cancel 保持 run scope；workflow child 的 cancel/close/message/resume 不伪装为 run 操作，返回结构化 `unsupported_capability` 且无副作用。
+
+真实 API E2E：
+
+```text
+python -m unittest tests.real_p2_1_agent_control_e2e -v
+1 test, skipped=1, no network request (opt-in absent)
+
+python tests/real_p2_1_agent_control_e2e.py
+skipped=true, no runner created
+
+GA_RUN_REAL_P2_1_E2E=1 python tests/real_p2_1_agent_control_e2e.py
+exit=0
+passed=true
+profile=luna
+model=gpt-5.6-luna
+provider=gpt-super-responses
+recordKinds=process_agent, workflow_child, workflow_run
+projectedStatuses=process:succeeded, workflow_child:succeeded, workflow_run:succeeded
+eventCount=8
+cursorKeys=process, workflow:wf_p2_1_luna
+artifactCounts=process:1, workflowChild:1, workflowRun:1
+workflowChildCapabilities=artifacts, events, read, result
+```
+
+该 harness 串行启动一个真实 process child 和一个真实 workflow child，均要求 bounded marker 输出；marker、prompt、transcript、完整 workspace 路径和 provider secret 不进入摘要。facade 查询确认三条 execution ID 不冲突，三类 record 均保留 workspace/permission metadata，process 与 workflow child 均提供 artifact/transcript/result 引用；process capability 保留 11 个既有动作，workflow child 未声明 process-only lifecycle 或 mailbox/resume。
+
+回归验证：
+
+```text
+python -m unittest discover -s tests
+Ran 942 tests in 159.726s
+OK (skipped=3)
+
+python -m unittest tests.test_agent_runtime_models tests.test_subagent_manager tests.test_agent_control_process tests.test_workflow_models tests.test_workflow_store tests.test_workflow_scheduler tests.test_workflow_controller tests.test_workflow_runtime tests.test_agent_control_workflow tests.test_agent_control -v
+Ran 227 tests in 34.549s
+OK
+
+cd frontends/ink-ui
+npm test
+tests=367, pass=367, fail=0, skipped=0
+npm run typecheck
+exit=0
+```
+
+结论：P2-1 的统一 read/control contract 已闭环。公共 identity、status、event cursor、result/artifact 引用、workspace/permission metadata 和 capability-aware lifecycle 均有确定性覆盖，并由真实 `gpt-5.6-luna` process/workflow E2E 验证；不再把“两个执行器相同”误认为“控制面事实可统一”。
+
+本轮明确保留的非目标：workflow child mailbox、独立 child-level cancel、独立 child resume、物理 artifact 目录迁移、跨引擎第二套 durable unified journal，以及把 Claude 的 logical key/attempt 模型伪造到当前 GA。后续若实现 workflow-specific `skip`/`retry`，必须单独定义 capability、scope、状态迁移和审计事件。
