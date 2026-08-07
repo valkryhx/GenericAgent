@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tsx src/main.tsx",
     "test": "tsx --test src/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e:real-ui": "tsx scripts/real_ink_ui_user_input_e2e.ts"
   },
   "dependencies": {
     "ink": "^5.0.1",
