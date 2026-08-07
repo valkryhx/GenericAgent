@@ -292,7 +292,20 @@ class FakeAgentControl:
         raise AssertionError("control is not used by the bridge snapshot tests")
 
 
+_REAL_GENERIC_AGENT_BRIDGE = GenericAgentBridge
+
+
+def make_isolated_bridge(*args, **kwargs):
+    kwargs.setdefault("agent_control", FakeAgentControl())
+    return _REAL_GENERIC_AGENT_BRIDGE(*args, **kwargs)
+
+
 class InkBridgeTest(unittest.TestCase):
+    def setUp(self):
+        bridge_patch = patch(f"{__name__}.GenericAgentBridge", new=make_isolated_bridge)
+        bridge_patch.start()
+        self.addCleanup(bridge_patch.stop)
+
     def test_workflow_refresh_emits_common_records_and_events_alongside_legacy_workflow_events(self):
         agent = FakeAgent()
         events = []
