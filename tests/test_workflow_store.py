@@ -45,6 +45,67 @@ class WorkflowStoreTest(unittest.TestCase):
             lines = (Path(run.artifact_dir) / "journal.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(2, len(lines))
 
+    def test_append_event_allocates_unique_sequence_under_concurrent_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(run_id="wf_journal", session_id="session_test", script=""))
+            barrier = threading.Barrier(3)
+            result_lock = threading.Lock()
+            assigned = []
+            errors = []
+
+            def write_event(event_type):
+                try:
+                    local_store = WorkflowStore(root=tmp)
+                    barrier.wait()
+                    stored = local_store.append_event(
+                        run.run_id,
+                        WorkflowEvent(run_id=run.run_id, event_type=event_type, sequence=1),
+                    )
+                    with result_lock:
+                        assigned.append(stored.sequence)
+                except Exception as exc:
+                    with result_lock:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=write_event, args=(name,)) for name in ("writer_a", "writer_b")]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=2.0)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual([], errors)
+            self.assertEqual([1, 2], sorted(assigned))
+            events = store.replay_events(run.run_id)
+            self.assertEqual([1, 2], [event.sequence for event in events])
+            self.assertEqual(2, len({event.sequence for event in events}))
+
+    def test_list_runs_and_bounded_transcript_reader_are_public_and_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run_b = store.create_run(
+                WorkflowRun(
+                    run_id="wf_b",
+                    session_id="session_b",
+                    script="",
+                    jobs=[WorkflowJob(job_id="agent_1")],
+                )
+            )
+            store.create_run(WorkflowRun(run_id="wf_a", session_id="session_a", script=""))
+            transcript_ref = store.write_agent_transcript(
+                run_b,
+                run_b.jobs[0],
+                [{"type": "metadata", "index": index} for index in range(20)],
+            )
+
+            self.assertEqual(["wf_a", "wf_b"], [run.run_id for run in store.list_runs()])
+            events = store.read_agent_transcript_events(run_b, transcript_ref, max_events=5)
+            self.assertEqual([0, 1, 2, 3, 4], [event["index"] for event in events])
+            with self.assertRaises(ValueError):
+                store.read_agent_transcript_events(run_b, "../state.json")
+
     def test_append_permission_event_maps_raw_event_to_workflow_journal_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

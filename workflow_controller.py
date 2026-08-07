@@ -128,13 +128,10 @@ class WorkflowController:
                 run_id=run.run_id,
                 session_id=run.session_id,
                 event_type=event_type,
-                sequence=self._next_sequence(run.run_id),
+                sequence=0,
                 payload=payload or {},
             ),
         )
-
-    def _next_sequence(self, run_id: str) -> int:
-        return max((event.sequence for event in self.store.replay_events(run_id)), default=0) + 1
 
     @staticmethod
     def _require_status(run: WorkflowRun, allowed: set[str], action: str):

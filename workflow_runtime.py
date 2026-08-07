@@ -15,7 +15,7 @@ from typing import Any
 
 from sensitive_redaction import is_sensitive_key, redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
-from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
+from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
 from workflow_store import WorkflowStore
 
@@ -176,6 +176,7 @@ class WorkflowRuntime:
                         raise RuntimeError(gate_error or verification_error)
                     run.status = "succeeded"
                     run.error = None
+                    refresh_workflow_execution_metadata(run)
                     self.store.save_run(run)
                     self.store.write_workflow_progress(run)
                     final_payload = self._final_payload(run, "succeeded", result=result)
@@ -190,6 +191,7 @@ class WorkflowRuntime:
             if current.status == "killed":
                 run.status = "killed"
                 run.error = current.error or reason
+                refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
                 self.store.write_final_result(
@@ -200,6 +202,7 @@ class WorkflowRuntime:
             else:
                 run.status = "failed"
                 run.error = reason
+                refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
                 self.store.write_final_result(
@@ -681,7 +684,7 @@ class WorkflowRuntime:
                 run_id=run.run_id,
                 session_id=run.session_id,
                 event_type=event_type,
-                sequence=max((event.sequence for event in self.store.replay_events(run.run_id)), default=0) + 1,
+                sequence=0,
                 payload=payload or {},
             ),
         )
@@ -793,6 +796,11 @@ class WorkflowRuntime:
             payload["result"] = sanitize(result)
         if error is not None:
             payload["error"] = redact_sensitive_text(error)
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        if "childSummary" in metadata:
+            payload["childSummary"] = sanitize(copy.deepcopy(metadata["childSummary"]))
+        if "executionOutcome" in metadata:
+            payload["executionOutcome"] = metadata["executionOutcome"]
         return sanitize(payload)
 
     def _terminate(self, process: subprocess.Popen) -> None:

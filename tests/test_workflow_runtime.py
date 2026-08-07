@@ -1874,6 +1874,40 @@ return results
             self.assertEqual("agent two failed after one success", failed_event.payload["error"])
             self.assertEqual("agents/agent_2/result.json", failed_event.payload["resultRef"])
 
+    def test_handled_child_failure_persists_partial_execution_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const first = await agent('succeeds first')
+let handled = false
+try {
+  await agent('fails second')
+} catch (error) {
+  handled = true
+}
+return {handled, first}
+"""
+            run = store.create_run(
+                WorkflowRun(run_id="wf_partial", session_id="session_test", script=script, status="running")
+            )
+
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=SucceedsThenFailsRunner(),
+                timeout_seconds=2.0,
+            ).run(run)
+
+            self.assertTrue(outcome.result["handled"])
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("partial", loaded.metadata["executionOutcome"])
+            self.assertEqual(1, loaded.metadata["childSummary"]["failed"])
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual("partial", final_result["executionOutcome"])
+            self.assertEqual(loaded.metadata["childSummary"], final_result["childSummary"])
+            self.assertEqual(loaded.metadata["childSummary"], progress["childSummary"])
+
     def test_runtime_provider_429_rate_limit_failure_preserves_artifacts_and_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

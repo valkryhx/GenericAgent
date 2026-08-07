@@ -14,6 +14,8 @@ SCHEMA_VERSION = 1
 # Readers open-read-close in microseconds, so backing off past the read burst is enough;
 # the budget is long so a reader can never turn into a lost write.
 _WINDOWS_REPLACE_RETRY_DELAYS = (0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8)
+_LOCAL_LOCKS = {}
+_LOCAL_LOCKS_GUARD = threading.Lock()
 
 
 def now_iso():
@@ -30,29 +32,33 @@ def cross_process_lock(lock_path):
     """
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        if os.name == "nt":
-            import msvcrt
+    lock_key = str(lock_path.resolve())
+    with _LOCAL_LOCKS_GUARD:
+        local_lock = _LOCAL_LOCKS.setdefault(lock_key, threading.Lock())
+    with local_lock:
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            if os.name == "nt":
+                import msvcrt
 
-            while True:
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.01)
                 try:
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.01)
-            try:
-                yield
-            finally:
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
 
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _replace_file(src, dst):

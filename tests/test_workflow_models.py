@@ -10,6 +10,8 @@ from workflow_models import (
     WorkflowJob,
     WorkflowRun,
     new_run_id,
+    project_workflow_execution_outcome,
+    summarize_workflow_jobs,
 )
 
 
@@ -117,6 +119,27 @@ class WorkflowModelsTest(unittest.TestCase):
 
     def test_new_run_id_uses_workflow_prefix(self):
         self.assertTrue(new_run_id().startswith("wf_"))
+
+    def test_workflow_child_summary_projects_handled_failure_to_partial(self):
+        jobs = [
+            WorkflowJob(job_id="agent_1", status="succeeded"),
+            WorkflowJob(job_id="agent_2", status="failed"),
+            WorkflowJob(
+                job_id="agent_3",
+                status="cached",
+                metadata={"cachedFromRunId": "wf_source", "cachedFromJobId": "agent_3"},
+            ),
+        ]
+
+        summary = summarize_workflow_jobs(jobs)
+
+        self.assertEqual(3, summary["total"])
+        self.assertEqual(1, summary["succeeded"])
+        self.assertEqual(1, summary["failed"])
+        self.assertEqual(1, summary["cached"])
+        self.assertEqual(3, summary["terminal"])
+        self.assertEqual("partial", project_workflow_execution_outcome("succeeded", summary))
+        self.assertEqual("failed", project_workflow_execution_outcome("failed", summary))
 
 
 if __name__ == "__main__":

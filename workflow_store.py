@@ -13,7 +13,13 @@ from subagent_state import (
     read_json_retrying,
     read_text_retrying,
 )
-from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
+from workflow_models import (
+    AgentResult,
+    WorkflowEvent,
+    WorkflowJob,
+    WorkflowRun,
+    refresh_workflow_execution_metadata,
+)
 
 
 def copy_tool_summary(value) -> dict:
@@ -75,8 +81,22 @@ class WorkflowStore:
 
     def append_event(self, run: WorkflowRun | str, event: WorkflowEvent) -> WorkflowEvent:
         artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
-        with (artifact_dir / "journal.jsonl").open("a", encoding="utf-8", errors="replace") as fh:
-            fh.write(json.dumps(sanitize(event.to_dict()), ensure_ascii=False, separators=(",", ":")) + "\n")
+        journal_path = artifact_dir / "journal.jsonl"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        with cross_process_lock(artifact_dir / ".journal.lock"):
+            current_max = 0
+            if journal_path.exists():
+                for line in journal_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        current_max = max(current_max, int(json.loads(line).get("sequence") or 0))
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        continue
+            if event.sequence <= current_max:
+                event.sequence = current_max + 1
+            with journal_path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write(json.dumps(sanitize(event.to_dict()), ensure_ascii=False, separators=(",", ":")) + "\n")
         return event
 
     def append_permission_event(self, run: WorkflowRun, raw_event: dict) -> WorkflowEvent:
@@ -101,7 +121,7 @@ class WorkflowStore:
             session_id=run.session_id,
             job_id=raw_event.get("jobId") or raw_event.get("job_id"),
             event_type=event_type,
-            sequence=self._next_sequence(run.run_id),
+            sequence=0,
             payload=payload,
         )
         return self.append_event(run, event)
@@ -185,6 +205,7 @@ class WorkflowStore:
 
     def write_workflow_progress(self, run: WorkflowRun) -> str:
         progress_ref = "workflow-progress.json"
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
         progress = {
             "runId": run.run_id,
             "sessionId": run.session_id,
@@ -192,6 +213,10 @@ class WorkflowStore:
             "workflowIssues": copy.deepcopy((run.metadata or {}).get("workflowIssues") or []),
             "workflowProgress": [self._build_job_progress(run, job, index) for index, job in enumerate(run.jobs, start=1)],
         }
+        if "childSummary" in metadata:
+            progress["childSummary"] = copy.deepcopy(metadata["childSummary"])
+        if "executionOutcome" in metadata:
+            progress["executionOutcome"] = metadata["executionOutcome"]
         self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
         return progress_ref
 
@@ -203,7 +228,7 @@ class WorkflowStore:
             except FileNotFoundError:
                 result = None
         transcript_ref = job.metadata.get("transcriptRef") or (result.transcript_ref if result else None)
-        transcript_events = self._read_agent_transcript_events(run, transcript_ref) if transcript_ref else []
+        transcript_events = self.read_agent_transcript_events(run, transcript_ref) if transcript_ref else []
         tool_calls = self._extract_tool_calls(transcript_events)
         loaded_skills = self._extract_loaded_skills(transcript_events)
         capabilities = self._extract_capability_summary(transcript_events)
@@ -243,13 +268,38 @@ class WorkflowStore:
         return progress
 
     def _read_agent_transcript_events(self, run: WorkflowRun, transcript_ref: str | None) -> list[dict]:
+        return self.read_agent_transcript_events(run, transcript_ref)
+
+    def read_agent_transcript_events(
+        self,
+        run: WorkflowRun | str,
+        transcript_ref: str | None,
+        *,
+        max_bytes: int = 64_000,
+        max_events: int = 256,
+    ) -> list[dict]:
         if not transcript_ref:
             return []
-        transcript_path = self._run_dir(run) / transcript_ref
+        max_bytes = max(0, int(max_bytes))
+        max_events = max(0, int(max_events))
+        if max_bytes == 0 or max_events == 0:
+            return []
+        artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
+        ref_path = Path(str(transcript_ref))
+        if ref_path.is_absolute() or ".." in ref_path.parts:
+            raise ValueError("transcript_ref must stay within the workflow artifact directory")
+        artifact_root = artifact_dir.resolve()
+        transcript_path = (artifact_dir / ref_path).resolve()
+        if transcript_path != artifact_root and artifact_root not in transcript_path.parents:
+            raise ValueError("transcript_ref must stay within the workflow artifact directory")
         if not transcript_path.exists():
             return []
+        with transcript_path.open("rb") as fh:
+            raw = fh.read(max_bytes)
         events: list[dict] = []
-        for line in transcript_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if len(events) >= max_events:
+                break
             if not line.strip():
                 continue
             try:
@@ -257,7 +307,7 @@ class WorkflowStore:
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
-                events.append(event)
+                events.append(sanitize(event))
         return events
 
     @staticmethod
@@ -381,16 +431,16 @@ class WorkflowStore:
             run.jobs.append(WorkflowJob(job_id=job_id, status="stale"))
             changed = True
         if changed:
-            next_sequence = max((event.sequence for event in self.replay_events(run_id)), default=0) + 1
             self.append_event(
                 run,
                 WorkflowEvent(
                     run_id=run.run_id,
                     session_id=run.session_id,
                     event_type="workflow_interrupted",
-                    sequence=next_sequence,
+                    sequence=0,
                 ),
             )
+            refresh_workflow_execution_metadata(run)
             self.save_run(run)
             self.write_workflow_progress(run)
         return run
@@ -409,8 +459,9 @@ class WorkflowStore:
             raise FileNotFoundError(run_id)
         return matches[0]
 
-    def _next_sequence(self, run_id: str) -> int:
-        return max((event.sequence for event in self.replay_events(run_id)), default=0) + 1
+    def list_runs(self) -> list[WorkflowRun]:
+        run_ids = sorted({path.parent.name for path in self.root.glob("*/workflows/*/state.json")})
+        return [self.load_run(run_id) for run_id in run_ids]
 
     def _preserve_external_kill(self, run: WorkflowRun, artifact_dir: Path) -> None:
         """Carry a `killed` status that landed on disk onto the row about to be written.

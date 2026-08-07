@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
-from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun
+from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore
 
 
@@ -324,8 +324,10 @@ class AgentScheduler:
     def _update_run_completion_state(self) -> None:
         if self.run.status != "running" or not self.jobs:
             return
+        refresh_workflow_execution_metadata(self.run)
         if all(job.status in {"succeeded", "cached"} for job in self.jobs):
             self.run.status = "succeeded"
+            refresh_workflow_execution_metadata(self.run)
             self.store.write_final_result(
                 self.run,
                 {
@@ -333,6 +335,8 @@ class AgentScheduler:
                     "status": self.run.status,
                     "workflowProgressRef": "workflow-progress.json",
                     "workflowIssues": sanitize(copy.deepcopy((self.run.metadata or {}).get("workflowIssues") or [])),
+                    "childSummary": sanitize(copy.deepcopy((self.run.metadata or {}).get("childSummary") or {})),
+                    "executionOutcome": (self.run.metadata or {}).get("executionOutcome"),
                     "jobs": [
                         {
                             "jobId": job.job_id,
@@ -505,14 +509,10 @@ class AgentScheduler:
                 session_id=self.run.session_id,
                 job_id=job.job_id if job else None,
                 event_type=event_type,
-                sequence=self._next_sequence(),
+                sequence=0,
                 payload=payload or {},
             ),
         )
-
-    def _next_sequence(self) -> int:
-        return max((event.sequence for event in self.store.replay_events(self.run.run_id)), default=0) + 1
-
 
 def _stable_hash(value) -> str:
     data = json.dumps(_hashable_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))

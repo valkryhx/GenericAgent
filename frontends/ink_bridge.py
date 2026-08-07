@@ -646,7 +646,7 @@ class GenericAgentBridge:
                         run_id=resumed.run_id,
                         session_id=resumed.session_id,
                         event_type="workflow_started",
-                        sequence=max((event.sequence for event in self.workflow_store.replay_events(resumed.run_id)), default=0) + 1,
+                        sequence=0,
                         payload={"resumeFromRunId": source_run_id},
                     ),
                 )
@@ -779,7 +779,7 @@ class GenericAgentBridge:
                             run_id=current.run_id,
                             session_id=current.session_id,
                             event_type="workflow_failed",
-                            sequence=max((event.sequence for event in existing_events), default=0) + 1,
+                            sequence=0,
                             payload={"error": reason},
                         ),
                     )

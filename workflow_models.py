@@ -37,6 +37,53 @@ JOB_STATUSES = frozenset(
 )
 
 
+def summarize_workflow_jobs(jobs) -> dict[str, int]:
+    summary = {
+        "total": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cached": 0,
+        "stale": 0,
+        "cancelled": 0,
+        "killed": 0,
+        "skipped": 0,
+        "running": 0,
+        "terminal": 0,
+    }
+    for job in jobs or []:
+        status = str(getattr(job, "status", "") or "")
+        summary["total"] += 1
+        if status in {"registered", "queued", "running"}:
+            summary["running"] += 1
+        else:
+            summary["terminal"] += 1
+        if status in summary:
+            summary[status] += 1
+    return summary
+
+
+def project_workflow_execution_outcome(raw_status: str, summary: dict[str, int]) -> str | None:
+    if raw_status == "failed":
+        return "failed"
+    if raw_status in {"succeeded", "completed"}:
+        success_like = summary["succeeded"] + summary["cached"]
+        return "succeeded" if success_like == summary["total"] else "partial"
+    return None
+
+
+def refresh_workflow_execution_metadata(run: "WorkflowRun") -> tuple[dict[str, int], str | None]:
+    summary = summarize_workflow_jobs(run.jobs)
+    outcome = project_workflow_execution_outcome(run.status, summary)
+    metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+    metadata["childSummary"] = summary
+    if outcome is None:
+        metadata.pop("executionOutcome", None)
+    else:
+        metadata["executionOutcome"] = outcome
+    run.metadata = metadata
+    return summary, outcome
+
+
 def new_run_id() -> str:
     return "wf_" + uuid.uuid4().hex
 
