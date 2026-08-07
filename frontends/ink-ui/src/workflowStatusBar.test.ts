@@ -14,6 +14,10 @@ function stateWithWorkflows(overrides: Partial<AppState>): AppState {
     workflowEvents: [],
     workflowDetails: {},
     workflowResults: {},
+    agents: [],
+    agentEvents: [],
+    agentCursors: {},
+    agentErrors: {},
     ...overrides,
   }
 }
@@ -174,4 +178,49 @@ test('workflowStatusBarCommandForKey maps Enter and running-only x controls', ()
   assert.equal(workflowStatusBarCommandForKey(running, { shift: true }, 'x'), null)
   assert.deepEqual(workflowStatusBarCommandForKey(awaiting, { return: true }, ''), { type: 'workflow_detail', runId: 'wf_review' })
   assert.equal(workflowStatusBarCommandForKey(awaiting, {}, 'x'), null)
+})
+
+test('workflowStatusBarFromState prefers the common workflow run status', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [{ runId: 'wf_common_status', sessionId: 'session', status: 'running', jobs: [] }],
+    agents: [{
+      executionId: 'workflow-run:wf_common_status',
+      engine: 'workflow',
+      recordKind: 'workflow_run',
+      status: 'partial',
+      runId: 'wf_common_status',
+      capabilities: { actions: [], features: [] },
+    }],
+  }))
+
+  assert.equal(bar?.status, 'partial')
+})
+
+test('workflowStatusBarFromState keeps raw workflow status as fallback', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [{ runId: 'wf_raw_status', sessionId: 'session', status: 'running', jobs: [] }],
+  }))
+
+  assert.equal(bar?.status, 'running')
+})
+
+test('workflowStatusBarFromState displays partial projection without rewriting raw workflow state', () => {
+  const run = { runId: 'wf_partial_status', sessionId: 'session', status: 'succeeded' as const, jobs: [] }
+  const state = stateWithWorkflows({
+    workflows: [run],
+    agents: [{
+      executionId: 'workflow-run:wf_partial_status',
+      engine: 'workflow',
+      recordKind: 'workflow_run',
+      status: 'partial',
+      sourceStatus: 'succeeded',
+      runId: 'wf_partial_status',
+      capabilities: { actions: [], features: [] },
+    }],
+  })
+
+  const bar = workflowStatusBarFromState(state)
+
+  assert.equal(bar?.status, 'partial')
+  assert.equal(state.workflows[0].status, 'succeeded')
 })

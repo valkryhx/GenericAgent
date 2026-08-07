@@ -380,3 +380,81 @@ test('applyBridgeEvent stores workflow list and detail payloads', () => {
   assert.equal(state.workflowDetails.wf_1.script, 'return 1')
   assert.equal(state.workflowDetails.wf_1.events.length, 1)
 })
+
+test('applyBridgeEvent stores process and workflow common agent snapshots', () => {
+  const state = applyBridgeEvent(initialState, {
+    type: 'agent_snapshot',
+    snapshot: {
+      records: [
+        {
+          executionId: 'process-agent:run:/root/worker',
+          engine: 'process',
+          recordKind: 'process_agent',
+          status: 'running',
+          capabilities: { actions: ['read'], features: [] },
+        },
+        {
+          executionId: 'workflow-run:wf_1',
+          engine: 'workflow',
+          recordKind: 'workflow_run',
+          status: 'running',
+          runId: 'wf_1',
+          capabilities: { actions: ['read'], features: [] },
+        },
+      ],
+      cursors: { process: 4, 'workflow:wf_1': 2 },
+      errors: {},
+    },
+  } as any)
+
+  assert.deepEqual((state as any).agents.map((record: any) => record.engine), ['process', 'workflow'])
+  assert.deepEqual((state as any).agentCursors, { process: 4, 'workflow:wf_1': 2 })
+})
+
+test('applyBridgeEvent appends common agent events once by eventId', () => {
+  const commonEvent = {
+    type: 'agent_event',
+    event: {
+      eventId: 'workflow:wf_1:4',
+      engine: 'workflow',
+      executionId: 'workflow-child:wf_1:agent_1',
+      sourceCursor: 'workflow:wf_1',
+      sourceSequence: 4,
+      type: 'agent_completed',
+      payload: { resultRef: 'agents/agent_1/result.json' },
+    },
+  } as any
+  let state = applyBridgeEvent(initialState, commonEvent)
+  state = applyBridgeEvent(state, commonEvent)
+
+  assert.equal((state as any).agentEvents.length, 1)
+  assert.equal((state as any).agentEvents[0].eventId, 'workflow:wf_1:4')
+})
+
+test('common agent events do not replace workflow detail or progress state', () => {
+  let state = applyBridgeEvent(initialState, {
+    type: 'workflow_detail',
+    run: { runId: 'wf_detail_common', sessionId: 's1', status: 'running' },
+    script: 'return 1',
+    events: [{ type: 'workflow_started', runId: 'wf_detail_common', sequence: 1, payload: {} }],
+    progress: {
+      runId: 'wf_detail_common',
+      status: 'running',
+      workflowProgress: [{ jobId: 'agent_1', state: 'running', label: 'worker' }],
+    },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'agent_event',
+    event: {
+      eventId: 'workflow:wf_detail_common:2',
+      engine: 'workflow',
+      executionId: 'workflow-child:wf_detail_common:agent_1',
+      sourceCursor: 'workflow:wf_detail_common',
+      sourceSequence: 2,
+      type: 'agent_completed',
+    },
+  } as any)
+
+  assert.equal(state.workflowDetails.wf_detail_common.script, 'return 1')
+  assert.equal(state.workflowDetails.wf_detail_common.progress?.workflowProgress[0]?.label, 'worker')
+})

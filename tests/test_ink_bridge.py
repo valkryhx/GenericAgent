@@ -31,6 +31,7 @@ from workflow_models import WorkflowJob  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
+from agent_runtime_models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
 
 
 class FakeBackend:
@@ -268,7 +269,101 @@ class FakeAgent:
         return {"ok": False, "code": "not_found", "message": "model not found"}
 
 
+class FakeAgentControl:
+    def __init__(self):
+        self.records = []
+        self.batch = AgentEventBatch()
+        self.cursors_seen = []
+
+    def list_records(self, *, include_terminal=False, engine=None):
+        return list(self.records)
+
+    def get_record(self, execution_id):
+        return next((record for record in self.records if record.execution_id == execution_id), None)
+
+    def events_since(self, cursors=None, *, execution_id=None):
+        self.cursors_seen.append(dict(cursors or {}))
+        return self.batch
+
+    def read_result(self, execution_id, *, include_preview=False):
+        raise AssertionError("read_result is not used by the bridge snapshot tests")
+
+    def control(self, execution_id, request):
+        raise AssertionError("control is not used by the bridge snapshot tests")
+
+
 class InkBridgeTest(unittest.TestCase):
+    def test_workflow_refresh_emits_common_records_and_events_alongside_legacy_workflow_events(self):
+        agent = FakeAgent()
+        events = []
+        control = FakeAgentControl()
+        control.batch = AgentEventBatch(
+            events=(
+                AgentEvent(
+                    sequence=1,
+                    event_type="agent_completed",
+                    agent_path="",
+                    event_id="workflow:wf_common:1",
+                    engine="workflow",
+                    execution_id="workflow-child:wf_common:agent_1",
+                    record_kind="workflow_child",
+                    source_sequence=1,
+                    source_cursor="workflow:wf_common",
+                ),
+            ),
+            next_cursors={"workflow:wf_common": 1},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                agent_control=control,
+            )
+            run_id = bridge.workflow_draft("return 1")
+            control.records = [
+                AgentRecord(
+                    execution_id="process-agent:run-process:/root/worker",
+                    engine="process",
+                    record_kind="process_agent",
+                    status="running",
+                    run_id="run-process",
+                    capabilities=AgentCapabilities(actions=frozenset({"read", "events"})),
+                ),
+                AgentRecord(
+                    execution_id=f"workflow-run:{run_id}",
+                    engine="workflow",
+                    record_kind="workflow_run",
+                    status="awaiting_approval",
+                    source_status="awaiting_approval",
+                    run_id=run_id,
+                    capabilities=AgentCapabilities(actions=frozenset({"read", "events"})),
+                ),
+                AgentRecord(
+                    execution_id=f"workflow-child:{run_id}:agent_1",
+                    engine="workflow",
+                    record_kind="workflow_child",
+                    status="queued",
+                    source_status="queued",
+                    run_id=run_id,
+                    job_id="agent_1",
+                    capabilities=AgentCapabilities(actions=frozenset({"read", "events"})),
+                ),
+            ]
+
+            bridge.workflow_detail(run_id)
+
+        snapshots = [event for event in events if event["type"] == "agent_snapshot"]
+        self.assertTrue(snapshots)
+        self.assertEqual(
+            {"process", "workflow"},
+            {record["engine"] for record in snapshots[-1]["snapshot"]["records"]},
+        )
+        self.assertTrue(any(event["type"] == "agent_event" for event in events))
+        self.assertTrue(any(event["type"] == "workflow_event" for event in events))
+        serialized = json.dumps(snapshots[-1], ensure_ascii=False)
+        self.assertNotIn("prompt", serialized)
+        self.assertNotIn("transcriptEvents", serialized)
     def test_encode_event_writes_compact_json_line(self):
         line = encode_event({"type": "assistant_delta", "text": "你好\nworld"})
 

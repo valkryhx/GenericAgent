@@ -14,18 +14,18 @@ export type WorkflowStatusBarSummary = {
 }
 
 const liveStatuses = new Set(['running', 'awaiting_approval'])
-const terminalStatuses = new Set(['succeeded', 'failed', 'killed', 'cancelled'])
-
 export function workflowStatusBarFromState(state: AppState): WorkflowStatusBarSummary | null {
   for (let index = state.workflows.length - 1; index >= 0; index--) {
     const run = state.workflows[index]!
-    if (!liveStatuses.has(run.status) || terminalStatuses.has(run.status)) continue
-    return workflowStatusBarFromRun(run, state)
+    const commonRecord = state.agents.find(record => record.recordKind === 'workflow_run' && record.runId === run.runId)
+    const status = commonRecord?.status ?? run.status
+    if (!liveStatuses.has(status) && status !== 'partial') continue
+    return workflowStatusBarFromRun(run, state, status)
   }
   return null
 }
 
-function workflowStatusBarFromRun(run: WorkflowRun, state: AppState): WorkflowStatusBarSummary {
+function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = run.status): WorkflowStatusBarSummary {
   const progressEntries = state.workflowDetails[run.runId]?.progress?.workflowProgress ?? []
   const agents = progressEntries.length > 0 ? progressEntries : progressFromJobs(run.jobs ?? [])
   const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached').length
@@ -33,7 +33,7 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState): WorkflowSt
   const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
   return {
     runId: run.runId,
-    status: run.status,
+    status,
     name: workflowDisplayName(run),
     completedAgents,
     totalAgents,
@@ -59,7 +59,7 @@ export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
   const pieces = [`${bar.completedAgents}/${bar.totalAgents} agents done`]
   if (bar.activeAgent) pieces.push(bar.lastActivity ? `${bar.activeAgent}: ${bar.lastActivity}` : bar.activeAgent)
   if (bar.tokenText) pieces.push(bar.tokenText)
-  return ['Enter view · x stop', `› ◌ ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
+  return [bar.status === 'running' ? 'Enter view · x stop' : 'Enter view', `› ◌ ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
 }
 
 export function workflowStatusBarCommandForKey(

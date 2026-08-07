@@ -217,6 +217,53 @@ export type WorkflowProgressPayload = {
   workflowProgress: WorkflowProgressEntry[]
 }
 
+export type AgentCapabilities = {
+  actions: string[]
+  features: string[]
+}
+
+export type AgentRecord = {
+  executionId: string
+  engine: 'process' | 'workflow' | string
+  recordKind: 'process_agent' | 'workflow_run' | 'workflow_child' | string
+  status: string
+  sourceStatus?: string | null
+  runId?: string | null
+  jobId?: string | null
+  logicalKey?: string | null
+  attemptId?: string | null
+  attemptIndex?: number | null
+  attemptCount?: number | null
+  cached?: boolean
+  parentExecutionId?: string | null
+  agentPath?: string | null
+  workspace?: string | null
+  permissionProfile?: string | null
+  artifactRefs?: Array<Record<string, unknown>>
+  transcriptRef?: string | null
+  capabilities: AgentCapabilities
+  metadata?: Record<string, unknown>
+}
+
+export type AgentEvent = {
+  eventId: string
+  engine: string
+  executionId: string
+  sourceCursor: string
+  sourceSequence: number
+  logicalKey?: string | null
+  attemptId?: string | null
+  attemptIndex?: number | null
+  type: string
+  payload?: Record<string, unknown>
+}
+
+export type AgentSnapshot = {
+  records: AgentRecord[]
+  cursors: Record<string, number>
+  errors: Record<string, string>
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -254,6 +301,8 @@ export type BridgeEvent =
   | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
   | { type: 'workflow_event'; event: WorkflowEvent }
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
+  | { type: 'agent_snapshot'; snapshot: AgentSnapshot }
+  | { type: 'agent_event'; event: AgentEvent }
   | { type: 'error'; code: string; message: string; taskId?: number }
 
 export type ChatMessage = {

@@ -183,6 +183,7 @@ class GenericAgentBridge:
         workflow_root: str | os.PathLike[str] | None = None,
         workflow_runtime_factory: Callable[..., Any] | None = None,
         workflow_planner_factory: Callable[[], Any] | None = None,
+        agent_control: Any | None = None,
     ) -> None:
         self.agent_factory = agent_factory
         with backend_output_redirect():
@@ -215,6 +216,25 @@ class GenericAgentBridge:
 
         self.workflow_store = WorkflowStore(root=workflow_root)
         self.workflow_controller = WorkflowController(store=self.workflow_store)
+        if agent_control is None:
+            with backend_output_redirect():
+                from agent_control import UnifiedAgentControl
+                from agent_control_process import ProcessSubagentAdapter
+                from agent_control_workflow import WorkflowChildAdapter
+                from subagent_manager import SubagentManager
+
+            process_manager = SubagentManager(root_dir=PROJECT_DIR, python_executable=sys.executable)
+            agent_control = UnifiedAgentControl(
+                [
+                    ProcessSubagentAdapter(process_manager),
+                    WorkflowChildAdapter(self.workflow_store, self.workflow_controller),
+                ]
+            )
+        self.agent_control = agent_control
+        self.agent_cursors: dict[str, int] = {}
+        self._agent_event_ids: set[str] = set()
+        self._agent_errors: dict[str, str] = {}
+        self._agent_snapshot_fingerprint: str | None = None
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
 
@@ -562,6 +582,7 @@ class GenericAgentBridge:
                     context=context if isinstance(context, dict) else {},
                     auto_approve=bool(auto_approve),
                 )
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
         except Exception as exc:
@@ -588,6 +609,7 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 run = self.workflow_controller.create_draft(session_id=session_id, script=str(script or ""))
                 run = self.workflow_controller.request_approval(run.run_id)
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_draft", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
             return run.run_id
@@ -606,6 +628,7 @@ class GenericAgentBridge:
         try:
             with backend_output_redirect():
                 run = self.workflow_controller.approve(run_id)
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
         except Exception as exc:
@@ -650,6 +673,7 @@ class GenericAgentBridge:
                         payload={"resumeFromRunId": source_run_id},
                     ),
                 )
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(resumed)})
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_resume_failed", "message": str(exc)})
@@ -667,6 +691,7 @@ class GenericAgentBridge:
     def workflow_list(self) -> None:
         try:
             runs = self._list_workflow_runs()
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_runs", "runs": [self._workflow_run_payload(run) for run in runs]})
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
@@ -678,6 +703,7 @@ class GenericAgentBridge:
                 events = self.workflow_store.replay_events(run.run_id)
                 draft = self._workflow_artifact_payload(run, run.metadata.get("workflowDraftRef"))
                 progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            self._emit_agent_read_model()
             self.emit(
                 {
                     "type": "workflow_detail",
@@ -699,6 +725,7 @@ class GenericAgentBridge:
             if progress is None:
                 self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
                 return
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_progress", "progress": progress})
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_progress_failed", "message": str(exc)})
@@ -711,6 +738,7 @@ class GenericAgentBridge:
         try:
             with backend_output_redirect():
                 run = self.workflow_controller.deny(run_id, reason=reason or "denied from Ink bridge")
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
             return True
@@ -733,6 +761,7 @@ class GenericAgentBridge:
                 else:
                     self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
                     return True
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
             return True
@@ -757,6 +786,7 @@ class GenericAgentBridge:
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
             self.workflow_progress(run_id)
+            self._emit_agent_read_model()
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
         except Exception as exc:
             try:
@@ -787,6 +817,7 @@ class GenericAgentBridge:
                 self._emit_workflow_events(run_id)
                 self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
                 self.workflow_progress(run_id)
+                self._emit_agent_read_model()
                 self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
             except Exception:
                 pass
@@ -857,6 +888,52 @@ class GenericAgentBridge:
                 continue
             seen.add(event.sequence)
             self.emit({"type": "workflow_event", "event": event.to_dict()})
+
+    def _emit_agent_read_model(self) -> None:
+        self._emit_agent_events()
+        self._emit_agent_snapshot()
+
+    def _emit_agent_events(self) -> None:
+        try:
+            batch = self.agent_control.events_since(self.agent_cursors)
+        except Exception as exc:
+            message = redact_sensitive_text(str(exc))
+            self._agent_errors["control"] = message
+            return
+        for key, value in batch.next_cursors.items():
+            self.agent_cursors[str(key)] = max(self.agent_cursors.get(str(key), 0), int(value))
+        for key, value in batch.errors.items():
+            self._agent_errors[str(key)] = redact_sensitive_text(str(value))
+        for event in batch.events:
+            event_id = event.event_id
+            if event_id and event_id in self._agent_event_ids:
+                continue
+            if event_id:
+                self._agent_event_ids.add(event_id)
+            self.emit({"type": "agent_event", "event": event.to_dict()})
+
+    def _emit_agent_snapshot(self) -> None:
+        try:
+            records = self.agent_control.list_records(include_terminal=True)
+            errors = dict(self._agent_errors)
+            errors.update({str(key): redact_sensitive_text(str(value)) for key, value in (getattr(self.agent_control, "last_errors", {}) or {}).items()})
+            snapshot = {
+                "records": [record.to_dict() for record in records],
+                "cursors": dict(self.agent_cursors),
+                "errors": errors,
+            }
+            fingerprint = json.dumps(snapshot, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            if fingerprint == self._agent_snapshot_fingerprint:
+                return
+            self._agent_snapshot_fingerprint = fingerprint
+            self.emit(
+                {
+                    "type": "agent_snapshot",
+                    "snapshot": snapshot,
+                }
+            )
+        except Exception as exc:
+            self._agent_errors["control"] = redact_sensitive_text(str(exc))
 
     def _workflow_run_payload(self, run) -> dict[str, Any]:
         data = run.to_dict()

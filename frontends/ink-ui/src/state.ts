@@ -1,4 +1,4 @@
-import type { BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
+import type { AgentEvent, AgentRecord, BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
 import {
   commitStreamingAssistantMessages,
   committedAssistantPrefix,
@@ -15,6 +15,10 @@ export type AppState = {
   workflowEvents: WorkflowEvent[]
   workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }>
   workflowResults: Record<string, Record<string, unknown>>
+  agents: AgentRecord[]
+  agentEvents: AgentEvent[]
+  agentCursors: Record<string, number>
+  agentErrors: Record<string, string>
 }
 
 export const initialState: AppState = {
@@ -27,6 +31,10 @@ export const initialState: AppState = {
   workflowEvents: [],
   workflowDetails: {},
   workflowResults: {},
+  agents: [],
+  agentEvents: [],
+  agentCursors: {},
+  agentErrors: {},
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
@@ -115,6 +123,24 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'workflow_final') {
     return { ...state, workflowResults: { ...state.workflowResults, [event.runId]: event.result }, error: null }
+  }
+  if (event.type === 'agent_snapshot') {
+    return {
+      ...state,
+      agents: event.snapshot.records,
+      agentCursors: { ...state.agentCursors, ...event.snapshot.cursors },
+      agentErrors: event.snapshot.errors,
+      error: null,
+    }
+  }
+  if (event.type === 'agent_event') {
+    if (state.agentEvents.some(item => item.eventId === event.event.eventId)) return state
+    const agentEvents = [...state.agentEvents, event.event]
+    return {
+      ...state,
+      agentEvents: agentEvents.length > 1000 ? agentEvents.slice(-1000) : agentEvents,
+      error: null,
+    }
   }
   if (event.type === 'system') {
     return {
