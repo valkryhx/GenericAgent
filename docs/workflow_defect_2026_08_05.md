@@ -605,3 +605,108 @@ exit=0
 结论：P2-1 的统一 read/control contract 已闭环。公共 identity、status、event cursor、result/artifact 引用、workspace/permission metadata 和 capability-aware lifecycle 均有确定性覆盖，并由真实 `gpt-5.6-luna` process/workflow E2E 验证；不再把“两个执行器相同”误认为“控制面事实可统一”。
 
 本轮明确保留的非目标：workflow child mailbox、独立 child-level cancel、独立 child resume、物理 artifact 目录迁移、跨引擎第二套 durable unified journal，以及把 Claude 的 logical key/attempt 模型伪造到当前 GA。后续若实现 workflow-specific `skip`/`retry`，必须单独定义 capability、scope、状态迁移和审计事件。
+
+#### P2-1 补充：GA UI workflow 最终结果未形成真实 E2E 闭环（2026-08-07）
+
+状态：**已修复，并完成 TDD、确定性全量回归、真实 `gpt-5.6-luna` 跨引擎复测和真实 Ink bridge/reducer E2E。**
+
+对既有结论的修正：`0411451` 的真实 E2E harness 能证明 process/workflow 公共控制面的 record、event cursor、capability 与 artifact/result reader 可用；`437e360` 对这些事实的记录仍然成立。但该 harness 没有经过 `GenericAgentBridge._workflow_final_payload()` 和 Ink `applyBridgeEvent()`，因此不能证明 GA UI 已收到 workflow 最终结果。此前“P2-1 已完整闭环”的表述范围过宽，应收窄为“统一 read/control contract 已闭环”；UI 最终交付需由本补充验证单独证明。
+
+根因确认：`WorkflowRuntime` 的 `succeeded`、`failed`、`killed` 三条终态路径都先 `save_run(run)`，再调用 `write_final_result(run, payload)`。后者写入 `final-result.json` 并只在当前内存对象上设置 `run.result_ref`，没有再次持久化 `run.json`/`state.json`。bridge 在 runtime 返回后重新 `load_run()`，因此获得 `result_ref=None`，并把 `workflow_final` 降级为：
+
+```json
+{"artifactError":"missing_ref"}
+```
+
+此时 child transcript 与 `final-result.json` 实际都已包含结果，但 Ink reducer 的 `workflowResults[runId]` 只能保存 fallback payload，无法交付真实结果。
+
+修复内容：
+
+- 保留每条终态路径原有的第一次 `save_run()`，不改变 external-kill guard 和终态竞争语义。
+- 在三条路径的 `write_final_result()` 后各增加一次 `save_run()`，持久化由 artifact writer 设置的 `result_ref`。
+- 不修改 `WorkflowStore.write_final_result()` 的低层副作用，不让 bridge 猜测默认 artifact 路径，也不改变 final payload schema。
+- 新增真实 Node worker + `FakeChildAgentRunner` + `GenericAgentBridge` seam 回归。
+- 新增 opt-in `tests/real_ink_workflow_final_delivery_e2e.ts`：使用生产 `startBridge()` 走 UI `model_switch → workflow_draft → workflow_approve → workflow_final` 协议，并将所有事件送入生产 Ink reducer。
+
+TDD 验证：
+
+```text
+RED:
+  succeeded / failed / external-killed 三类 run 重载后的 result_ref 均为 None；
+  真实 runtime-to-bridge seam 同样在 durable result_ref 断言处失败。
+  Ran 4 tests in 0.818s
+  FAILED (failures=4)
+
+GREEN:
+  python -m unittest \
+    tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_executes_phase_log_and_agent_script_with_fake_runner \
+    tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_marks_run_failed_when_worker_errors \
+    tests.test_workflow_runtime.WorkflowRuntimeTest.test_runtime_observes_external_kill_state \
+    tests.test_ink_bridge.InkBridgeTest.test_workflow_final_reads_persisted_artifact_from_real_runtime -v
+  Ran 4 tests in 0.860s
+  OK
+```
+
+确定性回归：
+
+```text
+workflow runtime/store/controller/bridge:
+  Ran 183 tests in 42.336s
+  OK
+
+P2-1 common control plane:
+  Ran 227 tests in 39.297s
+  OK
+
+python -m unittest discover -s tests
+  Ran 943 tests in 158.299s
+  OK (skipped=3)
+
+cd frontends/ink-ui
+npm test
+  tests=367, pass=367, fail=0, skipped=0
+npm run typecheck
+  exit=0
+```
+
+真实 `gpt-5.6-luna` Ink UI E2E：
+
+```text
+GA_RUN_REAL_INK_WORKFLOW_FINAL_E2E=1
+GA_WORKFLOW_LLM_PROFILE=luna
+.\frontends\ink-ui\node_modules\.bin\tsx.cmd tests\real_ink_workflow_final_delivery_e2e.ts
+
+exit=0
+passed=true
+model=luna/gpt-5.6-luna
+provider=gpt-super-responses
+persistedResultRef=final-result.json
+eventCount=27
+modelSelected=true
+terminalSucceeded=true
+finalContainsMarker=true
+finalHasNoArtifactError=true
+reducerContainsMarker=true
+transcriptContainsMarker=true
+commonSnapshotSeen=true
+commonEventSeen=true
+```
+
+该 E2E 使用真实 UI bridge client 切换模型，真实 workflow child 只输出 bounded marker；随后同时检查 child transcript artifact、bridge `workflow_final`、Ink reducer `workflowResults[runId]`、terminal `workflow_run.resultRef` 和 common agent snapshot/event。默认未设置 opt-in 时，脚本在调用 `startBridge()` 前退出，确认不会误发网络请求。
+
+真实跨引擎 harness 复测：
+
+```text
+GA_RUN_REAL_P2_1_E2E=1 python tests/real_p2_1_agent_control_e2e.py
+exit=0
+passed=true
+profile=luna
+model=gpt-5.6-luna
+provider=gpt-super-responses
+issues=[]
+recordKinds=process_agent, workflow_child, workflow_run
+eventCount=8
+artifactCounts=process:1, workflowRun:1, workflowChild:1
+```
+
+结论：`0411451` 所覆盖的统一控制面在修复后仍通过，但它不足以单独证明 GA UI 结果交付。现在 runtime durable state、bridge final payload、真实 child transcript 和 Ink reducer 已由同一条真实 E2E 链路贯通，`artifactError=missing_ref` 的已复现缺陷已闭环。对应提交：`1a91d41`、`ff7d047`。
