@@ -26,7 +26,7 @@ from ink_bridge import (  # noqa: E402
     make_stdout_emitter,
     run_jsonl_loop,
 )
-from workflow_child_agent import AgentResult  # noqa: E402
+from workflow_child_agent import AgentResult, FakeChildAgentRunner  # noqa: E402
 from workflow_models import WorkflowJob  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
@@ -2777,6 +2777,42 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
                 {"runId": run_id, "status": "killed", "error": "bad result", "resultRef": "missing-result.json", "artifactError": "missing"},
                 bridge._workflow_final_payload(run),
             )
+
+    def test_workflow_final_reads_persisted_artifact_from_real_runtime(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        marker = "GA_WORKFLOW_FINAL_DELIVERY_OK"
+        script = """
+const child = await agent('return the deterministic marker')
+return { marker: child.summary }
+"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: WorkflowRuntime(
+                    runner=FakeChildAgentRunner(results={"agent_1": {"summary": marker}}),
+                    **kwargs,
+                ),
+            )
+            run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=5.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            loaded = bridge.workflow_store.load_run(run_id)
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("final-result.json", loaded.result_ref)
+            final_event = next(
+                event
+                for event in events
+                if event["type"] == "workflow_final" and event["runId"] == run_id
+            )
+            self.assertEqual(marker, final_event["result"]["result"]["marker"])
+            self.assertNotIn("artifactError", final_event["result"])
+            self.assert_bridge_idle_tail(events)
 
     def test_workflow_final_emits_fallback_and_idle_when_final_result_missing_after_runtime(self):
         agent = FakeAgent()

@@ -179,6 +179,7 @@ class WorkflowRuntimeTest(unittest.TestCase):
     def assert_runtime_failed_with_marker(self, *, store, run, marker, expected_jobs=0):
         loaded = store.load_run(run.run_id)
         self.assertEqual("failed", loaded.status)
+        self.assertEqual("final-result.json", loaded.result_ref)
         self.assertIn(marker, loaded.error)
         self.assertEqual(expected_jobs, len(loaded.jobs))
         events = store.replay_events(run.run_id)
@@ -368,6 +369,9 @@ return { summary: result.summary, phaseDone: true }
 
             self.assertEqual({"summary": "ok", "phaseDone": True}, outcome.result)
             self.assertEqual("succeeded", outcome.run.status)
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("final-result.json", loaded.result_ref)
             events = store.replay_events("wf_test")
             self.assertEqual(
                 ["workflow_phase", "workflow_log", "agent_registered", "agent_started", "agent_completed"],
@@ -1985,6 +1989,7 @@ return await new Promise(() => {})
             self.assertIn("killed", str(errors[0]).lower())
             loaded = store.load_run("wf_test")
             self.assertEqual("killed", loaded.status)
+            self.assertEqual("final-result.json", loaded.result_ref)
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("killed", final_result["status"])
             self.assertEqual("workflow_killed", store.replay_events("wf_test")[-1].event_type)

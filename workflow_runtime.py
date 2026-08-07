@@ -181,6 +181,7 @@ class WorkflowRuntime:
                     self.store.write_workflow_progress(run)
                     final_payload = self._final_payload(run, "succeeded", result=result)
                     self.store.write_final_result(run, final_payload)
+                    self.store.save_run(run)
                     return WorkflowRuntimeResult(run=run, result=result, logs=list(self._logs), phases=list(self._phases))
                 elif message_type == "error":
                     raise RuntimeError(redact_sensitive_text(message.get("error") or "workflow worker failed"))
@@ -198,6 +199,7 @@ class WorkflowRuntime:
                     run,
                     self._final_payload(run, "killed", result=self._last_worker_result, error=run.error),
                 )
+                self.store.save_run(run)
                 self._append(run, "workflow_killed", {"error": run.error})
             else:
                 run.status = "failed"
@@ -209,6 +211,7 @@ class WorkflowRuntime:
                     run,
                     self._final_payload(run, "failed", result=self._last_worker_result, error=reason),
                 )
+                self.store.save_run(run)
                 self._append(run, "workflow_failed", {"error": reason})
             raise
         finally:
