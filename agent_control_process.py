@@ -164,7 +164,8 @@ class ProcessSubagentAdapter:
                 data = {}
             else:
                 return ControlResult(ok=False, code="unsupported_capability", execution_id=execution_id, scope="execution", status=record.status)
-            return ControlResult(ok=True, code="ok", execution_id=execution_id, scope="execution", status=record.status, data=data)
+            scope = "agent_tree" if action == "close" else "execution"
+            return ControlResult(ok=True, code="ok", execution_id=execution_id, scope=scope, status=record.status, data=data)
         except Exception as exc:
             return ControlResult(
                 ok=False,

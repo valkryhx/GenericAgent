@@ -1,5 +1,7 @@
 import unittest
+import tempfile
 from types import SimpleNamespace
+from pathlib import Path
 
 from agent_runtime_models import (
     AgentCapabilities,
@@ -7,8 +9,15 @@ from agent_runtime_models import (
     AgentEventBatch,
     AgentRecord,
     AgentResultRecord,
+    make_process_execution_id,
+    make_workflow_child_execution_id,
+    make_workflow_run_execution_id,
 )
-from agent_control import ControlRequest, UnifiedAgentControl
+from agent_control import ControlRequest, ControlResult, UnifiedAgentControl
+from subagent_manager import AgentState
+from workflow_controller import WorkflowController
+from workflow_models import WorkflowJob, WorkflowRun
+from workflow_store import WorkflowStore
 
 
 def record(execution_id, *, record_kind="process_agent", run_id=None, job_id=None, actions=None):
@@ -71,7 +80,196 @@ class FakeAdapter:
         return SimpleNamespace(ok=True, code="ok", execution_id=execution_id, scope="execution", status="running")
 
 
+def make_process_record(name):
+    task_name = str(name).split("/")[-1].split(":")[-1]
+    agent_path = f"/root/{task_name}"
+    run_id = f"run-{task_name}"
+    return AgentRecord(
+        execution_id=make_process_execution_id(run_id, agent_path),
+        engine="process",
+        record_kind="process_agent",
+        status="running",
+        run_id=run_id,
+        agent_path=agent_path,
+        task_name=task_name,
+        turn_status="running",
+        process_status="alive",
+        workspace="C:/ga/temp",
+        capabilities=AgentCapabilities(
+            actions=frozenset(
+                {
+                    "read",
+                    "events",
+                    "result",
+                    "artifacts",
+                    "interrupt",
+                    "close",
+                    "message",
+                    "followup",
+                    "resume",
+                    "attach",
+                    "detach",
+                }
+            )
+        ),
+    )
+
+
+class RecordingProcessManager:
+    def __init__(self, records):
+        self.records = list(records)
+        self.states = [
+            AgentState(
+                task_name=record.task_name,
+                agent_path=record.agent_path,
+                pid=100,
+                task_dir=record.workspace or "C:/ga/temp",
+                turn_status="running",
+                process_status="alive",
+                round=0,
+                output_path=None,
+                final_output_path=None,
+                run_id=record.run_id,
+                permission_profile="read_only",
+            )
+            for record in self.records
+        ]
+        self.interrupt_calls = []
+        self.close_calls = []
+        self.event_bus = SimpleNamespace(read_events_since=lambda _cursor: [])
+
+    def list_agent_snapshots(self, path_prefix=None, include_closed=False):
+        return list(self.states)
+
+    def probe_agent(self, target):
+        for state in self.states:
+            if target in {state.agent_path, state.task_name}:
+                return state
+        raise FileNotFoundError(target)
+
+    def interrupt_agent(self, target, reason=""):
+        self.interrupt_calls.append((target, reason))
+
+    def close_agent(self, target, reason="", cascade=False, **kwargs):
+        self.close_calls.append((target, cascade))
+        return {"closedDescendantExecutionIds": ["process-agent:child"]}
+
+
+class RecordingWorkflowController(WorkflowController):
+    def __init__(self, store):
+        super().__init__(store=store)
+        self.stop_calls = []
+        self.cancel_calls = []
+
+    def stop(self, run_id, *, reason=""):
+        self.stop_calls.append(run_id)
+        return super().stop(run_id, reason=reason)
+
+    def cancel(self, run_id, *, reason=""):
+        self.cancel_calls.append(run_id)
+        return super().cancel(run_id, reason=reason)
+
+
 class UnifiedAgentControlTest(unittest.TestCase):
+    def setUp(self):
+        self._temporary_workspaces = []
+        self.addCleanup(self._cleanup_workspaces)
+
+    def _cleanup_workspaces(self):
+        for workspace in self._temporary_workspaces:
+            workspace.cleanup()
+
+    def recording_running_workflow(self, run_id, child_count):
+        workspace = tempfile.TemporaryDirectory()
+        self._temporary_workspaces.append(workspace)
+        store = WorkflowStore(Path(workspace.name) / "sessions")
+        controller = RecordingWorkflowController(store)
+        run = WorkflowRun(
+            run_id=run_id,
+            session_id="session_control",
+            script="return {}",
+            status="running",
+            jobs=[WorkflowJob(job_id=f"agent_{index}", status="running") for index in range(1, child_count + 1)],
+        )
+        return store, controller, store.create_run(run)
+
+    def test_process_interrupt_is_forwarded_with_reason(self):
+        process_record = make_process_record("one")
+        manager = RecordingProcessManager([process_record])
+        from agent_control_process import ProcessSubagentAdapter
+
+        control = UnifiedAgentControl([ProcessSubagentAdapter(manager)])
+        result = control.control(process_record.execution_id, ControlRequest(action="interrupt", reason="user stop"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(("/root/one", "user stop"), manager.interrupt_calls[0])
+        self.assertEqual("execution", result.scope)
+
+    def test_process_close_cascade_returns_closed_descendants(self):
+        process_record = make_process_record("parent")
+        manager = RecordingProcessManager([process_record])
+        from agent_control_process import ProcessSubagentAdapter
+
+        control = UnifiedAgentControl([ProcessSubagentAdapter(manager)])
+        result = control.control(process_record.execution_id, ControlRequest(action="close", payload={"cascade": True}))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(manager.close_calls[0][1])
+        self.assertEqual("agent_tree", result.scope)
+        self.assertEqual(["process-agent:child"], result.data["closedDescendantExecutionIds"])
+
+    def test_workflow_run_stop_is_scoped_to_the_run_record(self):
+        store, controller, run = self.recording_running_workflow("wf_a", child_count=2)
+        from agent_control_workflow import WorkflowChildAdapter
+
+        control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
+        result = control.control(make_workflow_run_execution_id(run.run_id), ControlRequest(action="stop", reason="test stop"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual([run.run_id], controller.stop_calls)
+        self.assertEqual("workflow_run", result.scope)
+        self.assertEqual("killed", store.load_run(run.run_id).status)
+
+    def test_workflow_child_cancel_returns_unsupported_without_cancelling_siblings(self):
+        store, controller, run = self.recording_running_workflow("wf_b", child_count=2)
+        from agent_control_workflow import WorkflowChildAdapter
+
+        control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
+        child_id = make_workflow_child_execution_id(run.run_id, "agent_1")
+        result = control.control(child_id, ControlRequest(action="cancel"))
+        current = store.load_run(run.run_id)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("unsupported_capability", result.code)
+        self.assertEqual("running", current.status)
+        self.assertEqual(["running", "running"], [job.status for job in current.jobs])
+        self.assertEqual([], controller.stop_calls)
+
+    def test_workflow_child_resume_returns_unsupported_not_cached_resume(self):
+        store, controller, run = self.recording_running_workflow("wf_c", child_count=1)
+        from agent_control_workflow import WorkflowChildAdapter
+
+        control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
+        result = control.control(make_workflow_child_execution_id(run.run_id, "agent_1"), ControlRequest(action="resume"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("unsupported_capability", result.code)
+        self.assertEqual("running", store.load_run(run.run_id).status)
+
+    def test_control_result_contains_capability_and_scope_for_ui(self):
+        process_record = make_process_record("one")
+        result = ControlResult(
+            ok=False,
+            code="unsupported_capability",
+            execution_id=process_record.execution_id,
+            scope="execution",
+            status=process_record.status,
+            data={"requestedAction": "cancel", "capabilities": sorted(process_record.capabilities.actions)},
+        )
+
+        self.assertEqual("execution", result.scope)
+        self.assertIn("interrupt", result.data["capabilities"])
+
     def test_list_records_merges_engines_and_sorts_by_execution_id(self):
         process = FakeAdapter("process", [record("process-agent:one")])
         workflow = FakeAdapter("workflow", [record("workflow-child:wf_a:agent_1")])
