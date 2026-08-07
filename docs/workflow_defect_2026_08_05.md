@@ -710,3 +710,63 @@ artifactCounts=process:1, workflowRun:1, workflowChild:1
 ```
 
 结论：`0411451` 所覆盖的统一控制面在修复后仍通过，但它不足以单独证明 GA UI 结果交付。现在 runtime durable state、bridge final payload、真实 child transcript 和 Ink reducer 已由同一条真实 E2E 链路贯通，`artifactError=missing_ref` 的已复现缺陷已闭环。对应提交：`1a91d41`、`ff7d047`。
+
+#### P2-1 当前 main 复测（2026-08-07）
+
+在当前 `main`（包含 `1a91d41`、`ff7d047` 和 `c6ca8f3`）上重新执行了完整验证：
+
+```text
+P2-1 focused Python:
+  python -m unittest tests.test_agent_runtime_models tests.test_subagent_manager tests.test_agent_control_process tests.test_workflow_models tests.test_workflow_store tests.test_workflow_scheduler tests.test_workflow_controller tests.test_workflow_runtime tests.test_agent_control_workflow tests.test_agent_control -v
+  Ran 227 tests in 36.367s
+  OK
+
+Python full regression (second complete run):
+  python -m unittest discover -s tests
+  Ran 946 tests in 164.862s
+  OK (skipped=3)
+
+Ink UI:
+  npm test -> 367 tests, pass=367, fail=0, skipped=0
+  npm run typecheck -> exit=0
+```
+
+第一次 Python 全量运行中，非 P2-1 的 `ChannelSlowSubscriberTest.test_a_stalled_subscriber_does_not_delay_delivery_to_a_healthy_one` 因时序只收到 28 条事件而失败；该用例随后独立连续 5 次通过，第二次完整全量运行也通过。该现象作为 realtime IPC 负载抖动保留，不改变 P2-1 验证结论，也未修改其代码。
+
+真实 `gpt-5.6-luna` 跨引擎 E2E：
+
+```text
+GA_RUN_REAL_P2_1_E2E=1 python tests/real_p2_1_agent_control_e2e.py
+passed=true
+profile=luna
+model=gpt-5.6-luna
+provider=gpt-super-responses
+recordKinds=process_agent, workflow_child, workflow_run
+eventCount=9
+cursorKeys=process, workflow:wf_p2_1_luna
+artifactCounts=process:1, workflowRun:1, workflowChild:1
+issues=[]
+```
+
+真实 Ink workflow final delivery E2E：
+
+```text
+GA_RUN_REAL_INK_WORKFLOW_FINAL_E2E=1
+GA_WORKFLOW_LLM_PROFILE=luna
+tsx tests/real_ink_workflow_final_delivery_e2e.ts
+passed=true
+model=luna/gpt-5.6-luna
+provider=gpt-super-responses
+persistedResultRef=final-result.json
+eventCount=1153
+modelSelected=true
+terminalSucceeded=true
+finalContainsMarker=true
+finalHasNoArtifactError=true
+reducerContainsMarker=true
+transcriptContainsMarker=true
+commonSnapshotSeen=true
+commonEventSeen=true
+```
+
+本次复测确认：统一控制面在最新 workflow result 持久化修复后仍然通过；真实 UI bridge/reducer 链路能够收到最终结果，且没有回退为 `artifactError=missing_ref`。P2-1 的实现、验证和文档状态同步已完成。
