@@ -1,5 +1,7 @@
 import json
+import os
 import queue
+import subprocess
 import sys
 import tempfile
 import threading
@@ -188,6 +190,7 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             self.assertIn("--verbose", cmd)
             self.assertNotIn("long prompt must stay out of child command", cmd)
             self.assertEqual(Path(kwargs["cwd"]), Path(td))
+            self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
             state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["pid"], 13579)
             self.assertEqual(state["turn_status"], "pending")
@@ -322,6 +325,28 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
                 events,
                 ["turn_started", "turn_completed", "agent_waiting_reply", "agent_exited"],
             )
+            startup_path = task_dir / "startup.jsonl"
+            self.assertTrue(startup_path.exists(), "worker startup phases were not persisted")
+            startup_rows = [
+                json.loads(line)
+                for line in startup_path.read_text(encoding="utf-8").splitlines()
+            ]
+            startup_phases = [row["phase"] for row in startup_rows]
+            self.assertEqual(
+                startup_phases,
+                [
+                    "worker_entry",
+                    "permission_ready",
+                    "ipc_ready",
+                    "request_loaded",
+                    "turn_state_written",
+                    "local_turn_event_written",
+                    "event_bus_mirror_complete",
+                    "turn_started_complete",
+                ],
+            )
+            self.assertTrue(all(row["pid"] == os.getpid() for row in startup_rows))
+            self.assertTrue(all(row["elapsed_ms"] >= 0 for row in startup_rows))
             parent_events = [
                 json.loads(line)["type"]
                 for line in (Path(td) / "temp" / "subagents" / "inbox.jsonl").read_text(encoding="utf-8").splitlines()

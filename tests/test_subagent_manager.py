@@ -1,10 +1,12 @@
 import json
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -485,6 +487,125 @@ class CascadeCloseTest(unittest.TestCase):
 
 
 class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
+    def test_child_launch_does_not_inherit_parent_stdin(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+
+            kwargs = manager._child_popen_kwargs(
+                None,
+                stdout=object(),
+                stderr=object(),
+                agent_path="/root/stdin_safe_worker",
+            )
+
+            self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
+
+    def test_spawn_fails_fast_when_child_never_emits_startup_handshake(self):
+        """Popen returning a PID is not proof that agentmain entered the child."""
+        with tempfile.TemporaryDirectory() as td:
+            class FakeProcess:
+                pid = 3211
+
+                def __init__(self):
+                    self.returncode = None
+                    self.terminated = False
+
+                def poll(self):
+                    return self.returncode
+
+                def terminate(self):
+                    self.terminated = True
+                    self.returncode = -15
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+            process = FakeProcess()
+
+            def fake_popen(*_args, **_kwargs):
+                return process
+
+            manager = SubagentManager(
+                root_dir=td,
+                popen=fake_popen,
+                python_executable="python-test",
+                sleep=lambda _: None,
+            )
+
+            with patch.object(SubagentManager, "STARTUP_HANDSHAKE_TIMEOUT_S", 0.01, create=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    manager.spawn_agent("stalled_worker", "start but never enter")
+
+            self.assertIn("startup_timeout", str(ctx.exception))
+            self.assertTrue(process.terminated)
+            task_dir = Path(td) / "temp" / "stalled_worker"
+            state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertIsNone(state["pid"])
+            self.assertEqual(state["failed_pid"], 3211)
+            self.assertEqual(state["startup_phase"], "startup_timeout")
+            self.assertEqual(state["turn_status"], "errored")
+            self.assertEqual(state["process_status"], "exited")
+            self.assertIn("agent_error", (task_dir / "events.jsonl").read_text(encoding="utf-8"))
+            registry = json.loads(
+                (Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8")
+            )
+            registry_row = registry["agents"]["/root/stalled_worker"]
+            self.assertIsNone(registry_row["pid"])
+            self.assertEqual(registry_row["status"], "closed")
+            self.assertEqual(registry_row["closed_status"], "startup_timeout")
+
+    def test_startup_timeout_does_not_fallback_to_pid_after_handle_error(self):
+        """A stale Popen PID must never be used to terminate a potentially reused process."""
+        with tempfile.TemporaryDirectory() as td:
+            fallback_pids = []
+
+            class FakeProcess:
+                pid = 3212
+
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    raise OSError("process handle is already stale")
+
+            manager = SubagentManager(
+                root_dir=td,
+                popen=lambda *_args, **_kwargs: FakeProcess(),
+                python_executable="python-test",
+                sleep=lambda _: None,
+                terminate_process=fallback_pids.append,
+            )
+
+            with patch.object(SubagentManager, "STARTUP_HANDSHAKE_TIMEOUT_S", 0.01, create=True):
+                with self.assertRaises(RuntimeError):
+                    manager.spawn_agent("stale_handle_worker", "never enters agentmain")
+
+            self.assertEqual(fallback_pids, [])
+            state = json.loads(
+                (Path(td) / "temp" / "stale_handle_worker" / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("process handle is already stale", state["last_error"])
+
+    def test_spawn_marks_requested_before_popen_and_spawned_after_it_returns(self):
+        with tempfile.TemporaryDirectory() as td:
+            observed = []
+
+            class FakeProcess:
+                pid = 3210
+
+            def fake_popen(cmd, **kwargs):
+                task_dir = Path(td) / "temp" / "phase_worker"
+                observed.append(json.loads((task_dir / "state.json").read_text(encoding="utf-8"))["startup_phase"])
+                return FakeProcess()
+
+            manager = SubagentManager(root_dir=td, popen=fake_popen, python_executable="python-test")
+
+            handle = manager.spawn_agent("phase_worker", "record the spawn boundary")
+
+            state = json.loads(Path(handle.state_path).read_text(encoding="utf-8"))
+            self.assertEqual(observed, ["spawn_requested"])
+            self.assertEqual(state["startup_phase"], "process_spawned")
+
     def test_spawn_agent_duplicate_task_name_uses_new_agent_path_and_preserves_first_artifact(self):
         with tempfile.TemporaryDirectory() as td:
             class FakeProcess:
@@ -945,6 +1066,8 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             self.assertEqual([row["type"] for row in inbox_rows], ["agent_error"])
             registry = json.loads((Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8"))
             self.assertEqual(registry["agents"]["/root/broken_child"]["pid"], None)
+            self.assertEqual(registry["agents"]["/root/broken_child"]["status"], "closed")
+            self.assertEqual(registry["agents"]["/root/broken_child"]["closed_status"], "process_spawn_failed")
 
     def test_spawn_agent_rejects_unsafe_task_names(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1237,6 +1360,39 @@ class WaitAgentsWriteAmplificationTest(unittest.TestCase):
 
             self.assertTrue(result.timed_out)
             self.assertEqual(writes, [], f"wait wrote {len(writes)} files: {sorted(set(writes))}")
+
+    def test_a_timing_out_wait_returns_read_only_observed_snapshots(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._running_agent(td, "slow", 111)
+            state = read_json_or_none(task_dir / "state.json")
+            state.update({"turn_status": "pending"})
+            atomic_write_json(task_dir / "state.json", state)
+            (task_dir / "startup.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "startup_phase",
+                        "phase": "imports_complete",
+                        "created_at": "2026-08-10T10:05:16.100+08:00",
+                        "elapsed_ms": 100.25,
+                        "llm_no": 8,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+            writes = self._count_writes()
+
+            result = manager.wait_agents(["slow"], timeout_s=0, poll_interval_s=0.01)
+
+            self.assertTrue(result.timed_out)
+            self.assertEqual(result.changed_agents, [])
+            self.assertTrue(hasattr(result, "observed_agents"))
+            self.assertEqual([state.task_name for state in result.observed_agents], ["slow"])
+            self.assertEqual(result.observed_agents[0].llm_no, 8)
+            self.assertEqual(result.observed_agents[0].startup_phase, "imports_complete")
+            self.assertEqual(result.observed_agents[0].startup_elapsed_ms, 100.25)
+            self.assertEqual(writes, [], "observing timed-out agents must remain read-only")
 
     def test_wait_still_reports_a_finished_agent_with_its_full_state(self):
         """The cheap probe is only for detection; the returned state must stay the real one."""

@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agent_loop import exhaust  # noqa: E402
 from ga import GenericAgentHandler, get_global_memory  # noqa: E402
-from subagent_manager import SubagentManager  # noqa: E402
+from subagent_manager import AgentState, SubagentManager, SubagentStartupError, WaitResult  # noqa: E402
 from subagent_state import atomic_write_json  # noqa: E402
 
 
@@ -41,6 +41,34 @@ class GaSubagentToolsTest(unittest.TestCase):
         handler.subagent_manager = SubagentManager(root_dir=root, **manager_kwargs)
         return handler
 
+    def test_spawn_agent_tool_returns_structured_startup_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = GenericAgentHandler(FakeParent(), last_history=[], cwd=str(Path(td) / "temp"))
+
+            class FailingManager:
+                def spawn_agent(self, *_args, **_kwargs):
+                    raise SubagentStartupError(
+                        "startup_timeout",
+                        "stalled_worker",
+                        3211,
+                        "startup_timeout: child did not emit process_entry",
+                    )
+
+            handler.subagent_manager = FailingManager()
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"task_name": "stalled_worker", "message": "start"},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "startup_timeout")
+            self.assertEqual(outcome.data["task_name"], "stalled_worker")
+            self.assertEqual(outcome.data["pid"], 3211)
+            self.assertNotIn("Traceback", outcome.data["msg"])
+
     def test_spawn_agent_tool_defaults_to_context_fork_and_keeps_prompt_out_of_command(self):
         with tempfile.TemporaryDirectory() as td:
             calls = []
@@ -66,6 +94,8 @@ class GaSubagentToolsTest(unittest.TestCase):
 
             task_dir = Path(td) / "temp" / "context_worker"
             self.assertEqual(outcome.data["status"], "started")
+            self.assertIn("llm_no", outcome.data)
+            self.assertEqual(outcome.data["llm_no"], 1)
             self.assertEqual(outcome.data["fork_turns"], "all")
             self.assertTrue(outcome.data["run_id"].startswith("run_"))
             self.assertEqual(Path(outcome.data["artifact_dir"]), Path(td) / "temp" / "subagents" / "runs" / outcome.data["run_id"])
@@ -134,6 +164,149 @@ class GaSubagentToolsTest(unittest.TestCase):
             state = json.loads((Path(td) / "temp" / "readonly_worker" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["permission_profile"], "read_only")
             self.assertEqual(state["permission_options"], {"denied_tools": ["code_run"]})
+
+    def test_spawn_agent_tool_drops_worktree_for_search_only_allowlist(self):
+        with tempfile.TemporaryDirectory() as td:
+            worktree_calls = []
+
+            def create_worktree(*args, **kwargs):
+                worktree_calls.append((args, kwargs))
+                raise AssertionError("read-only search must not create a worktree")
+
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 223})(),
+                python_executable="python-test",
+                worktree_creator=create_worktree,
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "search_worker",
+                        "message": "search public sources only",
+                        "isolation": "worktree",
+                        "allowed_tools": [
+                            "mcp__tavily__tavily_search",
+                            "mcp__tavily__tavily_extract",
+                            "web_scan",
+                            "web_execute_js",
+                            "functions.update_working_checkpoint",
+                        ],
+                        "denied_tools": ["functions.file_write", "functions.file_patch"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(outcome.data["requested_isolation"], "worktree")
+            self.assertIsNone(outcome.data["isolation"])
+            self.assertEqual(outcome.data["isolation_fallback_reason"], "read_only_tool_allowlist")
+            self.assertEqual(worktree_calls, [])
+
+    def test_spawn_agent_tool_drops_worktree_for_read_only_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            worktree_calls = []
+
+            def create_worktree(*args, **kwargs):
+                worktree_calls.append((args, kwargs))
+                raise AssertionError("read-only subagent must not create a worktree")
+
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 225})(),
+                python_executable="python-test",
+                worktree_creator=create_worktree,
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "readonly_worktree_worker",
+                        "message": "inspect only",
+                        "isolation": "worktree",
+                        "permission_profile": "read_only",
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(outcome.data["requested_isolation"], "worktree")
+            self.assertIsNone(outcome.data["isolation"])
+            self.assertEqual(outcome.data["isolation_fallback_reason"], "read_only_permission_profile")
+            self.assertEqual(worktree_calls, [])
+
+    def test_spawn_agent_tool_drops_worktree_when_inheriting_read_only_parent(self):
+        with tempfile.TemporaryDirectory() as td:
+            worktree_calls = []
+
+            def create_worktree(*args, **kwargs):
+                worktree_calls.append((args, kwargs))
+                raise AssertionError("inherited read-only subagent must not create a worktree")
+
+            parent = FakeParent()
+            parent.permission_mode = "read_only"
+            handler = GenericAgentHandler(parent, last_history=[], cwd=str(Path(td) / "temp"))
+            handler.subagent_manager = SubagentManager(
+                root_dir=td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 226})(),
+                python_executable="python-test",
+                worktree_creator=create_worktree,
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "inherited_readonly_worktree_worker",
+                        "message": "inspect inherited permissions",
+                        "isolation": "worktree",
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(outcome.data["requested_isolation"], "worktree")
+            self.assertIsNone(outcome.data["isolation"])
+            self.assertEqual(outcome.data["isolation_fallback_reason"], "inherited_read_only_permission_mode")
+            self.assertEqual(worktree_calls, [])
+
+    def test_spawn_agent_tool_keeps_worktree_for_workspace_mutation(self):
+        with tempfile.TemporaryDirectory() as td:
+            worktree_calls = []
+
+            def create_worktree(repo_dir, base_dir, run_id):
+                worktree_calls.append((repo_dir, base_dir, run_id))
+                path = Path(td) / "worktree"
+                path.mkdir()
+                return {"status": "created", "path": str(path), "run_id": run_id}
+
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 224})(),
+                python_executable="python-test",
+                worktree_creator=create_worktree,
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "patch_worker",
+                        "message": "patch one owned file",
+                        "isolation": "worktree",
+                        "allowed_tools": ["functions.file_read", "functions.file_patch"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(outcome.data["requested_isolation"], "worktree")
+            self.assertEqual(outcome.data["isolation"], "worktree")
+            self.assertIsNone(outcome.data["isolation_fallback_reason"])
+            self.assertEqual(len(worktree_calls), 1)
 
     def test_spawn_agent_tool_applies_agent_type_role_defaults(self):
         with tempfile.TemporaryDirectory() as td:
@@ -204,8 +377,35 @@ class GaSubagentToolsTest(unittest.TestCase):
             )
 
             self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data.get("reason"), "unknown_agent_type")
+            self.assertEqual(outcome.data.get("requested_agent_type"), "missing")
+            self.assertEqual(outcome.data.get("available_agent_types"), [])
             self.assertIn("missing", outcome.data["msg"])
+            self.assertIn("omit agent_type", outcome.data["msg"])
+            self.assertNotIn("subagent_roles.py:", outcome.data["msg"])
             self.assertEqual(calls, [])
+
+    def test_spawn_agent_tool_lists_configured_roles_when_agent_type_is_unknown(self):
+        with tempfile.TemporaryDirectory() as td:
+            roles_dir = Path(td) / ".ga" / "subagents"
+            roles_dir.mkdir(parents=True)
+            (roles_dir / "auditor.json").write_text(
+                json.dumps({"name": "auditor", "system_prompt": "Review only."}),
+                encoding="utf-8",
+            )
+            handler = self.make_handler(td, python_executable="python-test")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"agent_type": "researcher", "task_name": "research", "message": "Find facts."},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data.get("reason"), "unknown_agent_type")
+            self.assertEqual(outcome.data.get("available_agent_types"), ["auditor"])
+            self.assertIn("auditor", outcome.data["msg"])
+            self.assertIn("omit agent_type", outcome.data["msg"])
 
     def test_global_memory_distinguishes_tool_cwd_from_workspace_root(self):
         prompt = get_global_memory()
@@ -301,6 +501,98 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "changed")
             self.assertEqual([agent["task_name"] for agent in outcome.data["agents"]], ["done_worker"])
             self.assertNotIn("final_output", outcome.data["agents"][0])
+
+    def test_wait_agent_timeout_reports_live_agent_model_and_startup_phase(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "slow_worker"
+            task_dir.mkdir(parents=True)
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "slow_worker",
+                    "agent_path": "/root/slow_worker",
+                    "pid": 456,
+                    "round": 0,
+                    "turn_status": "pending",
+                    "process_status": "alive",
+                    "llm_no": 8,
+                },
+            )
+            (task_dir / "startup.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "startup_phase",
+                        "phase": "model_selected",
+                        "created_at": "2026-08-10T10:05:16.250+08:00",
+                        "elapsed_ms": 1250.5,
+                        "llm_no": 8,
+                        "model_profile": "cc-opus-5",
+                        "model_id": "claude-opus-5",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            handler = self.make_handler(td, process_exists=lambda pid: True, sleep=lambda _: None)
+
+            outcome = exhaust(
+                handler.do_wait_agent(
+                    {"targets": ["slow_worker"], "timeout_seconds": 0},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "timeout")
+            self.assertEqual(outcome.data["agents"], [])
+            self.assertIn("observed_agents", outcome.data)
+            self.assertEqual(len(outcome.data["observed_agents"]), 1)
+            observed = outcome.data["observed_agents"][0]
+            self.assertEqual(observed["process_status"], "alive")
+            self.assertEqual(observed["turn_status"], "running")
+            self.assertEqual(observed["llm_no"], 8)
+            self.assertEqual(observed["model_profile"], "cc-opus-5")
+            self.assertEqual(observed["model_id"], "claude-opus-5")
+            self.assertEqual(observed["startup_phase"], "model_selected")
+            self.assertEqual(observed["startup_elapsed_ms"], 1250.5)
+
+    def test_wait_agent_timeout_does_not_call_completed_waiting_agent_pending(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td)
+            handler.subagent_manager.wait_agents = lambda **kwargs: WaitResult(
+                timed_out=True,
+                changed_agents=[],
+                message="Wait timed out; 1 target(s) still observed.",
+                observed_agents=[
+                    AgentState(
+                        task_name="finished_worker",
+                        agent_path="/root/finished_worker",
+                        pid=789,
+                        task_dir=str(Path(td) / "temp" / "finished_worker"),
+                        turn_status="completed",
+                        process_status="waiting_reply",
+                        round=0,
+                        output_path=None,
+                        final_output_path=None,
+                    )
+                ],
+            )
+
+            chunks = []
+            generator = handler.do_wait_agent(
+                {"targets": ["finished_worker"], "timeout_seconds": 0},
+                response=None,
+            )
+            try:
+                while True:
+                    chunks.append(next(generator))
+            except StopIteration as stop:
+                outcome = stop.value
+
+            self.assertEqual(outcome.data["status"], "timeout")
+            self.assertEqual(outcome.data["observed_agents"][0]["turn_status"], "completed")
+            status_line = "".join(chunks)
+            self.assertNotIn("target(s) still pending/running", status_line)
 
     def test_message_followup_and_interrupt_tools_write_mailbox_reply_and_stop_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -865,8 +1157,16 @@ class GaSubagentToolsTest(unittest.TestCase):
                 self.assertIn("cascade", close_schema["parameters"]["properties"])
                 spawn_schema = next(item["function"] for item in raw if item["function"]["name"] == "spawn_agent")
                 properties = spawn_schema["parameters"]["properties"]
-                for prop in ["agent_type", "background", "isolation", "ipc_mode"]:
+                for prop in ["background", "isolation", "ipc_mode"]:
                     self.assertIn(prop, properties)
+                self.assertNotIn("agent_type", properties)
+                isolation_description = properties["isolation"]["description"]
+                if schema_name == "tools_schema.json":
+                    self.assertIn("read-only", isolation_description)
+                    self.assertIn("security sandbox", isolation_description)
+                else:
+                    self.assertIn("只读", isolation_description)
+                    self.assertIn("安全沙箱", isolation_description)
 
     def test_spawn_agent_tool_reports_a_live_name_conflict_as_actionable_guidance(self):
         """The refusal message is written for the model, so it must arrive without traceback noise.

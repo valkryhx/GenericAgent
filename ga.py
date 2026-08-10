@@ -17,6 +17,37 @@ from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generato
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 
+_SUBAGENT_WORKSPACE_MUTATION_TOOLS = {
+    "file_write",
+    "file_patch",
+    "code_run",
+    "functions.file_write",
+    "functions.file_patch",
+    "functions.code_run",
+}
+
+
+def _resolve_subagent_isolation(requested_isolation, permission_profile, parent_permission_mode, permission_options):
+    if str(requested_isolation or "").strip().lower() != "worktree":
+        return requested_isolation, None
+
+    profile = str(permission_profile or "").strip().lower()
+    parent_mode = str(parent_permission_mode or "").strip().lower()
+    if profile == "read_only":
+        return None, "read_only_permission_profile"
+    if profile == "inherit-current-permissions" and parent_mode == "read_only":
+        return None, "inherited_read_only_permission_mode"
+
+    allowed_tools = (permission_options or {}).get("allowed_tools")
+    if isinstance(allowed_tools, str):
+        allowed_tools = [allowed_tools]
+    if allowed_tools:
+        normalized_tools = {str(tool).strip().lower() for tool in allowed_tools if str(tool).strip()}
+        if not normalized_tools.intersection(_SUBAGENT_WORKSPACE_MUTATION_TOOLS):
+            return None, "read_only_tool_allowlist"
+    return "worktree", None
+
+
 def _stop_requested(stop_signal):
     if stop_signal is None:
         return False
@@ -658,6 +689,12 @@ class GenericAgentHandler(BaseHandler):
             "updated_at": state.updated_at,
             "last_message": state.last_message,
             "last_error": state.last_error,
+            "llm_no": getattr(state, "llm_no", None),
+            "model_profile": getattr(state, "model_profile", None),
+            "model_id": getattr(state, "model_id", None),
+            "startup_phase": getattr(state, "startup_phase", None),
+            "startup_phase_at": getattr(state, "startup_phase_at", None),
+            "startup_elapsed_ms": getattr(state, "startup_elapsed_ms", None),
         }
         if include_output and state.final_output_path and os.path.exists(state.final_output_path):
             try:
@@ -676,14 +713,41 @@ class GenericAgentHandler(BaseHandler):
         role = None
         role_source_path = None
         if agent_type:
+            from subagent_roles import SubagentRoleRegistry, build_role_task_message
+
+            manager_for_roles = self._get_subagent_manager()
+            role_registry = SubagentRoleRegistry(manager_for_roles.root_dir)
             try:
-                from subagent_roles import SubagentRoleRegistry, build_role_task_message
-                manager_for_roles = self._get_subagent_manager()
-                role = SubagentRoleRegistry(manager_for_roles.root_dir).get(agent_type)
+                role = role_registry.get(agent_type)
                 role_source_path = role.source_path
                 task_name = task_name or role.name
+            except FileNotFoundError:
+                available_agent_types = sorted(role.name for role in role_registry.list_roles())
+                if available_agent_types:
+                    available_text = ", ".join(available_agent_types)
+                    msg = (
+                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label. "
+                        f"Available agent_type values: {available_text}. Retry with one exact available value, "
+                        "or omit agent_type to spawn a generic subagent. Do not probe the filesystem for role names."
+                    )
+                else:
+                    msg = (
+                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label, "
+                        "and no role definitions are available. Retry the same spawn with task_name and message "
+                        "but omit agent_type. Do not probe the filesystem for role names."
+                    )
+                return StepOutcome(
+                    {
+                        "status": "error",
+                        "reason": "unknown_agent_type",
+                        "requested_agent_type": str(agent_type),
+                        "available_agent_types": available_agent_types,
+                        "msg": msg,
+                    },
+                    next_prompt="\n",
+                )
             except Exception as e:
-                return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} not found: {format_error(e)}"}, next_prompt="\n")
+                return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} could not be loaded: {format_error(e)}"}, next_prompt="\n")
         message = args.get("message") or args.get("prompt") or ""
         if not task_name:
             return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
@@ -717,6 +781,13 @@ class GenericAgentHandler(BaseHandler):
             if args.get(key) is not None
         }
         permission_options = {**role_permission_options, **permission_options}
+        requested_isolation = args.get("isolation")
+        isolation, isolation_fallback_reason = _resolve_subagent_isolation(
+            requested_isolation,
+            permission_profile,
+            parent_permission_mode,
+            permission_options,
+        )
         manager = self._get_subagent_manager()
         yield f"[Action] Spawning subagent: {task_name}\n"
         try:
@@ -735,7 +806,7 @@ class GenericAgentHandler(BaseHandler):
                 role_source_path=role_source_path,
                 background=bool(args.get("background", True)),
                 ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "file",
-                isolation=args.get("isolation"),
+                isolation=isolation,
                 submission_id=args.get("submission_id") or args.get("submissionId"),
             )
             result = {
@@ -757,13 +828,19 @@ class GenericAgentHandler(BaseHandler):
                 "effective_ipc_mode": handle.effective_ipc_mode,
                 "ipc_fallback_reason": handle.ipc_fallback_reason,
                 "ipc_endpoint": handle.ipc_endpoint,
+                "requested_isolation": requested_isolation,
                 "isolation": handle.isolation,
+                "isolation_fallback_reason": isolation_fallback_reason,
                 "worktree_path": handle.worktree_path,
                 "fork_turns": fork_turns,
+                "llm_no": handle.llm_no,
             }
             yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
         except Exception as e:
             result = self._subagent_error_result(e)
+            result["requested_isolation"] = requested_isolation
+            result["isolation"] = isolation
+            result["isolation_fallback_reason"] = isolation_fallback_reason
             yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
@@ -776,10 +853,22 @@ class GenericAgentHandler(BaseHandler):
         suffix only invites the model to read a deliberate refusal as a GA bug and retry with a
         mangled task_name. Every other exception keeps the traceback context.
         """
+        from subagent_manager import SubagentStartupError
         from subagent_registry import SubagentNameConflictError
 
         if isinstance(exc, SubagentNameConflictError):
             return {"status": "error", "reason": "name_conflict", "agent_path": getattr(exc, "agent_path", None), "msg": str(exc)}
+        if isinstance(exc, SubagentStartupError):
+            result = {
+                "status": "error",
+                "reason": exc.reason,
+                "task_name": exc.task_name,
+                "pid": exc.pid,
+                "msg": str(exc),
+            }
+            if exc.returncode is not None:
+                result["returncode"] = exc.returncode
+            return result
         return {"status": "error", "msg": format_error(exc)}
 
     def do_list_agents(self, args, response):
@@ -891,10 +980,21 @@ class GenericAgentHandler(BaseHandler):
                 self._subagent_state_payload(state, include_output=False)
                 for state in result.changed_agents
             ],
+            "observed_agents": [
+                self._subagent_state_payload(state, include_output=False)
+                for state in result.observed_agents
+            ],
         }
-        if any(agent.get("turn_status") == "completed" for agent in data["agents"]):
+        if any(agent.get("turn_status") == "completed" for agent in data["agents"] + data["observed_agents"]):
             data["result_hint"] = "Call read_agent_result for a completed subagent when you need its final output."
-        yield f"[Status] {data['status']}: {len(data['agents'])} update(s).\n"
+        live_observed = sum(
+            1
+            for agent in data["observed_agents"]
+            if agent.get("turn_status") in {"pending", "running"}
+            and agent.get("process_status") not in {"shutdown", "killed", "exited"}
+        )
+        observed_suffix = f"; {live_observed} target(s) still pending/running" if live_observed else ""
+        yield f"[Status] {data['status']}: {len(data['agents'])} update(s){observed_suffix}.\n"
         return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_read_agent_result(self, args, response):

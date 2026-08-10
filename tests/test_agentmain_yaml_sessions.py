@@ -65,6 +65,36 @@ class LoadLlmSessionsYamlTest(unittest.TestCase):
                 agent.load_llm_sessions()
             again.assert_not_called()
 
+    def test_agent_init_records_each_local_startup_boundary(self):
+        client = _FakeClient("default", "claude-opus-4-8")
+        phases = []
+
+        def fake_load(**_kwargs):
+            return [client], 0, str(REPO_ROOT / "llm.yaml"), 12345
+
+        def record(phase, *_args, **_kwargs):
+            phases.append(phase)
+
+        with patch.object(agentmain_mod, "_record_startup_phase", side_effect=record), \
+             patch.object(agentmain_mod, "load_clients_from_yaml", side_effect=fake_load), \
+             patch("image_gc.maybe_gc_ga_images_on_startup", return_value=None), \
+             patch.object(agentmain_mod.session_transcript, "ensure_agent_session", return_value=None):
+            GenericAgent()
+
+        self.assertEqual(
+            phases,
+            [
+                "agent_image_gc_started",
+                "agent_image_gc_complete",
+                "agent_permission_init_started",
+                "agent_permission_init_complete",
+                "agent_model_config_started",
+                "agent_model_config_complete",
+                "agent_session_init_started",
+                "agent_session_init_complete",
+            ],
+        )
+
     def test_load_preserves_history_and_selection_by_name(self):
         old = _FakeClient("grok", "grok-4.5")
         old.backend.history = [{"role": "user", "content": "keep-me"}]

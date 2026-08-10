@@ -1,5 +1,7 @@
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,10 +11,24 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_worktree import create_subagent_worktree, remove_subagent_worktree, summarize_subagent_worktree  # noqa: E402
+from subagent_worktree import _run_git, create_subagent_worktree, remove_subagent_worktree, summarize_subagent_worktree  # noqa: E402
 
 
 class SubagentWorktreeTest(unittest.TestCase):
+    def test_run_git_timeout_kills_pipe_holding_descendants(self):
+        grandchild = "import time; time.sleep(2)"
+        child = (
+            "import subprocess,sys,time;"
+            f"subprocess.Popen([sys.executable,'-c',{grandchild!r}],stdout=sys.stdout,stderr=sys.stderr);"
+            "time.sleep(60)"
+        )
+        started = time.monotonic()
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            _run_git([sys.executable, "-c", child], timeout=0.2)
+
+        self.assertLess(time.monotonic() - started, 1.5)
+
     def test_create_subagent_worktree_uses_detached_git_worktree(self):
         with tempfile.TemporaryDirectory() as td:
             calls = []

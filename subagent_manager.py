@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
@@ -17,6 +18,15 @@ from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic
 
 
 ROUND_END_MARKER = "[ROUND END]"
+
+
+class SubagentStartupError(RuntimeError):
+    def __init__(self, reason, task_name, pid, message, *, returncode=None):
+        self.reason = str(reason)
+        self.task_name = str(task_name)
+        self.pid = pid
+        self.returncode = returncode
+        super().__init__(message)
 
 
 def normalize_task_name(target):
@@ -65,6 +75,12 @@ class AgentState:
     attach_status: str | None = None
     ipc_endpoint: dict | None = None
     close_reason: str | None = None
+    llm_no: int | None = None
+    model_profile: str | None = None
+    model_id: str | None = None
+    startup_phase: str | None = None
+    startup_phase_at: str | None = None
+    startup_elapsed_ms: float | None = None
 
 
 @dataclass
@@ -99,6 +115,7 @@ class WaitResult:
     message: str
     events: list[dict] | None = None
     next_event_seq: int | None = None
+    observed_agents: list[AgentState] = field(default_factory=list)
 
 
 @dataclass
@@ -143,6 +160,7 @@ class AgentHandle:
     worktree_summary: dict | None = None
     worktree_cleanup: dict | None = None
     ipc_endpoint: dict | None = None
+    llm_no: int | None = None
 
 
 @dataclass
@@ -180,6 +198,9 @@ def _default_terminate_process(pid):
 
 
 class SubagentManager:
+    STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
+    STARTUP_HANDSHAKE_POLL_S = 0.05
+
     def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None):
         self.root_dir = Path(root_dir or Path(__file__).resolve().parent)
         self.temp_dir = self.root_dir / "temp"
@@ -287,11 +308,172 @@ class SubagentManager:
             "cwd": str(worktree_path or self.root_dir),
             "stdout": stdout,
             "stderr": stderr,
+            # The Ink bridge's main thread owns a blocking read on its stdin pipe.  Letting a
+            # child inherit that handle can leave Windows' console/pipe startup suspended until
+            # the parent read completes, before agentmain can emit process_entry.
+            "stdin": subprocess.DEVNULL,
             "env": {**os.environ, self.AGENT_PATH_ENV: str(agent_path)},
         }
         if os.name == "nt":
             kwargs["creationflags"] = 0x08000000
         return kwargs
+
+    def _startup_handshake_timeout_s(self):
+        raw = os.environ.get("GA_SUBAGENT_STARTUP_TIMEOUT_S")
+        if raw is None:
+            return float(self.STARTUP_HANDSHAKE_TIMEOUT_S)
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return float(self.STARTUP_HANDSHAKE_TIMEOUT_S)
+
+    @staticmethod
+    def _startup_handshake_row(task_dir, pid):
+        path = Path(task_dir) / "startup.jsonl"
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return None
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if row.get("type") != "startup_phase" or row.get("phase") != "process_entry":
+                continue
+            row_pid = row.get("pid")
+            if pid is not None and row_pid is not None:
+                try:
+                    if int(row_pid) != int(pid):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            return row
+        return None
+
+    def _await_startup_handshake(self, proc, task_dir, task_name):
+        poll = getattr(proc, "poll", None)
+        if not callable(poll):
+            # Lightweight test doubles historically expose only pid. Real Popen objects always
+            # have poll(), which is also how we distinguish an early exit from a startup stall.
+            return None
+        timeout_s = self._startup_handshake_timeout_s()
+        if timeout_s <= 0:
+            return None
+        pid = getattr(proc, "pid", None)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            row = self._startup_handshake_row(task_dir, pid)
+            if row is not None:
+                return row
+            try:
+                returncode = poll()
+            except Exception:
+                returncode = None
+            if returncode is not None:
+                raise SubagentStartupError(
+                    "startup_exited",
+                    task_name,
+                    pid,
+                    f"startup_exited: subagent {task_name!r} exited before process_entry "
+                    f"(pid={pid}, returncode={returncode})",
+                    returncode=returncode,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SubagentStartupError(
+                    "startup_timeout",
+                    task_name,
+                    pid,
+                    f"startup_timeout: subagent {task_name!r} did not emit process_entry "
+                    f"within {timeout_s:g}s (pid={pid})",
+                )
+            self.sleep(min(self.STARTUP_HANDSHAKE_POLL_S, remaining))
+
+    def _terminate_spawned_process(self, proc):
+        pid = getattr(proc, "pid", None)
+        try:
+            poll = getattr(proc, "poll", None)
+            if callable(poll) and poll() is not None:
+                return None
+        except Exception:
+            pass
+        terminate = getattr(proc, "terminate", None)
+        if callable(terminate):
+            try:
+                terminate()
+                wait = getattr(proc, "wait", None)
+                if callable(wait):
+                    try:
+                        wait(timeout=1.0)
+                    except Exception:
+                        kill = getattr(proc, "kill", None)
+                        if callable(kill):
+                            kill()
+                return None
+            except Exception as e:
+                return f"{type(e).__name__}: {e}"
+        try:
+            self.terminate_process(pid)
+            return None
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+
+    def _record_startup_failure(self, task_name, task_dir, state_path, state, proc, error):
+        pid = getattr(proc, "pid", None)
+        terminate_error = self._terminate_spawned_process(proc)
+        latest = read_json_or_none(state_path) or {}
+        failed = {**state, **latest}
+        failed.update(
+            {
+                "pid": None,
+                "failed_pid": pid,
+                "turn_status": "errored",
+                "process_status": "exited",
+                "startup_phase": error.reason,
+                "startup_phase_at": now_iso(),
+                "last_error": str(error),
+                "close_reason": error.reason,
+                "updated_at": now_iso(),
+            }
+        )
+        if terminate_error:
+            failed["last_error"] += f"; terminate_error={terminate_error}"
+        atomic_write_json(state_path, failed)
+        event = {
+            "type": "agent_error",
+            "task_name": task_name,
+            "parent_session_id": failed.get("parent_session_id"),
+            "pid": pid,
+            "reason": error.reason,
+            "error": failed["last_error"],
+            "agent_type": failed.get("agent_type"),
+        }
+        append_jsonl_event(Path(task_dir) / "events.jsonl", event)
+        append_parent_inbox_event(task_dir, event)
+        bus_event = self.event_bus.append_event(
+            "agent_error",
+            agent_path=failed.get("agent_path"),
+            run_id=failed.get("run_id"),
+            task_name=task_name,
+            status={"turn_status": "errored", "process_status": "exited"},
+            payload={"pid": pid, "reason": error.reason, "error": failed["last_error"]},
+            notify=True,
+        )
+        failed["last_event_seq"] = bus_event["event_seq"]
+        atomic_write_json(state_path, failed)
+        self._write_registry_entry(task_name, failed, Path(task_dir))
+        try:
+            self.registry.mark_closed(
+                failed.get("agent_path"),
+                previous_status="starting",
+                closed_status=error.reason,
+            )
+        except (FileNotFoundError, ValueError):
+            pass
+        return failed
 
     def _create_child_or_reject(self, *, task_name, task_dir, state_path, parent_session_id, message, permission_metadata, **entry_fields):
         """Register the child, or record why the tree guard refused it before re-raising.
@@ -453,6 +635,8 @@ class SubagentManager:
                     "parent_permission_mode": permission_metadata.get("parent_permission_mode"),
                     "permission_options": permission_metadata["options"],
                     "llm_no": llm_no,
+                    "startup_phase": "process_spawn_failed",
+                    "startup_phase_at": now_iso(),
                     "verbose": bool(verbose),
                     "agent_type": agent_type,
                     "role_source_path": role_source_path,
@@ -531,6 +715,8 @@ class SubagentManager:
             "parent_permission_mode": permission_metadata.get("parent_permission_mode"),
             "permission_options": permission_metadata["options"],
             "llm_no": llm_no,
+            "startup_phase": "spawn_requested",
+            "startup_phase_at": now_iso(),
             "verbose": bool(verbose),
             "agent_type": agent_type,
             "role_source_path": role_source_path,
@@ -603,7 +789,10 @@ class SubagentManager:
                 {
                     "turn_status": "errored",
                     "process_status": "exited",
+                    "startup_phase": "process_spawn_failed",
+                    "startup_phase_at": now_iso(),
                     "last_error": error,
+                    "close_reason": "process_spawn_failed",
                     "updated_at": now_iso(),
                 }
             )
@@ -630,12 +819,28 @@ class SubagentManager:
             state["last_event_seq"] = bus_event["event_seq"]
             atomic_write_json(state_path, state)
             self._write_registry_entry(task_name, state, task_dir)
+            try:
+                self.registry.mark_closed(
+                    state.get("agent_path"),
+                    previous_status="starting",
+                    closed_status="process_spawn_failed",
+                )
+            except (FileNotFoundError, ValueError):
+                pass
             raise
         finally:
             stdout.close()
             stderr.close()
         pid = getattr(proc, "pid", None)
-        state.update({"pid": pid, "process_status": "alive", "updated_at": now_iso()})
+        state.update(
+            {
+                "pid": pid,
+                "process_status": "alive",
+                "startup_phase": "process_spawned",
+                "startup_phase_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+        )
         atomic_write_json(state_path, state)
         event = {
             "type": "agent_started",
@@ -658,6 +863,11 @@ class SubagentManager:
         state["last_event_seq"] = bus_event["event_seq"]
         atomic_write_json(state_path, state)
         self._write_registry_entry(task_name, state, task_dir)
+        try:
+            self._await_startup_handshake(proc, task_dir, task_name)
+        except SubagentStartupError as e:
+            self._record_startup_failure(task_name, task_dir, state_path, state, proc, e)
+            raise
         handle = AgentHandle(
             task_name,
             state["agent_path"],
@@ -679,6 +889,7 @@ class SubagentManager:
             isolation=state.get("isolation"),
             worktree_path=state.get("worktree_path"),
             ipc_endpoint=state.get("ipc_endpoint"),
+            llm_no=state.get("llm_no"),
         )
         # Keyed on the *requested* name, not the allocated one: `_next_available_task_name` may
         # have appended a suffix, and the replay lookup only knows what the caller asked for.
@@ -908,6 +1119,7 @@ class SubagentManager:
             worktree_path=worktree_path,
             handoff_mode=raw.get("handoff_mode"),
             handoff_reason=raw.get("handoff_reason"),
+            llm_no=llm_no,
         )
         self._record_submission(
             submission_id,
@@ -984,7 +1196,7 @@ class SubagentManager:
                     next_event_seq,
                 )
             if timeout_s <= 0:
-                return WaitResult(True, [], "Wait timed out.", [], self.event_bus.last_event_seq())
+                return self._timed_out_wait_result(targets)
         baseline = since_event_offsets or {target: self._event_size(target) for target in targets}
         inbox_baseline = self._parent_inbox_size()
         while True:
@@ -1030,8 +1242,24 @@ class SubagentManager:
                     self.event_bus.last_event_seq(),
                 )
             if time.monotonic() >= deadline:
-                return WaitResult(True, [], "Wait timed out.", [], self.event_bus.last_event_seq())
+                return self._timed_out_wait_result(targets)
             self._wait_for_change(targets, poll_interval_s, deadline)
+
+    def _timed_out_wait_result(self, targets):
+        observed = []
+        for target in targets:
+            try:
+                observed.append(self.probe_agent(target))
+            except (FileNotFoundError, ValueError):
+                continue
+        return WaitResult(
+            True,
+            [],
+            f"Wait timed out; {len(observed)} target(s) still observed.",
+            [],
+            self.event_bus.last_event_seq(),
+            observed_agents=observed,
+        )
 
     def _wait_for_change(self, targets, poll_interval_s, deadline):
         """Sleep until something might have changed: on the channels if there are any.
@@ -1936,6 +2164,7 @@ class SubagentManager:
             return False
 
     def _agent_state_from_dict(self, task_name, task_dir, raw):
+        startup = self._read_startup_status(task_dir)
         return AgentState(
             task_name=raw.get("task_name") or task_name,
             agent_path=raw.get("agent_path") or f"/root/{task_name}",
@@ -1970,7 +2199,44 @@ class SubagentManager:
             attach_status=raw.get("attach_status"),
             ipc_endpoint=raw.get("ipc_endpoint"),
             close_reason=raw.get("close_reason"),
+            llm_no=int(raw.get("llm_no") if raw.get("llm_no") is not None else startup.get("llm_no"))
+            if raw.get("llm_no") is not None or startup.get("llm_no") is not None
+            else None,
+            model_profile=startup.get("model_profile") or raw.get("model_profile"),
+            model_id=startup.get("model_id") or raw.get("model_id"),
+            startup_phase=startup.get("startup_phase") or raw.get("startup_phase"),
+            startup_phase_at=startup.get("startup_phase_at") or raw.get("startup_phase_at"),
+            startup_elapsed_ms=startup.get("startup_elapsed_ms"),
         )
+
+    @staticmethod
+    def _read_startup_status(task_dir):
+        path = Path(task_dir) / "startup.jsonl"
+        status = {}
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return status
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if row.get("type") != "startup_phase" or not row.get("phase"):
+                continue
+            status.update(
+                {
+                    "startup_phase": row.get("phase"),
+                    "startup_phase_at": row.get("created_at"),
+                    "startup_elapsed_ms": row.get("elapsed_ms"),
+                }
+            )
+            for key in ("llm_no", "model_profile", "model_id"):
+                if row.get(key) is not None:
+                    status[key] = row.get(key)
+        return status
 
 
 _DEFAULT_MANAGER = SubagentManager()

@@ -73,7 +73,6 @@
     "parameters": {"type": "object", "properties": {
       "task_name": {"type": "string", "description": "Lowercase letters, digits, and underscores only"},
       "message": {"type": "string", "description": "Self-contained task prompt. Include the exact result needed next, constraints, relevant paths/context, and final answer contract; avoid vague requests and do not duplicate parent work."},
-      "agent_type": {"type": "string", "description": "Optional role definition name loaded from .ga/subagents/<agent_type>.json or .md; role defaults can supply task_name, permission_profile, allowed/denied tools, and fork_turns."},
       "fork_turns": {"type": "string", "description": "'all' (default), 'none', or a positive integer string for recent turns", "default": "all"},
       "permission_profile": {"type": "string", "description": "Subagent permission profile: inherit-current-permissions, read_only, restricted_mcp, or explicit_approval", "default": "inherit-current-permissions"},
       "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional static tool allowlist for the subagent"},
@@ -83,7 +82,7 @@
       "allowed_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional exact MCP tool allowlist"},
       "denied_mcp_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional exact MCP tool denylist"},
       "background": {"type": "boolean", "description": "Run as a background subagent process; false is recorded for future foreground/background handoff support but still uses the durable process runner in this version", "default": true},
-      "isolation": {"type": "string", "description": "Optional isolation mode. Use 'worktree' to launch the subagent from an isolated git worktree while keeping the parent task root for coordination files"},
+      "isolation": {"type": "string", "description": "Optional isolation mode. Use 'worktree' only for repository-modifying tasks or independent branch tests. Omit it for search, research, and other read-only work. A worktree separates Git changes but is not a security sandbox. GA may downgrade an effectively read-only request and report isolation_fallback_reason"},
       "ipc_mode": {"type": "string", "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why", "default": "file"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
       "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry a spawn or are not sure whether the previous call took effect: retrying with the same submission_id returns the first result instead of starting a second process, a second active-agent slot and a second round of LLM spend. Omit it only for a genuinely new spawn"},

@@ -1,22 +1,89 @@
 from __future__ import annotations
 
+import os
+import signal
 import shutil
 import subprocess
 from pathlib import Path
 
 
 _CREATE_NO_WINDOW = 0x08000000
+_PIPE_DRAIN_TIMEOUT_S = 1.0
+_TASKKILL_TIMEOUT_S = 5.0
+
+
+def _terminate_process_tree(proc):
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TASKKILL_TIMEOUT_S,
+                check=False,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _close_process_pipes(proc):
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 def _run_git(cmd, *, runner=None, timeout=120):
     kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if os.name == "nt":
+        kwargs["creationflags"] = _CREATE_NO_WINDOW
+    if runner is not None:
+        return runner(cmd, **kwargs)
+
+    popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = _CREATE_NO_WINDOW
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     try:
-        import os
-        if os.name == "nt":
-            kwargs["creationflags"] = _CREATE_NO_WINDOW
-    except Exception:
-        pass
-    return (runner or subprocess.run)(cmd, **kwargs)
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as timeout_error:
+        _terminate_process_tree(proc)
+        stdout = timeout_error.output
+        stderr = timeout_error.stderr
+        try:
+            drained_stdout, drained_stderr = proc.communicate(timeout=_PIPE_DRAIN_TIMEOUT_S)
+            if drained_stdout is not None:
+                stdout = drained_stdout
+            if drained_stderr is not None:
+                stderr = drained_stderr
+        except subprocess.TimeoutExpired as drain_error:
+            if drain_error.output is not None:
+                stdout = drain_error.output
+            if drain_error.stderr is not None:
+                stderr = drain_error.stderr
+            _close_process_pipes(proc)
+            try:
+                proc.wait(timeout=_PIPE_DRAIN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                pass
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr) from None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def create_subagent_worktree(repo_dir, base_dir, run_id, *, runner=None):

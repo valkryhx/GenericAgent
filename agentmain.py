@@ -1,4 +1,51 @@
-import os, sys, threading, queue, time, json, re, random, locale, copy
+import os, sys, threading, queue, time, json, re, random, locale, copy, subprocess
+_PROCESS_START_MONOTONIC_NS = time.monotonic_ns()
+
+
+def _startup_task_dir_from_argv(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    def value_for(name):
+        for index, value in enumerate(argv):
+            if value == name and index + 1 < len(argv):
+                return argv[index + 1]
+            if value.startswith(name + '='):
+                return value.split('=', 1)[1]
+        return None
+
+    task_name = value_for('--task')
+    if not task_name:
+        return None
+    root_dir = value_for('--task_root') or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.abspath(root_dir), 'temp', task_name)
+
+
+def _record_startup_phase(phase, task_dir=None, **details):
+    """Append a task-local marker without touching the shared event bus."""
+    task_dir = str(task_dir or _startup_task_dir_from_argv() or '')
+    if not task_dir:
+        return None
+    elapsed_ms = round((time.monotonic_ns() - _PROCESS_START_MONOTONIC_NS) / 1_000_000, 3)
+    row = {
+        'schema_version': 1,
+        'type': 'startup_phase',
+        'phase': str(phase),
+        'pid': os.getpid(),
+        'created_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+        'elapsed_ms': elapsed_ms,
+        **details,
+    }
+    try:
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, 'startup.jsonl'), 'a', encoding='utf-8', newline='\n') as f:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+            f.flush()
+    except OSError:
+        return None
+    return row
+
+
+_record_startup_phase('process_entry')
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 def _configure_stdio_utf8():
     for name in ('stdout', 'stderr'):
@@ -26,6 +73,8 @@ except Exception:  # 压缩核心导入失败时降级：/compact 报不可用�
 from ga_agents_runtime import build_ga_project_instructions
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 from subagent_prompts import build_agent_role_usage_hint
+
+_record_startup_phase('imports_complete')
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # llm.yaml 热重载：记录上次成功加载的路径与 mtime，未变则跳过重建。
@@ -265,11 +314,45 @@ def normalize_display_assistant_text(full_resp: str) -> str:
     return text
 
 
+def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
+    from subagent_roles import SubagentRoleRegistry
+
+    role_names = sorted({role.name for role in SubagentRoleRegistry(root_dir).list_roles()})
+    for tool in tools_schema:
+        function = tool.get("function") or {}
+        if function.get("name") != "spawn_agent":
+            continue
+        properties = (function.get("parameters") or {}).get("properties") or {}
+        if not role_names:
+            properties.pop("agent_type", None)
+            return
+        agent_type = properties.setdefault("agent_type", {"type": "string"})
+        agent_type["enum"] = role_names
+        configured = ", ".join(role_names)
+        if language == "zh":
+            agent_type["description"] = (
+                f"可选的预配置角色名；当前可用值：{configured}。只能使用此列表中的精确名称，"
+                "也可省略以启动通用子智能体；该字段不是自由标签。"
+            )
+        else:
+            agent_type["description"] = (
+                f"Optional preconfigured role name. Available values: {configured}. "
+                "Use one exact listed value, or omit this field to spawn a generic subagent; "
+                "this is not a free-form label."
+            )
+        return
+
+
 def load_tool_schema(suffix='', include_mcp_tools=True):
     global TOOLS_SCHEMA
     with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
         TS = f.read()
     TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
+    _apply_subagent_role_schema(
+        TOOLS_SCHEMA,
+        script_dir,
+        language="zh" if suffix == "_cn" else "en",
+    )
     if not include_mcp_tools:
         return
     try:
@@ -348,11 +431,14 @@ class GenericAgent:
     def __init__(self):
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
         # Slice D3：进程内首次构造 agent 时 GC 自产图片缓存（best-effort）
+        _record_startup_phase('agent_image_gc_started')
+        image_gc_status, image_gc_error = 'ok', None
         try:
             from image_gc import maybe_gc_ga_images_on_startup
             maybe_gc_ga_images_on_startup(quiet=True)
-        except Exception:
-            pass
+        except Exception as e:
+            image_gc_status, image_gc_error = 'error', f'{type(e).__name__}: {e}'
+        _record_startup_phase('agent_image_gc_complete', status=image_gc_status, error=image_gc_error)
         self.lock = threading.Lock()
         self.task_dir = None
         self.history = []; self.handler = None;
@@ -361,24 +447,34 @@ class GenericAgent:
         self.llm_no = 0;  self.inc_out = False; self.verbose = True
         self.peer_hint = True
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
+        _record_startup_phase('agent_permission_init_started')
         from permission_policy import DEFAULT_PERMISSION_MODE
         self.permission_mode = DEFAULT_PERMISSION_MODE
         self.subagent_permission_policy = None
         # ask 档阻塞审批 runtime（可无 emit = headless deny）；bridge 会 set_emit
+        permission_status, permission_error = 'ok', None
         try:
             from permission_runtime import PermissionRuntime
             self.permission_runtime = PermissionRuntime()
-        except Exception:
+        except Exception as e:
             self.permission_runtime = None
+            permission_status, permission_error = 'error', f'{type(e).__name__}: {e}'
+        _record_startup_phase('agent_permission_init_complete', status=permission_status, error=permission_error)
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
+        _record_startup_phase('agent_model_config_started')
         self.load_llm_sessions()
+        _record_startup_phase('agent_model_config_complete', llm_count=len(self.llmclients), active_llm_no=self.llm_no)
         self.session_id = None
         self.session_path = None
         self.session_turn_id = 0
+        _record_startup_phase('agent_session_init_started')
+        session_status, session_error = 'ok', None
         try:
             session_transcript.ensure_agent_session(self)
         except Exception as e:
+            session_status, session_error = 'error', f'{type(e).__name__}: {e}'
             print(f"[WARN] Failed to initialize session transcript: {e}")
+        _record_startup_phase('agent_session_init_complete', status=session_status, error=session_error)
 
     def load_llm_sessions(self):
         """阶段 3：只从 llm.yaml 构造会话列表（profiles + mixin），不再读 mykey.py。
@@ -929,6 +1025,9 @@ def _signal_parent():
 
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
+    is_turn_started = event.get('type') == 'turn_started'
+    if is_turn_started:
+        _record_startup_phase('local_turn_event_written', task_dir)
     task_name = event.get('task_name') or os.path.basename(os.path.normpath(task_dir))
     state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
     agent_path = event.get('agent_path') or state.get('agent_path') or f'/root/{task_name}'
@@ -938,6 +1037,8 @@ def _subagent_event(task_dir, event):
         'turn_status': state.get('turn_status'),
         'process_status': state.get('process_status'),
     }
+    bus_status = 'ok'
+    bus_error = None
     try:
         from subagent_event_bus import SubagentEventBus
         SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
@@ -949,8 +1050,11 @@ def _subagent_event(task_dir, event):
             payload=payload,
             notify=event.get('type') in {'turn_completed', 'agent_exited', 'agent_shutdown', 'agent_error', 'agent_closed'},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        bus_status = 'error'
+        bus_error = format_error(e)
+    if is_turn_started:
+        _record_startup_phase('event_bus_mirror_complete', task_dir, status=bus_status, error=bus_error)
     try:
         parent_session_id = state.get('parent_session_id') or event.get('parent_session_id')
         if parent_session_id and run_id:
@@ -1058,6 +1162,7 @@ def resolve_reply_wait_schedule(reply_wait_iterations, reply_sleep_s, poll_inter
 def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
     task_dir = str(task_dir)
     task_name = os.path.basename(os.path.normpath(task_dir))
+    _record_startup_phase('worker_entry', task_dir)
     poll_interval, idle_timeout, max_wait_iterations = resolve_reply_wait_schedule(
         reply_wait_iterations, reply_sleep_s, poll_interval_s, idle_timeout_s
     )
@@ -1078,11 +1183,16 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         if parent_permission_mode is not None:
             state['parent_permission_mode'] = parent_permission_mode
         atomic_write_json(state_path, state)
+    permission_status = 'ok'
+    permission_error = None
     try:
         from subagent_permissions import load_subagent_permission_policy
         agent.subagent_permission_policy = load_subagent_permission_policy(task_dir)
     except Exception as e:
+        permission_status = 'error'
+        permission_error = format_error(e)
         print(f"[WARN] Failed to attach subagent permission policy: {e}")
+    _record_startup_phase('permission_ready', task_dir, status=permission_status, error=permission_error)
     state_path = os.path.join(task_dir, 'state.json')
     existing_state = read_json_or_none(state_path) or {}
     # Realtime subscription is an accelerator only: it carries change signals, while
@@ -1101,6 +1211,12 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     existing_state = _record_child_ipc_status(
         task_dir, task_name, child_ipc_status, child_ipc_fallback_reason, getattr(realtime_subscriber, 'address', None)
     )
+    _record_startup_phase(
+        'ipc_ready',
+        task_dir,
+        child_ipc_status=child_ipc_status,
+        child_ipc_fallback_reason=child_ipc_fallback_reason,
+    )
     nround = int(existing_state.get('round') or 0) if existing_state.get('round') else ''
     infile = os.path.join(task_dir, 'input.txt')
     if input_text:
@@ -1113,11 +1229,14 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         _load_forked_history(agent, task_dir, task_name, fh, nround)
     with open(infile, encoding='utf-8') as f: raw = f.read()
     _subagent_transcript_append(task_dir, 'request', {'task_name': task_name, 'prompt': raw})
+    _record_startup_phase('request_loaded', task_dir)
     while True:
         output_path = os.path.join(task_dir, f'output{nround}.txt')
         try:
             _subagent_state(task_dir, task_name, nround, 'running', 'alive', output_path=output_path)
+            _record_startup_phase('turn_state_written', task_dir)
             _subagent_event(task_dir, {'type': 'turn_started', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+            _record_startup_phase('turn_started_complete', task_dir)
 
             def _transcript_tool_before(tool_name, args, response):
                 _subagent_transcript_append(
@@ -1363,7 +1482,9 @@ def start_task_background(
     stdout = open(os.path.join(task_dir, 'stdout.log'), 'w', encoding='utf-8')
     stderr = open(os.path.join(task_dir, 'stderr.log'), 'w', encoding='utf-8')
     try:
-        kwargs = {'cwd': root_dir, 'stdout': stdout, 'stderr': stderr}
+        # A parent bridge may be blocked reading its stdin pipe.  Do not inherit that handle:
+        # on Windows the child can otherwise remain in process startup before process_entry.
+        kwargs = {'cwd': root_dir, 'stdout': stdout, 'stderr': stderr, 'stdin': subprocess.DEVNULL}
         if os.name == 'nt':
             kwargs['creationflags'] = 0x08000000
         proc = (popen or __import__('subprocess').Popen)(cmd, **kwargs)
@@ -1422,6 +1543,7 @@ if __name__ == '__main__':
     parser.add_argument('--parent_permission_mode', default=None, help='parent permission mode for inherit-current-permissions')
     parser.add_argument('--permission_options', default=None, help='subagent permission options JSON')
     args, _unknown = parser.parse_known_args()
+    _record_startup_phase('arguments_parsed')
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
 
     if args.task and not args.nobg:
@@ -1439,10 +1561,20 @@ if __name__ == '__main__':
             permission_options=_load_permission_options_arg(args.permission_options),
         )); sys.exit(0)
 
+    _record_startup_phase('agent_init_started')
     agent = GeneraticAgent()
+    _record_startup_phase('agent_init_complete')
     agent.next_llm(args.llm_no)
+    selected_backend = getattr(getattr(agent, 'llmclient', None), 'backend', None)
+    _record_startup_phase(
+        'model_selected',
+        llm_no=agent.llm_no,
+        model_profile=getattr(selected_backend, 'name', None),
+        model_id=getattr(selected_backend, 'model', None),
+    )
     agent.verbose = args.verbose
     threading.Thread(target=agent.run, daemon=True).start()
+    _record_startup_phase('agent_thread_started')
 
     if args.task:
         task_root = os.path.abspath(args.task_root or script_dir)

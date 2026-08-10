@@ -14,6 +14,13 @@ GA 的 subagent 是完整 agent，拥有同等工具能力。父 agent 的职责
 - 委派后不要重复执行已经委派给子智能体的任务；父 agent 应做非重叠工作或等待整合。
 - 谨慎调用 `wait_agent`；只有下一步关键路径需要 subagent 更新时才等。
 
+## Worktree 隔离策略
+
+- 搜索、调研、日志检查和其他只读任务不要设置 `isolation="worktree"`；直接在当前仓库只读访问。
+- 只有需要修改仓库文件，或需要独立分支环境执行测试的 subagent，才使用 `worktree`。
+- 如果权限 profile、继承的父权限或显式工具白名单表明任务实际只读，GA 会忽略请求的 worktree，并在结果中返回 `requested_isolation` 与 `isolation_fallback_reason`。
+- worktree 用于分离 Git 变更，不是安全沙箱；工具权限仍由 permission profile 和 allowlist/denylist 控制。
+
 ## 父 agent 写给 subagent 的 prompt 契约
 
 `message` 不应是泛泛目标，也不应写成长篇操作手册。它应是一个可独立执行的任务契约：

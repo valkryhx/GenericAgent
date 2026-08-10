@@ -239,7 +239,6 @@ async function main(): Promise<number> {
       const spawnPrompt = [
         '这是一次真实 GA UI subagent E2E。用户明确要求你使用子 agent，必须实际调用工具，不要直接伪造最终答案。',
         `调用 spawn_agent，task_name 必须是 ${SUBAGENT_NAME}，fork_turns 使用 "none"，llm_no 必须使用当前 model_status 返回的 luna index ${selectedModelIndex}，不要使用 0 或其他模型 index。`,
-        'agent_type 字段必须省略，不要传 default 或任何不存在的角色；不要调用 code_run 或其他探测工具。',
         `message 必须要求子 agent 不调用工具、不输出 Markdown，只输出这一行精确文本：${SUBAGENT_MARKER}。`,
         'spawn_agent 成功后本轮立即返回一行简短 ACK，不要在本轮调用 wait_agent、read_agent_result 或 close_agent。',
       ].join('\n')

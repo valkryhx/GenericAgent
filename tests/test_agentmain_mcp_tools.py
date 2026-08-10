@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -11,6 +12,41 @@ if str(REPO_ROOT) not in sys.path:
 
 
 class AgentMainMcpToolsTest(unittest.TestCase):
+    def test_load_tool_schema_hides_agent_type_when_no_roles_are_configured(self):
+        import agentmain
+
+        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=[]):
+            agentmain.load_tool_schema(include_mcp_tools=False)
+
+        spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
+        self.assertNotIn("agent_type", spawn["parameters"]["properties"])
+
+    def test_load_tool_schema_enumerates_only_configured_agent_types(self):
+        import agentmain
+
+        roles = [SimpleNamespace(name="auditor"), SimpleNamespace(name="researcher")]
+        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=roles):
+            agentmain.load_tool_schema(include_mcp_tools=False)
+
+        spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
+        agent_type = spawn["parameters"]["properties"]["agent_type"]
+        self.assertEqual(agent_type.get("enum"), ["auditor", "researcher"])
+        self.assertIn("auditor", agent_type["description"])
+        self.assertIn("researcher", agent_type["description"])
+        self.assertIn("not a free-form label", agent_type["description"])
+
+    def test_load_chinese_tool_schema_describes_configured_agent_types(self):
+        import agentmain
+
+        roles = [SimpleNamespace(name="researcher")]
+        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=roles):
+            agentmain.load_tool_schema("_cn", include_mcp_tools=False)
+
+        spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
+        agent_type = spawn["parameters"]["properties"]["agent_type"]
+        self.assertEqual(agent_type.get("enum"), ["researcher"])
+        self.assertIn("不是自由标签", agent_type["description"])
+
     def test_load_tool_schema_can_skip_mcp_discovery(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
         import agentmain
