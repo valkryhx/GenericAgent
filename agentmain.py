@@ -540,6 +540,27 @@ class GenericAgent:
         if selector.isdigit():
             return self._switch_llm_index(int(selector))
         lowered = selector.lower()
+        # Prefer an exact profile/display name when a chat variant reuses the
+        # same API model (for example deepseek-v4.1-flash and its -chat
+        # profile). Only fall back to an exact API-model match, then substring
+        # matching, when there is no exact profile candidate.
+        exact_profile_matches = [
+            i for i, client in enumerate(self.llmclients)
+            if lowered == self.get_llm_name(client).lower()
+            or lowered == getattr(client.backend, "name", "").lower()
+        ]
+        if len(exact_profile_matches) == 1:
+            return self._switch_llm_index(exact_profile_matches[0])
+        if len(exact_profile_matches) > 1:
+            return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
+        exact_model_matches = [
+            i for i, client in enumerate(self.llmclients)
+            if lowered == getattr(client.backend, "model", "").lower()
+        ]
+        if len(exact_model_matches) == 1:
+            return self._switch_llm_index(exact_model_matches[0])
+        if len(exact_model_matches) > 1:
+            return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
         matches = [
             i for i, client in enumerate(self.llmclients)
             if lowered in self.get_llm_name(client).lower()

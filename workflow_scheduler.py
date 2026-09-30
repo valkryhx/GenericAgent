@@ -100,6 +100,30 @@ def validate_agent_payload_against_schema(payload, schema) -> list[str]:
     return issues
 
 
+def _coerce_structured_text_payload(payload):
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("structured", "summary", "text"):
+        raw = payload.get(key)
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].lstrip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            parsed = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return payload
+
+
 def _schema_type_matches(value, expected_type: str) -> bool:
     if expected_type == "object":
         return isinstance(value, dict)
@@ -371,6 +395,11 @@ class AgentScheduler:
         if not isinstance(schema, dict) or not schema:
             return result
         issues = validate_agent_payload_against_schema(result.payload, schema)
+        if issues:
+            parsed_payload = _coerce_structured_text_payload(result.payload)
+            if parsed_payload is not result.payload:
+                result.payload = parsed_payload
+                issues = validate_agent_payload_against_schema(result.payload, schema)
         if not issues:
             job.metadata["schemaValidation"] = {
                 "ok": True,

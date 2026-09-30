@@ -133,6 +133,27 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual("workflow-draft.json", events[0].payload["workflowDraftRef"])
             self.assertEqual("deterministic", events[0].payload["plannerMode"])
 
+    def test_create_planned_coding_run_persists_acceptance_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = WorkflowController(WorkflowStore(root=tmp))
+
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text="实现一个必须 TDD 的解析器",
+                planner=WorkflowPlanner(),
+                context={"constraints": ["不要读取 mykey.py", "不要提交"]},
+            )
+
+            self.assertEqual("running", run.status)
+            self.assertEqual(
+                {
+                    "required": True,
+                    "failWorkflowOnError": True,
+                    "checks": ["python_unittest", "verification_schema"],
+                },
+                run.metadata["acceptanceContract"],
+            )
+
     def test_create_planned_run_can_request_approval_when_auto_approve_false(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))

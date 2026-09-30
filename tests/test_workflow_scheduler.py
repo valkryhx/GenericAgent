@@ -321,6 +321,37 @@ class WorkflowSchedulerTest(unittest.TestCase):
         final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
         self.assertEqual(loaded.metadata["workflowIssues"], final_result["workflowIssues"])
 
+    def test_strict_schema_accepts_json_object_returned_in_child_text(self):
+        scheduler, store, run = self.make_scheduler(
+            runner=FakeChildAgentRunner(
+                results={
+                    "agent_1": {
+                        "summary": '{"verificationPassed": true, "checks": [], "blockingIssues": []}',
+                        "text": '{"verificationPassed": true, "checks": [], "blockingIssues": []}',
+                    }
+                }
+            )
+        )
+        job = scheduler.register_agent(
+            prompt="return verification JSON",
+            label="verify",
+            options={
+                "role": "verification",
+                "schema": {
+                    "type": "object",
+                    "required": ["verificationPassed", "checks", "blockingIssues"],
+                },
+                "strictSchema": True,
+            },
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("succeeded", loaded.jobs[0].status)
+        self.assertTrue(loaded.jobs[0].metadata["result"]["verificationPassed"])
+        self.assertTrue(loaded.jobs[0].metadata["schemaValidation"]["ok"])
+
     def test_concurrency_limit_only_starts_configured_number_of_jobs_per_tick(self):
         scheduler, _store, _ = self.make_scheduler(max_concurrent=3, runner=FakeChildAgentRunner(delay_ticks=1))
         for index in range(20):

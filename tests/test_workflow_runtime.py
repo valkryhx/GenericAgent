@@ -723,6 +723,83 @@ return {verificationPassed: verification.verificationPassed}
             self.assertEqual("failed", final_result["status"])
             self.assertFalse(final_result["result"]["verificationPassed"])
 
+    def test_runtime_fails_coding_acceptance_when_no_host_test_gate_was_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = "const result = await agent('verification completed'); return {result};"
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_acceptance_missing_gate",
+                    session_id="session_test",
+                    script=script,
+                    status="running",
+                    metadata={
+                        "acceptanceContract": {
+                            "required": True,
+                            "checks": ["python_unittest"],
+                            "failWorkflowOnError": True,
+                        }
+                    },
+                )
+            )
+            runner = FakeChildAgentRunner(results={"agent_1": {"summary": "All checks passed"}})
+
+            with self.assertRaisesRegex(RuntimeError, "required acceptance check.*python_unittest"):
+                WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("failed", loaded.status)
+            self.assertEqual("succeeded", loaded.jobs[0].status)
+            self.assertEqual("failed", loaded.metadata["acceptanceStatus"])
+            self.assertEqual("failed", loaded.metadata["executionOutcome"])
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["acceptanceStatus"])
+            self.assertIn("python_unittest", final_result["acceptanceFailures"][0])
+            progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", progress["acceptanceStatus"])
+
+    def test_runtime_marks_required_acceptance_as_passed_with_gate_and_verification_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_acceptance.py").write_text(
+                "import unittest\n\nclass AcceptanceTest(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            script = """
+const verification = await agent('return structured verification')
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', phase: 'Verification', gateKey: 'workflow-acceptance'})
+return {verificationPassed: verification.verificationPassed, checks: [], blockingIssues: [], gate}
+"""
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_acceptance_passed",
+                    session_id="session_test",
+                    script=script,
+                    status="running",
+                    metadata={
+                        "acceptanceContract": {
+                            "required": True,
+                            "checks": ["python_unittest", "verification_schema"],
+                            "failWorkflowOnError": True,
+                        }
+                    },
+                )
+            )
+            runner = FakeChildAgentRunner(results={"agent_1": {"verificationPassed": True}})
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("passed", loaded.metadata["acceptanceStatus"])
+            self.assertEqual("succeeded", loaded.metadata["executionOutcome"])
+            self.assertEqual("passed", outcome.result["gate"]["gatePassed"] and loaded.metadata["acceptanceStatus"])
+
     def test_runtime_repair_and_retest_reuses_gate_until_repaired(self):
         class RepairingRunner:
             def __init__(self, test_path):
@@ -1112,6 +1189,38 @@ return result
             self.assertEqual("failed", final_result["status"])
             self.assertIn("schema_validation_failed", final_result["error"])
             self.assertEqual(issues, final_result["workflowIssues"])
+
+    def test_runtime_marks_required_acceptance_failed_on_schema_validation_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('return strict verification', {
+  label: 'verify',
+  schema: {
+    type: 'object',
+    required: ['verificationPassed', 'checks', 'blockingIssues'],
+    properties: { verificationPassed: {type: 'boolean'}, checks: {type: 'array'}, blockingIssues: {type: 'array'} }
+  },
+  strictSchema: true
+})
+return result
+"""
+            run = store.create_run(WorkflowRun(
+                run_id="wf_acceptance_schema_failure",
+                session_id="session_test",
+                script=script,
+                status="running",
+                metadata={"acceptanceContract": {"required": True, "checks": ["verification_schema"], "failWorkflowOnError": True}},
+            ))
+            with self.assertRaisesRegex(RuntimeError, "schema_validation_failed"):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner(results={"agent_1": {"summary": "plain text"}})).run(run)
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("failed", loaded.status)
+            self.assertEqual("failed", loaded.metadata["acceptanceStatus"])
+            self.assertTrue(loaded.metadata["acceptanceFailures"])
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", final_result["acceptanceStatus"])
 
     def test_runtime_agent_truthy_non_object_options_fail_before_registering_job(self):
         scripts = {

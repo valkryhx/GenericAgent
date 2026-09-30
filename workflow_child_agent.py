@@ -466,12 +466,21 @@ class NativeGPTChildAgentRunner:
         options = sanitize(copy.deepcopy(job.metadata.get("options") or {}))
         permission_profile = self._permission_profile(job)
         permission_policy_version = self._permission_policy_version(job)
+        role = options.get("role") or ""
+        role_instructions = {
+            "tests": "Write or run tests before implementation. Report the exact command, exit code, and observed RED/GREEN evidence; do not claim a test ran unless it did.",
+            "implementation": "Make the smallest change for the assigned implementation. Preserve existing contracts and run relevant tests after edits; do not claim success from code inspection alone.",
+            "verification": "Independently verify the result. Run the requested checks and report machine-observed commands, exit codes, and failures. Return the required structured verification fields. Never infer pass from another agent's summary; missing evidence means verificationPassed=false.",
+            "review": "Review independently against the supplied rubric. Report only actionable findings with concrete evidence; do not modify files unless the task explicitly permits it.",
+        }.get(str(role), "")
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
             f"runId: {run_id}",
             f"jobId: {job.job_id}",
             f"phase: {job.phase or ''}",
             f"label: {label}",
+            f"role: {role}",
+            f"roleInstructions: {role_instructions}",
             f"options: {options}",
             f"permissionProfile: {permission_profile}",
             f"permissionPolicyVersion: {permission_policy_version}",

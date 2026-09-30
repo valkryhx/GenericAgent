@@ -110,11 +110,21 @@ def repaired_coding_plan():
             {"title": "Understand", "agents": [{"label": "understand", "role": "understanding", "prompt": f"{boundary} 理解任务。", "dependsOn": []}]},
             {"title": "Tests", "agents": [{"label": "write-failing-tests", "role": "tests", "prompt": f"{boundary} 先写 failing tests 并确认红灯。", "dependsOn": ["understand"]}]},
             {"title": "Implementation", "agents": [{"label": "implement-minimal-code", "role": "implementation", "prompt": f"{boundary} 红灯后实现最小代码。", "dependsOn": ["write-failing-tests"]}]},
-            {"title": "Verification", "agents": [{"label": "run-tests", "role": "verification", "prompt": f"{boundary} 运行相关测试验证绿灯。", "dependsOn": ["implement-minimal-code"]}]},
+            {"title": "Verification", "agents": [{"label": "run-tests", "role": "verification", "prompt": f"{boundary} 运行相关测试并返回 verificationPassed、checks、blockingIssues。", "schemaRef": "VERIFICATION_SCHEMA", "strictSchema": True, "dependsOn": ["implement-minimal-code"]}]},
         ],
-        "schemas": {},
+        "schemas": {
+            "VERIFICATION_SCHEMA": {
+                "type": "object",
+                "required": ["verificationPassed", "checks", "blockingIssues"],
+            }
+        },
         "artifacts": ["tests", "implementation", "verification"],
         "constraints": ["no_secret_files", "no_git_commit"],
+        "acceptance": {
+            "required": True,
+            "failWorkflowOnError": True,
+            "checks": ["python_unittest", "verification_schema"],
+        },
     }
 def planning_plan():
     boundary = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。"
@@ -245,6 +255,23 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertNotIn("await parallel([", draft.script)
         self.assertEqual(2, len(client.calls))
         self.assertIn("missing_coding_role", client.calls[1][0]["content"])
+
+    def test_prompt_guided_planner_normalizes_missing_verification_schema(self):
+        plan = repaired_coding_plan()
+        plan["schemas"] = {}
+        verification = plan["phases"][-1]["agents"][0]
+        verification.pop("schemaRef", None)
+        verification.pop("strictSchema", None)
+        client = FakePlannerClient(responses=[plan])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=0)
+
+        draft = planner.plan("实现一个必须 TDD 的解析器", context={"constraints": ["不要提交"]})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        normalized = draft.plan["phases"][-1]["agents"][0]
+        self.assertTrue(normalized["strictSchema"])
+        self.assertEqual("GA_WORKFLOW_VERIFICATION_SCHEMA", normalized["schemaRef"])
+        self.assertIn("GA_WORKFLOW_VERIFICATION_SCHEMA", draft.plan["schemas"])
 
     def test_prompt_guided_planner_falls_back_to_deterministic_planner_when_client_fails(self):
         client = FakePlannerClient(error=RuntimeError("planner provider down"))

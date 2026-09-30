@@ -22,6 +22,61 @@ CODING_AGENT_ROLES = frozenset(
     }
 )
 
+GA_WORKFLOW_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "required": ["verificationPassed", "checks", "blockingIssues"],
+    "properties": {
+        "verificationPassed": {"type": "boolean"},
+        "checks": {"type": "array"},
+        "blockingIssues": {"type": "array"},
+    },
+}
+
+
+def _normalize_coding_acceptance_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    """Normalize model-produced coding plans to GA's strict verification contract."""
+
+    normalized = copy.deepcopy(plan)
+    if normalized.get("taskType") != "coding":
+        return normalized
+
+    schemas = normalized.get("schemas")
+    if not isinstance(schemas, dict):
+        schemas = {}
+        normalized["schemas"] = schemas
+
+    required_fields = set(GA_WORKFLOW_VERIFICATION_SCHEMA["required"])
+    for phase in normalized.get("phases") or []:
+        for agent in phase.get("agents") or []:
+            if str(agent.get("role") or "").strip().lower() != "verification":
+                continue
+
+            schema_ref = agent.get("schemaRef")
+            existing_schema = schemas.get(schema_ref) if schema_ref else None
+            existing_required = set(existing_schema.get("required") or []) if isinstance(existing_schema, dict) else set()
+            has_complete_schema = (
+                agent.get("strictSchema") is True
+                and isinstance(existing_schema, dict)
+                and required_fields.issubset(existing_required)
+            )
+            if has_complete_schema:
+                continue
+
+            if not (schema_ref and isinstance(existing_schema, dict) and required_fields.issubset(existing_required)):
+                schema_ref = "GA_WORKFLOW_VERIFICATION_SCHEMA"
+                schemas[schema_ref] = copy.deepcopy(GA_WORKFLOW_VERIFICATION_SCHEMA)
+            agent["schemaRef"] = schema_ref
+            agent["strictSchema"] = True
+            prompt = str(agent.get("prompt") or "")
+            requirement = (
+                "必须返回严格 JSON，字段为 verificationPassed（布尔值）、checks（数组）、"
+                "blockingIssues（数组）；不得用自然语言摘要替代结构化验收结果。"
+            )
+            if requirement not in prompt:
+                agent["prompt"] = f"{prompt}\n{requirement}".strip()
+
+    return normalized
+
 
 @dataclass
 class WorkflowDraft:
@@ -176,15 +231,32 @@ class WorkflowPlanner:
                             {
                                 "label": "verify",
                                 "role": "verification",
-                                "prompt": "运行相关验证并总结风险、失败和后续建议。",
+                                "prompt": "运行相关验证并返回结构化 verificationPassed、checks、blockingIssues；自然语言摘要不能替代验收证据。",
+                                "schemaRef": "VERIFICATION_SCHEMA",
+                                "strictSchema": True,
                                 "dependsOn": ["implement"],
                             }
                         ],
                     },
                 ],
-                "schemas": {},
+                "schemas": {
+                    "VERIFICATION_SCHEMA": {
+                        "type": "object",
+                        "required": ["verificationPassed", "checks", "blockingIssues"],
+                        "properties": {
+                            "verificationPassed": {"type": "boolean"},
+                            "checks": {"type": "array"},
+                            "blockingIssues": {"type": "array"},
+                        },
+                    }
+                },
                 "artifacts": ["understanding", "tests", "implementation", "verification"],
                 "constraints": ["no_secret_files", "no_git_commit"],
+                "acceptance": {
+                    "required": True,
+                    "failWorkflowOnError": True,
+                    "checks": ["python_unittest", "verification_schema"],
+                },
             }
         return {
             "taskType": classification["taskType"],
@@ -327,7 +399,7 @@ class LLMWorkflowPlanner:
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
         try:
-            plan = self._request_plan(task_text, context, issues=[])
+            plan = _normalize_coding_acceptance_contract(self._request_plan(task_text, context, issues=[]))
             repair_attempts: list[dict[str, Any]] = []
             for _ in range(self.max_repair_attempts + 1):
                 validation = validate_workflow_plan(plan)
@@ -342,7 +414,9 @@ class LLMWorkflowPlanner:
                 if len(repair_attempts) >= self.max_repair_attempts:
                     break
                 repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
-                plan = self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
+                plan = _normalize_coding_acceptance_contract(
+                    self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
+                )
         except Exception as exc:
             return self._fallback_draft(task_text, context, reason=str(exc))
         return self._rejected_draft(task_text, context, plan=plan, validation=validation, repair_attempts=repair_attempts)
@@ -384,6 +458,8 @@ class LLMWorkflowPlanner:
                 "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
                 "coding 任务必须遵守 Understand -> Tests -> Implementation -> Verification，禁止 tests 与 implementation 并行。",
                 "coding 任务的每个 agent.role 都是必填字段，只能使用 canonical role：understanding、contract、tests、implementation、verification、review、repair、summary、synthesis；不要省略 role 或使用 test-writer 等别名。",
+                "coding 任务必须提供 acceptance.required=true 和非空 acceptance.checks；至少包含 verification_schema 或 python_unittest。",
+                "verification agent 必须返回 verificationPassed、checks、blockingIssues；verification schema 不匹配时不得降级为普通文本。",
                 "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。",
                 "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
                 "agent label 使用清晰英文短语，避免无意义缩写。",
@@ -396,6 +472,7 @@ class LLMWorkflowPlanner:
                 "schemas": {},
                 "artifacts": [],
                 "constraints": ["no_secret_files", "no_git_commit"],
+                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema", "python_unittest"]},
             },
         }
         if issues:
@@ -471,6 +548,54 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
         labels.update(phase_labels)
     if not plan.get("phases"):
         issues.append({"code": "missing_phase", "message": "workflow plan requires at least one phase"})
+    if is_coding:
+        verification_agents = [
+            agent
+            for phase in (plan.get("phases") or [])
+            for agent in (phase.get("agents") or [])
+            if str(agent.get("role") or "").strip().lower() == "verification"
+        ]
+        if not verification_agents:
+            issues.append({"code": "missing_verification_role", "message": "coding workflow requires a verification agent"})
+        else:
+            required_verification_fields = {"verificationPassed", "checks", "blockingIssues"}
+            has_strict_verification_schema = any(
+                agent.get("strictSchema") is True
+                and isinstance(schemas.get(agent.get("schemaRef")), dict)
+                and required_verification_fields.issubset(set((schemas.get(agent.get("schemaRef")) or {}).get("required") or []))
+                for agent in verification_agents
+            )
+            if not has_strict_verification_schema:
+                issues.append({
+                    "code": "missing_strict_verification_schema",
+                    "message": "coding workflow verification agent must use a strict schema requiring verificationPassed, checks, and blockingIssues",
+                })
+        acceptance = plan.get("acceptance")
+        acceptance_check_names = {
+            str(check.get("type") if isinstance(check, dict) else check)
+            for check in acceptance.get("checks", [])
+        } if isinstance(acceptance, dict) and isinstance(acceptance.get("checks"), list) else set()
+        if (
+            not isinstance(acceptance, dict)
+            or acceptance.get("required") is not True
+            or not isinstance(acceptance.get("checks"), list)
+            or not acceptance.get("checks")
+        ):
+            issues.append({"code": "missing_acceptance_contract", "message": "coding workflow requires a non-empty acceptance contract"})
+        else:
+            required_checks = {"python_unittest", "verification_schema"}
+            if not required_checks.issubset(acceptance_check_names):
+                issues.append({
+                    "code": "incomplete_acceptance_contract",
+                    "message": "coding workflow acceptance must require python_unittest and verification_schema",
+                })
+            invalid_checks = [
+                str(check.get("type") if isinstance(check, dict) else check)
+                for check in acceptance.get("checks")
+                if str(check.get("type") if isinstance(check, dict) else check) not in {"python_unittest", "verification", "verification_schema"}
+            ]
+            if invalid_checks:
+                issues.append({"code": "invalid_acceptance_check", "message": f"unsupported acceptance checks: {', '.join(invalid_checks)}"})
     return {"ok": not issues, "issues": issues}
 
 
@@ -498,9 +623,14 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 label = str(agent.get("label") or "agent")
                 prompt = str(agent.get("prompt") or "")
                 options = {"label": label, "phase": title}
+                if agent.get("role"):
+                    options["role"] = str(agent["role"])
                 if agent.get("schemaRef"):
                     options["schema"] = {"__schema_ref__": agent["schemaRef"]}
-                    options["fallback"] = "text"
+                    if agent.get("strictSchema"):
+                        options["strictSchema"] = True
+                    else:
+                        options["fallback"] = str(agent.get("fallback") or "text")
                 lines.append(f"  () => agent(`{_template_string(prompt)}`, {_render_options(options)}),")
                 rendered_labels[label] = _js_identifier(label)
             lines.append("])")
@@ -517,13 +647,26 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
             if dependencies:
                 rendered_prompt += "\n\n上游结果：${JSON.stringify({" + ", ".join(dependencies) + "})}"
             options = {"label": label, "phase": title}
+            if agent.get("role"):
+                options["role"] = str(agent["role"])
             if agent.get("schemaRef"):
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
-                options["fallback"] = "text"
+                if agent.get("strictSchema"):
+                    options["strictSchema"] = True
+                else:
+                    options["fallback"] = str(agent.get("fallback") or "text")
             lines.append(f"const {var_name} = await agent(`{rendered_prompt}`, {_render_options(options)})")
             phase_vars.append(var_name)
             rendered_labels[label] = var_name
         result_names.extend(phase_vars)
+        lines.append("")
+    acceptance = plan.get("acceptance") or {}
+    acceptance_checks = acceptance.get("checks") if isinstance(acceptance, dict) else []
+    if isinstance(acceptance_checks, list) and any(
+        (check.get("type") if isinstance(check, dict) else check) == "python_unittest"
+        for check in acceptance_checks
+    ):
+        lines.append("const __acceptanceGate = await runPythonUnittest(args.workspacePath, { pattern: 'test_*.py', phase: 'Verification', gateKey: 'workflow-acceptance' })")
         lines.append("")
     if result_names:
         lines.append("return { " + ", ".join(result_names) + " }")

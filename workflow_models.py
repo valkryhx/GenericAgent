@@ -62,7 +62,13 @@ def summarize_workflow_jobs(jobs) -> dict[str, int]:
     return summary
 
 
-def project_workflow_execution_outcome(raw_status: str, summary: dict[str, int]) -> str | None:
+def project_workflow_execution_outcome(
+    raw_status: str,
+    summary: dict[str, int],
+    acceptance_status: str | None = None,
+) -> str | None:
+    if acceptance_status in {"failed", "blocked"}:
+        return "failed"
     if raw_status == "failed":
         return "failed"
     if raw_status in {"succeeded", "completed"}:
@@ -73,8 +79,8 @@ def project_workflow_execution_outcome(raw_status: str, summary: dict[str, int])
 
 def refresh_workflow_execution_metadata(run: "WorkflowRun") -> tuple[dict[str, int], str | None]:
     summary = summarize_workflow_jobs(run.jobs)
-    outcome = project_workflow_execution_outcome(run.status, summary)
     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+    outcome = project_workflow_execution_outcome(run.status, summary, metadata.get("acceptanceStatus"))
     metadata["childSummary"] = summary
     if outcome is None:
         metadata.pop("executionOutcome", None)

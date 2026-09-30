@@ -217,6 +217,9 @@ class WorkflowStore:
             progress["childSummary"] = copy.deepcopy(metadata["childSummary"])
         if "executionOutcome" in metadata:
             progress["executionOutcome"] = metadata["executionOutcome"]
+        if "acceptanceStatus" in metadata:
+            progress["acceptanceStatus"] = metadata["acceptanceStatus"]
+            progress["acceptanceFailures"] = copy.deepcopy(metadata.get("acceptanceFailures") or [])
         self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
         return progress_ref
 

@@ -28,6 +28,8 @@ class WorkflowController:
         task_type = str(classification.get("taskType") or getattr(draft, "plan", {}).get("taskType") or "unknown")
         is_valid = bool(validation.get("ok"))
         script = getattr(draft, "script", "") if is_valid else ""
+        draft_plan = getattr(draft, "plan", {}) or {}
+        acceptance_contract = draft_plan.get("acceptance") if isinstance(draft_plan, dict) else None
         run = WorkflowRun(
             session_id=session_id,
             script=script or "",
@@ -36,6 +38,8 @@ class WorkflowController:
                 "workflowTaskType": task_type,
             },
         )
+        if isinstance(acceptance_contract, dict):
+            run.metadata["acceptanceContract"] = acceptance_contract
         run = self.store.create_run(run)
         draft_ref = self.store.write_workflow_draft(run, draft)
         run.metadata["workflowDraftRef"] = draft_ref

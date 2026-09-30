@@ -103,6 +103,29 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertFalse(validation["ok"])
         self.assertIn("coding_tests_parallel_implementation", {issue["code"] for issue in validation["issues"]})
 
+    def test_rejects_coding_plan_without_acceptance_contract(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "coding"
+        plan["phases"] = [
+            {
+                "title": "Verification",
+                "agents": [
+                    {
+                        "label": "verify",
+                        "role": "verification",
+                        "prompt": "运行测试并输出结构化验收结果。",
+                        "dependsOn": [],
+                    }
+                ],
+            }
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("missing_acceptance_contract", {issue["code"] for issue in validation["issues"]})
+
     def test_rejects_coding_plan_that_omits_roles_even_when_labels_describe_roles(self):
         plan = self.valid_plan()
         plan["taskType"] = "coding"
@@ -129,7 +152,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         self.assertEqual(
-            {"missing_coding_role"},
+            {"missing_coding_role", "missing_verification_role", "missing_acceptance_contract"},
             {issue["code"] for issue in validation["issues"]},
         )
 
@@ -180,6 +203,28 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertIn("label: 'collector'", script)
         self.assertIn("label: 'repo-scout'", script)
         self.assertIn("JSON.stringify", script)
+
+    def test_renderer_propagates_agent_role_to_child_options(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["role"] = "verification"
+
+        script = render_workflow_plan(plan)
+
+        self.assertIn("role: 'verification'", script)
+
+    def test_renderer_adds_host_test_gate_for_coding_acceptance_contract(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "coding"
+        plan["acceptance"] = {
+            "required": True,
+            "failWorkflowOnError": True,
+            "checks": ["python_unittest", "verification_schema"],
+        }
+        plan["phases"][0]["agents"][0]["role"] = "verification"
+
+        script = render_workflow_plan(plan)
+
+        self.assertIn("runPythonUnittest(args.workspacePath", script)
 
     def test_renderer_treats_prompt_template_expressions_as_literal_text(self):
         plan = self.valid_plan()

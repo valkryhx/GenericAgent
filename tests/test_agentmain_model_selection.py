@@ -57,6 +57,34 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "ambiguous")
 
+    def test_select_model_prefers_exact_name_over_variant_fragment(self):
+        agent = self.make_agent()
+        agent.llmclients = [
+            FakeClient("gpt-6-luna", "gpt-6-luna"),
+            FakeClient("gpt-6-luna-chat", "gpt-6-luna-chat"),
+        ]
+        agent.llmclient = agent.llmclients[0]
+
+        result = agent.select_llm("gpt-6-luna")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["index"], 0)
+        self.assertEqual(result["model"], "gpt-6-luna")
+
+    def test_select_model_prefers_exact_profile_when_variants_share_api_model(self):
+        agent = self.make_agent()
+        agent.llmclients = [
+            FakeClient("deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+            FakeClient("deepseek-v4.1-flash-chat", "deepseek-v4.1-flash"),
+        ]
+        agent.llmclient = agent.llmclients[0]
+
+        result = agent.select_llm("deepseek-v4.1-flash")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["index"], 0)
+        self.assertEqual(result["name"], "deepseek-v4.1-flash/deepseek-v4.1-flash")
+
     def test_select_model_reports_missing_selector(self):
         agent = self.make_agent()
 

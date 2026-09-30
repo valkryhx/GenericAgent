@@ -172,8 +172,9 @@ class WorkflowRuntime:
                     self._last_worker_result = result
                     gate_error = self._test_gate_failure_reason()
                     verification_error = self._explicit_verification_failure_reason(result)
-                    if gate_error or verification_error:
-                        raise RuntimeError(gate_error or verification_error)
+                    acceptance_error = self._evaluate_acceptance(run, result)
+                    if gate_error or verification_error or acceptance_error:
+                        raise RuntimeError(gate_error or verification_error or acceptance_error)
                     run.status = "succeeded"
                     run.error = None
                     refresh_workflow_execution_metadata(run)
@@ -204,6 +205,15 @@ class WorkflowRuntime:
             else:
                 run.status = "failed"
                 run.error = reason
+                acceptance_contract = run.metadata.get("acceptanceContract") if isinstance(run.metadata, dict) else None
+                if isinstance(acceptance_contract, dict) and acceptance_contract.get("required"):
+                    metadata = dict(run.metadata)
+                    failures = list(metadata.get("acceptanceFailures") or [])
+                    if reason not in failures:
+                        failures.append(reason)
+                    metadata["acceptanceStatus"] = "failed"
+                    metadata["acceptanceFailures"] = failures
+                    run.metadata = metadata
                 refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
@@ -579,6 +589,58 @@ class WorkflowRuntime:
             return "workflow verification failed: verificationPassed=false"
         return None
 
+    def _evaluate_acceptance(self, run: WorkflowRun, result: Any) -> str | None:
+        metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+        contract = metadata.get("acceptanceContract")
+        if not isinstance(contract, dict) or not contract.get("required"):
+            return None
+
+        failures: list[str] = []
+        checks = contract.get("checks") or []
+        for check in checks:
+            check_name = str(check.get("type") if isinstance(check, dict) else check or "").strip()
+            if check_name == "python_unittest":
+                if not any(
+                    gate.get("gateKey") == "workflow-acceptance"
+                    and gate.get("expectation") == "pass"
+                    and gate.get("passed") is True
+                    and gate.get("gatePassed") is True
+                    for gate in self._test_gates
+                ):
+                    failures.append("required acceptance check python_unittest did not pass")
+            elif check_name in {"verification", "verification_schema"}:
+                verifications = self._find_verification_results(result)
+                if not verifications:
+                    failures.append("required acceptance check verification_schema is missing")
+                elif any(item.get("verificationPassed") is not True for item in verifications):
+                    failures.append("required acceptance check verification_schema did not pass")
+            else:
+                failures.append(f"unsupported required acceptance check: {check_name or '<empty>'}")
+
+        if failures:
+            metadata["acceptanceStatus"] = "failed"
+            metadata["acceptanceFailures"] = failures
+            run.metadata = metadata
+            return "workflow acceptance failed: " + "; ".join(failures)
+        metadata["acceptanceStatus"] = "passed"
+        metadata["acceptanceFailures"] = []
+        run.metadata = metadata
+        return None
+
+    @classmethod
+    def _find_verification_results(cls, value: Any) -> list[dict]:
+        found: list[dict] = []
+        if isinstance(value, dict):
+            if "verificationPassed" in value:
+                found.append(value)
+            else:
+                for child in value.values():
+                    found.extend(cls._find_verification_results(child))
+        elif isinstance(value, list):
+            for child in value:
+                found.extend(cls._find_verification_results(child))
+        return found
+
     @staticmethod
     def _test_gate_failure_preview(result: dict) -> str:
         text = result.get("error") or result.get("stderr") or result.get("stdout") or "test gate did not pass"
@@ -804,6 +866,9 @@ class WorkflowRuntime:
             payload["childSummary"] = sanitize(copy.deepcopy(metadata["childSummary"]))
         if "executionOutcome" in metadata:
             payload["executionOutcome"] = metadata["executionOutcome"]
+        if "acceptanceStatus" in metadata:
+            payload["acceptanceStatus"] = metadata["acceptanceStatus"]
+            payload["acceptanceFailures"] = sanitize(copy.deepcopy(metadata.get("acceptanceFailures") or []))
         return sanitize(payload)
 
     def _terminate(self, process: subprocess.Popen) -> None:
