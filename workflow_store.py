@@ -203,6 +203,104 @@ class WorkflowStore:
         self._write_json(self._run_dir(run) / draft_ref, sanitize(payload))
         return draft_ref
 
+    def write_workflow_contract_artifacts(self, run: WorkflowRun, draft) -> dict[str, str]:
+        """Project the machine plan into concise, human-auditable workflow artifacts."""
+
+        plan = copy.deepcopy(getattr(draft, "plan", None) or {})
+        context = copy.deepcopy(getattr(draft, "context", None) or {})
+        task_text = str(getattr(draft, "task_text", "") or "")
+        phases = plan.get("phases") or []
+        constraints = context.get("constraints") or plan.get("constraints") or []
+        success_criteria = plan.get("successCriteria") or []
+        eval_contract = plan.get("evalContract") or {}
+        orchestration = plan.get("orchestration") or {}
+
+        plan_lines = [
+            f"# {plan.get('meta', {}).get('name') or 'Workflow plan'}",
+            "",
+            "## Goal",
+            task_text,
+            "",
+            "## Success criteria",
+            *[f"- {item}" for item in success_criteria],
+            "",
+            "## Current context",
+            f"- plannerMode: {context.get('plannerMode') or 'unknown'}",
+            f"- taskType: {plan.get('taskType') or 'unknown'}",
+            f"- workflowContractVersion: {plan.get('workflowContractVersion') or 'unknown'}",
+            "",
+            "## Constraints",
+            *[f"- {item}" for item in constraints],
+            "",
+            "## Risk level",
+            str(plan.get("riskLevel") or "unknown"),
+            "",
+            "## Mode",
+            str(plan.get("mode") or "workflow"),
+            "",
+            "## Work packets",
+        ]
+        for index, phase in enumerate(phases, start=1):
+            plan_lines.append(f"### {index}. {phase.get('title') or 'Untitled phase'}")
+            for agent in phase.get("agents") or []:
+                deps = ", ".join(str(item) for item in agent.get("dependsOn") or []) or "none"
+                plan_lines.append(
+                    f"- {agent.get('label') or 'agent'} (role={agent.get('role') or 'unspecified'}, owner={agent.get('owner') or 'workflow'}, dependsOn={deps})"
+                )
+        plan_lines.extend(
+            [
+                "",
+                "## Eval contract",
+                f"- level: {eval_contract.get('level') or 'unknown'}",
+                f"- outcome: {eval_contract.get('outcome') or 'unknown'}",
+                f"- requiredChecks: {', '.join(str(item) for item in eval_contract.get('requiredChecks') or []) or 'none'}",
+                f"- blockingConditions: {', '.join(str(item) for item in eval_contract.get('blockingConditions') or []) or 'none'}",
+                "",
+                "## Verification plan",
+                "- Plan validator must pass before execution.",
+                "- Runtime acceptance and structured verification must pass before success.",
+                "",
+                "## Completion criteria",
+                "- workflow status, execution outcome, acceptance status, and artifacts agree.",
+            ]
+        )
+
+        orchestration_lines = [
+            "# Orchestration",
+            "",
+            "## Parent critical path",
+            *[f"- {item}" for item in orchestration.get("parentCriticalPath") or []],
+            "",
+            "## Packets",
+            *[
+                f"- {agent.get('label') or 'agent'}: owner={agent.get('owner') or 'workflow'}, writeScope={agent.get('writeScope') or []}"
+                for phase in phases
+                for agent in phase.get("agents") or []
+            ],
+            "",
+            "## Delegation",
+            f"- allowed: {bool(orchestration.get('delegationAllowed'))}",
+            f"- maxAgents: {orchestration.get('maxAgents') or 0}",
+            f"- maxWaves: {orchestration.get('maxWaves') or 0}",
+            f"- failurePolicy: {orchestration.get('failurePolicy') or 'continue'}",
+            "",
+            "## Wait points",
+            *[f"- {item}" for item in orchestration.get("waitPoints") or []],
+            "",
+            "## Fallback",
+            "- Plan rejection remains fail-closed; no native delegation is simulated.",
+            "",
+            "## Verification order",
+            "- plan validation -> child results -> host acceptance gates -> final result artifact",
+        ]
+
+        artifact_dir = self._run_dir(run)
+        plan_ref = "plan.md"
+        orchestration_ref = "orchestration.md"
+        self._write_text(artifact_dir / plan_ref, sanitize("\n".join(plan_lines) + "\n"))
+        self._write_text(artifact_dir / orchestration_ref, sanitize("\n".join(orchestration_lines) + "\n"))
+        return {"plan": plan_ref, "orchestration": orchestration_ref}
+
     def write_workflow_progress(self, run: WorkflowRun) -> str:
         progress_ref = "workflow-progress.json"
         metadata = run.metadata if isinstance(run.metadata, dict) else {}

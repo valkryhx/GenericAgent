@@ -273,6 +273,22 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertEqual("GA_WORKFLOW_VERIFICATION_SCHEMA", normalized["schemaRef"])
         self.assertIn("GA_WORKFLOW_VERIFICATION_SCHEMA", draft.plan["schemas"])
 
+    def test_prompt_guided_planner_normalizes_ultracode_execution_contract(self):
+        plan = review_plan()
+        client = FakePlannerClient(responses=[plan])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=0)
+
+        draft = planner.plan("审查一个跨模块 workflow 变更", context={"constraints": ["不要提交"]})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual("workflow", draft.plan["mode"])
+        self.assertIn(draft.plan["riskLevel"], {"low", "medium", "high"})
+        self.assertTrue(draft.plan["successCriteria"])
+        self.assertEqual("inline", draft.plan["evalContract"]["level"])
+        self.assertIn("requiredChecks", draft.plan["evalContract"])
+        self.assertEqual(len(draft.plan["phases"]), draft.plan["orchestration"]["maxWaves"])
+        self.assertEqual(5, draft.plan["orchestration"]["maxAgents"])
+
     def test_prompt_guided_planner_falls_back_to_deterministic_planner_when_client_fails(self):
         client = FakePlannerClient(error=RuntimeError("planner provider down"))
         planner = LLMWorkflowPlanner(client=client)

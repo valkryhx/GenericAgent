@@ -32,6 +32,78 @@ GA_WORKFLOW_VERIFICATION_SCHEMA = {
     },
 }
 
+WORKFLOW_MODES = frozenset({"direct", "workflow", "delegated"})
+WORKFLOW_RISK_LEVELS = frozenset({"low", "medium", "high"})
+
+
+def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    """Add a stable, inspectable orchestration contract to model-produced plans."""
+
+    normalized = copy.deepcopy(plan)
+    phases = normalized.get("phases") or []
+    task_type = str(normalized.get("taskType") or "planning").strip().lower()
+    mode = str(normalized.get("mode") or "").strip().lower()
+    if mode not in WORKFLOW_MODES:
+        mode = "workflow" if phases else "direct"
+    risk_level = str(normalized.get("riskLevel") or "").strip().lower()
+    if risk_level not in WORKFLOW_RISK_LEVELS:
+        risk_level = "high" if task_type in {"coding", "debugging", "mixed"} else "medium" if task_type == "review" else "low"
+
+    acceptance = normalized.get("acceptance") if isinstance(normalized.get("acceptance"), dict) else {}
+    acceptance_checks = [
+        str(check.get("type") if isinstance(check, dict) else check).strip()
+        for check in acceptance.get("checks") or []
+        if str(check.get("type") if isinstance(check, dict) else check).strip()
+    ]
+    success_criteria = normalized.get("successCriteria")
+    if not isinstance(success_criteria, list) or not success_criteria:
+        success_criteria = [f"acceptance check passes: {check}" for check in acceptance_checks]
+    if not success_criteria:
+        success_criteria = ["all declared workflow phases complete", "workflow artifacts are persisted"]
+
+    eval_contract = normalized.get("evalContract") if isinstance(normalized.get("evalContract"), dict) else {}
+    required_checks = list(eval_contract.get("requiredChecks") or [])
+    for check in ["plan_validation", *acceptance_checks]:
+        if check not in required_checks:
+            required_checks.append(check)
+    eval_contract = {
+        "level": str(eval_contract.get("level") or ("full" if task_type in {"coding", "debugging", "mixed"} else "inline")),
+        "outcome": str(eval_contract.get("outcome") or "workflow completes with evidence-backed acceptance result"),
+        "sharedSurfaces": list(eval_contract.get("sharedSurfaces") or []),
+        "requiredChecks": required_checks,
+        "blockingConditions": list(eval_contract.get("blockingConditions") or ["plan_validation_failed", "acceptance_failed"]),
+        "handoffEvidence": list(eval_contract.get("handoffEvidence") or ["summary", "evidence", "blockingIssues"]),
+    }
+
+    labels = [
+        str(agent.get("label") or "")
+        for phase in phases
+        for agent in phase.get("agents") or []
+        if str(agent.get("label") or "")
+    ]
+    orchestration = normalized.get("orchestration") if isinstance(normalized.get("orchestration"), dict) else {}
+    orchestration = {
+        "maxAgents": int(orchestration.get("maxAgents") or len(labels)),
+        "maxWaves": int(orchestration.get("maxWaves") or len(phases)),
+        "delegationAllowed": bool(orchestration.get("delegationAllowed", mode == "delegated")),
+        "failurePolicy": str(orchestration.get("failurePolicy") or ("fail_fast" if acceptance.get("failWorkflowOnError") else "continue")),
+        "parentCriticalPath": list(orchestration.get("parentCriticalPath") or labels[-1:]),
+        "waitPoints": list(orchestration.get("waitPoints") or [str(phase.get("title") or "") for phase in phases]),
+    }
+
+    normalized["workflowContractVersion"] = int(normalized.get("workflowContractVersion") or 1)
+    normalized["mode"] = mode
+    normalized["riskLevel"] = risk_level
+    normalized["successCriteria"] = [str(item) for item in success_criteria]
+    normalized["evalContract"] = eval_contract
+    normalized["orchestration"] = orchestration
+    for phase in phases:
+        for agent in phase.get("agents") or []:
+            agent.setdefault("owner", "workflow")
+            agent.setdefault("writeScope", [])
+            agent.setdefault("deliverables", [])
+    return normalized
+
 
 def _normalize_coding_acceptance_contract(plan: dict[str, Any]) -> dict[str, Any]:
     """Normalize model-produced coding plans to GA's strict verification contract."""
@@ -102,7 +174,7 @@ class WorkflowPlanner:
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
         classification = self.classify(task_text, context)
-        plan = self._build_plan(task_text, context, classification)
+        plan = _normalize_workflow_execution_contract(self._build_plan(task_text, context, classification))
         validation = validate_workflow_plan(plan)
         script = render_workflow_plan(plan) if validation["ok"] else ""
         return WorkflowDraft(
@@ -399,7 +471,9 @@ class LLMWorkflowPlanner:
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
         try:
-            plan = _normalize_coding_acceptance_contract(self._request_plan(task_text, context, issues=[]))
+            plan = _normalize_workflow_execution_contract(
+                _normalize_coding_acceptance_contract(self._request_plan(task_text, context, issues=[]))
+            )
             repair_attempts: list[dict[str, Any]] = []
             for _ in range(self.max_repair_attempts + 1):
                 validation = validate_workflow_plan(plan)
@@ -414,8 +488,10 @@ class LLMWorkflowPlanner:
                 if len(repair_attempts) >= self.max_repair_attempts:
                     break
                 repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
-                plan = _normalize_coding_acceptance_contract(
-                    self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
+                plan = _normalize_workflow_execution_contract(
+                    _normalize_coding_acceptance_contract(
+                        self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
+                    )
                 )
         except Exception as exc:
             return self._fallback_draft(task_text, context, reason=str(exc))
@@ -518,6 +594,13 @@ class LLMWorkflowPlanner:
 def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
     labels: set[str] = set()
+    label_phase: dict[str, int] = {}
+    for phase_index, phase in enumerate(plan.get("phases") or []):
+        for agent in phase.get("agents") or []:
+            label = str(agent.get("label") or "")
+            if label:
+                label_phase.setdefault(label, phase_index)
+    dependency_graph: dict[str, list[str]] = {}
     schemas = plan.get("schemas") or {}
     is_coding = plan.get("taskType") == "coding"
     for phase_index, phase in enumerate(plan.get("phases") or []):
@@ -542,12 +625,40 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             schema_ref = agent.get("schemaRef")
             if schema_ref and schema_ref not in schemas:
                 issues.append({"code": "undefined_schema", "message": f"agent {label} references undefined schema: {schema_ref}"})
-            for dependency in agent.get("dependsOn") or []:
-                if dependency not in labels:
+            dependencies = agent.get("dependsOn") or []
+            dependency_graph[label] = [str(item) for item in dependencies if str(item) in label_phase]
+            if len(dependencies) != len(set(str(item) for item in dependencies)):
+                issues.append({"code": "duplicate_dependency", "message": f"agent {label} declares the same dependency more than once"})
+            for dependency in dependencies:
+                dependency = str(dependency)
+                if dependency not in label_phase:
                     issues.append({"code": "undefined_dependency", "message": f"agent {label} depends on undefined or same-phase label: {dependency}"})
+                elif label_phase[dependency] == phase_index:
+                    issues.append({"code": "same_phase_dependency", "message": f"agent {label} depends on same-phase agent: {dependency}"})
+                elif label_phase[dependency] > phase_index:
+                    issues.append({"code": "forward_dependency", "message": f"agent {label} depends on later-phase agent: {dependency}"})
         labels.update(phase_labels)
     if not plan.get("phases"):
         issues.append({"code": "missing_phase", "message": "workflow plan requires at least one phase"})
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(label: str) -> bool:
+        if label in visiting:
+            return True
+        if label in visited:
+            return False
+        visiting.add(label)
+        for dependency in dependency_graph.get(label, []):
+            if visit(dependency):
+                return True
+        visiting.remove(label)
+        visited.add(label)
+        return False
+
+    if any(visit(label) for label in dependency_graph if label not in visited):
+        issues.append({"code": "dependency_cycle", "message": "workflow dependency graph contains a cycle"})
     if is_coding:
         verification_agents = [
             agent

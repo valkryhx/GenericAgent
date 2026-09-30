@@ -40,9 +40,14 @@ class WorkflowController:
         )
         if isinstance(acceptance_contract, dict):
             run.metadata["acceptanceContract"] = acceptance_contract
+        for key in ("mode", "riskLevel", "evalContract", "orchestration"):
+            if key in draft_plan:
+                run.metadata[key] = draft_plan[key]
         run = self.store.create_run(run)
         draft_ref = self.store.write_workflow_draft(run, draft)
         run.metadata["workflowDraftRef"] = draft_ref
+        contract_refs = self.store.write_workflow_contract_artifacts(run, draft)
+        run.metadata["workflowContractRefs"] = contract_refs
         self.store.save_run(run)
         self._append(
             run,
@@ -52,6 +57,7 @@ class WorkflowController:
                 "plannerMode": planner_mode,
                 "taskType": task_type,
                 "validationOk": is_valid,
+                "workflowContractRefs": contract_refs,
             },
         )
         if is_valid and auto_approve:

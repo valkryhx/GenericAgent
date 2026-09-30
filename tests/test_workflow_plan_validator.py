@@ -56,6 +56,44 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
             {issue["code"] for issue in validation["issues"]},
         )
 
+    def test_rejects_same_phase_dependency_with_explicit_diagnostic(self):
+        plan = self.valid_plan()
+        plan["phases"] = [
+            {
+                "title": "Collect",
+                "agents": [
+                    {"label": "collector", "prompt": "collect", "dependsOn": []},
+                    {"label": "writer", "prompt": "write", "dependsOn": ["collector"]},
+                ],
+            }
+        ]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("same_phase_dependency", {issue["code"] for issue in validation["issues"]})
+
+    def test_rejects_duplicate_dependency(self):
+        plan = self.valid_plan()
+        plan["phases"][1]["agents"][0]["dependsOn"] = ["collector", "collector"]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("duplicate_dependency", {issue["code"] for issue in validation["issues"]})
+
+    def test_rejects_dependency_cycle_with_explicit_diagnostic(self):
+        plan = self.valid_plan()
+        plan["phases"] = [
+            {"title": "First", "agents": [{"label": "first", "prompt": "first", "dependsOn": ["second"]}]},
+            {"title": "Second", "agents": [{"label": "second", "prompt": "second", "dependsOn": ["first"]}]},
+        ]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("dependency_cycle", {issue["code"] for issue in validation["issues"]})
+
     def test_accepts_agent_prompt_without_sensitive_file_template(self):
         plan = self.valid_plan()
         plan["phases"][0]["agents"][0]["prompt"] = "分析仓库中的普通 workflow 逻辑。"

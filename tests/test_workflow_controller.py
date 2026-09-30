@@ -154,6 +154,32 @@ class WorkflowControllerTest(unittest.TestCase):
                 run.metadata["acceptanceContract"],
             )
 
+    def test_create_planned_run_writes_plan_and_orchestration_projections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            controller = WorkflowController(store)
+            draft = WorkflowPlanner().plan("调研一个技术方案")
+
+            class FixedPlanner:
+                def plan(self, _task_text, _context):
+                    return draft
+
+            run = controller.create_planned_run(
+                session_id="session_projection",
+                task_text="调研一个技术方案",
+                planner=FixedPlanner(),
+            )
+
+            artifact_dir = Path(run.artifact_dir)
+            self.assertTrue((artifact_dir / "plan.md").exists())
+            self.assertTrue((artifact_dir / "orchestration.md").exists())
+            self.assertEqual(
+                {"plan": "plan.md", "orchestration": "orchestration.md"},
+                run.metadata["workflowContractRefs"],
+            )
+            self.assertIn("## Mode\nworkflow", (artifact_dir / "plan.md").read_text(encoding="utf-8"))
+            self.assertIn("Parent critical path", (artifact_dir / "orchestration.md").read_text(encoding="utf-8"))
+
     def test_create_planned_run_can_request_approval_when_auto_approve_false(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))
