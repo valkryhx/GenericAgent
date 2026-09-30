@@ -43,6 +43,12 @@ class WorkflowController:
         for key in ("mode", "riskLevel", "evalContract", "orchestration"):
             if key in draft_plan:
                 run.metadata[key] = draft_plan[key]
+        orchestration = draft_plan.get("orchestration") if isinstance(draft_plan, dict) else None
+        approval_required = bool(isinstance(orchestration, dict) and orchestration.get("approvalRequired"))
+        run.metadata["approvalGate"] = {
+            "required": approval_required,
+            "reason": "explicit_workflow_approval_gate" if approval_required else None,
+        }
         run = self.store.create_run(run)
         draft_ref = self.store.write_workflow_draft(run, draft)
         run.metadata["workflowDraftRef"] = draft_ref
@@ -60,14 +66,18 @@ class WorkflowController:
                 "workflowContractRefs": contract_refs,
             },
         )
-        if is_valid and auto_approve:
+        if is_valid and auto_approve and not approval_required:
             run.status = "running"
             self.store.save_run(run)
             self._append(run, "workflow_started")
         elif is_valid:
             run.status = "awaiting_approval"
             self.store.save_run(run)
-            self._append(run, "workflow_approval_requested")
+            self._append(
+                run,
+                "workflow_approval_requested",
+                payload={"reason": run.metadata["approvalGate"].get("reason") or "caller_requested_approval"},
+            )
         else:
             run.status = "failed"
             run.error = "workflow_plan_rejected"

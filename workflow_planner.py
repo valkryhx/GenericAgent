@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from workflow_policy import normalize_delegation_policy
+
 
 CODING_AGENT_ROLES = frozenset(
     {
@@ -34,6 +36,26 @@ GA_WORKFLOW_VERIFICATION_SCHEMA = {
 
 WORKFLOW_MODES = frozenset({"direct", "workflow", "delegated"})
 WORKFLOW_RISK_LEVELS = frozenset({"low", "medium", "high"})
+
+
+def _normalize_plan_retry_policy(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    try:
+        max_attempts = int(raw.get("maxAttempts", 2))
+    except (TypeError, ValueError):
+        max_attempts = 2
+    try:
+        backoff_ms = int(raw.get("backoffMs", 0))
+    except (TypeError, ValueError):
+        backoff_ms = 0
+    retryable = raw.get("retryableErrors")
+    if not isinstance(retryable, list) or not retryable:
+        retryable = ["timeout", "transient", "rate_limit", "provider_anomaly", "mcp_transient", "schema_validation_failed"]
+    return {
+        "maxAttempts": max(1, min(3, max_attempts)),
+        "retryableErrors": [str(item) for item in retryable if str(item).strip()],
+        "backoffMs": max(0, min(30_000, backoff_ms)),
+    }
 
 
 def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, Any]:
@@ -90,6 +112,8 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
         "parentCriticalPath": list(orchestration.get("parentCriticalPath") or labels[-1:]),
         "waitPoints": list(orchestration.get("waitPoints") or [str(phase.get("title") or "") for phase in phases]),
     }
+    policy = normalize_delegation_policy({**normalized, "mode": mode, "riskLevel": risk_level, "orchestration": orchestration})
+    orchestration.update(policy)
 
     normalized["workflowContractVersion"] = int(normalized.get("workflowContractVersion") or 1)
     normalized["mode"] = mode
@@ -102,6 +126,7 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
             agent.setdefault("owner", "workflow")
             agent.setdefault("writeScope", [])
             agent.setdefault("deliverables", [])
+            agent["retryPolicy"] = _normalize_plan_retry_policy(agent.get("retryPolicy"))
     return normalized
 
 
@@ -529,6 +554,8 @@ class LLMWorkflowPlanner:
             "contract": "Return WorkflowPlan JSON only. 不要输出 JS. Do not wrap in markdown. phases must be a non-empty array.",
             "orchestrationPolicy": [
                 "根据任务语义和 classificationHint 决定 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts。",
+                "每个 agent 必须声明 bounded retryPolicy（maxAttempts 只能是 1-3），不得生成无界重试；transient/provider/MCP/schema 错误要区分 retryable 与 blocking。",
+                "delegated mode 必须遵守 maxAgents<=5、maxWaves<=4，并在 approvalRequired=true 时停在 awaiting approval。",
                 "如果任务要求审查安全/性能/测试缺口/回归风险，taskType 必须是 review，不要误判为 research。",
                 "如果任务要求规划设计方案或实施计划且明确不要直接写代码，taskType 应为 planning 或 mixed。",
                 "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
@@ -736,6 +763,8 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 options = {"label": label, "phase": title}
                 if agent.get("role"):
                     options["role"] = str(agent["role"])
+                if agent.get("retryPolicy"):
+                    options["retryPolicy"] = agent["retryPolicy"]
                 if agent.get("schemaRef"):
                     options["schema"] = {"__schema_ref__": agent["schemaRef"]}
                     if agent.get("strictSchema"):
@@ -760,6 +789,8 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
             options = {"label": label, "phase": title}
             if agent.get("role"):
                 options["role"] = str(agent["role"])
+            if agent.get("retryPolicy"):
+                options["retryPolicy"] = agent["retryPolicy"]
             if agent.get("schemaRef"):
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
                 if agent.get("strictSchema"):
@@ -806,6 +837,12 @@ def _render_options(options: dict[str, Any]) -> str:
     for key, value in options.items():
         if isinstance(value, dict) and value.get("__schema_ref__"):
             parts.append(f"{key}: {value['__schema_ref__']}")
+        elif isinstance(value, (dict, list)):
+            parts.append(f"{key}: {json.dumps(value, ensure_ascii=False, separators=(',', ':'))}")
+        elif isinstance(value, bool):
+            parts.append(f"{key}: {'true' if value else 'false'}")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append(f"{key}: {value}")
         else:
             parts.append(f"{key}: '{_js_string(str(value))}'")
     return "{ " + ", ".join(parts) + " }"

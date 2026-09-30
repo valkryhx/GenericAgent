@@ -754,6 +754,29 @@ return {verificationPassed: verification.verificationPassed}
             self.assertEqual("failed", loaded.metadata["executionOutcome"])
             final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", final_result["acceptanceStatus"])
+
+    def test_runtime_records_integration_and_final_audit_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_integration_audit",
+                    session_id="session_test",
+                    script="return await agent('produce evidence')",
+                    status="running",
+                )
+            )
+
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(run)
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("accepted", loaded.metadata["integrationStatus"])
+            self.assertEqual("passed", loaded.metadata["finalAuditStatus"])
+            self.assertEqual("accepted", outcome.run.metadata["integrationStatus"])
+            self.assertEqual("passed", outcome.run.metadata["finalAuditStatus"])
+            progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual("accepted", progress["integrationStatus"])
+            self.assertEqual("passed", progress["finalAuditStatus"])
             self.assertIn("python_unittest", final_result["acceptanceFailures"][0])
             progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", progress["acceptanceStatus"])
@@ -1221,6 +1244,26 @@ return result
             self.assertTrue(loaded.metadata["acceptanceFailures"])
             final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", final_result["acceptanceStatus"])
+
+    def test_runtime_records_integration_and_final_audit_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_integration_audit",
+                    session_id="session_test",
+                    script="return await agent('produce evidence')",
+                    status="running",
+                )
+            )
+
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0).run(run)
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("accepted", loaded.metadata["integrationStatus"])
+            self.assertEqual("passed", loaded.metadata["finalAuditStatus"])
+            self.assertEqual("accepted", outcome.run.metadata["integrationStatus"])
+            self.assertEqual("passed", outcome.run.metadata["finalAuditStatus"])
 
     def test_runtime_agent_truthy_non_object_options_fail_before_registering_job(self):
         scripts = {

@@ -25,6 +25,24 @@ class FailedResultRunner:
         pass
 
 
+class SequenceResultRunner:
+    def __init__(self):
+        self.polls = {}
+
+    def start(self, job):
+        self.polls.setdefault(job.job_id, 0)
+
+    def poll(self, job):
+        attempt = self.polls.get(job.job_id, 0)
+        self.polls[job.job_id] = attempt + 1
+        if attempt == 0:
+            return AgentResult(job_id=job.job_id, status="failed", payload={"error": "provider transient"})
+        return AgentResult(job_id=job.job_id, payload={"summary": "recovered"})
+
+    def cancel(self, job):
+        pass
+
+
 class ProtocolMetadataRunner:
     def __init__(self):
         self.started = []
@@ -439,6 +457,40 @@ class WorkflowSchedulerTest(unittest.TestCase):
         transcript_path = Path(run.artifact_dir) / "agents" / "agent_1" / "transcript.jsonl"
         self.assertTrue(transcript_path.exists())
 
+    def test_retry_policy_requeues_transient_child_failure_with_bounded_attempts(self):
+        scheduler, store, run = self.make_scheduler(runner=SequenceResultRunner())
+        job = scheduler.register_agent(
+            prompt="retry transient provider",
+            options={
+                "retryPolicy": {
+                    "maxAttempts": 2,
+                    "retryableErrors": ["provider transient"],
+                    "backoffMs": 0,
+                }
+            },
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("succeeded", loaded.jobs[0].status)
+        self.assertEqual(1, loaded.jobs[0].metadata["retryPolicy"]["attempts"] - 1)
+        self.assertEqual("recovered", loaded.jobs[0].metadata["result"]["summary"])
+        self.assertIn("agent_retry_scheduled", self.event_types(store))
+
+    def test_completed_child_result_contains_compact_handoff_envelope(self):
+        scheduler, store, run = self.make_scheduler()
+        scheduler.register_agent(prompt="produce evidence")
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        handoff = loaded.jobs[0].metadata["handoff"]
+        self.assertEqual("succeeded", handoff["status"])
+        self.assertIn("summary", handoff)
+        self.assertIn("evidence", handoff)
+        self.assertEqual([], handoff["blockingIssues"])
+
     def test_total_agents_cap_rejects_excess_job_and_records_event(self):
         scheduler, store, _ = self.make_scheduler(max_total=2)
         scheduler.register_agent(prompt="one")
@@ -451,6 +503,25 @@ class WorkflowSchedulerTest(unittest.TestCase):
         rejected = store.replay_events("wf_test")[-1]
         self.assertEqual("max_total_exceeded", rejected.payload["reason"])
         self.assertEqual(2, len(scheduler.jobs))
+
+    def test_delegated_workflow_enforces_bounded_agent_cap(self):
+        scheduler, store, _run = self.make_scheduler(
+            max_total=10,
+            run_kwargs={
+                "metadata": {
+                    "mode": "delegated",
+                    "orchestration": {"delegationAllowed": True, "maxAgents": 2, "maxWaves": 2},
+                }
+            },
+        )
+        scheduler.register_agent(prompt="one")
+        scheduler.register_agent(prompt="two")
+
+        with self.assertRaisesRegex(RuntimeError, "workflow agent limit exceeded"):
+            scheduler.register_agent(prompt="three")
+
+        rejected = store.replay_events("wf_test")[-1]
+        self.assertEqual("delegation_max_agents_exceeded", rejected.payload["reason"])
 
     def test_continue_failure_policy_keeps_other_jobs_running(self):
         runner = FakeChildAgentRunner(fail_job_ids={"agent_1"}, delay_ticks=0)

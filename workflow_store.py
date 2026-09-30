@@ -311,6 +311,9 @@ class WorkflowStore:
             "workflowIssues": copy.deepcopy((run.metadata or {}).get("workflowIssues") or []),
             "workflowProgress": [self._build_job_progress(run, job, index) for index, job in enumerate(run.jobs, start=1)],
         }
+        for key in ("mode", "riskLevel", "orchestration", "approvalGate"):
+            if key in metadata:
+                progress[key] = copy.deepcopy(metadata[key])
         if "childSummary" in metadata:
             progress["childSummary"] = copy.deepcopy(metadata["childSummary"])
         if "executionOutcome" in metadata:
@@ -318,6 +321,9 @@ class WorkflowStore:
         if "acceptanceStatus" in metadata:
             progress["acceptanceStatus"] = metadata["acceptanceStatus"]
             progress["acceptanceFailures"] = copy.deepcopy(metadata.get("acceptanceFailures") or [])
+        for key in ("integrationStatus", "integrationIssues", "finalAuditStatus"):
+            if key in metadata:
+                progress[key] = copy.deepcopy(metadata[key])
         self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
         return progress_ref
 
@@ -365,6 +371,8 @@ class WorkflowStore:
             "resultPreview": self._preview(payload.get("summary") if isinstance(payload, dict) and payload.get("summary") is not None else payload),
             "error": job.error,
             "schemaValidation": copy.deepcopy(job.metadata.get("schemaValidation") or {}),
+            "handoff": copy.deepcopy(job.metadata.get("handoff") or {}),
+            "retryPolicy": copy.deepcopy(job.metadata.get("retryPolicy") or {}),
         }
         return progress
 

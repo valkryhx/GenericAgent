@@ -215,3 +215,25 @@ GA 已补充 schema normalization 和硬门禁，但这些事件说明 planner �
 5. `workflow_controller.py` 将 contract 字段及 artifact 引用写入 run metadata 和 journal，便于后续 runtime acceptance 与最终审计关联。
 
 本轮没有放宽 strict verification、权限默认值或高风险 approval gate，也没有引入无界重试。新增回归测试覆盖依赖图诊断、prompt-guided contract normalization 以及 artifact projection；完成全量测试后再提交该切片。
+
+## 9. P1/P2 已实施结果
+
+在 P0 之上，本轮继续落地了 P1/P2 的第一批稳定性机制：
+
+### P1：有界恢复与证据协议
+
+- `workflow_scheduler.py` 为每个 child job 归一化 `retryPolicy`，限制 `maxAttempts` 为 1-3，并支持 `retryableErrors` 与 `backoffMs`。
+- transient、timeout、rate-limit、provider anomaly、MCP transient 和 schema validation failure 可以按策略有限重试；每次重试写入 `agent_retry_scheduled`，不会把失败误报成成功。
+- child 完成或失败时生成 compact `handoff`，包含 `status`、`summary`、`evidence`、`blockingIssues` 和 transcript 引用；不把完整 transcript 注入下游。
+- runtime 增加 `integrationStatus`、`integrationIssues` 和 `finalAuditStatus`；child 全部完成只代表 integration pending，父侧 acceptance/final audit 通过后才标记 accepted/passed。
+- `workflow-progress.json` 和 job progress 同步保存 retry、handoff、integration、audit 信息。
+
+### P2：模式路由与 bounded delegation
+
+- 新增 `workflow_policy.py`，提供 direct/workflow/delegated 路由、delegation 上限和 forward-test matrix。
+- delegated workflow 的默认硬上限为 `maxAgents<=5`、`maxWaves<=4`；scheduler 在注册阶段拒绝超限 child，并记录具体拒绝原因。
+- 显式 `approvalRequired` 或 delegated mode 会进入 `awaiting_approval`，controller 不会因为 `auto_approve=true` 绕过门禁。
+- planner prompt 和 normalized plan 会把 bounded retry、delegation 上限和 approval gate 作为机器可检查 contract；生成的脚本会携带 retry policy。
+- forward-testing 已覆盖 direct、workflow、delegated、fallback、approval 和 eval-contract 场景。
+
+当前仍未做的后续工作：真实多模型 forward-testing 矩阵、repairRole 专用修复 agent、按 wave 的依赖调度可视化，以及将 integration/final-audit 结果接入 UI 展示。上述项目应继续保持有界、可审计和 fail-closed。

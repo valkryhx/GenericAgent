@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,52 @@ from workflow_store import WorkflowStore
 
 
 SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+
+
+DEFAULT_RETRYABLE_ERRORS = (
+    "timeout",
+    "timed out",
+    "transient",
+    "rate limit",
+    "rate_limit",
+    "429",
+    "provider_anomaly",
+    "mcp_transient",
+    SCHEMA_VALIDATION_FAILED,
+)
+
+
+def normalize_retry_policy(policy: dict | None) -> dict:
+    raw = policy if isinstance(policy, dict) else {}
+    max_attempts = raw.get("maxAttempts", 1)
+    try:
+        max_attempts = int(max_attempts)
+    except (TypeError, ValueError):
+        max_attempts = 1
+    max_attempts = max(1, min(3, max_attempts))
+    backoff_ms = raw.get("backoffMs", 0)
+    try:
+        backoff_ms = int(backoff_ms)
+    except (TypeError, ValueError):
+        backoff_ms = 0
+    backoff_ms = max(0, min(30_000, backoff_ms))
+    errors = raw.get("retryableErrors", DEFAULT_RETRYABLE_ERRORS)
+    if not isinstance(errors, list):
+        errors = list(DEFAULT_RETRYABLE_ERRORS)
+    errors = [str(item).strip().lower() for item in errors if str(item).strip()]
+    attempts = raw.get("attempts", 0)
+    try:
+        attempts = int(attempts)
+    except (TypeError, ValueError):
+        attempts = 0
+    return {
+        "maxAttempts": max_attempts,
+        "retryableErrors": errors,
+        "backoffMs": backoff_ms,
+        "attempts": max(0, attempts),
+        "lastError": raw.get("lastError"),
+        "retryNotBefore": raw.get("retryNotBefore"),
+    }
 
 
 def normalize_workflow_workspace(args) -> str | None:
@@ -172,25 +219,29 @@ class AgentScheduler:
         return sum(1 for job in self.jobs if job.status == "queued")
 
     def register_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None) -> WorkflowJob:
-        if len(self.jobs) >= self.config.max_total:
-            self._append("agent_rejected", payload={"reason": "max_total_exceeded", "maxTotal": self.config.max_total})
+        options = normalize_agent_options(options)
+        max_allowed, reason = self._agent_limit()
+        if len(self.jobs) >= max_allowed:
+            self._append("agent_rejected", payload={"reason": reason, "maxTotal": max_allowed})
             raise RuntimeError("workflow agent limit exceeded")
         workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
         metadata = {
             "callIndex": call_index,
             "label": label,
-            "options": normalize_agent_options(options),
+            "options": options,
             "runId": self.run.run_id,
             "permissionProfile": self.run.permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
         }
+        metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
             job_id=f"agent_{call_index + 1}",
             prompt=prompt,
             status="queued",
+            phase=options.get("phase"),
             metadata=metadata,
         )
         job.metadata["cacheKey"] = self._cache_key(job)
@@ -201,15 +252,17 @@ class AgentScheduler:
         return job
 
     def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None) -> WorkflowJob:
-        if len(self.jobs) >= self.config.max_total:
-            self._append("agent_rejected", payload={"reason": "max_total_exceeded", "maxTotal": self.config.max_total})
+        options = normalize_agent_options(options)
+        max_allowed, reason = self._agent_limit()
+        if len(self.jobs) >= max_allowed:
+            self._append("agent_rejected", payload={"reason": reason, "maxTotal": max_allowed})
             raise RuntimeError("workflow agent limit exceeded")
         workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
         metadata = {
             "callIndex": call_index,
             "label": label,
-            "options": normalize_agent_options(options),
+            "options": options,
             "runId": self.run.run_id,
             "permissionProfile": self.run.permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
@@ -217,12 +270,14 @@ class AgentScheduler:
             "cachedFromRunId": source_run_id,
             "cachedFromJobId": source_job_id,
         }
+        metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
             job_id=f"agent_{call_index + 1}",
             prompt=prompt,
             status="cached",
+            phase=options.get("phase"),
             metadata=metadata,
         )
         job.metadata["cacheKey"] = self._cache_key(job)
@@ -266,6 +321,21 @@ class AgentScheduler:
             self.store.save_run(self.run)
         return workspace_path
 
+    def _agent_limit(self) -> tuple[int, str]:
+        limit = self.config.max_total
+        reason = "max_total_exceeded"
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
+        orchestration = metadata.get("orchestration") if isinstance(metadata.get("orchestration"), dict) else {}
+        if orchestration.get("delegationAllowed") or metadata.get("mode") == "delegated":
+            try:
+                delegated_limit = int(orchestration.get("maxAgents") or limit)
+            except (TypeError, ValueError):
+                delegated_limit = limit
+            if delegated_limit < limit:
+                limit = max(1, delegated_limit)
+                reason = "delegation_max_agents_exceeded"
+        return limit, reason
+
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
         completed: list[WorkflowJob] = []
         self._start_queued_jobs()
@@ -276,10 +346,12 @@ class AgentScheduler:
                 result = self.runner.poll(job)
             except Exception as exc:
                 error = redact_sensitive_text(str(exc))
-                self._fail_job(job, error)
-                completed.append(job)
+                if not self._schedule_retry(job, error):
+                    self._fail_job(job, error)
+                    completed.append(job)
                 if failure_policy == "fail_fast":
-                    self._fail_fast(error)
+                    if job.status == "failed":
+                        self._fail_fast(error)
                 continue
             if result is None:
                 continue
@@ -287,19 +359,23 @@ class AgentScheduler:
                 self._cancel_job(job, reason="cancelled")
             elif result.status == "failed":
                 error = redact_sensitive_text(str(result.payload.get("error") or "child agent failed"))
-                self._fail_job(job, error, result=result)
-                if failure_policy == "fail_fast":
+                if not self._schedule_retry(job, error, result=result):
+                    self._fail_job(job, error, result=result)
+                    completed.append(job)
+                if failure_policy == "fail_fast" and job.status == "failed":
                     self._fail_fast(job.error or "child agent failed")
             else:
                 result = self._apply_schema_contract(job, result)
                 if result.status == "failed":
                     error = redact_sensitive_text(str(result.payload.get("error") or "child agent failed"))
-                    self._fail_job(job, error, result=result)
-                    if failure_policy == "fail_fast":
+                    if not self._schedule_retry(job, error, result=result):
+                        self._fail_job(job, error, result=result)
+                        completed.append(job)
+                    if failure_policy == "fail_fast" and job.status == "failed":
                         self._fail_fast(job.error or "child agent failed")
                 else:
                     self._complete_job(job, result)
-            completed.append(job)
+                    completed.append(job)
         if self.manage_run_completion:
             self._update_run_completion_state()
         self.store.save_run(self.run)
@@ -313,6 +389,15 @@ class AgentScheduler:
             completed.extend(self.tick(failure_policy=failure_policy))
             after = [(job.job_id, job.status) for job in self.jobs]
             if before == after and any(job.status == "running" for job in self.jobs):
+                continue
+            if before == after and any(job.status == "queued" for job in self.jobs):
+                due = [
+                    float((job.metadata.get("retryPolicy") or {}).get("retryNotBefore") or 0)
+                    for job in self.jobs
+                    if job.status == "queued"
+                ]
+                if due and min(due) > time.time():
+                    time.sleep(min(0.05, max(0.0, min(due) - time.time())))
                 continue
         if self.manage_run_completion:
             self._update_run_completion_state()
@@ -339,7 +424,15 @@ class AgentScheduler:
                 return
             if job.status != "queued":
                 continue
+            retry_policy = job.metadata.get("retryPolicy") or {}
+            retry_not_before = float(retry_policy.get("retryNotBefore") or 0)
+            if retry_not_before > time.time():
+                continue
             job.status = "running"
+            retry_policy = normalize_retry_policy(retry_policy)
+            retry_policy["attempts"] += 1
+            retry_policy["retryNotBefore"] = None
+            job.metadata["retryPolicy"] = retry_policy
             self.runner.start(job)
             self._append("agent_started", job)
             slots -= 1
@@ -350,6 +443,10 @@ class AgentScheduler:
             return
         refresh_workflow_execution_metadata(self.run)
         if all(job.status in {"succeeded", "cached"} for job in self.jobs):
+            metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
+            metadata.setdefault("integrationStatus", "pending")
+            metadata.setdefault("finalAuditStatus", "pending")
+            self.run.metadata = metadata
             self.run.status = "succeeded"
             refresh_workflow_execution_metadata(self.run)
             self.store.write_final_result(
@@ -361,6 +458,8 @@ class AgentScheduler:
                     "workflowIssues": sanitize(copy.deepcopy((self.run.metadata or {}).get("workflowIssues") or [])),
                     "childSummary": sanitize(copy.deepcopy((self.run.metadata or {}).get("childSummary") or {})),
                     "executionOutcome": (self.run.metadata or {}).get("executionOutcome"),
+                    "integrationStatus": (self.run.metadata or {}).get("integrationStatus"),
+                    "finalAuditStatus": (self.run.metadata or {}).get("finalAuditStatus"),
                     "jobs": [
                         {
                             "jobId": job.job_id,
@@ -379,7 +478,9 @@ class AgentScheduler:
             transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
             result.transcript_ref = result.transcript_ref or transcript_ref
         self.store.write_agent_result(self.run, job, result)
+        handoff = self._build_handoff(result)
         job.metadata["result"] = result.payload
+        job.metadata["handoff"] = handoff
         if result.transcript_ref:
             job.metadata["transcriptRef"] = result.transcript_ref
         if result.token_usage:
@@ -388,6 +489,52 @@ class AgentScheduler:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
         self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
+
+    def _build_handoff(self, result: AgentResult, *, error: str | None = None) -> dict:
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        summary = payload.get("summary") or payload.get("text") or payload.get("error") or error or ""
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, list):
+            evidence = []
+        if result.transcript_ref and not evidence:
+            evidence = [{"transcriptRef": result.transcript_ref}]
+        blocking = payload.get("blockingIssues")
+        if not isinstance(blocking, list):
+            blocking = []
+        return {
+            "status": result.status,
+            "summary": redact_sensitive_text(str(summary))[:2_000],
+            "evidence": sanitize(copy.deepcopy(evidence)),
+            "blockingIssues": sanitize(copy.deepcopy(blocking)),
+            "transcriptRef": result.transcript_ref,
+        }
+
+    def _schedule_retry(self, job: WorkflowJob, error: str, *, result: AgentResult | None = None) -> bool:
+        policy = normalize_retry_policy(job.metadata.get("retryPolicy"))
+        text_parts = [str(error or "").lower()]
+        if result is not None and isinstance(result.payload, dict):
+            text_parts.extend(str(result.payload.get(key) or "").lower() for key in ("code", "category", "providerAnomaly"))
+        text = " ".join(text_parts)
+        retryable = any(pattern and pattern in text for pattern in policy["retryableErrors"])
+        if not retryable or policy["attempts"] >= policy["maxAttempts"]:
+            return False
+        policy["lastError"] = redact_sensitive_text(error)
+        policy["retryNotBefore"] = time.time() + (policy["backoffMs"] / 1000.0)
+        job.metadata["retryPolicy"] = policy
+        job.status = "queued"
+        job.error = None
+        self._append(
+            "agent_retry_scheduled",
+            job,
+            {
+                "attempt": policy["attempts"],
+                "nextAttempt": policy["attempts"] + 1,
+                "maxAttempts": policy["maxAttempts"],
+                "error": policy["lastError"],
+                "backoffMs": policy["backoffMs"],
+            },
+        )
+        return True
 
     def _apply_schema_contract(self, job: WorkflowJob, result: AgentResult) -> AgentResult:
         options = job.metadata.get("options") or {}
@@ -481,6 +628,8 @@ class AgentScheduler:
                 transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
                 result.transcript_ref = result.transcript_ref or transcript_ref
             self.store.write_agent_result(self.run, job, result)
+            job.metadata["result"] = result.payload
+            job.metadata["handoff"] = self._build_handoff(result, error=error)
             if result.transcript_ref:
                 job.metadata["transcriptRef"] = result.transcript_ref
             if result.token_usage:

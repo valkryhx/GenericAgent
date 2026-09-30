@@ -199,6 +199,27 @@ class WorkflowControllerTest(unittest.TestCase):
                 [event.event_type for event in events],
             )
 
+    def test_create_planned_run_honors_explicit_approval_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            controller = WorkflowController(store)
+            draft = WorkflowPlanner().plan("调研一个技术方案")
+            draft.plan["orchestration"]["approvalRequired"] = True
+
+            class FixedPlanner:
+                def plan(self, _task_text, _context=None):
+                    return draft
+
+            run = controller.create_planned_run(
+                session_id="session_gate",
+                task_text="调研一个技术方案",
+                planner=FixedPlanner(),
+                auto_approve=True,
+            )
+
+            self.assertEqual("awaiting_approval", run.status)
+            self.assertEqual("explicit_workflow_approval_gate", run.metadata["approvalGate"]["reason"])
+
     def test_create_planned_run_records_rejected_draft_without_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))

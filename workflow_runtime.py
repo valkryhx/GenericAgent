@@ -174,7 +174,19 @@ class WorkflowRuntime:
                     verification_error = self._explicit_verification_failure_reason(result)
                     acceptance_error = self._evaluate_acceptance(run, result)
                     if gate_error or verification_error or acceptance_error:
+                        metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+                        metadata["integrationStatus"] = "rejected"
+                        metadata["integrationIssues"] = [
+                            item for item in (gate_error, verification_error, acceptance_error) if item
+                        ]
+                        metadata["finalAuditStatus"] = "failed"
+                        run.metadata = metadata
                         raise RuntimeError(gate_error or verification_error or acceptance_error)
+                    metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+                    metadata["integrationStatus"] = "accepted"
+                    metadata["integrationIssues"] = []
+                    metadata["finalAuditStatus"] = "passed"
+                    run.metadata = metadata
                     run.status = "succeeded"
                     run.error = None
                     refresh_workflow_execution_metadata(run)
@@ -193,6 +205,10 @@ class WorkflowRuntime:
             if current.status == "killed":
                 run.status = "killed"
                 run.error = current.error or reason
+                metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+                metadata["integrationStatus"] = "cancelled"
+                metadata["finalAuditStatus"] = "not_run"
+                run.metadata = metadata
                 refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
@@ -205,15 +221,18 @@ class WorkflowRuntime:
             else:
                 run.status = "failed"
                 run.error = reason
-                acceptance_contract = run.metadata.get("acceptanceContract") if isinstance(run.metadata, dict) else None
+                metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+                metadata["integrationStatus"] = "rejected"
+                metadata["integrationIssues"] = [reason]
+                metadata["finalAuditStatus"] = "failed"
+                acceptance_contract = metadata.get("acceptanceContract")
                 if isinstance(acceptance_contract, dict) and acceptance_contract.get("required"):
-                    metadata = dict(run.metadata)
                     failures = list(metadata.get("acceptanceFailures") or [])
                     if reason not in failures:
                         failures.append(reason)
                     metadata["acceptanceStatus"] = "failed"
                     metadata["acceptanceFailures"] = failures
-                    run.metadata = metadata
+                run.metadata = metadata
                 refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
@@ -869,6 +888,9 @@ class WorkflowRuntime:
         if "acceptanceStatus" in metadata:
             payload["acceptanceStatus"] = metadata["acceptanceStatus"]
             payload["acceptanceFailures"] = sanitize(copy.deepcopy(metadata.get("acceptanceFailures") or []))
+        for key in ("integrationStatus", "integrationIssues", "finalAuditStatus"):
+            if key in metadata:
+                payload[key] = sanitize(copy.deepcopy(metadata[key]))
         return sanitize(payload)
 
     def _terminate(self, process: subprocess.Popen) -> None:
