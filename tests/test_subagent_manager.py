@@ -54,6 +54,19 @@ class SubagentManagerReadTest(unittest.TestCase):
             self.assertEqual(persisted["turn_status"], "completed")
             self.assertEqual(persisted["process_status"], "waiting_reply")
 
+    def test_result_view_reads_persisted_state_without_refreshing_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._write_running_state(td)
+            state_path = task_dir / "state.json"
+            before = state_path.read_bytes()
+            manager = SubagentManager(root_dir=td, process_exists=lambda pid: False)
+            manager.read_agent = lambda *_args, **_kwargs: self.fail("result view must not refresh persisted state")
+
+            rows = manager.list_result_view()
+
+            self.assertEqual(["wc_france_history"], [row.task_name for row in rows])
+            self.assertEqual(before, state_path.read_bytes())
+
     def test_read_agent_does_not_treat_partial_output_as_final(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "wc_brazil_history"

@@ -98,7 +98,7 @@
   }},
   {"type": "function", "function": {
     "name": "wait_agent",
-    "description": "Wait for a subagent mailbox/status update. Call wait_agent sparingly; use it as an event wait only when the next critical-path step needs a subagent update. It does not read final output content.",
+    "description": "Wait for a subagent using an explicit lifecycle predicate. condition=event only observes an update; condition=all_terminal waits for all targets to finish; condition=result_available waits for persisted result refs. A timeout is not a failure and must not trigger duplicate spawning. This tool does not read final output content.",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional non-empty list of task names; overrides target"},

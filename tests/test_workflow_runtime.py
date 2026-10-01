@@ -2342,6 +2342,77 @@ return await new Promise(() => {})
         self.assertIn("diff", error)
         self.assertEqual(run.metadata["acceptanceStatus"], "failed")
 
+    def test_runtime_persists_verification_evidence_in_final_run_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_verification_persist",
+                    session_id="session_test",
+                    script="return {verificationEvidence: {diff: {status: 'passed', evidence: {changedFiles: ['src/app.py']}}}}",
+                    status="running",
+                    metadata={
+                        "verificationContract": {
+                            "level": "inline",
+                            "checks": [{"id": "diff", "kind": "diff", "required": True, "owner": "host"}],
+                            "independentReview": False,
+                        }
+                    },
+                )
+            )
+
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            runtime.run(run)
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("passed", loaded.metadata["acceptanceStatus"])
+            self.assertEqual("passed", loaded.metadata["verificationEvidence"]["diff"]["status"])
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("passed", final_result["verificationEvidence"]["diff"]["status"])
+
+    def test_runtime_executes_required_command_check_on_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "test_host_check.py").write_text(
+                """import unittest
+class HostCheck(unittest.TestCase):
+ def test_ok(self): self.assertTrue(True)
+""",
+                encoding="utf-8",
+            )
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_verification_command",
+                    session_id="session_test",
+                    script="return {}",
+                    status="running",
+                    metadata={
+                        "verificationContract": {
+                            "level": "inline",
+                            "checks": [
+                                {
+                                    "id": "targeted",
+                                    "kind": "command",
+                                    "required": True,
+                                    "owner": "host",
+                                    "command": ["python", "-m", "unittest", "discover", "-s", "."],
+                                }
+                            ],
+                            "independentReview": False,
+                        }
+                    },
+                )
+            )
+
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            runtime.run(run, args={"workspacePath": str(workspace)})
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("passed", loaded.metadata["acceptanceStatus"])
+            self.assertEqual(0, loaded.metadata["verificationEvidence"]["targeted"]["evidence"]["exitCode"])
+
     def _run_and_capture(self, runtime, run, errors):
         try:
             runtime.run(run)

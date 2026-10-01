@@ -72,13 +72,11 @@ def plan_produces_code(plan: dict[str, Any] | None) -> bool:
     host can do is check whether the plan itself declares code-producing work
     and hold the plan to the coding contract when it does.
 
-    ``taskType`` remains a fail-closed fallback: an explicit coding/debugging
-    label always gets the coding contract even if the model forgot roles.
+    ``taskType`` is a planner hint only. Runtime contracts are activated by
+    declared write scope or code-producing roles, never by classification.
     """
 
     source = plan if isinstance(plan, dict) else {}
-    if str(source.get("taskType") or "").strip().lower() in {"coding", "debugging"}:
-        return True
     for phase in source.get("phases") or []:
         if not isinstance(phase, dict):
             continue
@@ -350,12 +348,10 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
 
 
 def _normalize_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
-    """Apply the full host-side contract normalization pipeline in order.
+    """Apply legacy conversion, topology normalization, and runtime contracts.
 
-    Coding acceptance contract first so the verification role/schema is in place
-    before phase topology is repaired, then same-phase dependency splitting, and
-    finally the generic orchestration contract. Review plans in the workflow UI
-    see the same normalized shape as runtime execution.
+    Legacy acceptance fields are preserved as checks; no verification role or
+    output schema is synthesized. Review plans and execution share the shape.
     """
 
     normalized = _normalize_coding_acceptance_contract(plan)
@@ -421,48 +417,14 @@ def _split_same_phase_dependencies(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_coding_acceptance_contract(plan: dict[str, Any]) -> dict[str, Any]:
-    """Normalize model-produced coding plans to GA's strict verification contract."""
+    """Keep legacy name while avoiding implicit verifier/schema injection.
 
-    normalized = copy.deepcopy(plan)
-    if not plan_produces_code(normalized):
-        return normalized
+    Legacy acceptance fields are converted by
+    :func:`_normalize_workflow_execution_contract`; plan topology and explicit
+    verification checks remain model-declared and are validated separately.
+    """
 
-    schemas = normalized.get("schemas")
-    if not isinstance(schemas, dict):
-        schemas = {}
-        normalized["schemas"] = schemas
-
-    required_fields = set(GA_WORKFLOW_VERIFICATION_SCHEMA["required"])
-    for phase in normalized.get("phases") or []:
-        for agent in phase.get("agents") or []:
-            if str(agent.get("role") or "").strip().lower() != "verification":
-                continue
-
-            schema_ref = agent.get("schemaRef")
-            existing_schema = schemas.get(schema_ref) if schema_ref else None
-            existing_required = set(existing_schema.get("required") or []) if isinstance(existing_schema, dict) else set()
-            has_complete_schema = (
-                agent.get("strictSchema") is True
-                and isinstance(existing_schema, dict)
-                and required_fields.issubset(existing_required)
-            )
-            if has_complete_schema:
-                continue
-
-            if not (schema_ref and isinstance(existing_schema, dict) and required_fields.issubset(existing_required)):
-                schema_ref = "GA_WORKFLOW_VERIFICATION_SCHEMA"
-                schemas[schema_ref] = copy.deepcopy(GA_WORKFLOW_VERIFICATION_SCHEMA)
-            agent["schemaRef"] = schema_ref
-            agent["strictSchema"] = True
-            prompt = str(agent.get("prompt") or "")
-            requirement = (
-                "必须返回严格 JSON，字段为 verificationPassed（布尔值）、checks（数组）、"
-                "blockingIssues（数组）；不得用自然语言摘要替代结构化验收结果。"
-            )
-            if requirement not in prompt:
-                agent["prompt"] = f"{prompt}\n{requirement}".strip()
-
-    return normalized
+    return copy.deepcopy(plan)
 
 
 @dataclass
@@ -839,18 +801,18 @@ class LLMWorkflowPlanner:
             "classificationHint": classification_hint["taskType"],
             "contract": "Return WorkflowPlan JSON only. 不要输出 JS. Do not wrap in markdown. phases must be a non-empty array.",
             "orchestrationPolicy": [
-                "根据任务语义和 classificationHint 决定 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts。",
+                "根据任务语义和 classificationHint 规划 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts；taskType 仅为提示，不触发硬门禁。",
+                "计划声明 writeScope 或 implementation/tests/repair 等代码产出角色时，必须在 verification.checks 中显式声明至少一个可观测 required check；不写入的研究、审阅和规划任务不需要伪造代码验收项。",
+                "verification.level 使用 none/inline/full；full 才需要 independentReview，且应显式声明 review agent 或独立 review capability。",
+                "验收检查项由任务决定，可使用 command、schema、artifact 等受支持 kind；不要把 verification agent、verification_schema 或 python_unittest 当作所有代码任务的固定要求。",
                 "小任务（单步、低风险、无需多 agent 协作）必须 mode=direct，不要为了简单问题创建 workflow。",
                 "每个 agent 必须声明 bounded retryPolicy（maxAttempts 只能是 1-3），不得生成无界重试；transient/provider/MCP/schema 错误要区分 retryable 与 blocking。",
                 "delegated mode（有界 sidecar）必须遵守 maxAgents<=5、maxWaves<=4，并在 approvalRequired=true 时停在 awaiting approval；普通 workflow 不受此限制，按任务真实复杂度拆分 phase/agent，宿主会按依赖图计算所需 wave 数。",
                 "如果任务要求审查安全/性能/测试缺口/回归风险，taskType 必须是 review，不要误判为 research。",
                 "如果任务要求规划设计方案或实施计划且明确不要直接写代码，taskType 应为 planning 或 mixed。",
                 "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
-                "coding 任务必须遵守 Understand -> Tests -> Implementation -> Verification，禁止 tests 与 implementation 并行。",
-                "coding 任务的每个 agent.role 都是必填字段，只能使用 canonical role：understanding、contract、tests、implementation、verification、review、repair、summary、synthesis；不要省略 role 或使用 test-writer 等别名。",
-                "acceptance.checks 必须由任务自身决定，不要照抄示例：只有本次 workflow 会写或运行 Python 测试时才声明 python_unittest；只做研究、审阅或规划时声明 verification_schema 即可。",
-                "如果计划声明了 role=tests 的 agent，就必须真的产出 test_*.py；运行时发现零测试会判定为失败。",
-                "verification agent 必须返回 verificationPassed、checks、blockingIssues；verification schema 不匹配时不得降级为普通文本。",
+                "如果计划声明 role=tests，就必须产出与任务对应的测试证据；该 role 不能由 taskType 推断。",
+                "对实际声明为代码产出的计划，role 如有填写必须使用 canonical role：understanding、contract、tests、implementation、verification、review、repair、summary、synthesis；不要使用 test-writer 等别名。",
                 "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。",
                 "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
                 "agent label 使用清晰英文短语，避免无意义缩写。",
@@ -863,7 +825,7 @@ class LLMWorkflowPlanner:
                 "schemas": {},
                 "artifacts": [],
                 "constraints": ["no_secret_files", "no_git_commit"],
-                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema"], "notes": "add python_unittest only when this workflow writes or runs Python tests"},
+                "verification": {"level": "none | inline | full", "checks": [{"id": "...", "kind": "command | schema | artifact", "required": True, "owner": "host | <agent-label>"}], "independentReview": False},
             },
         }
         if issues:

@@ -39,7 +39,21 @@ def _command_argv(check):
     command = check.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("verification command must be an argv list")
-    return list(command)
+
+    argv = list(command)
+    executable = Path(argv[0]).name.lower()
+    python_names = {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
+    if executable in python_names:
+        allowed_modules = {"unittest", "pytest", "compileall"}
+        if len(argv) < 3 or argv[1] != "-m" or argv[2] not in allowed_modules:
+            raise ValueError("verification command is not allowlisted")
+    elif executable in {"pytest", "pytest.exe", "ruff", "ruff.exe", "mypy", "mypy.exe"}:
+        pass
+    elif executable in {"git", "git.exe"} and argv[1:] == ["diff", "--check"]:
+        pass
+    else:
+        raise ValueError("verification command is not allowlisted")
+    return argv
 
 
 def _run_command(check, workspace, timeout_s):

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import LLMWorkflowPlanner, NativeWorkflowPlannerClient, WorkflowPlanner, build_workflow_planner_from_env, parse_json_object
+from workflow_planner import LLMWorkflowPlanner, NativeWorkflowPlannerClient, WorkflowPlanner, build_workflow_planner_from_env, parse_json_object, plan_produces_code
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
@@ -284,20 +284,15 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertEqual(2, len(client.calls))
         self.assertIn("coding_tests_parallel_implementation", client.calls[1][0]["content"])
 
-    def test_prompt_guided_planner_repairs_coding_plan_that_omits_roles(self):
-        client = FakePlannerClient(responses=[omitted_role_coding_parallel_plan(), repaired_coding_plan()])
+    def test_task_type_alone_does_not_trigger_coding_role_repair(self):
+        client = FakePlannerClient(responses=[omitted_role_coding_parallel_plan()])
         planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
 
-        draft = planner.plan(
-            "实现 workflow controller 的 planned run 入口",
-            context={"constraints": ["不要读取 mykey.py", "不要提交"]},
-        )
+        draft = planner.plan("technical task", context={})
 
         self.assertTrue(draft.validation["ok"], draft.validation)
-        self.assertEqual("repaired-coding", draft.plan["meta"]["name"])
-        self.assertNotIn("await parallel([", draft.script)
-        self.assertEqual(2, len(client.calls))
-        self.assertIn("missing_coding_role", client.calls[1][0]["content"])
+        self.assertEqual("missing-role-coding", draft.plan["meta"]["name"])
+        self.assertEqual(1, len(client.calls))
 
     def test_prompt_guided_planner_normalizes_missing_verification_schema(self):
         plan = repaired_coding_plan()
@@ -312,9 +307,28 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
 
         self.assertTrue(draft.validation["ok"], draft.validation)
         normalized = draft.plan["phases"][-1]["agents"][0]
-        self.assertTrue(normalized["strictSchema"])
-        self.assertEqual("GA_WORKFLOW_VERIFICATION_SCHEMA", normalized["schemaRef"])
-        self.assertIn("GA_WORKFLOW_VERIFICATION_SCHEMA", draft.plan["schemas"])
+        self.assertNotIn("strictSchema", normalized)
+        self.assertNotIn("schemaRef", normalized)
+        self.assertNotIn("GA_WORKFLOW_VERIFICATION_SCHEMA", draft.plan["schemas"])
+
+    def test_task_type_is_not_a_hard_coding_signal(self):
+        plan = {"taskType": "coding", "phases": [{"title": "Research", "agents": [{"label": "inspect", "role": "understanding"}]}]}
+        self.assertFalse(plan_produces_code(plan))
+
+        client = FakePlannerClient(responses=[plan])
+        draft = LLMWorkflowPlanner(client=client, max_repair_attempts=0).plan("read only research", context={})
+        issue_codes = {issue["code"] for issue in draft.validation["issues"]}
+        self.assertNotIn("missing_verification_check", issue_codes)
+        self.assertNotIn("missing_coding_role", issue_codes)
+
+    def test_planner_prompt_treats_task_type_as_hint_and_requires_explicit_checks(self):
+        client = FakePlannerClient(responses=[research_credibility_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=0)
+        planner.plan("technical research", context={})
+        prompt = client.calls[0][0]["content"]
+        self.assertIn("taskType", prompt)
+        self.assertIn("verification.checks", prompt)
+        self.assertNotIn("\"checks\": [\"verification_schema\"]", prompt)
 
     def test_prompt_guided_planner_normalizes_ultracode_execution_contract(self):
         plan = review_plan()

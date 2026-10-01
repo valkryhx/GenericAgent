@@ -8,6 +8,8 @@ ROOT_AGENT_USAGE_HINT_ZH = """
 - 委派任务必须具体、有边界、自包含，只覆盖真正可并行的旁路工作。
 - 不要和子智能体重复做同一件事；spawn 之后不要再手工重做已委派内容。
 - wait_agent 只在下一步确实需要子智能体更新时调用，避免无意义轮询。
+- wait_agent 的 condition=event 只表示观察到更新；需要等全部目标结束时必须使用 condition=all_terminal 或 result_available。
+- wait_agent timeout 不是失败，不要因为 timeout 重复 spawn；先根据 remainingTargets 继续 wait，已有 resultRefs 时调用 read_agent_result。
 - 子智能体 completed 后，再用 read_agent_result 读取权威结果并整合。
 """.strip()
 
@@ -19,6 +21,8 @@ You are the root agent, responsible for orchestration and synthesis.
 - Delegated work must be concrete, bounded, and self-contained, and should cover only true sidecar work.
 - Do not duplicate work that has already been delegated; after spawning, do not redo it yourself.
 - Call wait_agent only when you truly need a subagent update for the next step; avoid reflexive polling.
+- wait_agent with condition=event only observes an update; use condition=all_terminal or result_available when the next step needs completed results.
+- A wait_agent timeout is not a failure and must not trigger a duplicate spawn; continue waiting using remainingTargets, or call read_agent_result when resultRefs exist.
 - After a subagent completes, call read_agent_result and integrate the authoritative result.
 """.strip()
 

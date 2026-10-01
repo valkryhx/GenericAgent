@@ -987,8 +987,8 @@ class SubagentManager:
         return self._list_agent_states(self.read_agent, path_prefix=path_prefix, include_closed=include_closed)
 
     def list_result_view(self, path_prefix=None):
-        """List persisted agent states, including closed/stale rows, without starting agents."""
-        return self._list_agent_states(self.read_agent, path_prefix=path_prefix, include_closed=True)
+        """List closed and active result states without refreshing persistent lifecycle state."""
+        return self._list_agent_states(self.probe_agent, path_prefix=path_prefix, include_closed=True)
 
     def list_descendants(self, parent_session_id):
         return [

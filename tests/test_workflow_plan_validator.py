@@ -152,6 +152,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
                     {
                         "label": "verify",
                         "role": "verification",
+                        "writeScope": ["src/"],
                         "prompt": "运行测试并输出结构化验收结果。",
                         "dependsOn": [],
                     }
@@ -174,11 +175,13 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
                 "agents": [
                     {
                         "label": "write-tests",
+                        "writeScope": ["tests/"],
                         "prompt": "边界：不要读取 mykey.py；不要提交；先写 failing tests。",
                         "dependsOn": [],
                     },
                     {
                         "label": "implement-code",
+                        "writeScope": ["src/"],
                         "prompt": "边界：不要读取 mykey.py；不要提交；实现生产代码。",
                         "dependsOn": [],
                     },
@@ -259,7 +262,8 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
             "failWorkflowOnError": True,
             "checks": ["python_unittest", "verification_schema"],
         }
-        plan["phases"][0]["agents"][0]["role"] = "verification"
+        plan["phases"][0]["agents"][0]["role"] = "implementation"
+        plan["phases"][0]["agents"][0]["writeScope"] = ["src/"]
 
         script = render_workflow_plan(plan)
 

@@ -8,13 +8,20 @@ from workflow_check_adapters import run_check
 class WorkflowCheckAdapterTest(unittest.TestCase):
     def test_python_unittest_adapter_records_exit_code_and_output(self):
         with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "test_adapter.py").write_text(
+                """import unittest
+class AdapterTest(unittest.TestCase):
+ def test_output(self): print('adapter-ok')
+""",
+                encoding="utf-8",
+            )
             result = run_check(
                 {
                     "id": "tests",
                     "kind": "command",
                     "adapter": "python_unittest",
                     "required": True,
-                    "command": ["python", "-c", "print('adapter-ok')"],
+                    "command": ["python", "-m", "unittest", "discover", "-s", "."],
                 },
                 workspace=Path(td),
                 timeout_s=5,
@@ -30,6 +37,24 @@ class WorkflowCheckAdapterTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "argv list"):
                 run_check(
                     {"id": "bad", "kind": "command", "command": "cd .. && del file"},
+                    workspace=Path(td),
+                    timeout_s=5,
+                )
+
+    def test_command_adapter_rejects_unapproved_executable(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                run_check(
+                    {"id": "bad", "kind": "command", "command": ["curl", "https://example.invalid"]},
+                    workspace=Path(td),
+                    timeout_s=5,
+                )
+
+    def test_command_adapter_rejects_inline_python_execution(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(ValueError, "not allowlisted"):
+                run_check(
+                    {"id": "bad", "kind": "command", "command": ["python", "-c", "print('unsafe')"]},
                     workspace=Path(td),
                     timeout_s=5,
                 )

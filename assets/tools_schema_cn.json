@@ -98,7 +98,7 @@
   }},
   {"type": "function", "function": {
     "name": "wait_agent",
-    "description": "等待子智能体 mailbox/status 更新。谨慎调用 wait_agent；只有下一步关键路径确实需要子智能体更新时才等待。它只是事件等待，不会读取最终输出正文。",
+    "description": "使用明确生命周期谓词等待子智能体。condition=event 只观察更新；condition=all_terminal 等待全部目标结束；condition=result_available 等待结果引用持久化。timeout 不是失败，不得据此重复 spawn。不会读取最终输出正文。",
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},

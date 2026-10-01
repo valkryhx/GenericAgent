@@ -174,7 +174,7 @@ class WorkflowRuntime:
                     self._last_worker_result = result
                     gate_error = self._test_gate_failure_reason()
                     verification_error = self._explicit_verification_failure_reason(result)
-                    acceptance_error = self._evaluate_acceptance(run, result)
+                    acceptance_error = self._evaluate_acceptance(run, result, args=args)
                     if gate_error or verification_error or acceptance_error:
                         metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                         metadata["integrationStatus"] = "rejected"
@@ -637,11 +637,11 @@ class WorkflowRuntime:
             return "workflow verification failed: verificationPassed=false"
         return None
 
-    def _evaluate_acceptance(self, run: WorkflowRun, result: Any) -> str | None:
+    def _evaluate_acceptance(self, run: WorkflowRun, result: Any, *, args: Any = None) -> str | None:
         metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
         verification_contract = metadata.get("verificationContract")
         if isinstance(verification_contract, dict):
-            return self._evaluate_verification_contract(run, result, verification_contract, metadata)
+            return self._evaluate_verification_contract(run, result, verification_contract, metadata, args=args)
         contract = metadata.get("acceptanceContract")
         if not isinstance(contract, dict) or not contract.get("required"):
             return None
@@ -686,7 +686,7 @@ class WorkflowRuntime:
         run.metadata = metadata
         return None
 
-    def _evaluate_verification_contract(self, run, result, raw_contract, metadata):
+    def _evaluate_verification_contract(self, run, result, raw_contract, metadata, *, args=None):
         try:
             contract = validate_verification_contract(raw_contract)
         except ValueError as exc:
@@ -716,9 +716,14 @@ class WorkflowRuntime:
                     ({"status": "passed" if gate.get("gatePassed") or gate.get("notApplicable") else "failed", "evidence": gate} for gate in reversed(self._test_gates)),
                     None,
                 )
+            if item is None and check.get("kind") in {"command", "artifact"}:
+                workspace = normalize_workflow_workspace(args)
+                if workspace:
+                    item = run_check(check, workspace=workspace, timeout_s=self.timeout_seconds)
             if item is None:
                 failures.append(f"required verification check {check_id} has no evidence")
                 continue
+            evidence[check_id] = item
             if isinstance(item, dict):
                 status = item.get("status")
                 passed = status == "passed" or item.get("passed") is True or item.get("gatePassed") is True
@@ -990,6 +995,10 @@ class WorkflowRuntime:
         if "acceptanceStatus" in metadata:
             payload["acceptanceStatus"] = metadata["acceptanceStatus"]
             payload["acceptanceFailures"] = sanitize(copy.deepcopy(metadata.get("acceptanceFailures") or []))
+        if "verificationContract" in metadata:
+            payload["verificationContract"] = sanitize(copy.deepcopy(metadata["verificationContract"]))
+        if "verificationEvidence" in metadata:
+            payload["verificationEvidence"] = sanitize(copy.deepcopy(metadata["verificationEvidence"]))
         for key in ("integrationStatus", "integrationIssues", "finalAuditStatus", "finalAuditRef"):
             if key in metadata:
                 payload[key] = sanitize(copy.deepcopy(metadata[key]))
