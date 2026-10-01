@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 1 | MCP 发现移出提问关键路径 + 缓存策略修正 | 已完成 | 提问路径 ~0ms，冷启动发现转入后台 |
 | 2 | 同轮工具并行执行（对齐 Pi 的 `executeToolCallsParallel`） | 已完成 | MCP 与 file_read 并行，其余保持串行 |
-| 3 | prompt cache 预热与 miss 统计 | 未开始 | |
+| 3 | prompt cache 预热与 miss 统计 | 已完成 | 新增 `cache_stats.py`，接入 usage 记录 |
 | 4 | HTTP 层自适应超时 | 未开始 | 仅当 GA 使用多线路由时才需要 |
 
 ## 优化项 1：MCP 发现移出提问关键路径
@@ -118,7 +118,36 @@ turn at t=10.0s ->  0.000s, 16 tools
 
 ## 优化项 3：prompt cache 预热与 miss 统计
 
-待开始。
+### 基线问题
+
+GA 已经会给 Anthropic 打 `cache_control`、给 Responses 传 `prompt_cache_key`，但缓存效果只以一行 `[Cache] ...` 打印，既不累计也不判定。Pi 则把 prompt cache 当一等资产：`cache-stats.ts` 统计 miss 与 missedCost，`cache-warmer.ts` 在 TTL 的 90% 处主动预热。没有度量就无法判断提速收益来自哪一层。
+
+### 改动内容
+
+- 新增 `cache_stats.py`
+  - `record_usage()` / `session_stats()` / `summary()` / `reset()`：按会话累计 requests、input、cached、cache_creation/read、output。
+  - 分别处理三种上报口径：Responses 的 `input_tokens_details.cached_tokens`、Chat Completions 的 `prompt_tokens_details.cached_tokens`、Anthropic 独立上报的 `cache_creation_input_tokens` / `cache_read_input_tokens`。
+  - `hit_rate`：Anthropic 的 `input_tokens` 不含缓存读写，所以完整 prompt 是 input + creation + read；OpenAI 兼容口径则直接用 cached / prompt。
+  - `missed_tokens`：对齐 Pi 的 `NOISE_FLOOR_TOKENS = 1024`，噪声以下不计。
+  - 预热策略对齐 `cache-warmer.ts`：`MAX_WARMING_AGE_MS`、`CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS`、`get_cache_warming_delay_ms()`（TTL 的 90%，至少留 10s）、`is_warming_worthwhile()`、`should_warm()`。
+- `llmcore.py`
+  - `_record_usage()` 改为调用 `cache_stats.record_usage()` 并打印 `format_trace()`，输出与原 `[Cache]` 行逐字兼容。
+  - import 提到模块顶层；统计失败被吞掉，绝不影响主请求路径。
+
+### 验证记录
+
+- 新增 `tests/test_cache_stats.py`，17 个用例：三种上报口径的累计与命中率、Anthropic 的完整 prompt 口径、噪声地板、跨请求累计、多会话汇总、空 usage 与未知 api_mode、`[Cache]` 三行 trace 的逐字兼容、预热策略（90%、10s 余量、过短 TTL、节省门槛、过期条目）。
+- `python -m unittest discover -s tests`：1054 passed, 3 skipped（改动前 1037 + 新增 17）。
+
+### 实测收益
+
+本项以可观测性为主，不直接改变延迟；它让后续任何提速改动都能用 hit_rate / missed_tokens 量化，并给出可复用的预热判定。
+
+### 状态
+
+已完成并提交。
+
+## 优化项 4：HTTP 层自适应超时
 
 ## 优化项 4：HTTP 层自适应超时
 

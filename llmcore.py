@@ -1,6 +1,7 @@
 import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
 import token_meter
+from cache_stats import format_trace, record_usage as record_cache_usage
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 DEFAULT_CONTEXT_WIN = 400_000
@@ -370,17 +371,13 @@ def _record_usage(usage, api_mode, sess=None):
                 normalized = {"input_tokens": inp, "output_tokens": out, "total_tokens": total}
             sess.last_usage_tokens = normalized
         except Exception: pass
-    if api_mode == 'responses':
-        cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        inp = usage.get("input_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
-    elif api_mode == 'chat_completions':
-        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        inp = usage.get("prompt_tokens", 0)
-        print(f"[Cache] input={inp} cached={cached}")
-    elif api_mode == 'messages':
-        ci, cr, inp = usage.get("cache_creation_input_tokens", 0), usage.get("cache_read_input_tokens", 0), usage.get("input_tokens", 0)
-        print(f"[Cache] input={inp} creation={ci} read={cr}")
+    try:
+        record_cache_usage(usage, api_mode, sess)
+        trace = format_trace(usage, api_mode)
+        if trace:
+            print(trace)
+    except Exception:
+        pass
     
 def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     blocks = []
