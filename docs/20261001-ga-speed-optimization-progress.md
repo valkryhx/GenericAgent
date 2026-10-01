@@ -204,8 +204,8 @@ GA 已经会给 Anthropic 打 `cache_control`、给 Responses 传 `prompt_cache_
 
 ### 顺带确认
 
-- `fetch`（`uvx mcp-server-fetch`）单独与并发场景实测均正常，之前偶发失败是 npx/uvx 冷启动竞争，非配置问题。
-- `context7` 未在 GA 中配置；实测 `https://mcp.context7.com/mcp` 无需 key 即可列出 2 个工具（`resolve-library-id`、`query-docs`），首次连接约 5-10s。
+- `fetch` 最初用 `uvx mcp-server-fetch`，偶发 `ImportError: cannot import name 'McpError'`——uvx 缓存里的 `mcp` 包与服务端版本不兼容（新版已改名 `MCPError`）。已换成 npx 版 `npx -y mcp-fetch-server`（zcaceres/fetch-mcp），不再依赖 uvx 缓存，工具从 1 个扩到 6 个（`fetch_html`/`fetch_markdown`/`fetch_txt`/`fetch_json`/`fetch_readable`/`fetch_youtube_transcript`）。
+- `context7` 配置为 `https://mcp.context7.com/mcp`，同样**只写 url 不写 type**；无需 key 即可列出 2 个工具（`resolve-library-id`、`query-docs`），首次连接约 5-10s。
 
 ### 修复后实测
 

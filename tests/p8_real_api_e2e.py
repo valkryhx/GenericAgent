@@ -775,7 +775,7 @@ def _pick_real_mcp_diagnostic_tool() -> tuple[str | None, dict, dict]:
     schemas_by_name = {(tool.get("function") or {}).get("name") or "": tool for tool in tools}
     names = sorted(name for name in schemas_by_name if name)
     preferred = [
-        ("mcp__fetch__fetch", {"url": "https://example.com", "max_length": 200}),
+        ("mcp__fetch__fetch_markdown", {"url": "https://example.com"}),
         ("mcp__context7__resolve-library-id", {"libraryName": "React", "query": "Resolve React docs for P8 real MCP diagnostic."}),
         ("mcp__tavily__tavily_search", {"query": "React official documentation", "max_results": 1, "search_depth": "basic", "topic": "general"}),
         ("mcp__exa__web_search_exa", {"query": "React official documentation", "numResults": 1}),

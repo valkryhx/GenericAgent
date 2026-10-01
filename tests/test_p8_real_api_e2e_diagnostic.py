@@ -15,7 +15,7 @@ class P8RealApiE2EDiagnosticTest(unittest.TestCase):
         bridge_stop_diagnostic = {"passed": True, "diagnosticOnly": True, "sourceStatus": "killed", "resumedStatus": "succeeded"}
         parallel_diagnostic = {"passed": False, "diagnosticOnly": True, "status": "failed"}
         timeout_diagnostic = {"passed": True, "diagnosticOnly": True, "status": "failed"}
-        mcp_diagnostic = {"passed": False, "diagnosticOnly": True, "selectedTool": "mcp__fetch__fetch"}
+        mcp_diagnostic = {"passed": False, "diagnosticOnly": True, "selectedTool": "mcp__fetch__fetch_markdown"}
         output = io.StringIO()
 
         with mock.patch.object(p8_real_api_e2e, "OPT_IN", True), \
