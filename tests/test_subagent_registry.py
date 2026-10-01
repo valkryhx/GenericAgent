@@ -138,6 +138,23 @@ class SubagentRegistryTest(unittest.TestCase):
                 "/root/researcher/worker",
             ])
 
+    def test_result_view_includes_closed_agent_without_changing_active_view(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = SubagentRegistry(Path(td) / "temp" / "subagents")
+            entry = registry.create_child(
+                "/root",
+                "researcher",
+                Path(td) / "temp" / "researcher",
+                Path(td) / "temp" / "researcher" / "state.json",
+            )
+            registry.mark_closed(entry.agent_path, previous_status="running", closed_status="shutdown")
+
+            self.assertEqual(registry.list_agents(), [])
+            result_rows = registry.list_result_view()
+
+            self.assertEqual([row.task_name for row in result_rows], ["researcher"])
+            self.assertEqual(result_rows[0].status, "closed")
+
     def test_update_status_and_get_round_trips_from_disk(self):
         with tempfile.TemporaryDirectory() as td:
             registry = SubagentRegistry(Path(td) / "temp" / "subagents")

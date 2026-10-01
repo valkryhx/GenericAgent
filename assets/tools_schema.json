@@ -102,6 +102,7 @@
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "Optional task name or /root/task_name; omit to wait for any live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "Optional non-empty list of task names; overrides target"},
+      "condition": {"type": "string", "enum": ["event", "turn_terminal", "process_terminal", "all_terminal", "result_available", "workflow_terminal"], "description": "Wait predicate: event observes an update; terminal predicates wait for lifecycle completion; result_available waits for a persisted result reference", "default": "event"},
       "since_event_seq": {"type": "integer", "description": "Optional event cursor; return only subagent event-bus events after this sequence"},
       "timeout_seconds": {"type": "number", "description": "Wait timeout in seconds", "default": 30}}}
   }},

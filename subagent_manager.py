@@ -15,6 +15,7 @@ from subagent_registry import SubagentRegistry
 from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
+from subagent_wait import evaluate_wait_condition
 
 
 ROUND_END_MARKER = "[ROUND END]"
@@ -51,6 +52,8 @@ class AgentState:
     round: int
     output_path: str | None
     final_output_path: str | None
+    result_status: str = "pending"
+    result_ref: str | None = None
     completion_status: str | None = None
     updated_at: str | None = None
     last_message: str | None = None
@@ -122,6 +125,12 @@ class WaitResult:
     events: list[dict] | None = None
     next_event_seq: int | None = None
     observed_agents: list[AgentState] = field(default_factory=list)
+    condition: str = "event"
+    satisfied: bool = False
+    remaining_targets: list[str] = field(default_factory=list)
+    terminal_targets: list[str] = field(default_factory=list)
+    result_refs: dict[str, str] = field(default_factory=dict)
+    recommended_next_action: str = "wait_agent"
 
 
 @dataclass
@@ -977,6 +986,17 @@ class SubagentManager:
     def list_agents(self, path_prefix=None, include_closed=False):
         return self._list_agent_states(self.read_agent, path_prefix=path_prefix, include_closed=include_closed)
 
+    def list_result_view(self, path_prefix=None):
+        """List persisted agent states, including closed/stale rows, without starting agents."""
+        return self._list_agent_states(self.read_agent, path_prefix=path_prefix, include_closed=True)
+
+    def list_descendants(self, parent_session_id):
+        return [
+            state
+            for state in self.list_result_view()
+            if state.parent_session_id == parent_session_id
+        ]
+
     def list_agent_snapshots(self, path_prefix=None, include_closed=False):
         """List derived agent states without persisting state or registry refreshes."""
         return self._list_agent_states(self.probe_agent, path_prefix=path_prefix, include_closed=include_closed)
@@ -1212,27 +1232,38 @@ class SubagentManager:
             result.get("resume_context") or {},
         )
 
-    def wait_agents(self, targets=None, timeout_s=30, poll_interval_s=0.5, since_event_offsets=None, since_event_seq=None):
+    def wait_agents(
+        self,
+        targets=None,
+        timeout_s=30,
+        poll_interval_s=0.5,
+        since_event_offsets=None,
+        since_event_seq=None,
+        wait_condition="event",
+    ):
         deadline = time.monotonic() + timeout_s
+        condition = str(wait_condition or "event").strip().lower()
         if targets is None:
             targets = [state.task_name for state in self.list_agents()]
         else:
             targets = [self._task_name_from_target(target) for target in targets if str(target).strip()]
         if not targets:
-            return WaitResult(True, [], "No subagents to wait for.", next_event_seq=self.event_bus.last_event_seq())
-        if since_event_seq is not None:
-            bus_events = self.event_bus.read_events_since(since_event_seq, targets=targets)
-            if bus_events:
-                next_event_seq = int(bus_events[-1].get("event_seq") or self.event_bus.last_event_seq())
-                return WaitResult(
-                    False,
-                    self._states_for_events(bus_events, targets),
-                    "Subagent event update received.",
-                    bus_events,
-                    next_event_seq,
-                )
+            return WaitResult(
+                True,
+                [],
+                "No subagents to wait for.",
+                next_event_seq=self.event_bus.last_event_seq(),
+                condition=condition,
+            )
+
+        if condition != "event":
+            observed = self._probe_wait_targets(targets)
+            decision = evaluate_wait_condition(observed, condition)
+            if decision.satisfied:
+                return self._wait_result_from_decision(decision, observed, "Wait predicate satisfied.")
             if timeout_s <= 0:
-                return self._timed_out_wait_result(targets)
+                return self._timed_out_wait_result(targets, condition)
+
         baseline = since_event_offsets or {target: self._event_size(target) for target in targets}
         inbox_baseline = self._parent_inbox_size()
         while True:
@@ -1240,29 +1271,46 @@ class SubagentManager:
                 bus_events = self.event_bus.read_events_since(since_event_seq, targets=targets)
                 if bus_events:
                     next_event_seq = int(bus_events[-1].get("event_seq") or self.event_bus.last_event_seq())
-                    return WaitResult(
-                        False,
-                        self._states_for_events(bus_events, targets),
-                        "Subagent event update received.",
-                        bus_events,
-                        next_event_seq,
-                    )
+                    states = self._states_for_events(bus_events, targets)
+                    if condition == "event":
+                        return WaitResult(
+                            False,
+                            states,
+                            "Subagent event update received.",
+                            bus_events,
+                            next_event_seq,
+                            condition=condition,
+                        )
+                    decision = evaluate_wait_condition(self._probe_wait_targets(targets), condition)
+                    if decision.satisfied:
+                        return self._wait_result_from_decision(decision, states, "Wait predicate satisfied.", bus_events, next_event_seq)
+                    since_event_seq = next_event_seq
+
             inbox_events = self._read_parent_inbox_events_since(inbox_baseline, targets)
             if inbox_events:
-                return WaitResult(
-                    False,
-                    self._states_for_events(inbox_events, targets),
-                    "Subagent mailbox update received.",
-                    inbox_events,
-                    self.event_bus.last_event_seq(),
-                )
+                states = self._states_for_events(inbox_events, targets)
+                if condition == "event":
+                    return WaitResult(
+                        False,
+                        states,
+                        "Subagent mailbox update received.",
+                        inbox_events,
+                        self.event_bus.last_event_seq(),
+                        condition=condition,
+                    )
+                decision = evaluate_wait_condition(self._probe_wait_targets(targets), condition)
+                if decision.satisfied:
+                    return self._wait_result_from_decision(decision, states, "Wait predicate satisfied.", inbox_events, self.event_bus.last_event_seq())
+
             changed = []
             state_events = []
+            observed = []
             for target in targets:
                 # probe_agent, not read_agent: detection runs every poll interval and must not
                 # write. Once something is worth reporting, _states_for_events re-reads through
                 # read_agent so the returned state is still the persisted one.
                 state = self.probe_agent(target)
+                observed.append(state)
                 if self._is_notify_state(state):
                     changed.append(state)
                     state_events.append({"type": "state_notify", "task_name": state.task_name, "agent_path": state.agent_path})
@@ -1270,31 +1318,75 @@ class SubagentManager:
                     changed.append(state)
                     state_events.append({"type": "task_event_file_changed", "task_name": state.task_name, "agent_path": state.agent_path})
             if changed:
-                return WaitResult(
-                    False,
-                    self._states_for_events(state_events, targets),
-                    "Subagent state update received.",
-                    state_events,
-                    self.event_bus.last_event_seq(),
-                )
+                states = self._states_for_events(state_events, targets)
+                if condition == "event":
+                    return WaitResult(
+                        False,
+                        states,
+                        "Subagent state update received.",
+                        state_events,
+                        self.event_bus.last_event_seq(),
+                        condition=condition,
+                    )
+                decision = evaluate_wait_condition(observed, condition)
+                if decision.satisfied:
+                    return self._wait_result_from_decision(decision, states, "Wait predicate satisfied.", state_events, self.event_bus.last_event_seq())
             if time.monotonic() >= deadline:
-                return self._timed_out_wait_result(targets)
+                return self._timed_out_wait_result(targets, condition)
             self._wait_for_change(targets, poll_interval_s, deadline)
 
-    def _timed_out_wait_result(self, targets):
+    def _probe_wait_targets(self, targets):
         observed = []
         for target in targets:
             try:
                 observed.append(self.probe_agent(target))
             except (FileNotFoundError, ValueError):
                 continue
+        return observed
+
+    @staticmethod
+    def _wait_result_from_decision(decision, states, message, events=None, next_event_seq=None):
         return WaitResult(
-            True,
+            False,
+            list(states or []),
+            message,
+            events or [],
+            next_event_seq,
+            observed_agents=list(states or []),
+            condition=decision.condition,
+            satisfied=decision.satisfied,
+            remaining_targets=decision.remaining_targets,
+            terminal_targets=decision.terminal_targets,
+            result_refs=decision.result_refs,
+            recommended_next_action=decision.recommended_next_action,
+        )
+
+    def _timed_out_wait_result(self, targets, condition="event"):
+        observed = []
+        for target in targets:
+            try:
+                observed.append(self.probe_agent(target))
+            except (FileNotFoundError, ValueError):
+                continue
+        decision = evaluate_wait_condition(observed, condition)
+        timed_out = True
+        satisfied = False
+        if condition != "event":
+            timed_out = not decision.satisfied
+            satisfied = decision.satisfied
+        return WaitResult(
+            timed_out,
             [],
             f"Wait timed out; {len(observed)} target(s) still observed.",
             [],
             self.event_bus.last_event_seq(),
             observed_agents=observed,
+            condition=decision.condition,
+            satisfied=satisfied,
+            remaining_targets=decision.remaining_targets,
+            terminal_targets=decision.terminal_targets,
+            result_refs=decision.result_refs,
+            recommended_next_action=decision.recommended_next_action,
         )
 
     def _wait_for_change(self, targets, poll_interval_s, deadline):
@@ -2138,6 +2230,9 @@ class SubagentManager:
                     turn_status = "running"
 
         refreshed = dict(raw)
+        result_status = "available" if final_output_path else (
+            "failed" if turn_status in {"errored", "failed", "interrupted", "cancelled", "killed"} else "pending"
+        )
         refreshed.update(
             {
                 "schema_version": 1,
@@ -2150,6 +2245,8 @@ class SubagentManager:
                 "output_path": str(output_path) if output_path else raw.get("output_path"),
                 "final_output_path": final_output_path,
                 "final_output_sha256": final_output_sha256,
+                "result_status": result_status,
+                "result_ref": final_output_path,
                 "completion_status": (
                     "completed" if turn_status == "completed" else
                     "failed" if turn_status == "errored" else
@@ -2229,6 +2326,8 @@ class SubagentManager:
             round=int(raw.get("round") or 0),
             output_path=raw.get("output_path"),
             final_output_path=raw.get("final_output_path"),
+            result_status=raw.get("result_status") or ("available" if raw.get("final_output_path") else "pending"),
+            result_ref=raw.get("result_ref") or raw.get("final_output_path"),
             updated_at=raw.get("updated_at"),
             last_message=raw.get("last_message"),
             last_error=raw.get("last_error"),
@@ -2314,8 +2413,22 @@ def register_agent(task_name, state, task_dir=None):
     return _DEFAULT_MANAGER.register_agent(task_name, state, task_dir)
 
 
-def wait_agents(targets=None, timeout_s=30, poll_interval_s=0.5, since_event_offsets=None, since_event_seq=None):
-    return _DEFAULT_MANAGER.wait_agents(targets, timeout_s, poll_interval_s, since_event_offsets, since_event_seq)
+def wait_agents(
+    targets=None,
+    timeout_s=30,
+    poll_interval_s=0.5,
+    since_event_offsets=None,
+    since_event_seq=None,
+    wait_condition="event",
+):
+    return _DEFAULT_MANAGER.wait_agents(
+        targets,
+        timeout_s,
+        poll_interval_s,
+        since_event_offsets,
+        since_event_seq,
+        wait_condition,
+    )
 
 
 def close_agent(target, reason="parent_cleanup", grace_s=2.0, cascade=False):

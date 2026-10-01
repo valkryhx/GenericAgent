@@ -224,6 +224,10 @@ class SubagentRegistry:
             entries.append(_entry_from_dict(raw))
         return sorted(entries, key=lambda entry: str(entry.agent_path))
 
+    def list_result_view(self, path_prefix=None):
+        """Return active and closed registry rows for durable result discovery."""
+        return self.list_agents(path_prefix=path_prefix, include_closed=True)
+
     def descendants(self, agent_path, include_closed=False):
         """Rows strictly below ``agent_path``, deepest first.
 

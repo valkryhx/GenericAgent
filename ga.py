@@ -1014,16 +1014,26 @@ class GenericAgentHandler(BaseHandler):
                 since_event_seq = int(raw_since_seq)
             except Exception:
                 since_event_seq = 0
+        wait_condition = str(
+            args.get("condition") or args.get("wait_condition") or args.get("waitCondition") or "event"
+        ).strip().lower()
         manager = self._get_subagent_manager()
-        yield f"[Action] Waiting for subagent update ({timeout_s:g}s).\n"
+        yield f"[Action] Waiting for subagent update ({timeout_s:g}s, condition={wait_condition}).\n"
         result = manager.wait_agents(
             targets=targets,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
             since_event_seq=since_event_seq,
+            wait_condition=wait_condition,
         )
         data = {
-            "status": "timeout" if result.timed_out else "changed",
+            "status": "timeout" if result.timed_out else ("satisfied" if result.satisfied else "changed"),
+            "condition": result.condition,
+            "satisfied": result.satisfied,
+            "remaining_targets": result.remaining_targets,
+            "terminal_targets": result.terminal_targets,
+            "result_refs": result.result_refs,
+            "recommended_next_action": result.recommended_next_action,
             "message": result.message,
             "events": result.events or [],
             "next_event_seq": result.next_event_seq,
@@ -1036,7 +1046,7 @@ class GenericAgentHandler(BaseHandler):
                 for state in result.observed_agents
             ],
         }
-        if any(agent.get("turn_status") == "completed" for agent in data["agents"] + data["observed_agents"]):
+        if result.result_refs or any(agent.get("turn_status") == "completed" for agent in data["agents"] + data["observed_agents"]):
             data["result_hint"] = "Call read_agent_result for a completed subagent when you need its final output."
         live_observed = sum(
             1

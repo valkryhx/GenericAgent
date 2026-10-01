@@ -499,6 +499,42 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual([agent["task_name"] for agent in outcome.data["agents"]], ["done_worker"])
             self.assertNotIn("final_output", outcome.data["agents"][0])
 
+    def test_wait_agent_result_available_returns_structured_next_action(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "done_worker"
+            task_dir.mkdir(parents=True)
+            output_path = task_dir / "output.txt"
+            output_path.write_text("finished work\n\n[ROUND END]\n", encoding="utf-8")
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "done_worker",
+                    "agent_path": "/root/done_worker",
+                    "pid": None,
+                    "round": 0,
+                    "turn_status": "completed",
+                    "process_status": "exited",
+                    "output_path": str(output_path),
+                    "final_output_path": str(output_path),
+                    "result_status": "available",
+                    "result_ref": str(output_path),
+                },
+            )
+            handler = self.make_handler(td, process_exists=lambda pid: False, sleep=lambda _: None)
+
+            outcome = exhaust(
+                handler.do_wait_agent(
+                    {"target": "done_worker", "condition": "result_available", "timeout_seconds": 0},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "satisfied")
+            self.assertTrue(outcome.data["satisfied"])
+            self.assertEqual(outcome.data["recommended_next_action"], "read_agent_result")
+            self.assertEqual(outcome.data["result_refs"]["done_worker"], str(output_path))
+
     def test_wait_agent_timeout_reports_live_agent_model_and_startup_phase(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "slow_worker"
@@ -1143,6 +1179,10 @@ class GaSubagentToolsTest(unittest.TestCase):
                 self.assertTrue(expected.issubset(names))
                 wait_schema = next(item["function"] for item in raw if item["function"]["name"] == "wait_agent")
                 self.assertNotIn("poll_interval_seconds", wait_schema["parameters"]["properties"])
+                self.assertEqual(
+                    wait_schema["parameters"]["properties"]["condition"]["enum"],
+                    ["event", "turn_terminal", "process_terminal", "all_terminal", "result_available", "workflow_terminal"],
+                )
                 read_schema = next(item["function"] for item in raw if item["function"]["name"] == "read_agent_result")
                 self.assertIn("artifact_id", read_schema["parameters"]["properties"])
                 self.assertIn("include_transcript_replay", read_schema["parameters"]["properties"])

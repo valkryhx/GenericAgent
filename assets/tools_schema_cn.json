@@ -102,6 +102,7 @@
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},
+      "condition": {"type": "string", "enum": ["event", "turn_terminal", "process_terminal", "all_terminal", "result_available", "workflow_terminal"], "description": "等待谓词：event 只观察更新；terminal 谓词等待生命周期结束；result_available 等待结果引用持久化", "default": "event"},
       "since_event_seq": {"type": "integer", "description": "可选事件游标；只返回该序号之后的子智能体 event-bus 事件"},
       "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30}}}
   }},
