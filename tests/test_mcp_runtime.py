@@ -31,6 +31,7 @@ from mcp_runtime import (  # noqa: E402
     load_mcp_config,
     mcp_cancellation_scope,
     mcp_status,
+    mcp_status_snapshot,
     normalize_mcp_name,
     reconnect_mcp_server,
     reset_mcp_manager,
@@ -417,6 +418,24 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertEqual(status["servers"][0]["name"], "demo")
         self.assertEqual(status["servers"][0]["status"], "disabled")
         self.assertEqual(status["servers"][0]["tool_count"], 0)
+
+    def test_mcp_status_snapshot_reports_pending_without_waiting_for_connection(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script = _write_demo_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "demo", server_script)
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+
+            started = time.monotonic()
+            snapshot = mcp_status_snapshot()
+            elapsed = time.monotonic() - started
+            reset_mcp_manager()
+
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(snapshot["loading"])
+        self.assertEqual(snapshot["servers"][0]["status"], "pending")
+        self.assertEqual(snapshot["servers"][0]["tool_count"], 0)
 
     def test_set_mcp_server_enabled_persists_disabled_flag(self):
         with _tempdir() as tmp:

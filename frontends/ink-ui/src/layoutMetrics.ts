@@ -54,7 +54,7 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
     ? Math.max(0, input.panelRows ?? (input.hasSlashSuggestions ? 6 : 8))
     : 0
   const availablePanelRows = Math.max(0, rows - headerRows - baseBottomRows - activityRows - errorRows - 1)
-  const maxPanelRows = Math.max(0, Math.min(12, availablePanelRows))
+  const maxPanelRows = Math.max(0, availablePanelRows)
   const panelRows = Math.min(requestedPanelRows, maxPanelRows)
   const requestedBottomRows = baseBottomRows + activityRows + errorRows + panelRows
   const bottomRows = Math.min(requestedBottomRows, Math.max(1, rows - headerRows - 1))

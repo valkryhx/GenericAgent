@@ -4,6 +4,7 @@ import {
   mcpStatusColor,
   mcpStatusIcon,
   mcpPanelRows,
+  mcpStartupStatusRows,
   mcpToolsForServer,
   visibleMcpServerRows,
   moveMcpSelection,
@@ -69,6 +70,52 @@ test('visibleMcpServerRows keeps selected server visible in a capped panel', () 
 
   assert.deepEqual(rows.map(row => panel.servers[row.index]?.name), ['tavily', 'sequential-thinking', 'memory'])
   assert.equal(rows.some(row => row.selected && panel.servers[row.index]?.name === 'sequential-thinking'), true)
+})
+
+test('mcp server list can display every configured server when the viewport allows it', () => {
+  const panel = panelFromMcpStatus({
+    ...statusEvent,
+    servers: ['fetch', 'tavily', 'exa', 'memory', 'sequential-thinking', 'context7'].map(name => ({
+      name,
+      status: 'connected',
+      transport: 'http',
+      disabled: false,
+      error: '',
+      tool_count: 2,
+    })),
+  })
+
+  assert.deepEqual(visibleMcpServerRows(panel, panel.servers.length).map(row => panel.servers[row.index]?.name), [
+    'fetch', 'tavily', 'exa', 'memory', 'sequential-thinking', 'context7',
+  ])
+  assert.equal(mcpPanelRows(panel), 10)
+})
+
+test('mcp startup status rows show per-server startup progress and final tool totals', () => {
+  const pendingRows = mcpStartupStatusRows({
+    loading: true,
+    servers: [
+      { name: 'exa', status: 'connected', tool_count: 3 },
+      { name: 'context7', status: 'pending', tool_count: 0 },
+    ],
+    tools: Array.from({ length: 3 }, (_, index) => ({
+      type: 'function' as const,
+      function: { name: `mcp__exa__tool${index}`, description: '', parameters: {} },
+    })),
+  })
+  assert.match(pendingRows[0] ?? '', /MCP initializing.*1\/2.*3 tools/)
+  assert.match(pendingRows.join('\n'), /context7.*pending/)
+
+  const readyRows = mcpStartupStatusRows({
+    loading: false,
+    servers: [{ name: 'context7', status: 'connected', tool_count: 8 }],
+    tools: Array.from({ length: 8 }, (_, index) => ({
+      type: 'function' as const,
+      function: { name: `mcp__context7__tool${index}`, description: '', parameters: {} },
+    })),
+  })
+  assert.equal(readyRows.length, 1)
+  assert.match(readyRows[0] ?? '', /MCP ready.*1 server.*8 tools/)
 })
 
 test('mcpPanelRows requests enough height for five servers and selected details', () => {

@@ -219,6 +219,10 @@ class McpManager:
 
     def status(self, timeout: Optional[float] = None) -> dict[str, Any]:
         self.ensure_all_connected(timeout=timeout, retry_failed=True)
+        return self.snapshot()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return currently known MCP state without starting or waiting on connections."""
         with self.lock:
             servers = [self._server_summary(state) for state in self.states.values()]
             tools = [dict(tool) for state in self.states.values() for tool in state.tools]
@@ -708,6 +712,22 @@ def mcp_status(
     timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     return get_mcp_manager(config_path).status(timeout=timeout)
+
+
+def mcp_status_snapshot(config_path: Optional[os.PathLike | str] = None) -> dict[str, Any]:
+    """Return an immediate, non-blocking snapshot suitable for live UI progress."""
+    payload = get_mcp_manager(config_path).snapshot()
+    warmup = mcp_discovery_warmup_state()
+    loading = bool(warmup.get("running")) or any(
+        server.get("status") in {"pending", "connecting"}
+        for server in payload["servers"]
+    )
+    payload.update({
+        "loading": loading,
+        "discovery_running": bool(warmup.get("running")),
+        "discovery_complete": warmup.get("complete"),
+    })
+    return payload
 
 
 def set_mcp_server_enabled(

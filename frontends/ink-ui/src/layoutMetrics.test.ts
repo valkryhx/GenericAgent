@@ -123,6 +123,21 @@ test('computeLayoutMetrics allows tall panels when the terminal has room', () =>
   assert.equal(metrics.messageRows, 6)
 })
 
+test('computeLayoutMetrics sizes a tall MCP panel to the available terminal height', () => {
+  const metrics = computeLayoutMetrics({
+    rows: 40,
+    columns: 80,
+    hasActivity: false,
+    hasError: false,
+    hasPanel: true,
+    hasSlashSuggestions: false,
+    panelRows: 20,
+    headerRows: 0,
+  })
+  assert.equal(metrics.bottomRows, 25)
+  assert.equal(metrics.messageRows, 14)
+})
+
 test('computeLayoutMetrics never returns negative message rows on tiny terminals', () => {
   const metrics = computeLayoutMetrics({
     rows: 4,

@@ -13,6 +13,7 @@ export type BridgeCommand =
   | { type: 'resume_session_index'; index: number }
   | { type: 'rewind'; taskId: number }
   | { type: 'mcp_status' }
+  | { type: 'mcp_watch_start' }
   | { type: 'mcp_reconnect'; server: string }
   | { type: 'mcp_enable'; server: string }
   | { type: 'mcp_disable'; server: string }
@@ -288,7 +289,8 @@ export type BridgeEvent =
   | { type: 'resume_sessions'; sessions: ResumeSession[] }
   | { type: 'history_replace'; messages: HistoryMessage[] }
   | { type: 'rewind_done'; taskId: number; text: string }
-  | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string> }
+  | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading?: boolean; discovery_running?: boolean; discovery_complete?: boolean | null }
+  | { type: 'mcp_progress'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading: boolean; discovery_running: boolean; discovery_complete: boolean | null }
   | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'model_switch_result'; ok: boolean; message: string }
   | { type: 'permission_status'; mode: PermissionMode | string; default: PermissionMode | string; modes: (PermissionMode | string)[] }

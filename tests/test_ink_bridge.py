@@ -1043,22 +1043,59 @@ class InkBridgeTest(unittest.TestCase):
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
-        payload = {"config_path": "mcp.json", "servers": [], "tools": [], "errors": {}}
+        payload = {
+            "config_path": "mcp.json", "servers": [], "tools": [], "errors": {},
+            "loading": False, "discovery_running": False, "discovery_complete": True,
+        }
 
-        with patch("mcp_runtime.mcp_status", return_value=payload):
+        with (
+            patch("mcp_runtime.mcp_status_snapshot", return_value=payload),
+            patch("mcp_runtime.start_background_discovery"),
+        ):
             bridge.mcp_status()
 
         self.assertEqual({"type": "mcp_status", **payload}, events[-1])
+
+    def test_mcp_status_watch_emits_progress_until_discovery_finishes(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        snapshots = [
+            {
+                "config_path": "mcp.json", "servers": [{"name": "context7", "status": "pending", "tool_count": 0}],
+                "tools": [], "errors": {}, "loading": True, "discovery_running": True, "discovery_complete": False,
+            },
+            {
+                "config_path": "mcp.json", "servers": [{"name": "context7", "status": "connected", "tool_count": 8}],
+                "tools": [{"function": {"name": f"mcp__context7__tool{i}"}} for i in range(8)],
+                "errors": {}, "loading": False, "discovery_running": False, "discovery_complete": True,
+            },
+        ]
+        with (
+            patch("mcp_runtime.start_background_discovery") as start_discovery,
+            patch("mcp_runtime.mcp_status_snapshot", side_effect=snapshots),
+        ):
+            bridge.start_mcp_status_watch()
+            bridge._mcp_watch_thread.join(timeout=2)
+
+        start_discovery.assert_called_once_with()
+        progress = [event for event in events if event.get("type") == "mcp_progress"]
+        self.assertEqual([event["loading"] for event in progress], [True, False])
+        self.assertEqual(progress[-1]["servers"][0]["tool_count"], 8)
 
     def test_emit_mcp_action_result_then_status(self):
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
-        payload = {"config_path": "mcp.json", "servers": [], "tools": [], "errors": {}}
+        payload = {
+            "config_path": "mcp.json", "servers": [], "tools": [], "errors": {},
+            "loading": False, "discovery_running": False, "discovery_complete": True,
+        }
 
         with (
             patch("mcp_runtime.reconnect_mcp_server", return_value={"server": {"name": "demo", "status": "connected"}}),
-            patch("mcp_runtime.mcp_status", return_value=payload),
+            patch("mcp_runtime.mcp_status_snapshot", return_value=payload),
+            patch("mcp_runtime.start_background_discovery"),
         ):
             bridge.mcp_reconnect("demo")
 

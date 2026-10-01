@@ -562,6 +562,109 @@ test('App does not draw a second cursor marker in slash suggestions', async () =
   }
 })
 
+test('App starts MCP status monitoring on bridge ready and shows progress beneath the composer', async () => {
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        if (command.type === 'mcp_watch_start') {
+          onEvent({
+            type: 'mcp_progress',
+            config_path: 'mcp.json',
+            loading: true,
+            discovery_running: true,
+            discovery_complete: false,
+            servers: [
+              { name: 'exa', status: 'connected', transport: 'http', disabled: false, error: '', tool_count: 3 },
+              { name: 'context7', status: 'pending', transport: 'http', disabled: false, error: '', tool_count: 0 },
+            ],
+            tools: [],
+            errors: {},
+          })
+        }
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    const output = await waitForOutput(stdout, value => value.includes('MCP initializing') && value.includes('context7'))
+    assert.match(output, /MCP initializing/)
+    assert.match(output, /context7.*pending/)
+    const frame = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('context7')).at(-1) ?? ''
+    assert.ok(frame.indexOf('Enter send') < frame.indexOf('context7'), 'MCP progress should render below the input composer')
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App /mcp panel renders the sixth configured server when terminal space allows', async () => {
+  const servers = ['fetch', 'tavily', 'exa', 'memory', 'sequential-thinking', 'context7'].map((name, index) => ({
+    name,
+    status: 'connected',
+    transport: 'http',
+    disabled: false,
+    error: '',
+    tool_count: index === 5 ? 8 : 2,
+  }))
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        if (command.type === 'mcp_status') {
+          onEvent({ type: 'mcp_status', config_path: 'mcp.json', servers, tools: [], errors: {} })
+        }
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    stdin.send('/mcp')
+    await waitForFrame(stdout, frame => frame.includes('/mcp') && frame.includes('Tab/Enter complete'))
+    stdin.send('\r')
+    const output = await waitForOutput(stdout, value => value.includes('context7') && value.includes('MCP Servers'))
+    assert.match(output, /context7 - connected - http - 8 tools/)
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App hides the native input cursor while the model selection panel is open', async () => {
   const startBridgeClient = (
     _python: string,

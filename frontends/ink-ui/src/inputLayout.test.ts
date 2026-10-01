@@ -16,6 +16,15 @@ test('inputChromeSections places command panels below the input frame', () => {
   assert.deepEqual(sections, ['hint', 'input', 'panel'])
 })
 
+test('inputChromeSections places live MCP startup status below the composer', () => {
+  assert.deepEqual(inputChromeSections({
+    hasError: false,
+    hasPanel: false,
+    hasSlashSuggestions: false,
+    hasMcpStatus: true,
+  }), ['hint', 'input', 'mcpStatus'])
+})
+
 test('inputChromeSections keeps errors above the input chrome', () => {
   assert.deepEqual(inputChromeSections({ hasError: true, hasPanel: true, hasSlashSuggestions: false }), [
     'error',

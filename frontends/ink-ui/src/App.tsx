@@ -30,6 +30,7 @@ import type { BridgeEvent, PermissionMode, ResumeSession, TokenUsage } from './p
 import {
   loadingMcpPanel,
   mcpPanelRows,
+  mcpStartupStatusRows,
   mcpStatusIcon,
   mcpToolsForServer,
   moveMcpSelection,
@@ -219,10 +220,10 @@ function SlashSuggestionsView({ suggestions, selected, theme }: { suggestions: S
   )
 }
 
-function McpPanelView({ panel, theme }: { panel: McpPanelState; theme: InkTheme }) {
+function McpPanelView({ panel, theme, maxServerRows }: { panel: McpPanelState; theme: InkTheme; maxServerRows: number }) {
   const selected = panel.servers[panel.selected]
   const selectedTools = selected ? mcpToolsForServer(panel, selected.name) : []
-  const serverRows = visibleMcpServerRows(panel, 5)
+  const serverRows = visibleMcpServerRows(panel, maxServerRows)
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text bold>MCP Servers</Text>
@@ -245,6 +246,16 @@ function McpPanelView({ panel, theme }: { panel: McpPanelState; theme: InkTheme 
         <Text key={tool.function.name} color={theme.muted}>  - {tool.function.name}</Text>
       ))}
       <Text color={theme.muted}>Up/Down move - Esc close</Text>
+    </Box>
+  )
+}
+
+function McpStartupStatusView({ rows, loading, theme }: { rows: string[]; loading: boolean; theme: InkTheme }) {
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {rows.map((row, index) => (
+        <Text key={`${index}:${row}`} color={index === 0 && loading ? theme.warning : theme.muted} wrap="truncate-end">{row}</Text>
+      ))}
     </Box>
   )
 }
@@ -510,6 +521,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [skills, setSkills] = useState<SkillStatus[]>([])
   const [selector, setSelector] = useState<SelectorState | null>(null)
   const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null)
+  const [mcpStartupStatus, setMcpStartupStatus] = useState<Extract<BridgeEvent, { type: 'mcp_progress' }> | null>(null)
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
   const [permissionPanel, setPermissionPanel] = useState<PermissionPanelState | null>(null)
   const [approvalPanel, setApprovalPanel] = useState<ApprovalPanelState | null>(null)
@@ -794,6 +806,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     function onEvent(event: BridgeEvent) {
       if (event.type === 'ready') {
         bridgeRef.current?.send({ type: 'skill_status' })
+        bridgeRef.current?.send({ type: 'mcp_watch_start' })
       }
       if (event.type === 'status') {
         if (stopEchoGateAfterStatus(event.status) === 'reset') {
@@ -805,8 +818,28 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         return
       }
       if (event.type === 'mcp_status') {
+        setMcpStartupStatus({
+          ...event,
+          type: 'mcp_progress',
+          loading: Boolean(event.loading),
+          discovery_running: event.discovery_running ?? false,
+          discovery_complete: event.discovery_complete ?? !event.loading,
+        })
         if (!mcpPanelOpenRef.current) return
         setMcpPanel(panelFromMcpStatus(event))
+        return
+      }
+      if (event.type === 'mcp_progress') {
+        setMcpStartupStatus(event)
+        if (mcpPanelOpenRef.current) {
+          setMcpPanel(panelFromMcpStatus({
+            type: 'mcp_status',
+            config_path: event.config_path,
+            servers: event.servers,
+            tools: event.tools,
+            errors: event.errors,
+          }))
+        }
         return
       }
       if (event.type === 'model_status') {
@@ -1294,6 +1327,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
   const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
+  const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
+  const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
@@ -1321,6 +1356,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       ? Math.min(workflowPanelRows(workflowPanel).length, 8)
     : footerPanel
       ? footerPanelRows(footerPanel)
+    : showMcpStartupStatus
+      ? mcpStartupRows.length
     : slashItems.length > 0
       ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
       : 0
@@ -1329,7 +1366,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     columns,
     hasActivity,
     hasError: Boolean(state.error),
-    hasPanel: Boolean(activePanel),
+    hasPanel: Boolean(activePanel) || showMcpStartupStatus,
     hasSlashSuggestions: slashItems.length > 0,
     inputRows,
     panelRows,
@@ -1338,6 +1375,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // Full mouse mode keeps a 1-row header (single viewport, no Static).
     headerRows: mouseMode === 'full' ? 1 : 0,
   })
+  const mcpServerRowCapacity = mcpPanel
+    ? Math.max(1, Math.min(
+      mcpPanel.servers.length,
+      metrics.bottomRows - (3 + inputRows) - 1 - errorRows - mcpPanelRows(mcpPanel, 0),
+    ))
+    : 0
   const keepLatestTaskActive = state.status === 'running' || state.status === 'stopping'
   const messagePartition = useMemo(() => (
     splitStaticAndActiveMessages(state.messages, { keepLatestTaskActive })
@@ -1461,14 +1504,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
+    hasMcpStatus: showMcpStartupStatus,
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
     if (section === 'hint') return <Box key={section} paddingX={1}><Text color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text></Box>
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
+    if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} />
     if (section === 'panel') {
       if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
-      if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} />
+      if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} maxServerRows={mcpServerRowCapacity} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
       if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />

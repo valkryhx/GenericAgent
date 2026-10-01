@@ -14,13 +14,40 @@ export type VisibleMcpServerRow = {
   selected: boolean
 }
 
+export type McpStartupStatus = {
+  loading: boolean
+  servers: Pick<McpServerStatus, 'name' | 'status' | 'tool_count'>[]
+  tools: McpToolStatus[]
+  errors?: Record<string, string>
+}
+
+export function mcpStartupStatusRows(status: McpStartupStatus): string[] {
+  if (status.servers.length === 0) {
+    const error = Object.values(status.errors ?? {})[0]
+    return error ? [`MCP status unavailable · ${error}`] : []
+  }
+  const connected = status.servers.filter(server => server.status === 'connected').length
+  const failed = status.servers.filter(server => server.status === 'failed').length
+  const totalTools = status.tools.length || status.servers.reduce((sum, server) => sum + server.tool_count, 0)
+  const summary = status.loading
+    ? `MCP initializing · ${connected}/${status.servers.length} connected · ${totalTools} tools`
+    : failed > 0
+      ? `MCP ready with failures · ${status.servers.length} servers · ${totalTools} tools · ${failed} failed`
+      : `MCP ready · ${status.servers.length} servers · ${totalTools} tools`
+  if (!status.loading) return [summary]
+  return [
+    summary,
+    ...status.servers.map(server => `${mcpStatusIcon(server.status)} ${server.name} · ${server.status}${server.status === 'connected' ? ` · ${server.tool_count} tools` : ''}`),
+  ]
+}
+
 export function loadingMcpPanel(): McpPanelState {
   return { loading: true, selected: 0, configPath: '', servers: [], tools: [], errors: {} }
 }
 
 export function panelFromMcpStatus(event: Extract<BridgeEvent, { type: 'mcp_status' }>): McpPanelState {
   return {
-    loading: false,
+    loading: Boolean(event.loading),
     selected: 0,
     configPath: event.config_path,
     servers: event.servers,
@@ -48,9 +75,9 @@ export function visibleMcpServerRows(panel: McpPanelState, maxRows: number): Vis
   })
 }
 
-export function mcpPanelRows(panel: McpPanelState): number {
+export function mcpPanelRows(panel: McpPanelState, maxServerRows = panel.servers.length): number {
   const selected = panel.servers[panel.selected]
-  const serverRows = Math.min(panel.servers.length, 5)
+  const serverRows = Math.min(panel.servers.length, Math.max(0, Math.floor(maxServerRows)))
   const statusRows = (panel.configPath ? 1 : 0)
     + (panel.loading ? 1 : 0)
     + (!panel.loading && panel.servers.length === 0 ? 1 : 0)

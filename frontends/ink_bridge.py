@@ -208,6 +208,8 @@ class GenericAgentBridge:
         self._consume_thread: threading.Thread | None = None
         self._workflow_threads: dict[str, threading.Thread] = {}
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
+        self._mcp_watch_lock = threading.Lock()
+        self._mcp_watch_thread: threading.Thread | None = None
         self.workflow_runtime_factory = workflow_runtime_factory
         self.workflow_planner_factory = workflow_planner_factory
         with backend_output_redirect():
@@ -329,12 +331,50 @@ class GenericAgentBridge:
     def mcp_status(self) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import mcp_status
+                from mcp_runtime import mcp_status_snapshot
 
-                payload = mcp_status()
+                payload = mcp_status_snapshot()
             self.emit({"type": "mcp_status", **payload})
         except Exception as exc:
             self.emit({"type": "error", "code": "mcp_status_failed", "message": str(exc)})
+
+    def start_mcp_status_watch(self) -> None:
+        """Publish MCP connection/tool discovery progress without blocking JSONL commands."""
+        with self._mcp_watch_lock:
+            if self._mcp_watch_thread is not None and self._mcp_watch_thread.is_alive():
+                return
+            self._mcp_watch_thread = threading.Thread(
+                target=self._watch_mcp_status,
+                daemon=True,
+                name="ga-ink-mcp-status",
+            )
+            self._mcp_watch_thread.start()
+
+    def _watch_mcp_status(self) -> None:
+        try:
+            with backend_output_redirect():
+                from mcp_runtime import mcp_status_snapshot, start_background_discovery
+
+                start_background_discovery()
+            while True:
+                with backend_output_redirect():
+                    payload = mcp_status_snapshot()
+                loading = bool(payload.get("loading"))
+                self.emit({"type": "mcp_progress", **payload, "loading": loading})
+                if not loading:
+                    return
+                threading.Event().wait(0.25)
+        except Exception as exc:
+            self.emit({
+                "type": "mcp_progress",
+                "config_path": "",
+                "servers": [],
+                "tools": [],
+                "errors": {"startup": str(exc)},
+                "loading": False,
+                "discovery_running": False,
+                "discovery_complete": False,
+            })
 
     def mcp_reconnect(self, server_name: str) -> None:
         try:
@@ -1365,6 +1405,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.rewind(int(command.get("taskId") or 0))
         elif cmd_type == "mcp_status":
             bridge.mcp_status()
+        elif cmd_type == "mcp_watch_start":
+            bridge.start_mcp_status_watch()
         elif cmd_type == "mcp_reconnect":
             bridge.mcp_reconnect(str(command.get("server") or ""))
         elif cmd_type == "mcp_enable":
