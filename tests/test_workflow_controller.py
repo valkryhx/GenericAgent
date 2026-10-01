@@ -13,6 +13,37 @@ from workflow_store import WorkflowStore
 
 
 class WorkflowControllerTest(unittest.TestCase):
+    def test_create_planned_run_persists_explicit_verification_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = WorkflowDraft(
+                task_text="write a small change",
+                context={},
+                classification={"taskType": "coding"},
+                plan={
+                    "taskType": "coding",
+                    "phases": [{"title": "Build", "agents": [{"label": "impl", "role": "implementation"}]}],
+                    "verification": {
+                        "level": "inline",
+                        "checks": [{"id": "diff", "kind": "diff", "required": True, "owner": "host"}],
+                    },
+                },
+                validation={"ok": True, "issues": []},
+                script="phase('Build')",
+            )
+
+            class Planner:
+                def plan(self, *_args, **_kwargs):
+                    return draft
+
+            run = WorkflowController(WorkflowStore(root=tmp)).create_planned_run(
+                session_id="session_test",
+                task_text=draft.task_text,
+                planner=Planner(),
+            )
+
+            self.assertEqual("inline", run.metadata["verificationContract"]["level"])
+            self.assertEqual("diff", run.metadata["verificationContract"]["checks"][0]["id"])
+
     def test_create_draft_persists_run_without_starting_scheduler(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))

@@ -2297,6 +2297,51 @@ return await new Promise(() => {})
         self.assertTrue(process.stdout.closed)
         self.assertTrue(process.stderr.closed)
 
+    def test_runtime_accepts_explicit_diff_evidence_without_legacy_acceptance(self):
+        run = WorkflowRun(
+            run_id="wf_verification_contract",
+            session_id="session_test",
+            script="",
+            status="running",
+            metadata={
+                "verificationContract": {
+                    "level": "inline",
+                    "checks": [{"id": "diff", "kind": "diff", "required": True, "owner": "host"}],
+                    "independentReview": False,
+                }
+            },
+        )
+        runtime = WorkflowRuntime(runner=FakeChildAgentRunner())
+
+        error = runtime._evaluate_acceptance(
+            run,
+            {"verificationEvidence": {"diff": {"status": "passed", "evidence": {"changedFiles": ["src/app.py"]}}}},
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(run.metadata["acceptanceStatus"], "passed")
+
+    def test_runtime_rejects_required_check_without_evidence(self):
+        run = WorkflowRun(
+            run_id="wf_verification_missing",
+            session_id="session_test",
+            script="",
+            status="running",
+            metadata={
+                "verificationContract": {
+                    "level": "inline",
+                    "checks": [{"id": "diff", "kind": "diff", "required": True, "owner": "host"}],
+                    "independentReview": False,
+                }
+            },
+        )
+        runtime = WorkflowRuntime(runner=FakeChildAgentRunner())
+
+        error = runtime._evaluate_acceptance(run, {})
+
+        self.assertIn("diff", error)
+        self.assertEqual(run.metadata["acceptanceStatus"], "failed")
+
     def _run_and_capture(self, runtime, run, errors):
         try:
             runtime.run(run)

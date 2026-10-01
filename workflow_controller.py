@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from workflow_models import WorkflowEvent, WorkflowRun
 from workflow_store import WorkflowStore
+from workflow_verification import normalize_verification_contract
 
 
 class WorkflowController:
@@ -29,6 +30,7 @@ class WorkflowController:
         is_valid = bool(validation.get("ok"))
         script = getattr(draft, "script", "") if is_valid else ""
         draft_plan = getattr(draft, "plan", {}) or {}
+        run_verification_contract = normalize_verification_contract(draft_plan)
         acceptance_contract = draft_plan.get("acceptance") if isinstance(draft_plan, dict) else None
         run = WorkflowRun(
             session_id=session_id,
@@ -36,6 +38,7 @@ class WorkflowController:
             metadata={
                 "plannerMode": planner_mode,
                 "workflowTaskType": task_type,
+                "verificationContract": run_verification_contract,
             },
         )
         if isinstance(acceptance_contract, dict):

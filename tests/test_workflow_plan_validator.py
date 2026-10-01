@@ -163,7 +163,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         validation = validate_workflow_plan(plan)
 
         self.assertFalse(validation["ok"])
-        self.assertIn("missing_acceptance_contract", {issue["code"] for issue in validation["issues"]})
+        self.assertIn("missing_verification_check", {issue["code"] for issue in validation["issues"]})
 
     def test_rejects_coding_plan_that_omits_roles_even_when_labels_describe_roles(self):
         plan = self.valid_plan()
@@ -191,7 +191,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         self.assertEqual(
-            {"missing_coding_role", "missing_verification_role", "missing_acceptance_contract"},
+            {"missing_coding_role", "missing_verification_check"},
             {issue["code"] for issue in validation["issues"]},
         )
 
@@ -278,8 +278,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         codes = {issue["code"] for issue in validation["issues"]}
-        self.assertIn("missing_verification_role", codes)
-        self.assertIn("missing_acceptance_contract", codes)
+        self.assertIn("missing_verification_check", codes)
 
     def test_validator_ignores_role_optional_when_plan_declares_no_code_work(self):
         plan = self.valid_plan()
@@ -292,6 +291,56 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         validation = validate_workflow_plan(plan)
 
         self.assertTrue(validation["ok"], validation)
+
+    def test_write_plan_accepts_explicit_diff_check_without_verification_agent(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "mixed"
+        plan["phases"] = [
+            {
+                "title": "Build",
+                "agents": [
+                    {
+                        "label": "impl",
+                        "role": "implementation",
+                        "writeScope": ["src/"],
+                        "prompt": "write code",
+                        "dependsOn": [],
+                    }
+                ],
+            }
+        ]
+        plan["verification"] = {
+            "level": "inline",
+            "checks": [{"id": "diff", "kind": "diff", "required": True, "owner": "host"}],
+        }
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+
+    def test_write_plan_without_required_check_is_rejected(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "mixed"
+        plan["phases"] = [
+            {
+                "title": "Build",
+                "agents": [
+                    {
+                        "label": "impl",
+                        "role": "implementation",
+                        "writeScope": ["src/"],
+                        "prompt": "write code",
+                        "dependsOn": [],
+                    }
+                ],
+            }
+        ]
+        plan["verification"] = {"level": "inline", "checks": []}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("missing_verification_check", {issue["code"] for issue in validation["issues"]})
 
     def test_renderer_skips_host_test_gate_for_non_coding_acceptance_contract(self):
         plan = self.valid_plan()

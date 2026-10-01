@@ -18,6 +18,8 @@ from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChi
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
 from workflow_store import WorkflowStore
+from workflow_check_adapters import run_check
+from workflow_verification import validate_verification_contract
 
 
 MAX_TEST_GATE_TIMEOUT_MS = 120_000
@@ -637,6 +639,9 @@ class WorkflowRuntime:
 
     def _evaluate_acceptance(self, run: WorkflowRun, result: Any) -> str | None:
         metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+        verification_contract = metadata.get("verificationContract")
+        if isinstance(verification_contract, dict):
+            return self._evaluate_verification_contract(run, result, verification_contract, metadata)
         contract = metadata.get("acceptanceContract")
         if not isinstance(contract, dict) or not contract.get("required"):
             return None
@@ -677,6 +682,58 @@ class WorkflowRuntime:
             return "workflow acceptance failed: " + "; ".join(failures)
         not_applicable = metadata.get("notApplicableChecks") or []
         metadata["acceptanceStatus"] = "not_applicable" if not_applicable and len(not_applicable) == len(checks) else "passed"
+        metadata["acceptanceFailures"] = []
+        run.metadata = metadata
+        return None
+
+    def _evaluate_verification_contract(self, run, result, raw_contract, metadata):
+        try:
+            contract = validate_verification_contract(raw_contract)
+        except ValueError as exc:
+            metadata["acceptanceStatus"] = "failed"
+            metadata["acceptanceFailures"] = [f"invalid verification contract: {exc}"]
+            run.metadata = metadata
+            return metadata["acceptanceFailures"][0]
+
+        supplied = {}
+        if isinstance(metadata.get("verificationEvidence"), dict):
+            supplied.update(metadata["verificationEvidence"])
+        if isinstance(result, dict) and isinstance(result.get("verificationEvidence"), dict):
+            supplied.update(result["verificationEvidence"])
+        failures = []
+        evidence = dict(supplied)
+        for check in contract["checks"]:
+            if not check.get("required"):
+                continue
+            check_id = check["id"]
+            item = evidence.get(check_id)
+            if item is None and check.get("kind") == "schema":
+                verifications = self._find_verification_results(result)
+                if verifications:
+                    item = {"status": "passed" if all(value.get("verificationPassed") is True for value in verifications) else "failed", "evidence": verifications}
+            if item is None and check.get("kind") == "command" and check.get("adapter") == "python_unittest":
+                item = next(
+                    ({"status": "passed" if gate.get("gatePassed") or gate.get("notApplicable") else "failed", "evidence": gate} for gate in reversed(self._test_gates)),
+                    None,
+                )
+            if item is None:
+                failures.append(f"required verification check {check_id} has no evidence")
+                continue
+            if isinstance(item, dict):
+                status = item.get("status")
+                passed = status == "passed" or item.get("passed") is True or item.get("gatePassed") is True
+            else:
+                passed = item is True
+            if not passed:
+                failures.append(f"required verification check {check_id} did not pass")
+        metadata["verificationContract"] = contract
+        metadata["verificationEvidence"] = evidence
+        if failures:
+            metadata["acceptanceStatus"] = "failed"
+            metadata["acceptanceFailures"] = failures
+            run.metadata = metadata
+            return "workflow verification failed: " + "; ".join(failures)
+        metadata["acceptanceStatus"] = "passed" if contract["checks"] else "not_applicable"
         metadata["acceptanceFailures"] = []
         run.metadata = metadata
         return None

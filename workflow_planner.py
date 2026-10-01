@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from workflow_policy import normalize_delegation_policy
+from workflow_verification import normalize_verification_contract
 
 
 CODING_AGENT_ROLES = frozenset(
@@ -287,6 +288,8 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
         for check in acceptance.get("checks") or []
         if str(check.get("type") if isinstance(check, dict) else check).strip()
     ]
+    verification_contract = normalize_verification_contract({**normalized, "acceptance": acceptance})
+    normalized["verification"] = copy.deepcopy(verification_contract)
     success_criteria = normalized.get("successCriteria")
     if not isinstance(success_criteria, list) or not success_criteria:
         success_criteria = [f"acceptance check passes: {check}" for check in acceptance_checks]
@@ -334,6 +337,7 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     normalized["mode"] = mode
     normalized["riskLevel"] = risk_level
     normalized["successCriteria"] = [str(item) for item in success_criteria]
+    normalized["verification"] = copy.deepcopy(verification_contract)
     normalized["evalContract"] = eval_contract
     normalized["orchestration"] = orchestration
     for phase in phases:
@@ -970,54 +974,30 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
     if any(visit(label) for label in dependency_graph if label not in visited):
         issues.append({"code": "dependency_cycle", "message": "workflow dependency graph contains a cycle"})
+    try:
+        verification_contract = normalize_verification_contract(plan)
+    except ValueError as exc:
+        verification_contract = {"level": "none", "checks": [], "independentReview": False}
+        issues.append({"code": "invalid_verification_contract", "message": str(exc)})
     if is_coding:
-        verification_agents = [
-            agent
-            for phase in (plan.get("phases") or [])
-            for agent in (phase.get("agents") or [])
-            if str(agent.get("role") or "").strip().lower() == "verification"
-        ]
-        if not verification_agents:
-            issues.append({"code": "missing_verification_role", "message": "coding workflow requires a verification agent"})
-        else:
-            required_verification_fields = {"verificationPassed", "checks", "blockingIssues"}
-            has_strict_verification_schema = any(
-                agent.get("strictSchema") is True
-                and isinstance(schemas.get(agent.get("schemaRef")), dict)
-                and required_verification_fields.issubset(set((schemas.get(agent.get("schemaRef")) or {}).get("required") or []))
-                for agent in verification_agents
-            )
-            if not has_strict_verification_schema:
-                issues.append({
-                    "code": "missing_strict_verification_schema",
-                    "message": "coding workflow verification agent must use a strict schema requiring verificationPassed, checks, and blockingIssues",
-                })
-        acceptance = plan.get("acceptance")
-        acceptance_check_names = {
-            str(check.get("type") if isinstance(check, dict) else check)
-            for check in acceptance.get("checks", [])
-        } if isinstance(acceptance, dict) and isinstance(acceptance.get("checks"), list) else set()
-        if (
-            not isinstance(acceptance, dict)
-            or acceptance.get("required") is not True
-            or not isinstance(acceptance.get("checks"), list)
-            or not acceptance.get("checks")
-        ):
-            issues.append({"code": "missing_acceptance_contract", "message": "coding workflow requires a non-empty acceptance contract"})
-        else:
-            required_checks = {"python_unittest", "verification_schema"}
-            if not required_checks.issubset(acceptance_check_names):
-                issues.append({
-                    "code": "incomplete_acceptance_contract",
-                    "message": "coding workflow acceptance must require python_unittest and verification_schema",
-                })
-            invalid_checks = [
-                str(check.get("type") if isinstance(check, dict) else check)
-                for check in acceptance.get("checks")
-                if str(check.get("type") if isinstance(check, dict) else check) not in {"python_unittest", "verification", "verification_schema"}
+        required_checks = [check for check in verification_contract.get("checks", []) if check.get("required") is True]
+        if not required_checks:
+            issues.append({
+                "code": "missing_verification_check",
+                "message": "write-capable workflow requires at least one required observable verification check",
+            })
+        if verification_contract.get("independentReview"):
+            review_agents = [
+                agent
+                for phase in (plan.get("phases") or [])
+                for agent in (phase.get("agents") or [])
+                if str(agent.get("role") or "").strip().lower() in {"verification", "review"}
             ]
-            if invalid_checks:
-                issues.append({"code": "invalid_acceptance_check", "message": f"unsupported acceptance checks: {', '.join(invalid_checks)}"})
+            if not review_agents:
+                issues.append({
+                    "code": "missing_independent_review_agent",
+                    "message": "full verification contract requires an independent review capability or agent",
+                })
     return {"ok": not issues, "issues": issues}
 
 
