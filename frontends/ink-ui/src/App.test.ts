@@ -523,6 +523,101 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
   }
 })
 
+test('App does not draw a second cursor marker in slash suggestions', async () => {
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return { send() {}, stop() {} }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const cursorPark = createCursorParkStdout(stdout as unknown as NodeJS.WriteStream)
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+    cursorPark,
+  }), {
+    stdout: cursorPark.stdout,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('>'))
+    stdin.send('/')
+    await waitForFrame(stdout, frame => frame.includes('  /help') && frame.includes('Tab/Enter complete'))
+    await delay(30)
+
+    const frame = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('Tab/Enter complete')).at(-1) ?? ''
+    assert.doesNotMatch(frame, /> \/help/)
+    assert.match(frame, /  \/help/)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App hides the native input cursor while the model selection panel is open', async () => {
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        if (command.type === 'model_status') {
+          onEvent({
+            type: 'model_status',
+            models: [
+              { index: 0, name: 'provider/model-a', current: true },
+              { index: 1, name: 'provider/model-b', current: false },
+            ],
+          })
+        }
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const cursorPark = createCursorParkStdout(stdout as unknown as NodeJS.WriteStream)
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+    cursorPark,
+  }), {
+    stdout: cursorPark.stdout,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    stdin.send('/model')
+    await waitForFrame(stdout, frame => frame.includes('/model'))
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('provider/model-a') && output.includes('Models'))
+    await delay(30)
+
+    const combined = stdout.chunks.join('')
+    const latestPanel = combined.slice(combined.lastIndexOf('Models'))
+    assert.doesNotMatch(latestPanel, /\x1b\[\?25h/, 'panel selection should not expose a native cursor on a panel row')
+    assert.match(stdout.chunks.map(stripAnsi).join(''), /Models[\s\S]*provider\/model-a/)
+  } finally {
+    instance.unmount()
+  }
+})
+
+
 test('App restores the renderer cursor before redrawing after parking the input caret', async () => {
   const startBridgeClient = (
     _python: string,

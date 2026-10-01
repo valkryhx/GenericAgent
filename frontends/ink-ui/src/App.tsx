@@ -210,7 +210,7 @@ function SlashSuggestionsView({ suggestions, selected, theme }: { suggestions: S
         const active = index === selected
         return (
           <Text key={command.name} color={active ? theme.accent : undefined}>
-            {active ? '> ' : '  '}{formatSlashSuggestionLine(command)}
+            {'  '}{formatSlashSuggestionLine(command)}
           </Text>
         )
       })}
@@ -1423,14 +1423,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   // 光标留在帧底，与 ink 默认一致）。geometry 计算沿用现有 inputCursor。
   useLayoutEffect(() => {
     if (!cursorPark) return
-    const inactive = !terminalReady || state.status === 'running' || state.status === 'stopping'
+    // Selection panels live below the composer. Keep their native cursor
+    // hidden: the input already draws its inverse caret, while parking the
+    // terminal cursor can leave a second visible cursor over the panel title.
+    const inactive = !terminalReady || state.status === 'running' || state.status === 'stopping' || Boolean(activePanel)
     if (inactive) {
       cursorPark.setPark(null)
       return
     }
     const up = Math.max(0, liveViewportRows - inputCursor.row)
     cursorPark.setPark({ up, col: inputCursor.column })
-  }, [cursorPark, inputCursor.column, inputCursor.row, liveViewportRows, state.status, terminalReady])
+  }, [activePanel, cursorPark, inputCursor.column, inputCursor.row, liveViewportRows, state.status, terminalReady])
 
   useEffect(() => {
     if (mouseMode !== 'full') {
