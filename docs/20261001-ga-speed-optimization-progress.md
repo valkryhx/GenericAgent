@@ -232,3 +232,42 @@ full discovery: 9.6s tools=18 complete=True
 - LLM HTTP 请求复用连接池，去掉每次请求的握手开销。
 
 测试从 1025 增至 1061（新增 36 个），全绿。每一项都是独立提交，可单独回滚。
+
+## 实测：中等难度任务的真实端到端耗时（2026-10-01）
+
+用 `temp/ga_latency_probe_20261001.py` 驱动真实 GA 会话（`deepseek-v4.1-flash`），任务是「加载 test-driven-development skill → TDD 实现 `parse_duration` → 观察 RED/GREEN → 用 Tavily MCP 查一次 Python 官方文档」。三次真实运行：
+
+| 场景 | 总耗时 | 轮数 | `load_tool_schema` 阻塞 | 发现结果 |
+|---|---:|---:|---:|---|
+| 冷启动 + 坏缓存（修复前） | 77.7s | 9 | **2.019s** | `tools=0 complete=False` |
+| 热缓存（修复前） | 57.8s | 8 | 0.007s | `tools=25 complete=True` |
+| 冷启动 + 无缓存（修复后） | 46.1s | 9 | 2.009s | `tools=25 complete=True` |
+
+任务质量三次都过关：7 个 unittest 全绿，`parse_duration('1h30m') == 5400`，非法输入抛 `ValueError`。
+
+### 结论：优化达到预期
+
+提问路径的 MCP 开销确实降到毫秒级（热态 7ms，对比基线 16.02s），预算上限行为也符合设计（冷启动 2.0s 封顶）。中间那 46-78s 是**模型推理与工具执行的固有成本**，不是 GA 自身阻塞——逐轮间隔 3.6-9.0s，与 deepseek 的响应速度一致。
+
+### 但第一次运行暴露了一个真实缺陷（已修）
+
+第一、二次运行里 MCP 工具**全程没有进入 schema**，模型只能自己写代码去探测，并明确说「MCP 工具未暴露」。诊断（`temp/mcp_during_turn_diag.py`）定位到两个独立原因：
+
+1. **失败的一轮发现会覆盖健康缓存**。`_background_discovery_worker` 无条件写 `tools=[] complete=False`，即使上一轮已经缓存了 25 个工具。一次远程握手全失败的 pass 就能让后续所有 turn 失去 MCP。
+2. **单个 pass 中途连上的 server 对 turn 不可见**。缓存只在整轮发现结束时写一次；本地 npx 冷启动要 6.7s，期间 `fetch`/`memory`/`sequential-thinking` 仍是 `pending`，于是这一轮拿到空结果。
+
+修复：
+
+- `_background_discovery_worker` 在 `errors` 非空时不再丢弃已连接的 server；一轮「谁都没连上」的 pass 保留旧缓存并记 `last_skips`，不再把空结果当权威。
+- 新增 `_merge_live_mcp_tools()`，快速路径把缓存与**当前进程已连接**的工具取并集，中途连上的 server 立即可见。
+- 诊断信息补齐：`last_errors`（逐 server 错误）和 `last_skips`。
+
+回归测试（`tests/test_mcp_runtime.py::McpFastDiscoveryTest` 新增 3 个，先 RED 后 GREEN）：
+
+- `test_failed_background_discovery_does_not_erase_healthy_cache`
+- `test_partial_discovery_keeps_failed_server_tools`
+- `test_connected_server_is_visible_even_when_cache_is_empty`
+
+修复后冷启动真实运行：12.0s 发现 25 个工具且 `complete=True`，模型真正调用了 `mcp__tavily__tavily_search` 并拿到 Python 官方文档结果。
+
+全量回归：`Ran 1064 tests ... OK (skipped=3)`。

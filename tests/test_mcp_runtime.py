@@ -1224,6 +1224,139 @@ class McpFastDiscoveryTest(unittest.TestCase):
         self.assertLess(elapsed, 1.0, f"fast discovery blocked for {elapsed:.2f}s")
         self.assertIn("mcp__good__echo", {tool["function"]["name"] for tool in second})
 
+    def test_failed_background_discovery_does_not_erase_healthy_cache(self):
+        """A discovery pass that reaches no server must not clobber good tools.
+
+        Observed 2026-10-01: every remote server failed to handshake during one
+        background pass, the worker wrote an empty complete=False entry over a
+        healthy 25-tool cache, and the following turns ran with no MCP tools.
+        """
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            bad_script, _bad_marker = _write_failing_marker_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "bad", bad_script)
+            cache_path = tmp_path / "healthy-cache.json"
+            cfg = mcp_runtime.load_mcp_config_with_disabled(config_path)
+            signature = mcp_runtime._cache_signature(cfg, False)
+            healthy = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__good__echo",
+                        "description": "echo",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+            mcp_runtime._write_mcp_tools_cache(cache_path, signature, healthy, complete=True)
+            reset_mcp_manager()
+
+            start_background_discovery(
+                config_path=config_path,
+                timeout=5,
+                cache_path=cache_path,
+            )
+            wait_for_background_discovery(30)
+            entry = json.loads(cache_path.read_text(encoding="utf-8"))
+            fast = discover_mcp_tools_cached_fast(
+                config_path=config_path,
+                timeout=5,
+                cache_path=cache_path,
+                budget=0.2,
+            )
+            reset_mcp_manager()
+
+        # The pass reached nothing, so its empty result is not evidence that the
+        # previously known tools disappeared; the healthy cache must survive.
+        self.assertEqual(
+            len(entry.get("tools") or []),
+            1,
+            f"failed discovery clobbered the cache with {entry}",
+        )
+        self.assertIn("mcp__good__echo", {tool["function"]["name"] for tool in fast})
+    def test_partial_discovery_keeps_failed_server_tools(self):
+        """A pass that connects to only one server must not drop the other's tools."""
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            good_script = _write_demo_server(tmp_path)
+            bad_script, _bad_marker = _write_failing_marker_server(tmp_path)
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {"good": good_script, "bad": bad_script},
+            )
+            cache_path = tmp_path / "partial-cache.json"
+            cfg = mcp_runtime.load_mcp_config_with_disabled(config_path)
+            signature = mcp_runtime._cache_signature(cfg, False)
+            mcp_runtime._write_mcp_tools_cache(
+                cache_path,
+                signature,
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__bad__echo",
+                            "description": "echo",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                complete=True,
+            )
+            reset_mcp_manager()
+
+            start_background_discovery(config_path=config_path, timeout=20, cache_path=cache_path)
+            wait_for_background_discovery(60)
+            entry = json.loads(cache_path.read_text(encoding="utf-8"))
+            state = mcp_runtime.mcp_discovery_state()
+            reset_mcp_manager()
+
+        names = {(tool.get("function") or {}).get("name") for tool in entry.get("tools") or []}
+        self.assertIn("mcp__good__echo", names, f"good server tools missing: {entry}")
+        self.assertIn("mcp__bad__echo", names, f"failed server tools were dropped: {entry}")
+        self.assertIn("bad", state.get("last_errors") or {}, f"failure not recorded: {state}")
+
+    def test_connected_server_is_visible_even_when_cache_is_empty(self):
+        """Tools that connected mid-pass must reach the caller without waiting.
+
+        The background worker only writes its cache when the whole pass ends, so
+        a server that is already connected would otherwise stay invisible for
+        turns, which is how a real task ran with no MCP tools at all.
+        """
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            good_script = _write_demo_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "good", good_script)
+            cache_path = tmp_path / "empty-cache.json"
+            cfg = mcp_runtime.load_mcp_config_with_disabled(config_path)
+            signature = mcp_runtime._cache_signature(cfg, False)
+            mcp_runtime._write_mcp_tools_cache(cache_path, signature, [], complete=False)
+            reset_mcp_manager()
+
+            # A server connects, but the pass as a whole has not finished yet.
+            get_mcp_manager(config_path).ensure_connected("good", timeout=30)
+
+            tools = discover_mcp_tools_cached_fast(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+                budget=0.1,
+            )
+            reset_mcp_manager()
+
+        names = {tool["function"]["name"] for tool in tools}
+        self.assertIn(
+            "mcp__good__echo",
+            names,
+            f"connected server stayed invisible behind an empty cache: {names}",
+        )
+
+
     def test_fast_discovery_without_cache_respects_budget(self):
         import mcp_runtime
 

@@ -91,9 +91,19 @@ _MCP_DISCOVERY_STATE: dict[str, Any] = {
     "last_started_at": None,
     "last_finished_at": None,
     "last_error": None,
+    "last_errors": {},
+    "last_skips": [],
     "tool_count": 0,
     "complete": None,
 }
+
+
+def _record_discovery_skip(reason: str, prior_tools: int) -> None:
+    """Note a discovery pass that kept old tools instead of trusting an empty result."""
+    with _MCP_DISCOVERY_LOCK:
+        skips = list(_MCP_DISCOVERY_STATE.get("last_skips") or [])
+        skips.append({"reason": reason, "prior_tools": int(prior_tools), "at": time.time()})
+        _MCP_DISCOVERY_STATE["last_skips"] = skips[-10:]
 
 
 @contextmanager
@@ -839,6 +849,42 @@ def _notify_mcp_discovery_complete(tools: list[dict[str, Any]], complete: bool) 
             continue
 
 
+def _tool_server_name(tool: dict[str, Any]) -> str:
+    name = ((tool.get("function") or {}).get("name") or "")
+    parts = name.split("__")
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def _merge_partial_discovery(
+    tools: list[dict[str, Any]],
+    previous: Optional[dict[str, Any]],
+    failed_servers: set[str],
+) -> list[dict[str, Any]]:
+    """Keep previously known tools for servers that failed this pass.
+
+    A discovery pass is not authoritative about a server it never reached. Losing
+    the handshake for one server must not delete its tools from the cache, which
+    is how the 2026-10-01 run ended up serving zero MCP tools for a whole task.
+    """
+    if not previous or not previous.get("tools"):
+        return tools
+    kept: list[dict[str, Any]] = []
+    for tool in previous["tools"]:
+        if not isinstance(tool, dict):
+            continue
+        if _tool_server_name(tool) in failed_servers and tool not in tools:
+            kept.append(dict(tool))
+    if not kept:
+        return tools
+    seen = {((tool.get("function") or {}).get("name") or "") for tool in tools}
+    for tool in kept:
+        name = (tool.get("function") or {}).get("name") or ""
+        if name and name not in seen:
+            tools.append(tool)
+            seen.add(name)
+    return tools
+
+
 def _background_discovery_worker(
     config_path: Optional[os.PathLike | str],
     include_unavailable: bool,
@@ -849,6 +895,7 @@ def _background_discovery_worker(
     tools: list[dict[str, Any]] = []
     complete = False
     error: Optional[str] = None
+    errors: dict[str, str] = {}
     try:
         discovery = discover_mcp(
             config_path=config_path,
@@ -856,10 +903,23 @@ def _background_discovery_worker(
             timeout=timeout,
         )
         tools = [dict(tool) for tool in discovery.tools]
+        errors = dict(discovery.errors)
         complete = not discovery.errors
         cfg = load_mcp_config_with_disabled(config_path)
         signature = _cache_signature(cfg, include_unavailable)
-        _write_mcp_tools_cache(_discovery_cache_file(cache_path), signature, tools, complete=complete)
+        cache_file = _discovery_cache_file(cache_path)
+        previous = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
+        if errors:
+            prior_tools = len((previous or {}).get("tools") or [])
+            if not tools and prior_tools:
+                # Reaching nothing at all is a failed pass, not proof the known
+                # tools are gone; keep serving them and retry in the background.
+                tools = [dict(tool) for tool in previous["tools"] if isinstance(tool, dict)]
+                complete = False
+                _record_discovery_skip("no_server_reached", prior_tools)
+            else:
+                tools = _merge_partial_discovery(tools, previous, set(errors))
+        _write_mcp_tools_cache(cache_file, signature, tools, complete=complete)
     except Exception as e:
         error = _redact_sensitive(f"{type(e).__name__}: {e}")
     finally:
@@ -868,6 +928,7 @@ def _background_discovery_worker(
                 {
                     "last_finished_at": time.time(),
                     "last_error": error,
+                    "last_errors": errors,
                     "tool_count": len(tools),
                     "complete": complete,
                 }
@@ -960,6 +1021,34 @@ def _maybe_schedule_discovery_refresh(
     return True
 
 
+def _merge_live_mcp_tools(
+    cached_tools: list[dict[str, Any]],
+    config_path: Optional[os.PathLike | str],
+    include_unavailable: bool,
+) -> list[dict[str, Any]]:
+    """Union cached tools with everything already connected in this process.
+
+    The background worker writes its cache only once a whole pass finishes, so a
+    server that connected mid-pass is otherwise invisible to a turn. Observed
+    2026-10-01: a task ran end to end with zero MCP tools while six servers were
+    reachable seconds later.
+    """
+    tools = [dict(tool) for tool in cached_tools or []]
+    try:
+        live, _errors = available_mcp_tools(config_path=config_path, include_unavailable=include_unavailable)
+    except Exception:
+        return tools
+    if not live:
+        return tools
+    seen = {((tool.get("function") or {}).get("name") or "") for tool in tools}
+    for tool in live:
+        name = (tool.get("function") or {}).get("name") or ""
+        if name and name not in seen:
+            tools.append(dict(tool))
+            seen.add(name)
+    return tools
+
+
 def discover_mcp_tools_cached_fast(
     config_path: Optional[os.PathLike | str] = None,
     include_unavailable: bool = False,
@@ -981,7 +1070,7 @@ def discover_mcp_tools_cached_fast(
     cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
     if cached is not None:
         _maybe_schedule_discovery_refresh(cached, config_path, include_unavailable, timeout, cache_path)
-        return cached["tools"]
+        return _merge_live_mcp_tools(cached["tools"], config_path, include_unavailable)
     thread = start_background_discovery(
         config_path=config_path,
         include_unavailable=include_unavailable,
@@ -991,7 +1080,7 @@ def discover_mcp_tools_cached_fast(
     wait_for_background_discovery(budget, thread=thread)
     cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
     if cached is not None:
-        return cached["tools"]
+        return _merge_live_mcp_tools(cached["tools"], config_path, include_unavailable)
     tools, _errors = available_mcp_tools(config_path=config_path, include_unavailable=include_unavailable)
     return tools
 
