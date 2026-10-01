@@ -210,6 +210,7 @@ class WorkflowStoreTest(unittest.TestCase):
             result_path = Path(run.artifact_dir) / result_ref
             data = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertEqual("agent_1", data["jobId"])
+            self.assertTrue(job.metadata["resultSha256"])
             self.assertEqual({"summary": "ok"}, data["payload"])
             self.assertEqual("agents/agent_1/transcript.jsonl", data["transcriptRef"])
             self.assertEqual({"input_tokens": 1}, data["tokenUsage"])
@@ -271,6 +272,34 @@ class WorkflowStoreTest(unittest.TestCase):
             lines = transcript_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(2, len(lines))
             self.assertEqual(events, [json.loads(line) for line in lines])
+
+    def test_resume_marks_corrupted_success_result_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_integrity",
+                    session_id="session_test",
+                    script="",
+                    status="running",
+                    jobs=[WorkflowJob(job_id="agent_1", status="succeeded")],
+                )
+            )
+            job = run.jobs[0]
+            store.write_agent_result(
+                run,
+                job,
+                AgentResult(job_id="agent_1", payload={"summary": "ok"}),
+            )
+            store.save_run(run)
+            result_path = Path(run.artifact_dir) / job.result_ref
+            result_path.write_text("{\"tampered\":true}", encoding="utf-8")
+
+            projected = store.project_resume_state(run.run_id)
+
+            self.assertEqual("stale", projected.jobs[0].status)
+            self.assertEqual("checksum_mismatch", projected.jobs[0].metadata["resultIntegrity"])
+            self.assertIn("result artifact integrity", projected.jobs[0].error)
 
     def test_mark_running_jobs_stale_on_resume_projection(self):
         for event_type in ("agent_started", "job_running"):

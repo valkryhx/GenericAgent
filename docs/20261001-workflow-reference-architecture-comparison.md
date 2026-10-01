@@ -854,6 +854,7 @@ GA 的正确优化方向不是简单提高 polling 频率或把默认 timeout �
 2. **不再隐式注入 verifier/schema**：planner 归一化不再凭空创建 `verification` agent、`GA_WORKFLOW_VERIFICATION_SCHEMA` 或 strict schema；写入型计划必须显式声明 `verification.checks` 中的 required check，检查类型可为 command/schema/artifact 等。
 3. **检查执行边界加固**：command adapter 要求 argv 数组、`shell=False`，并限制 executable/module allowlist；拒绝任意网络命令和 `python -c` 内联代码。
 4. **结果视图只读**：`list_result_view()` 使用 `probe_agent`，列举 active/closed/stale agent 不会刷新或改写持久化 state。
+5. **恢复完整性校验**：workflow job 写入 result 时记录 SHA-256；resume projection 对已成功/缓存 job 校验 artifact，缺失或篡改会标记 `stale` 并要求重新执行，而不是复用损坏结果。
 
 验证：
 

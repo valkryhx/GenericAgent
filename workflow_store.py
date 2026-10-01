@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -132,6 +133,10 @@ class WorkflowStore:
         result_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_json(result_path, sanitize(result.to_artifact_dict()))
         job.result_ref = result_ref
+        metadata = dict(job.metadata) if isinstance(job.metadata, dict) else {}
+        metadata["resultSha256"] = self._file_sha256(result_path)
+        metadata.pop("resultIntegrity", None)
+        job.metadata = metadata
         return result_ref
 
     def write_test_gate_result(self, run: WorkflowRun, gate_id: str, result: dict) -> str:
@@ -601,9 +606,37 @@ class WorkflowStore:
             events.append(WorkflowEvent.from_dict(json.loads(line)))
         return events
 
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _mark_corrupt_result_artifacts_stale(self, run: WorkflowRun) -> bool:
+        changed = False
+        for job in run.jobs:
+            if job.status not in {"succeeded", "cached"} or not job.result_ref:
+                continue
+            expected = (job.metadata or {}).get("resultSha256") if isinstance(job.metadata, dict) else None
+            if not expected:
+                continue
+            result_path = self._run_dir(run) / job.result_ref
+            actual = self._file_sha256(result_path) if result_path.is_file() else None
+            if actual == expected:
+                continue
+            job.status = "stale"
+            job.error = "result artifact integrity check failed; result artifact integrity must be revalidated"
+            metadata = dict(job.metadata) if isinstance(job.metadata, dict) else {}
+            metadata["resultIntegrity"] = "missing" if actual is None else "checksum_mismatch"
+            job.metadata = metadata
+            changed = True
+        return changed
+
     def project_resume_state(self, run_id: str) -> WorkflowRun:
         run = self.load_run(run_id)
-        changed = False
+        changed = self._mark_corrupt_result_artifacts_stale(run)
         if run.status == "running":
             run.status = "interrupted"
             changed = True
