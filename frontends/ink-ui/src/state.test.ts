@@ -131,13 +131,22 @@ test('applyBridgeEvent tracks compact activity while running and clears it when 
 test('applyBridgeEvent keeps completed token usage when idle and clears stale usage on the next run', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   state = applyBridgeEvent(state, { type: 'status', status: 'running' })
-  state = applyBridgeEvent(state, { type: 'token_usage', taskId: 1, inputTokens: 11, outputTokens: 17, totalTokens: 28 })
+  state = applyBridgeEvent(state, {
+    type: 'token_usage', taskId: 1, inputTokens: 11, outputTokens: 17, totalTokens: 28,
+    cachedTokens: 7, cacheReadTokens: 7, cacheCreationTokens: 0,
+  })
 
-  assert.deepEqual(state.tokenUsage, { inputTokens: 11, outputTokens: 17, totalTokens: 28 })
+  assert.deepEqual(state.tokenUsage, {
+    inputTokens: 11, outputTokens: 17, totalTokens: 28,
+    cachedTokens: 7, cacheReadTokens: 7, cacheCreationTokens: 0,
+  })
 
   state = applyBridgeEvent(state, { type: 'status', status: 'idle' })
 
-  assert.deepEqual(state.tokenUsage, { inputTokens: 11, outputTokens: 17, totalTokens: 28 })
+  assert.deepEqual(state.tokenUsage, {
+    inputTokens: 11, outputTokens: 17, totalTokens: 28,
+    cachedTokens: 7, cacheReadTokens: 7, cacheCreationTokens: 0,
+  })
 
   state = applyBridgeEvent(state, { type: 'status', status: 'running' })
 

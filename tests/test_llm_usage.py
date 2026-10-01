@@ -12,6 +12,9 @@ class LLMUsageTest(unittest.TestCase):
                 "input_tokens": 11,
                 "output_tokens": 17,
                 "total_tokens": 28,
+                "cached_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
             },
             normalize_usage_tokens(
                 {
@@ -30,6 +33,9 @@ class LLMUsageTest(unittest.TestCase):
                 "input_tokens": 5,
                 "output_tokens": 7,
                 "total_tokens": 12,
+                "cached_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
             },
             normalize_usage_tokens(
                 {
@@ -47,6 +53,9 @@ class LLMUsageTest(unittest.TestCase):
                 "input_tokens": 10,
                 "output_tokens": 20,
                 "total_tokens": 33,
+                "cached_tokens": 1,
+                "cache_read_tokens": 1,
+                "cache_creation_tokens": 2,
             },
             normalize_usage_tokens(
                 {
@@ -73,9 +82,50 @@ class LLMUsageTest(unittest.TestCase):
         list(_parse_claude_sse(lines, session))
 
         self.assertEqual(
-            {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+            {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30,
+                "cached_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+            },
             session.last_usage_tokens,
         )
+
+    def test_normalize_openai_usage_exposes_cached_input_tokens(self):
+        self.assertEqual(
+            {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cached_tokens": 70,
+                "cache_read_tokens": 70,
+                "cache_creation_tokens": 0,
+            },
+            normalize_usage_tokens(
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "input_tokens_details": {"cached_tokens": 70},
+                },
+                "responses",
+            ),
+        )
+
+    def test_normalize_chat_usage_exposes_cached_prompt_tokens(self):
+        normalized = normalize_usage_tokens(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 70},
+            },
+            "chat_completions",
+        )
+        self.assertEqual(70, normalized["cached_tokens"])
+        self.assertEqual(70, normalized["cache_read_tokens"])
 
 
 if __name__ == "__main__":

@@ -60,7 +60,18 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     return { ...state, activityLabel: event.label, error: null }
   }
   if (event.type === 'token_usage') {
-    return { ...state, tokenUsage: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.totalTokens }, error: null }
+    return {
+      ...state,
+      tokenUsage: {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        totalTokens: event.totalTokens,
+        cachedTokens: event.cachedTokens ?? 0,
+        cacheReadTokens: event.cacheReadTokens ?? 0,
+        cacheCreationTokens: event.cacheCreationTokens ?? 0,
+      },
+      error: null,
+    }
   }
   if (event.type === 'error') {
     return { ...state, error: event.message }

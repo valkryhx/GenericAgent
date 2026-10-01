@@ -49,6 +49,9 @@ export type TokenUsage = {
   inputTokens: number
   outputTokens: number
   totalTokens: number
+  cachedTokens?: number
+  cacheReadTokens?: number
+  cacheCreationTokens?: number
 }
 
 export function formatTokenCount(tokens: number): string {
@@ -59,7 +62,12 @@ export function formatTokenCount(tokens: number): string {
 }
 
 export function formatTokenUsage(usage: TokenUsage): string {
-  return `↑${formatTokenCount(usage.inputTokens)} ↓${formatTokenCount(usage.outputTokens)} Σ${formatTokenCount(usage.totalTokens)}`
+  const parts = [`↑${formatTokenCount(usage.inputTokens)}`, `↓${formatTokenCount(usage.outputTokens)}`, `Σ${formatTokenCount(usage.totalTokens)}`]
+  const cached = Math.max(0, usage.cacheReadTokens ?? usage.cachedTokens ?? 0)
+  const creation = Math.max(0, usage.cacheCreationTokens ?? 0)
+  if (cached > 0) parts.push(`cache ${formatTokenCount(cached)}`)
+  if (creation > 0) parts.push(`write ${formatTokenCount(creation)}`)
+  return parts.join(' ')
 }
 
 export function formatRunningStatus(seconds: number, label = 'Hyperspacing', usage?: TokenUsage | null): string {

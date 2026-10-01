@@ -340,22 +340,39 @@ def _int_usage(value):
 
 def normalize_usage_tokens(usage, api_mode):
     if not usage: return None
+    cached = 0
+    cache_read = 0
+    cache_creation = 0
     if api_mode == 'responses':
         inp = _int_usage(usage.get("input_tokens"))
         out = _int_usage(usage.get("output_tokens"))
         total = _int_usage(usage.get("total_tokens")) or inp + out
+        cached = _int_usage((usage.get("input_tokens_details") or {}).get("cached_tokens"))
+        cache_read = cached
     elif api_mode == 'chat_completions':
         inp = _int_usage(usage.get("prompt_tokens"))
         out = _int_usage(usage.get("completion_tokens"))
         total = _int_usage(usage.get("total_tokens")) or inp + out
+        cached = _int_usage((usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
+        cache_read = cached
     elif api_mode == 'messages':
         inp = _int_usage(usage.get("input_tokens"))
         out = _int_usage(usage.get("output_tokens"))
-        total = inp + out + _int_usage(usage.get("cache_creation_input_tokens")) + _int_usage(usage.get("cache_read_input_tokens"))
+        cache_creation = _int_usage(usage.get("cache_creation_input_tokens"))
+        cache_read = _int_usage(usage.get("cache_read_input_tokens"))
+        cached = cache_read
+        total = inp + out + cache_creation + cache_read
     else:
         return None
-    if inp == 0 and out == 0 and total == 0: return None
-    return {"input_tokens": inp, "output_tokens": out, "total_tokens": total}
+    if inp == 0 and out == 0 and total == 0 and cached == 0 and cache_read == 0 and cache_creation == 0: return None
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "total_tokens": total,
+        "cached_tokens": cached,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+    }
 
 def _record_usage(usage, api_mode, sess=None):
     if not usage: return
@@ -366,9 +383,18 @@ def _record_usage(usage, api_mode, sess=None):
                 old = getattr(sess, "last_usage_tokens", None) or {}
                 inp = normalized["input_tokens"] or _int_usage(old.get("input_tokens"))
                 out = normalized["output_tokens"] or _int_usage(old.get("output_tokens"))
-                total = normalized["total_tokens"]
-                if total < inp + out: total = inp + out
-                normalized = {"input_tokens": inp, "output_tokens": out, "total_tokens": total}
+                cache_creation = normalized["cache_creation_tokens"] or _int_usage(old.get("cache_creation_tokens"))
+                cache_read = normalized["cache_read_tokens"] or _int_usage(old.get("cache_read_tokens"))
+                cached = cache_read or normalized["cached_tokens"] or _int_usage(old.get("cached_tokens"))
+                total = max(normalized["total_tokens"], inp + out + cache_creation + cache_read)
+                normalized = {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "total_tokens": total,
+                    "cached_tokens": cached,
+                    "cache_read_tokens": cache_read,
+                    "cache_creation_tokens": cache_creation,
+                }
             sess.last_usage_tokens = normalized
         except Exception: pass
     try:

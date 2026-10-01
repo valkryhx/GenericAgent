@@ -85,6 +85,9 @@ export type TokenUsage = {
   inputTokens: number
   outputTokens: number
   totalTokens: number
+  cachedTokens?: number
+  cacheReadTokens?: number
+  cacheCreationTokens?: number
 }
 
 

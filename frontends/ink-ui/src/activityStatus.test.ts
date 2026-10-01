@@ -26,6 +26,20 @@ test('formatRunningStatus renders token usage in k units above one thousand', ()
   )
 })
 
+test('formatRunningStatus renders cached input tokens when available', () => {
+  assert.equal(
+    formatRunningStatus(40, 'Hyperspacing', {
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      cachedTokens: 70,
+      cacheReadTokens: 70,
+      cacheCreationTokens: 0,
+    }),
+    '✻ Hyperspacing (40s · ↑100 ↓20 Σ120 cache 70)',
+  )
+})
+
 test('formatTokenCount keeps sub-thousand values exact and trims whole k values', () => {
   assert.equal(formatTokenCount(999), '999')
   assert.equal(formatTokenCount(1000), '1k')

@@ -1225,11 +1225,21 @@ class GenericAgentBridge:
         if not isinstance(usage, dict):
             return None
         try:
-            return {
+            result = {
                 "inputTokens": int(usage.get("input_tokens") or 0),
                 "outputTokens": int(usage.get("output_tokens") or 0),
                 "totalTokens": int(usage.get("total_tokens") or 0),
             }
+            cached = int(usage.get("cached_tokens") or 0)
+            cache_read = int(usage.get("cache_read_tokens") or 0)
+            cache_creation = int(usage.get("cache_creation_tokens") or 0)
+            if cached or cache_read or cache_creation:
+                result.update({
+                    "cachedTokens": cached,
+                    "cacheReadTokens": cache_read,
+                    "cacheCreationTokens": cache_creation,
+                })
+            return result
         except Exception:
             return None
 

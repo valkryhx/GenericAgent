@@ -448,6 +448,37 @@ class InkBridgeTest(unittest.TestCase):
             events,
         )
 
+    def test_submit_emits_cached_token_usage_fields(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.submit("hello")
+        agent.llmclient.backend.last_usage_tokens = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cached_tokens": 70,
+            "cache_read_tokens": 70,
+            "cache_creation_tokens": 0,
+        }
+        agent.queues[0].put({"done": "hello"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertIn(
+            {
+                "type": "token_usage",
+                "taskId": 1,
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "totalTokens": 120,
+                "cachedTokens": 70,
+                "cacheReadTokens": 70,
+                "cacheCreationTokens": 0,
+            },
+            events,
+        )
+
     def test_busy_submit_is_rejected_without_calling_agent(self):
         agent = FakeAgent()
         events = []
