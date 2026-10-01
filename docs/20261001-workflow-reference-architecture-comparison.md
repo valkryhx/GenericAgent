@@ -859,4 +859,4 @@ GA 的正确优化方向不是简单提高 polling 频率或把默认 timeout �
 验证：
 
 - planner / validator / verification / controller / scheduler / runtime / adapter / subagent 聚焦套件：322 tests passed。
-- 真实 provider E2E 尚未在本 checkpoint 执行；按计划必须使用 `deepseek-v4.1-flash` 串行验证，并单独区分 provider 延迟与 GA runtime 延迟。
+- 真实 `deepseek-v4.1-flash` forward matrix 已于 2026-10-01 串行通过，耗时 33.29 秒；详见 `docs/20261001-ga-dynamic-workflow-reliability-validation.md`。该 matrix 使用 fake child runtime，真实 child/MCP E2E 仍待单独执行。
