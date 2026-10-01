@@ -54,6 +54,45 @@ class WorkflowVerificationContractTest(unittest.TestCase):
         self.assertEqual(contract["level"], "full")
         self.assertTrue(contract["independentReview"])
 
+    def test_agent_label_is_a_valid_verification_owner(self):
+        plan = {
+            "phases": [{"agents": [{"label": "Real MCP World Cup Results Research Agent"}]}],
+            "verification": {
+                "level": "inline",
+                "checks": [
+                    {
+                        "id": "mcp-evidence",
+                        "kind": "schema",
+                        "required": True,
+                        "owner": "Real MCP World Cup Results Research Agent",
+                        "schemaRef": "mcp_result",
+                    }
+                ],
+            },
+        }
+
+        contract = normalize_verification_contract(plan)
+
+        self.assertEqual("Real MCP World Cup Results Research Agent", contract["checks"][0]["owner"])
+
+    def test_invalid_owner_control_characters_are_rejected(self):
+        contract = {
+            "level": "inline",
+            "checks": [
+                {
+                    "id": "bad-owner",
+                    "kind": "artifact",
+                    "required": True,
+                    "owner": "agent\nforged",
+                    "path": "report.md",
+                }
+            ],
+            "independentReview": False,
+        }
+
+        with self.assertRaisesRegex(ValueError, "unsupported verification check owner"):
+            validate_verification_contract(contract)
+
     def test_invalid_check_kind_is_rejected(self):
         contract = {
             "level": "inline",

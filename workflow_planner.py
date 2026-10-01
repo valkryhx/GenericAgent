@@ -748,26 +748,47 @@ class LLMWorkflowPlanner:
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
         try:
-            plan = _normalize_plan_contract(self._request_plan(task_text, context, issues=[]))
-            repair_attempts: list[dict[str, Any]] = []
-            for _ in range(self.max_repair_attempts + 1):
-                validation = validate_workflow_plan(plan)
-                if validation["ok"]:
-                    classification = self.fallback.classify(task_text, context)
-                    classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
-                    script = render_workflow_plan(plan)
-                    context["plannerMode"] = "prompt_guided"
-                    if repair_attempts:
-                        context["repairAttempts"] = repair_attempts
-                    return WorkflowDraft(task_text=task_text, context=context, classification=classification, plan=plan, validation=validation, script=script)
-                if len(repair_attempts) >= self.max_repair_attempts:
-                    break
-                repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
-                plan = _normalize_plan_contract(
-                    self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
-                )
+            raw_plan = self._request_plan(task_text, context, issues=[])
         except Exception as exc:
             return self._fallback_draft(task_text, context, reason=str(exc))
+
+        repair_attempts: list[dict[str, Any]] = []
+        plan: dict[str, Any] = {}
+        validation: dict[str, Any] = {"ok": False, "issues": []}
+        for _ in range(self.max_repair_attempts + 1):
+            try:
+                plan = _normalize_plan_contract(raw_plan)
+                validation = validate_workflow_plan(plan)
+            except (TypeError, ValueError, KeyError) as exc:
+                # A malformed contract is a validator issue, not a provider
+                # failure. Keep the raw plan so the normal repair prompt can
+                # show the model the exact contract defect instead of silently
+                # switching to the deterministic planner.
+                plan = copy.deepcopy(raw_plan) if isinstance(raw_plan, dict) else {}
+                validation = {
+                    "ok": False,
+                    "issues": [{"code": "invalid_plan_contract", "message": str(exc)}],
+                }
+            if validation["ok"]:
+                classification = self.fallback.classify(task_text, context)
+                classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
+                script = render_workflow_plan(plan)
+                context["plannerMode"] = "prompt_guided"
+                if repair_attempts:
+                    context["repairAttempts"] = repair_attempts
+                return WorkflowDraft(task_text=task_text, context=context, classification=classification, plan=plan, validation=validation, script=script)
+            if len(repair_attempts) >= self.max_repair_attempts:
+                break
+            repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
+            try:
+                raw_plan = self._request_plan(
+                    task_text,
+                    context,
+                    issues=validation["issues"],
+                    previous_plan=plan,
+                )
+            except Exception as exc:
+                return self._fallback_draft(task_text, context, reason=str(exc))
         return self._rejected_draft(task_text, context, plan=plan, validation=validation, repair_attempts=repair_attempts)
 
     def _request_plan(

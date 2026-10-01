@@ -42,3 +42,33 @@ GA_RUN_REAL_FORWARD_MATRIX=1 GA_FORWARD_MATRIX_PROFILE=deepseek-v4.1-flash pytho
 ## 安全
 
 输出仅保留 profile/model、状态、wave、验收状态和耗时；API key、prompt、transcript 和 provider 原始响应未写入本文件。
+
+## 2026-10-01 复杂真实 workflow 复测
+
+测试入口：`tests/real_complex_workflow_mcp_skill_coding_e2e.py`。本次严格串行使用真实 `deepseek-v4.1-flash`，并启用真实 MCP。
+
+```text
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_WORKFLOW_LLM_PROFILE=deepseek-v4.1-flash \nGA_REAL_API_EXPECTED_MODEL=deepseek-v4.1-flash GA_REAL_API_EXPECTED_NAME=deepseek-v4.1-flash \npython tests/real_complex_workflow_mcp_skill_coding_e2e.py
+```
+
+结果：`passed=true`，耗时 38.97 秒，`plannerCallCount=2`，`plannerMode` 保持 `prompt_guided`，没有 fallback。3 个 job 全部 `succeeded`。
+
+| 验证项 | 证据 |
+|---|---|
+| MCP discovery | 25 个可用工具；`mcp__tavily__tavily_search` 可用并真实返回 |
+| MCP 调用 | research job 调用 `mcp__tavily__tavily_search`，`mcpCalled=true`、`mcpReturned=true` |
+| Skill | coding job 真实调用 `load_skill`，加载 `using-superpowers` |
+| 文件闭环 | `file_write` 后 `file_read` 回读通过，`codingFileWritten=true`、`codingFileOk=true` |
+| synthesis | synthesis job 成功消费前两路结果并输出完成标记 |
+| 安全 | `deniedTools=[]`，未访问敏感配置，未提交改动 |
+
+### 首次失败与修复
+
+首次复杂运行的 runtime 实际已经成功，但 planner 在归一化阶段遇到两个模型契约问题：
+
+1. verification check 的 `owner` 是动态 agent label，旧 validator 只接受固定枚举；现已允许长度受限且无控制字符的显式 agent label。
+2. schema check 缺少 `schemaRef` 时，旧 `LLMWorkflowPlanner.plan()` 会把 normalization exception 直接当 provider failure 并 fallback；现已将 normalization 异常转换为 `invalid_plan_contract` validator issue，进入 bounded repair loop。
+
+本次复测确认第二次 planner 响应补齐契约后可继续使用 prompt-guided plan，避免把真实成功的 MCP/Skill/文件工作误报为 deterministic fallback 计划缺失。
+
+MCP 预热 discovery 同时显示 `fetch` 与 `context7` 的远程服务可能出现 partial discovery timeout；Tavily 目标工具仍成功发现并执行。该类外部 MCP 瞬态错误应保持有界重试和按工具报告，不应影响已经可用的目标工具。

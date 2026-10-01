@@ -860,3 +860,10 @@ GA 的正确优化方向不是简单提高 polling 频率或把默认 timeout �
 
 - planner / validator / verification / controller / scheduler / runtime / adapter / subagent 聚焦套件：322 tests passed。
 - 真实 `deepseek-v4.1-flash` forward matrix 已于 2026-10-01 串行通过，耗时 33.29 秒；详见 `docs/20261001-ga-dynamic-workflow-reliability-validation.md`。该 matrix 使用 fake child runtime，真实 child/MCP E2E 仍待单独执行。
+
+
+## 14. 真实模型复测补充：契约修复必须进入 repair loop
+
+2026-10-01 的真实 `deepseek-v4.1-flash` 复杂 workflow 证明：child runtime、MCP、skill、文件读写和 synthesis 均可成功，但模型偶尔会生成不完整的 verification schema，或使用计划中真实存在的动态 agent label 作为 check owner。
+
+这类错误属于“模型计划契约错误”，不是 provider 不可用，也不应触发 deterministic fallback。GA 现在将 normalization exception 投影成 validator issue，复用有界 repair loop；owner 则由固定 host capability 与受限动态 label 两层规则共同校验。这个分层比继续扩大固定枚举更稳健，也与 Step-Code/ultracode 的“显式计划 + runtime 硬校验”方向一致。

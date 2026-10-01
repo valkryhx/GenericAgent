@@ -284,6 +284,26 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertEqual(2, len(client.calls))
         self.assertIn("coding_tests_parallel_implementation", client.calls[1][0]["content"])
 
+    def test_planner_repairs_normalization_error_instead_of_falling_back(self):
+        invalid = {
+            "taskType": "research",
+            "meta": {"name": "invalid-schema-check", "description": "missing schema ref"},
+            "phases": [{"title": "Research", "agents": [{"label": "research", "prompt": "collect", "dependsOn": []}]}],
+            "verification": {
+                "level": "inline",
+                "checks": [{"id": "evidence", "kind": "schema", "required": True, "owner": "research"}],
+            },
+        }
+        client = FakePlannerClient(responses=[invalid, research_credibility_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        draft = planner.plan("研究一个技术问题", context={})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual("prompt_guided", draft.context["plannerMode"])
+        self.assertEqual(2, len(client.calls))
+        self.assertIn("verification schema check evidence requires schemaRef", client.calls[1][0]["content"])
+
     def test_task_type_alone_does_not_trigger_coding_role_repair(self):
         client = FakePlannerClient(responses=[omitted_role_coding_parallel_plan()])
         planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)

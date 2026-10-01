@@ -41,7 +41,11 @@ def _normalize_check(raw, index):
     owner = _text(check.get("owner"))
     if not owner:
         owner = "implementation" if kind == "schema" else ("independent_agent" if kind == "review" else "host")
-    if owner not in CHECK_OWNERS:
+    # Fixed owners cover host/runtime semantics. Any other printable owner is
+    # an explicit agent label; labels are dynamic plan data and must not be
+    # forced into a closed enum. Control characters are rejected so owner text
+    # cannot forge journal lines or structured output.
+    if owner not in CHECK_OWNERS and (not owner or len(owner) > 160 or any(ord(char) < 32 for char in owner)):
         raise ValueError(f"unsupported verification check owner: {owner}")
     check["id"] = check_id
     check["kind"] = kind
