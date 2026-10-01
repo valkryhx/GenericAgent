@@ -211,6 +211,33 @@ class SubagentManagerReadTest(unittest.TestCase):
             events = (task_dir / "events.jsonl").read_text(encoding="utf-8")
             self.assertIn('"type":"agent_closed"', events)
 
+    def test_empty_final_output_is_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "empty_worker"
+            task_dir.mkdir(parents=True)
+            output_path = task_dir / "output.txt"
+            output_path.write_text("\n[ROUND END]\n", encoding="utf-8")
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "empty_worker",
+                    "agent_path": "/root/empty_worker",
+                    "pid": None,
+                    "round": 0,
+                    "turn_status": "completed",
+                    "process_status": "exited",
+                    "output_path": str(output_path),
+                    "final_output_path": str(output_path),
+                },
+            )
+
+            state = SubagentManager(root_dir=td, process_exists=lambda _pid: False).read_agent("empty_worker")
+
+            self.assertEqual(state.turn_status, "errored")
+            self.assertEqual(state.last_error_stage, "empty_output")
+            self.assertIsNone(state.final_output_path)
+
     def test_close_agent_records_shutdown_when_process_exits_during_grace_period(self):
         with tempfile.TemporaryDirectory() as td:
             self._write_running_state(td)
@@ -711,6 +738,29 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
                 for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(event_rows[-1]["permission_profile"], "read_only")
+
+    def test_spawn_agent_records_capability_metadata_and_passes_it_to_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(
+                root_dir=td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 2468})(),
+                python_executable="python-test",
+            )
+
+            handle = manager.spawn_agent(
+                "role_worker",
+                "inspect only",
+                capability_options={"role_tools": ["file_read"], "allow_delegation": False},
+            )
+
+            state = json.loads((Path(handle.task_dir) / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["capability_options"], {"role_tools": ["file_read"], "allow_delegation": False})
+            self.assertEqual(state["capability_profile"], "isolated")
+            self.assertFalse(state["allow_delegation"])
+            self.assertEqual(state["context_mode"], "isolated")
+            self.assertIn("--capability_options", handle.command)
+            encoded = handle.command[handle.command.index("--capability_options") + 1]
+            self.assertEqual(json.loads(encoded), state["capability_options"])
 
     def test_spawn_agent_worktree_isolation_records_created_worktree_and_cwd(self):
         with tempfile.TemporaryDirectory() as td:

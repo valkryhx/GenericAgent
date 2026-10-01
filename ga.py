@@ -329,6 +329,26 @@ class GenericAgentHandler(BaseHandler):
         self.permission_runtime = None
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        capability_profile = getattr(self, "capability_profile", None)
+        if capability_profile is not None and not capability_profile.allows(tool_name):
+            reason = "tool_not_granted"
+            yield f"[Capability] deny: {tool_name} ({reason})\n"
+            ret = StepOutcome(
+                {
+                    "status": "error",
+                    "capability": {
+                        "action": "deny",
+                        "reason": reason,
+                        "tool_name": str(tool_name or ""),
+                    },
+                },
+                next_prompt=(
+                    f"工具 `{tool_name}` 不在当前 agent 的能力范围内。"
+                    "请不要重试该工具，改用当前可用工具或直接给出结论。"
+                ),
+            )
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
         policy = getattr(self, 'workflow_permission_policy', None)
         if policy is not None:
             decision = self._check_workflow_permission(tool_name, args or {})
@@ -672,6 +692,10 @@ class GenericAgentHandler(BaseHandler):
             "permission_profile": getattr(state, "permission_profile", None),
             "parent_permission_mode": getattr(state, "parent_permission_mode", None),
             "permission_options": getattr(state, "permission_options", None) or {},
+            "capability_options": getattr(state, "capability_options", None) or {},
+            "capability_profile": getattr(state, "capability_profile", None),
+            "allow_delegation": getattr(state, "allow_delegation", False),
+            "context_mode": getattr(state, "context_mode", None),
             "agent_type": getattr(state, "agent_type", None),
             "role_source_path": getattr(state, "role_source_path", None),
             "background": getattr(state, "background", True),
@@ -689,6 +713,8 @@ class GenericAgentHandler(BaseHandler):
             "updated_at": state.updated_at,
             "last_message": state.last_message,
             "last_error": state.last_error,
+            "last_error_stage": getattr(state, "last_error_stage", None),
+            "completion_status": getattr(state, "completion_status", None),
             "llm_no": getattr(state, "llm_no", None),
             "model_profile": getattr(state, "model_profile", None),
             "model_id": getattr(state, "model_id", None),
@@ -707,7 +733,7 @@ class GenericAgentHandler(BaseHandler):
         return payload
 
     def do_spawn_agent(self, args, response):
-        '''启动一个后台子智能体。默认继承当前会话上下文，子智能体拥有完整 GA 工具能力。'''
+        '''启动一个后台子智能体。默认使用隔离上下文，并移除子 agent 的编排工具。'''
         task_name = args.get("task_name") or args.get("name")
         agent_type = args.get("agent_type") or args.get("agentType")
         role = None
@@ -758,7 +784,7 @@ class GenericAgentHandler(BaseHandler):
         raw_fork_turns = args.get("fork_turns")
         if raw_fork_turns is None and role is not None and role.fork_turns_default:
             raw_fork_turns = role.fork_turns_default
-        fork_turns = str(raw_fork_turns if raw_fork_turns is not None else "all")
+        fork_turns = str(raw_fork_turns if raw_fork_turns is not None else "none")
         fork_history = None if fork_turns.lower() == "none" else self._current_backend_history_snapshot()
         try:
             llm_no = int(args.get("llm_no", getattr(self.parent, "llm_no", 0)))
@@ -781,6 +807,25 @@ class GenericAgentHandler(BaseHandler):
             if args.get(key) is not None
         }
         permission_options = {**role_permission_options, **permission_options}
+        requested_role_tools = args.get("tools") or args.get("capability_tools")
+        if requested_role_tools is None and role is not None:
+            requested_role_tools = list(role.tools)
+        if isinstance(requested_role_tools, str):
+            requested_role_tools = [requested_role_tools]
+        allow_delegation = args.get("allow_delegation")
+        if allow_delegation is None:
+            allow_delegation = args.get("allowDelegation")
+        if allow_delegation is None and role is not None:
+            allow_delegation = role.allow_delegation
+        allow_delegation = bool(allow_delegation)
+        capability_options = {
+            "role_tools": (
+                None
+                if requested_role_tools is None
+                else [str(item) for item in requested_role_tools if str(item).strip()]
+            ),
+            "allow_delegation": allow_delegation,
+        }
         requested_isolation = args.get("isolation")
         isolation, isolation_fallback_reason = _resolve_subagent_isolation(
             requested_isolation,
@@ -802,6 +847,7 @@ class GenericAgentHandler(BaseHandler):
                 permission_profile=permission_profile,
                 parent_permission_mode=parent_permission_mode,
                 permission_options=permission_options,
+                capability_options=capability_options,
                 agent_type=agent_type,
                 role_source_path=role_source_path,
                 background=bool(args.get("background", True)),
@@ -821,6 +867,10 @@ class GenericAgentHandler(BaseHandler):
                 "permission_profile": handle.permission_profile,
                 "parent_permission_mode": handle.parent_permission_mode,
                 "permission_options": handle.permission_options or {},
+                "capability_options": getattr(handle, "capability_options", None) or capability_options,
+                "capability_profile": getattr(handle, "capability_profile", None) or ("delegating" if allow_delegation else "isolated"),
+                "allow_delegation": bool(getattr(handle, "allow_delegation", allow_delegation)),
+                "context_mode": getattr(handle, "context_mode", None) or ("isolated" if fork_turns.lower() == "none" else "explicit_fork"),
                 "agent_type": handle.agent_type,
                 "role_source_path": handle.role_source_path,
                 "background": handle.background,
@@ -833,6 +883,7 @@ class GenericAgentHandler(BaseHandler):
                 "isolation_fallback_reason": isolation_fallback_reason,
                 "worktree_path": handle.worktree_path,
                 "fork_turns": fork_turns,
+                "context_mode": "isolated" if fork_turns.lower() == "none" else "explicit_fork",
                 "llm_no": handle.llm_no,
             }
             yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"

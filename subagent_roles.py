@@ -28,6 +28,8 @@ class SubagentRole:
     permission_options: dict | None = None
     model_profile: str | None = None
     fork_turns_default: str | None = None
+    tools: tuple[str, ...] = ()
+    allow_delegation: bool = False
     source_path: str | None = None
 
 
@@ -84,6 +86,15 @@ def _load_role_file(path, *, default_name):
         if data.get(key) is not None:
             permission_raw[key] = data.get(key)
     permission = normalize_permission_metadata(permission_raw)
+    raw_tools = data.get("tools")
+    if raw_tools is None:
+        raw_tools = data.get("capability_tools")
+    if raw_tools is None:
+        raw_tools = data.get("allowed_tools")
+    if isinstance(raw_tools, str):
+        raw_tools = [raw_tools]
+    tools = tuple(str(item).strip() for item in (raw_tools or ()) if str(item).strip())
+    allow_delegation = bool(data.get("allow_delegation", data.get("allowDelegation", False)))
     system_prompt = data.get("system_prompt") or data.get("systemPrompt") or body_prompt
     return SubagentRole(
         name=name,
@@ -92,8 +103,10 @@ def _load_role_file(path, *, default_name):
         system_prompt=_none_if_empty(system_prompt),
         permission_profile=permission["permission_profile"],
         permission_options=permission["options"],
-        model_profile=_none_if_empty(data.get("model_profile") or data.get("modelProfile")),
+        model_profile=_none_if_empty(data.get("model_profile") or data.get("modelProfile") or data.get("model")),
         fork_turns_default=_none_if_empty(data.get("fork_turns_default") or data.get("forkTurnsDefault")),
+        tools=tools,
+        allow_delegation=allow_delegation,
         source_path=str(path),
     )
 

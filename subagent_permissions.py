@@ -48,6 +48,18 @@ class SubagentPermissionPolicy:
         tool_name = str(tool_name or "")
         denied_tools = set(self.options.get("denied_tools") or [])
         allowed_tools = set(self.options.get("allowed_tools") or [])
+        # `no_tool` is not a tool the model chooses; the engine substitutes it when a
+        # turn contains no tool call. It is how a child delivers its final answer, so
+        # an allowed_tools allowlist must never forbid it. Observed 2026-10-01: a
+        # child that had already finished kept re-prompting because its own answer
+        # was rejected as subagent_tool_not_allowed, then failed on an empty retry.
+        if tool_name == "no_tool":
+            return PermissionDecision(
+                action="allow",
+                reason="engine_internal_sentinel",
+                profile=self.profile,
+                tool_name=tool_name,
+            )
         if tool_name in denied_tools:
             return PermissionDecision(
                 action="deny",

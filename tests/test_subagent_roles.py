@@ -29,6 +29,8 @@ class SubagentRolesTest(unittest.TestCase):
                         "allowed_tools": ["file_read", "load_skill"],
                         "model_profile": "inherit",
                         "fork_turns_default": "none",
+                        "tools": ["file_read", "code_run"],
+                        "allow_delegation": True,
                     },
                     ensure_ascii=False,
                 ),
@@ -45,6 +47,8 @@ class SubagentRolesTest(unittest.TestCase):
             self.assertEqual(role.permission_options, {"allowed_tools": ["file_read", "load_skill"]})
             self.assertEqual(role.model_profile, "inherit")
             self.assertEqual(role.fork_turns_default, "none")
+            self.assertEqual(role.tools, ("file_read", "code_run"))
+            self.assertTrue(role.allow_delegation)
             self.assertEqual(Path(role.source_path), roles_dir / "researcher.json")
 
     def test_load_markdown_role_definition_with_frontmatter(self):
@@ -58,6 +62,7 @@ class SubagentRolesTest(unittest.TestCase):
                 "permission_profile: read_only\n"
                 "allowed_tools: [file_read, grep]\n"
                 "fork_turns_default: 3\n"
+                "tools: [file_read, grep]\n"
                 "---\n"
                 "Check the implementation against the plan.\n",
                 encoding="utf-8",
@@ -70,6 +75,7 @@ class SubagentRolesTest(unittest.TestCase):
             self.assertEqual(role.permission_profile, "read_only")
             self.assertEqual(role.permission_options, {"allowed_tools": ["file_read", "grep"]})
             self.assertEqual(role.fork_turns_default, "3")
+            self.assertEqual(role.tools, ("file_read", "grep"))
             self.assertEqual(role.system_prompt, "Check the implementation against the plan.")
 
     def test_unknown_role_raises_file_not_found(self):

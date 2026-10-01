@@ -30,6 +30,38 @@ class SubagentPermissionPolicyTest(unittest.TestCase):
         self.assertEqual(metadata["permission_profile"], INHERIT_CURRENT_PERMISSIONS)
         self.assertEqual(metadata["options"], {})
 
+    def test_allowed_tools_does_not_block_the_internal_no_tool_sentinel(self):
+        """`no_tool` is the engine's "model answered directly" marker.
+
+        A parent that passes allowed_tools=[...] must not accidentally forbid it:
+        the child's final answer is delivered through that path, so denying it
+        makes the child keep retrying after it has already finished.
+        """
+        policy = build_subagent_permission_policy(
+            {
+                "permission_profile": READ_ONLY,
+                "permission_options": {"allowed_tools": ["file_read", "mcp__tavily__tavily_search"]},
+            }
+        )
+
+        decision = policy.evaluate("no_tool", {})
+
+        self.assertEqual(decision.action, "allow", f"no_tool was denied: {decision.to_dict()}")
+
+    def test_allowed_tools_still_blocks_unlisted_real_tools(self):
+        policy = build_subagent_permission_policy(
+            {
+                "permission_profile": READ_ONLY,
+                "permission_options": {"allowed_tools": ["file_read"]},
+            }
+        )
+
+        decision = policy.evaluate("file_write", {})
+
+        self.assertEqual(decision.action, "deny")
+        self.assertEqual(decision.reason, "subagent_tool_not_allowed")
+
+
     def test_inherit_current_permissions_uses_parent_read_only_mode(self):
         policy = build_subagent_permission_policy(
             {
@@ -190,6 +222,45 @@ class SubagentPermissionDispatchTest(unittest.TestCase):
         self.assertNotIn("tool:file_write", handler.calls)
         self.assertEqual("approval_required", outcome.data["status"])
         self.assertEqual("ask", outcome.data["permission"]["action"])
+
+
+class SubagentSpawnDefaultsTest(unittest.TestCase):
+    def test_spawn_defaults_to_isolated_context_without_parent_history(self):
+        handler = SpyHandler()
+        captured = {}
+
+        class FakeManager:
+            def spawn_agent(self, task_name, message, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    task_name=task_name,
+                    agent_path="/root/" + task_name,
+                    pid=123,
+                    task_dir="temp/" + task_name,
+                    state_path="temp/" + task_name + "/state.json",
+                    run_id="run-test",
+                    artifact_dir="temp/runs/run-test",
+                    permission_profile=kwargs.get("permission_profile"),
+                    parent_permission_mode=kwargs.get("parent_permission_mode"),
+                    permission_options=kwargs.get("permission_options"),
+                    agent_type=kwargs.get("agent_type"),
+                    role_source_path=kwargs.get("role_source_path"),
+                    background=True,
+                    ipc_mode="file",
+                    effective_ipc_mode="file",
+                    ipc_fallback_reason=None,
+                    ipc_endpoint=None,
+                    isolation=kwargs.get("isolation"),
+                    worktree_path=None,
+                    llm_no=0,
+                )
+
+        handler.subagent_manager = FakeManager()
+        outcome = exhaust(handler.do_spawn_agent({"task_name": "isolated", "message": "do one bounded task"}, SimpleNamespace()))
+
+        self.assertEqual("none", captured["fork_turns"])
+        self.assertIsNone(captured["fork_history"])
+        self.assertEqual("isolated", outcome.data["context_mode"])
 
 
 if __name__ == "__main__":

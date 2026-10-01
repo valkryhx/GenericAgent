@@ -96,15 +96,12 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "started")
             self.assertIn("llm_no", outcome.data)
             self.assertEqual(outcome.data["llm_no"], 1)
-            self.assertEqual(outcome.data["fork_turns"], "all")
+            self.assertEqual(outcome.data["fork_turns"], "none")
             self.assertTrue(outcome.data["run_id"].startswith("run_"))
             self.assertEqual(Path(outcome.data["artifact_dir"]), Path(td) / "temp" / "subagents" / "runs" / outcome.data["run_id"])
             self.assertEqual(outcome.data["permission_profile"], "inherit-current-permissions")
             self.assertEqual((task_dir / "input.txt").read_text(encoding="utf-8"), "inspect inherited context")
-            self.assertEqual(
-                json.loads((task_dir / "_history.json").read_text(encoding="utf-8")),
-                FakeParent().llmclient.backend.history,
-            )
+            self.assertFalse((task_dir / "_history.json").exists())
             cmd, kwargs = calls[0]
             self.assertEqual(cmd[0], "python-test")
             self.assertIn("--task_root", cmd)

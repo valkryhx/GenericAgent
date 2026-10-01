@@ -51,15 +51,21 @@ class AgentState:
     round: int
     output_path: str | None
     final_output_path: str | None
+    completion_status: str | None = None
     updated_at: str | None = None
     last_message: str | None = None
     last_error: str | None = None
+    last_error_stage: str | None = None
     parent_session_id: str | None = None
     run_id: str | None = None
     artifact_dir: str | None = None
     permission_profile: str | None = None
     parent_permission_mode: str | None = None
     permission_options: dict | None = None
+    capability_options: dict | None = None
+    capability_profile: str | None = None
+    allow_delegation: bool = False
+    context_mode: str | None = None
     agent_type: str | None = None
     role_source_path: str | None = None
     background: bool = True
@@ -147,6 +153,10 @@ class AgentHandle:
     permission_profile: str | None = None
     parent_permission_mode: str | None = None
     permission_options: dict | None = None
+    capability_options: dict | None = None
+    capability_profile: str | None = None
+    allow_delegation: bool = False
+    context_mode: str | None = None
     agent_type: str | None = None
     role_source_path: str | None = None
     background: bool = True
@@ -435,6 +445,7 @@ class SubagentManager:
                 "startup_phase": error.reason,
                 "startup_phase_at": now_iso(),
                 "last_error": str(error),
+                "last_error_stage": "startup_handshake",
                 "close_reason": error.reason,
                 "updated_at": now_iso(),
             }
@@ -553,6 +564,7 @@ class SubagentManager:
         permission_profile=INHERIT_CURRENT_PERMISSIONS,
         parent_permission_mode=None,
         permission_options=None,
+        capability_options=None,
         agent_type=None,
         role_source_path=None,
         background=True,
@@ -572,7 +584,17 @@ class SubagentManager:
         permission_metadata = normalize_permission_metadata(
             {"permission_profile": permission_profile, "permission_options": permission_options or {}, "parent_permission_mode": parent_permission_mode}
         )
+        capability_options = dict(capability_options or {})
+        role_tools = capability_options.get("role_tools")
+        if isinstance(role_tools, str):
+            role_tools = [role_tools]
+        if role_tools is not None:
+            role_tools = [str(item).strip() for item in role_tools if str(item).strip()]
+        allow_delegation = bool(capability_options.get("allow_delegation", False))
+        capability_options = {"role_tools": role_tools, "allow_delegation": allow_delegation}
+        capability_profile = "delegating" if allow_delegation else "isolated"
         fork_mode, history_to_write = self._select_fork_history(fork_turns, fork_history)
+        context_mode = "isolated" if fork_mode == "none" else "explicit_fork"
         requested_ipc_mode = str(ipc_mode or "file").strip().lower() or "file"
         ipc_mode = requested_ipc_mode
         effective_ipc_mode = "file"
@@ -634,6 +656,10 @@ class SubagentManager:
                     "permission_profile": permission_metadata["permission_profile"],
                     "parent_permission_mode": permission_metadata.get("parent_permission_mode"),
                     "permission_options": permission_metadata["options"],
+                    "capability_options": capability_options,
+                    "capability_profile": capability_profile,
+                    "allow_delegation": allow_delegation,
+                    "context_mode": context_mode,
                     "llm_no": llm_no,
                     "startup_phase": "process_spawn_failed",
                     "startup_phase_at": now_iso(),
@@ -714,6 +740,10 @@ class SubagentManager:
             "permission_profile": permission_metadata["permission_profile"],
             "parent_permission_mode": permission_metadata.get("parent_permission_mode"),
             "permission_options": permission_metadata["options"],
+            "capability_options": capability_options,
+            "capability_profile": capability_profile,
+            "allow_delegation": allow_delegation,
+            "context_mode": context_mode,
             "llm_no": llm_no,
             "startup_phase": "spawn_requested",
             "startup_phase_at": now_iso(),
@@ -775,6 +805,8 @@ class SubagentManager:
             permission_metadata.get("parent_permission_mode") or "",
             "--permission_options",
             json.dumps(permission_metadata["options"], ensure_ascii=False, sort_keys=True),
+            "--capability_options",
+            json.dumps(capability_options, ensure_ascii=False, sort_keys=True),
         ]
         if verbose:
             cmd.append("--verbose")
@@ -880,6 +912,10 @@ class SubagentManager:
             permission_profile=state.get("permission_profile"),
             parent_permission_mode=state.get("parent_permission_mode"),
             permission_options=state.get("permission_options"),
+            capability_options=state.get("capability_options") or {},
+            capability_profile=state.get("capability_profile"),
+            allow_delegation=bool(state.get("allow_delegation", False)),
+            context_mode=state.get("context_mode"),
             agent_type=state.get("agent_type"),
             role_source_path=state.get("role_source_path"),
             background=state.get("background", True),
@@ -2078,6 +2114,17 @@ class SubagentManager:
                 process_status = raw.get("process_status")
             else:
                 process_status = "exited"
+            try:
+                final_text = Path(output_path).read_text(encoding="utf-8", errors="replace")
+                final_text = final_text.split(ROUND_END_MARKER, 1)[0].strip()
+            except OSError:
+                final_text = ""
+            if not final_text:
+                turn_status = "errored"
+                final_output_path = None
+                final_output_sha256 = None
+                raw = {**raw, "last_error": raw.get("last_error") or "empty final output"}
+                raw["last_error_stage"] = "empty_output"
         else:
             if alive:
                 process_status = "alive"
@@ -2103,6 +2150,13 @@ class SubagentManager:
                 "output_path": str(output_path) if output_path else raw.get("output_path"),
                 "final_output_path": final_output_path,
                 "final_output_sha256": final_output_sha256,
+                "completion_status": (
+                    "completed" if turn_status == "completed" else
+                    "failed" if turn_status == "errored" else
+                    "interrupted" if turn_status == "interrupted" else
+                    raw.get("completion_status") or "pending"
+                ),
+                "last_error_stage": raw.get("last_error_stage"),
                 "agent_type": raw.get("agent_type"),
                 "role_source_path": raw.get("role_source_path"),
                 "background": raw.get("background", True),
@@ -2178,12 +2232,18 @@ class SubagentManager:
             updated_at=raw.get("updated_at"),
             last_message=raw.get("last_message"),
             last_error=raw.get("last_error"),
+            last_error_stage=raw.get("last_error_stage"),
+            completion_status=raw.get("completion_status"),
             parent_session_id=raw.get("parent_session_id"),
             run_id=raw.get("run_id"),
             artifact_dir=raw.get("artifact_dir") or str(task_dir),
             permission_profile=raw.get("permission_profile"),
             parent_permission_mode=raw.get("parent_permission_mode"),
             permission_options=raw.get("permission_options") or {},
+            capability_options=raw.get("capability_options") or {},
+            capability_profile=raw.get("capability_profile"),
+            allow_delegation=bool(raw.get("allow_delegation", False)),
+            context_mode=raw.get("context_mode"),
             agent_type=raw.get("agent_type"),
             role_source_path=raw.get("role_source_path"),
             background=bool(raw.get("background", True)),
@@ -2278,6 +2338,7 @@ def spawn_agent(
     permission_profile=INHERIT_CURRENT_PERMISSIONS,
     parent_permission_mode=None,
     permission_options=None,
+    capability_options=None,
 ):
     return _DEFAULT_MANAGER.spawn_agent(
         task_name,
@@ -2290,6 +2351,7 @@ def spawn_agent(
         permission_profile=permission_profile,
         parent_permission_mode=parent_permission_mode,
         permission_options=permission_options,
+        capability_options=capability_options,
     )
 
 

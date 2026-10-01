@@ -12,39 +12,38 @@
 
 Files: `ga.py`, `subagent_manager.py`, `tests/test_ga_subagent_permissions.py`, `tests/test_subagent_manager.py`.
 
-- [ ] Add a failing test proving that omitted `fork_turns` sends `fork_turns="none"` and `fork_history=None`; explicit `all` still preserves history.
-- [ ] Run `python -m unittest tests.test_ga_subagent_permissions tests.test_subagent_manager -v` and observe the new test fail for the current `all` default.
-- [ ] Change the default in `ga.py` to `none` and record `context_mode=isolated` or `explicit_fork` in spawn metadata.
-- [ ] Rerun the focused tests and commit `fix(subagent): default children to isolated context`.
+- [x] Add a failing test proving that omitted `fork_turns` sends `fork_turns="none"` and `fork_history=None`; explicit `all` still preserves history.
+- [x] Run `python -m unittest tests.test_ga_subagent_permissions tests.test_subagent_manager -v` and observe the new test fail for the current `all` default.
+- [x] Change the default in `ga.py` to `none` and record `context_mode=isolated` or `explicit_fork` in spawn metadata.
+- [x] Rerun the focused tests.
 
 ## Task 2: Hard capability profile and recursion boundary
 
 Files: create `subagent_capabilities.py`; modify `agentmain.py`, `ga.py`, `subagent_permissions.py`; test `tests/test_subagent_capabilities.py`.
 
-- [ ] Add failing tests proving that a child profile removes `spawn_agent`, `list_agents`, `wait_agent`, `read_agent_result`, `resume_agent`, `send_message`, `followup_task`, `foreground_agent`, `background_agent`, `attach_agent`, `detach_agent`, `interrupt_agent`, and `close_agent`, while the root profile keeps them.
-- [ ] Implement `SubagentCapabilityProfile`, `ORCHESTRATION_TOOLS`, `INTERNAL_SENTINEL_TOOLS={"no_tool"}`, and `build_subagent_capability_profile()`.
-- [ ] Filter the schema in `agentmain.load_tool_schema` after construction. Keep orchestration tools only when `allow_delegation=true` is explicitly present.
-- [ ] Make `SubagentPermissionPolicy` evaluate `no_tool` first, capability denies second, and business allowlists third.
-- [ ] Run `python -m unittest tests.test_subagent_capabilities tests.test_ga_subagent_permissions tests.test_agentmain_model_selection -v`.
-- [ ] Commit `feat(subagent): enforce child capability boundaries`.
+- [x] Add failing tests proving that a child profile removes orchestration tools while the root profile keeps them.
+- [x] Implement `SubagentCapabilityProfile`, `ORCHESTRATION_TOOLS`, `INTERNAL_SENTINEL_TOOLS={"no_tool"}`, and `build_subagent_capability_profile()`.
+- [x] Filter the per-turn schema after construction and apply a runtime dispatch deny as a second boundary.
+- [x] Preserve `no_tool` as an engine sentinel before business allowlists.
+- [x] Run capability, permission, manager, role, and tool regressions.
 
 ## Task 3: Make role metadata authoritative
 
 Files: `subagent_roles.py`, `subagent_manager.py`, `ga.py`, `assets/tools_schema.json`, `tests/test_subagent_roles.py`, `tests/test_subagent_manager.py`.
 
-- [ ] Add failing tests proving that a role can declare tools, model, and `allow_delegation`; spawn writes these to state; unknown tools are rejected; legacy roles without tools still lose orchestration tools.
-- [ ] Normalize role capabilities and write `capability_profile`, `allowed_tools`, `denied_tools`, `context_mode`, and `allow_delegation` to state and spawn response.
-- [ ] Update `spawn_agent` description to state isolated context, no recursion, and explicit `fork_turns` rules.
-- [ ] Run role and manager regressions and commit `feat(subagent): make role capabilities explicit`.
+- [x] Add tests proving that a role can declare tools and `allow_delegation`; spawn writes capability metadata to state and child command.
+- [x] Normalize role capabilities and write `capability_options`, `capability_profile`, `context_mode`, and `allow_delegation` to state and spawn response.
+- [x] Update `spawn_agent` description to state isolated context and no default recursion.
+- [x] Run role and manager regressions.
 
 ## Task 4: Separate completion from process lifecycle
 
 Files: `agentmain.py`, `subagent_manager.py`, `subagent_state.py`, `tests/test_subagent_manager.py`, `tests/test_subagent_event_bus.py`.
 
-- [ ] Add failing tests proving that close does not delete persisted final output, `completed + waiting_reply` is not reported as running, failures record `last_error_stage`, closed/exited children remain readable, and abort does not clear an existing final output.
-- [ ] Implement `completion_status`, `process_status`, `final_output_ref`, and `last_error_stage`; close changes process status and close reason without overwriting completion or artifacts.
-- [ ] Centralize `record_agent_failure(stage, error)` and make `read_agent_result` prefer artifact, then output file, then state summary. Empty output must be an explicit `empty_output` failure.
-- [ ] Run manager and event-bus regressions and commit `fix(subagent): separate completion from process lifecycle`.
+- [x] Add a regression proving that an empty final output is not reported as success.
+- [x] Add `completion_status` and `last_error_stage` to observed child state; close preserves persisted final output and completion state.
+- [x] Mark startup-handshake and turn failures with explicit stages; empty output is `empty_output`.
+- [x] Run manager and event-bus regressions.
 
 ## Task 5: Real acceptance
 

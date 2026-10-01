@@ -489,6 +489,9 @@ class GenericAgent:
         self.is_running = False; self.stop_sig = False
         self.llm_no = 0;  self.inc_out = False; self.verbose = True
         self.peer_hint = True
+        self.is_subagent = False
+        self.capability_profile = None
+        self.capability_allow_delegation = False
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
         _record_startup_phase('agent_permission_init_started')
         from permission_policy import DEFAULT_PERMISSION_MODE
@@ -869,8 +872,37 @@ class GenericAgent:
             from mcp_runtime import mcp_cancellation_scope
             with mcp_cancellation_scope(handler.code_stop_signal):
                 load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
+            from subagent_capabilities import (
+                build_subagent_capability_profile,
+                filter_tool_schema_for_capabilities,
+            )
+            available_tool_names = [
+                item.get('function', {}).get('name')
+                for item in TOOLS_SCHEMA
+                if isinstance(item, dict)
+            ]
+            # Rebuild from the current schema every turn: MCP discovery may append
+            # tools after the child process has already entered its first turn.  A
+            # deliberately empty schema is also used by lightweight test/fake
+            # backends; leave dispatch to the existing permission policy there.
+            if not available_tool_names and getattr(self, 'capability_role_tools', None) is None:
+                profile = None
+            else:
+                profile = build_subagent_capability_profile(
+                    is_subagent=bool(getattr(self, 'is_subagent', False)),
+                    role_tools=getattr(self, 'capability_role_tools', None),
+                    allow_delegation=bool(getattr(self, 'capability_allow_delegation', False)),
+                    available_tools=available_tool_names,
+                )
+            self.capability_profile = profile
+            handler.capability_profile = profile
+            effective_tools_schema = (
+                TOOLS_SCHEMA
+                if profile is None
+                else filter_tool_schema_for_capabilities(TOOLS_SCHEMA, profile)
+            )
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
-                                handler, TOOLS_SCHEMA, max_turns=70, verbose=self.verbose,
+                                handler, effective_tools_schema, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)
             stop_watcher = self._start_stop_file_watcher()
             try:
@@ -931,7 +963,7 @@ class GenericAgent:
 
 GeneraticAgent = GenericAgent    
 
-def _subagent_state(task_dir, task_name, nround, turn_status, process_status, output_path=None, final_output_path=None, final_output_sha256=None, last_error=None):
+def _subagent_state(task_dir, task_name, nround, turn_status, process_status, output_path=None, final_output_path=None, final_output_sha256=None, last_error=None, last_error_stage=None):
     state_path = os.path.join(task_dir, 'state.json')
     old = {}
     try:
@@ -958,6 +990,13 @@ def _subagent_state(task_dir, task_name, nround, turn_status, process_status, ou
         'final_output_path': str(final_output_path) if final_output_path else old.get('final_output_path'),
         'final_output_sha256': final_output_sha256 if final_output_sha256 else old.get('final_output_sha256'),
         'last_error': last_error,
+        'last_error_stage': last_error_stage if last_error_stage else old.get('last_error_stage'),
+        'completion_status': (
+            'completed' if turn_status == 'completed' else
+            'failed' if turn_status == 'errored' else
+            'interrupted' if turn_status == 'interrupted' else
+            old.get('completion_status') or 'pending'
+        ),
     })
     if turn_status == 'running':
         old['last_round_started_at'] = old['updated_at']
@@ -1230,7 +1269,7 @@ def resolve_reply_wait_schedule(reply_wait_iterations, reply_sleep_s, poll_inter
     return interval, timeout, None
 
 
-def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
+def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, capability_options=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
     task_dir = str(task_dir)
     task_name = os.path.basename(os.path.normpath(task_dir))
     _record_startup_phase('worker_entry', task_dir)
@@ -1238,6 +1277,19 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         reply_wait_iterations, reply_sleep_s, poll_interval_s, idle_timeout_s
     )
     agent.peer_hint = False
+    # Process-backed workers are children even before their first turn.  The
+    # capability boundary is applied later, after MCP schema warmup, so the
+    # child receives every concrete non-orchestration tool but never the
+    # parent-only orchestration surface.
+    agent.is_subagent = True
+    agent.capability_profile = None
+    agent.capability_allow_delegation = False
+    capability_options = capability_options if capability_options is not None else ((read_json_or_none(os.path.join(task_dir, 'state.json')) or {}).get('capability_options') or {})
+    role_tools = capability_options.get('role_tools')
+    if isinstance(role_tools, str):
+        role_tools = [role_tools]
+    agent.capability_role_tools = role_tools
+    agent.capability_allow_delegation = bool(capability_options.get('allow_delegation', False))
     agent.task_dir = task_dir
     # Must run before anything writes state.json. Every writer in this loop rebuilds the file
     # from `read_json_or_none(...) or {}`, so the first one silently replaces unparsable bytes
@@ -1448,7 +1500,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                 break
             nround = nround + 1 if isinstance(nround, int) else 1
         except Exception as e:
-            _subagent_state(task_dir, task_name, nround, 'errored', 'exited', output_path=output_path, last_error=format_error(e))
+            _subagent_state(task_dir, task_name, nround, 'errored', 'exited', output_path=output_path, last_error=format_error(e), last_error_stage='turn')
             _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
             if realtime_subscriber is not None:
                 realtime_subscriber.close()
@@ -1472,6 +1524,7 @@ def start_task_background(
     permission_profile=None,
     parent_permission_mode=None,
     permission_options=None,
+    capability_options=None,
 ):
     from subagent_manager import SubagentManager
 
@@ -1526,6 +1579,10 @@ def start_task_background(
         'permission_profile': permission_metadata['permission_profile'],
         'parent_permission_mode': permission_metadata.get('parent_permission_mode'),
         'permission_options': permission_metadata['options'],
+        'capability_options': capability_options or {},
+        'capability_profile': 'delegating' if (capability_options or {}).get('allow_delegation') else 'isolated',
+        'allow_delegation': bool((capability_options or {}).get('allow_delegation', False)),
+        'context_mode': 'isolated' if fork_mode == 'none' else 'explicit_fork',
     }
     state_path = os.path.join(task_dir, 'state.json')
     atomic_write_json(state_path, state)
@@ -1546,6 +1603,8 @@ def start_task_background(
         permission_metadata.get('parent_permission_mode') or '',
         '--permission_options',
         json.dumps(permission_metadata['options'], ensure_ascii=False, sort_keys=True),
+        '--capability_options',
+        json.dumps(capability_options or {}, ensure_ascii=False, sort_keys=True),
     ]
     if verbose:
         cmd.append('--verbose')
@@ -1613,6 +1672,7 @@ if __name__ == '__main__':
     parser.add_argument('--permission_profile', default=None, help='subagent permission profile')
     parser.add_argument('--parent_permission_mode', default=None, help='parent permission mode for inherit-current-permissions')
     parser.add_argument('--permission_options', default=None, help='subagent permission options JSON')
+    parser.add_argument('--capability_options', default=None, help='subagent capability options JSON')
     args, _unknown = parser.parse_known_args()
     _record_startup_phase('arguments_parsed')
     _reflect_args = dict(zip([k.lstrip('-') for k in _unknown[::2]], _unknown[1::2])) if _unknown else {}
@@ -1630,6 +1690,7 @@ if __name__ == '__main__':
             permission_profile=args.permission_profile,
             parent_permission_mode=args.parent_permission_mode,
             permission_options=_load_permission_options_arg(args.permission_options),
+            capability_options=_load_permission_options_arg(args.capability_options),
         )); sys.exit(0)
 
     _record_startup_phase('agent_init_started')
@@ -1657,6 +1718,7 @@ if __name__ == '__main__':
             permission_profile=args.permission_profile,
             parent_permission_mode=args.parent_permission_mode,
             permission_options=_load_permission_options_arg(args.permission_options),
+            capability_options=_load_permission_options_arg(args.capability_options),
             **resolve_reply_wait_schedule_from_env(),
         )
     elif args.reflect:
