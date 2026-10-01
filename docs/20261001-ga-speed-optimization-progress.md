@@ -178,6 +178,50 @@ GA 已经会给 Anthropic 打 `cache_control`、给 Responses 传 `prompt_cache_
 
 已完成并提交。
 
+## 后续：MCP 配置修正（exa 405 与 finance 移除）
+
+优化项 1 里提到 `temp/mcp_tools_cache.json` 长期 `complete=false`，导致 60 秒 TTL 反复触发同步冷启动。定位后发现不是超时抖动，而是两个 server 配置错误。
+
+### exa：`type: "sse"` 用错了 transport
+
+- 现象：`HTTPStatusError: 405 Method Not Allowed for https://mcp.exa.ai/mcp`。
+- 根因：GA 的 `mcp.json` 写的是 `"type": "sse"`，而 `mcp.exa.ai/mcp` 是 **streamable-HTTP** 端点。声明成 sse 后客户端走 GET/SSE 建流，端点不接受，直接 405。
+- 参照 Codex 的 `~/.codex/config.toml`：`[mcp_servers.exa]` 下的 `# type = "sse"` 是**被注释掉的**，即只给 `url` 让客户端自行推断。
+- 实测三种写法：
+
+  | 配置 | 结果 |
+  |---|---|
+  | `{"type": "sse", "url": ...}`（原配置） | 0 工具，405 |
+  | `{"url": ...}`（Codex 写法） | 2 工具（`web_search_exa`、`web_fetch_exa`） |
+  | `{"type": "streamable-http", "url": ...}` | 2 工具 |
+
+- 结论：**不需要登录验证**，也不需要 API key，只是 transport 声明错了。
+- 修复：删除 `type` 字段，只保留 `url`。
+
+### finance：移除
+
+`http://106.14.205.176:3101/sse` 持续超时，已从 `mcp.json` 删除。修改前备份到 `temp/mcp.json.bak-<时间戳>`（`mcp.json` 已被 `.gitignore` 忽略，含真实密钥，不入库）。
+
+### 顺带确认
+
+- `fetch`（`uvx mcp-server-fetch`）单独与并发场景实测均正常，之前偶发失败是 npx/uvx 冷启动竞争，非配置问题。
+- `context7` 未在 GA 中配置；实测 `https://mcp.context7.com/mcp` 无需 key 即可列出 2 个工具（`resolve-library-id`、`query-docs`），首次连接约 5-10s。
+
+### 修复后实测
+
+```
+full discovery: 9.6s tools=18 complete=True
+  exa                  connected  tools=2
+  fetch                connected  tools=1
+  memory               connected  tools=9
+  sequential-thinking  connected  tools=1
+  tavily               connected  tools=5
+```
+
+`mcp__exa__web_search_exa` 真实调用：6.2s，`status=success`，返回结构化搜索结果。
+
+这也闭环了优化项 1 的背景：5 个 server 全部连上后缓存进入 `complete=True`，不再有 60 秒一次的强制冷启动。
+
 ## 总结
 
 四项全部完成，累计：
