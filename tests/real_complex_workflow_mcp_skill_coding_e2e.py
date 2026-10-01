@@ -111,19 +111,65 @@ class BoundedPlannerClient(RealPlannerClient):
 def discover_required_mcp() -> tuple[dict | None, dict]:
     if not REAL_MCP_OPT_IN:
         return None, {"skipped": True, "reason": "set GA_RUN_REAL_MCP_E2E=1 to require real MCP tool calling"}
-    try:
-        import mcp_runtime
-        mcp_runtime.clear_mcp_cache()
-        mcp_runtime.reset_mcp_manager()
-        tools = mcp_runtime.discover_mcp_tools_cached(timeout=20)
-    except Exception as exc:
-        return None, {"error": f"{type(exc).__name__}: {exc}"}
-    by_name = {(tool.get("function") or {}).get("name") or "": tool for tool in tools}
-    names = sorted(name for name in by_name if name)
-    schema = by_name.get("mcp__tavily__tavily_search")
-    if not schema:
-        return None, {"error": "mcp__tavily__tavily_search not discovered", "availableToolCount": len(names), "availableToolsSample": names[:30]}
-    return schema, {"availableToolCount": len(names), "selectedTool": "mcp__tavily__tavily_search"}
+    import mcp_runtime
+
+    # Child runners use the persisted cached schema.  Reset in-process state,
+    # perform an explicit bounded discovery, and publish the result under the
+    # same ``include_unavailable=False`` cache signature the child reads.  This
+    # prevents a stale empty cache from hiding tools that the preflight already
+    # proved reachable, while still preserving partial-error diagnostics.
+    mcp_runtime.clear_mcp_cache()
+    mcp_runtime.reset_mcp_manager()
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, 4):
+        try:
+            discovery = mcp_runtime.discover_mcp(
+                config_path="mcp.json",
+                timeout=30,
+                include_unavailable=True,
+            )
+            tools = [dict(tool) for tool in discovery.tools]
+            errors = dict(discovery.errors or {})
+            by_name = {(tool.get("function") or {}).get("name") or "": tool for tool in tools}
+            names = sorted(name for name in by_name if name)
+            attempt_info = {
+                "attempt": attempt,
+                "availableToolCount": len(names),
+                "partialErrors": errors,
+                "availableToolsSample": names[:30],
+            }
+            attempts.append(attempt_info)
+            schema = by_name.get("mcp__tavily__tavily_search")
+            if schema:
+                # Keep the child runner's cache view aligned with this live
+                # preflight.  A partial result remains explicitly incomplete,
+                # so the runtime can refresh it in the background.
+                cfg = mcp_runtime.load_mcp_config_with_disabled("mcp.json")
+                signature = mcp_runtime._cache_signature(cfg, False)
+                mcp_runtime._write_mcp_tools_cache(
+                    mcp_runtime._MCP_TOOLS_CACHE_PATH,
+                    signature,
+                    tools,
+                    complete=not errors,
+                )
+                return schema, {
+                    **attempt_info,
+                    "attempts": attempts,
+                    "selectedTool": "mcp__tavily__tavily_search",
+                    "cachePrimedForChild": True,
+                }
+        except Exception as exc:
+            attempts.append({"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"})
+        if attempt < 3:
+            time.sleep(1.0)
+
+    last = attempts[-1] if attempts else {}
+    return None, {
+        "error": "mcp__tavily__tavily_search not discovered",
+        "attempts": attempts,
+        "availableToolCount": last.get("availableToolCount", 0),
+        "availableToolsSample": last.get("availableToolsSample", []),
+    }
 
 
 def load_json(path: Path) -> dict:

@@ -12,7 +12,7 @@ export function panelFromModelStatus(event: Extract<BridgeEvent, { type: 'model_
 
 export function moveModelSelection(selected: number, delta: number, total: number): number {
   if (total <= 0) return 0
-  return Math.max(0, Math.min(total - 1, selected + delta))
+  return ((selected + delta) % total + total) % total
 }
 
 export function modelPanelRows(panel: ModelPanelState): number {

@@ -15,10 +15,13 @@ test('panelFromModelStatus selects current model', () => {
   assert.equal(panel.models[1].name, 'NativeOAISession/kimi-native')
 })
 
-test('moveModelSelection clamps to bounds', () => {
-  assert.equal(moveModelSelection(0, -1, 2), 0)
+test('moveModelSelection wraps at both ends', () => {
+  assert.equal(moveModelSelection(0, -1, 2), 1)
   assert.equal(moveModelSelection(0, 1, 2), 1)
-  assert.equal(moveModelSelection(1, 1, 2), 1)
+  assert.equal(moveModelSelection(1, 1, 2), 0)
+  assert.equal(moveModelSelection(0, -3, 3), 0)
+  assert.equal(moveModelSelection(2, 4, 3), 0)
+  assert.equal(moveModelSelection(0, 1, 0), 0)
 })
 
 test('shouldApplyModelStatus only opens panel when requested or already open', () => {

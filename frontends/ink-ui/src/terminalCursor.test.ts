@@ -9,6 +9,8 @@ test('cursorPosition emits a clamped absolute CUP escape sequence', () => {
   assert.equal(cursorPosition(99, 99, 24, 80), '\x1b[24;80H')
 })
 
+
+
 test('inputCursorPosition parks the native cursor on the visible input caret', () => {
   assert.deepEqual(inputCursorPosition({
     headerRows: 1,
