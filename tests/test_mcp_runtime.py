@@ -35,6 +35,9 @@ from mcp_runtime import (  # noqa: E402
     reconnect_mcp_server,
     reset_mcp_manager,
     set_mcp_server_enabled,
+    discover_mcp_tools_cached_fast,
+    start_background_discovery,
+    wait_for_background_discovery,
     _MCP_LOG_DIR,
     _redact_sensitive,
 )
@@ -1170,6 +1173,81 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertIn("中文stderr启动日志", log_text)
         self.assertIn("中文stderr调用日志", log_text)
         self.assertNotIn("ä¸­", log_text)
+
+
+
+class McpFastDiscoveryTest(unittest.TestCase):
+    """The user-facing discovery path must not block a turn on a slow server."""
+
+    def test_fast_discovery_reuses_partial_cache_without_blocking(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            good_script = _write_demo_server(tmp_path)
+            bad_script, _bad_marker = _write_failing_marker_server(tmp_path)
+            cache_path = tmp_path / "fast-cache.json"
+            config_path = _write_multi_mcp_config(
+                tmp_path,
+                {"good": good_script, "bad": bad_script},
+            )
+            reset_mcp_manager()
+
+            first = discover_mcp_tools_cached_fast(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+                budget=20,
+            )
+            self.assertIn("mcp__good__echo", {tool["function"]["name"] for tool in first})
+
+            # Age the partial cache far past the old 60s TTL. The fast path must
+            # still serve it immediately; rediscovery runs in the background.
+            stale = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertFalse(stale.get("complete", True))
+            stale["cached_at"] = time.time() - (mcp_runtime._MCP_TOOLS_CACHE_INCOMPLETE_TTL * 100)
+            cache_path.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+            reset_mcp_manager()
+            started = time.monotonic()
+            second = discover_mcp_tools_cached_fast(
+                config_path=config_path,
+                timeout=20,
+                cache_path=cache_path,
+                budget=20,
+            )
+            elapsed = time.monotonic() - started
+            # Wait for the scheduled background refresh so the manager shuts down cleanly.
+            wait_for_background_discovery(20)
+            reset_mcp_manager()
+
+        self.assertLess(elapsed, 1.0, f"fast discovery blocked for {elapsed:.2f}s")
+        self.assertIn("mcp__good__echo", {tool["function"]["name"] for tool in second})
+
+    def test_fast_discovery_without_cache_respects_budget(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            server_script, _started_marker, _pid_path = _write_hanging_startup_server(tmp_path)
+            config_path = _write_named_mcp_config(tmp_path, "starting", server_script)
+            cache_path = tmp_path / "empty-cache.json"
+            reset_mcp_manager()
+
+            started = time.monotonic()
+            tools = discover_mcp_tools_cached_fast(
+                config_path=config_path,
+                timeout=30,
+                cache_path=cache_path,
+                budget=0.5,
+            )
+            elapsed = time.monotonic() - started
+            warmup = mcp_runtime.mcp_discovery_warmup_state()
+            reset_mcp_manager()
+
+        self.assertLess(elapsed, 3.0, f"budgeted discovery took {elapsed:.2f}s")
+        self.assertEqual(tools, [])
+        self.assertIsNotNone(warmup.get("last_started_at"), "no background refresh scheduled")
 
 
 if __name__ == "__main__":

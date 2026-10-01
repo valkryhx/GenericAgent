@@ -356,16 +356,59 @@ def load_tool_schema(suffix='', include_mcp_tools=True):
     if not include_mcp_tools:
         return
     try:
-        from mcp_runtime import discover_mcp_tools_cached
-        existing = {t.get("function", {}).get("name") for t in TOOLS_SCHEMA}
-        for tool in discover_mcp_tools_cached():
-            name = tool.get("function", {}).get("name")
-            if name and name not in existing:
-                TOOLS_SCHEMA.append(tool)
-                existing.add(name)
+        from mcp_runtime import discover_mcp_tools_cached_fast
+        append_mcp_tools(TOOLS_SCHEMA, discover_mcp_tools_cached_fast())
+        start_mcp_schema_warmup()
     except Exception as e:
         if os.environ.get("GA_MCP_DEBUG"):
             print(f"[WARN] MCP tool discovery failed: {e}")
+
+
+_MCP_SCHEMA_WARMUP_STARTED = False
+
+
+def append_mcp_tools(schema, tools):
+    """Append not-yet-present MCP tools in place so a running turn can pick them up."""
+    existing = {t.get("function", {}).get("name") for t in schema}
+    appended = []
+    for tool in tools or []:
+        name = tool.get("function", {}).get("name")
+        if name and name not in existing:
+            schema.append(tool)
+            existing.add(name)
+            appended.append(name)
+    return appended
+
+
+def _on_background_mcp_discovery(tools, complete=True):
+    """Background discovery finished: extend the live schema without blocking a turn."""
+    try:
+        append_mcp_tools(TOOLS_SCHEMA, tools)
+    except Exception as e:
+        if os.environ.get("GA_MCP_DEBUG"):
+            print(f"[WARN] MCP schema append failed: {e}")
+
+
+def start_mcp_schema_warmup():
+    """Discover MCP tools once, off the critical path, and append them when ready.
+
+    Every user turn used to block on MCP discovery (measured 16s cold, and a
+    partial cache re-triggered it every 60s). The warmup turns that into a
+    one-time background cost: turns read whatever is already known and the
+    schema grows in place when a server finally answers.
+    """
+    global _MCP_SCHEMA_WARMUP_STARTED
+    if _MCP_SCHEMA_WARMUP_STARTED:
+        return None
+    _MCP_SCHEMA_WARMUP_STARTED = True
+    try:
+        from mcp_runtime import on_mcp_discovery_complete, start_background_discovery
+        on_mcp_discovery_complete(_on_background_mcp_discovery)
+        return start_background_discovery()
+    except Exception as e:
+        if os.environ.get("GA_MCP_DEBUG"):
+            print(f"[WARN] MCP warmup failed: {e}")
+        return None
 load_tool_schema(include_mcp_tools=False)
 
 lang_suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
@@ -1585,6 +1628,7 @@ if __name__ == '__main__':
     _record_startup_phase('agent_init_started')
     agent = GeneraticAgent()
     _record_startup_phase('agent_init_complete')
+    start_mcp_schema_warmup()
     agent.next_llm(args.llm_no)
     selected_backend = getattr(getattr(agent, 'llmclient', None), 'backend', None)
     _record_startup_phase(

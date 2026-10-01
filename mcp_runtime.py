@@ -23,6 +23,19 @@ _MCP_TOOLS_CACHE_PATH = Path(script_dir) / "temp" / "mcp_tools_cache.json"
 # transient remote-server timeout cannot permanently hide its tools. Complete
 # results stay cached as long as the config signature matches (no TTL).
 _MCP_TOOLS_CACHE_INCOMPLETE_TTL = 60.0
+# A partial result is handed to callers as-is, but the missing servers are
+# retried in the background on this cadence. This is the old 60s self-heal
+# TTL, moved off the critical path: a transient remote timeout no longer
+# blocks a user turn to rediscover tools.
+_MCP_TOOLS_CACHE_PARTIAL_RECHECK_TTL = _MCP_TOOLS_CACHE_INCOMPLETE_TTL
+# Even a complete result is re-checked now and then so a server that starts
+# publishing new tools is eventually reflected. Not a correctness TTL: the old
+# value keeps being served while the refresh runs in the background.
+_MCP_TOOLS_CACHE_REVERIFY_TTL = 600.0
+# How long the first MCP-aware turn waits for tools when no cache exists yet.
+# Local (stdio) servers settle in milliseconds; remote ones keep connecting in
+# the background and land in the schema when they are ready.
+_MCP_DISCOVERY_BUDGET_DEFAULT = 2.0
 _MAX_MCP_DESCRIPTION_LENGTH = 2048
 
 
@@ -67,6 +80,21 @@ _MANAGER_LOCK = threading.Lock()
 _MANAGER: Optional["McpManager"] = None
 _CALL_CONTEXT = threading.local()
 
+# Background tool discovery shared by every caller in the process. A user turn
+# reads whatever is already cached or connected and never waits on a slow MCP
+# server; this state tracks the single refresh worker that fills the gap.
+_MCP_DISCOVERY_LOCK = threading.Lock()
+_MCP_DISCOVERY_CALLBACKS: list = []
+_MCP_DISCOVERY_THREAD: Optional[threading.Thread] = None
+_MCP_DISCOVERY_STATE: dict[str, Any] = {
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_error": None,
+    "tool_count": 0,
+    "complete": None,
+}
+
 
 @contextmanager
 def mcp_cancellation_scope(stop_signal):
@@ -105,6 +133,11 @@ def build_mcp_tool_name(server_name: str, tool_name: str) -> str:
 
 def clear_mcp_cache() -> None:
     _DISCOVERY_CACHE.clear()
+
+
+def mcp_discovery_state() -> dict[str, Any]:
+    """Snapshot of the background discovery worker, for diagnostics and tests."""
+    return mcp_discovery_warmup_state()
 
 
 def default_mcp_config_path() -> Path:
@@ -747,6 +780,150 @@ def discover_mcp_tools_cached(
     return tools
 
 
+def available_mcp_tools(
+    config_path: Optional[os.PathLike | str] = None,
+    include_unavailable: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Non-blocking snapshot of whatever the manager has connected so far."""
+    manager = get_mcp_manager(config_path)
+    tools: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    with manager.lock:
+        for state in manager.states.values():
+            if state.status == "disabled":
+                if include_unavailable:
+                    errors[state.name] = "disabled"
+                continue
+            if state.error and not include_unavailable:
+                errors[state.name] = state.error
+                continue
+            tools.extend(dict(tool) for tool in state.tools)
+    return tools, errors
+
+
+def _mcp_discovery_budget(value: Optional[float] = None) -> float:
+    if value is not None:
+        return max(0.0, float(value))
+    try:
+        return max(0.0, float(os.environ.get("GA_MCP_DISCOVERY_BUDGET", _MCP_DISCOVERY_BUDGET_DEFAULT)))
+    except (TypeError, ValueError):
+        return _MCP_DISCOVERY_BUDGET_DEFAULT
+
+
+def _discovery_cache_file(cache_path: Optional[os.PathLike | str]) -> Path:
+    return Path(cache_path) if cache_path is not None else _MCP_TOOLS_CACHE_PATH
+
+
+def on_mcp_discovery_complete(callback) -> None:
+    """Register a listener notified with (tools, complete) after a background refresh."""
+    with _MCP_DISCOVERY_LOCK:
+        if callback not in _MCP_DISCOVERY_CALLBACKS:
+            _MCP_DISCOVERY_CALLBACKS.append(callback)
+
+
+def remove_mcp_discovery_listener(callback) -> None:
+    with _MCP_DISCOVERY_LOCK:
+        try:
+            _MCP_DISCOVERY_CALLBACKS.remove(callback)
+        except ValueError:
+            pass
+
+
+def _notify_mcp_discovery_complete(tools: list[dict[str, Any]], complete: bool) -> None:
+    with _MCP_DISCOVERY_LOCK:
+        callbacks = list(_MCP_DISCOVERY_CALLBACKS)
+    for callback in callbacks:
+        try:
+            callback(tools, complete)
+        except Exception:
+            continue
+
+
+def _background_discovery_worker(
+    config_path: Optional[os.PathLike | str],
+    include_unavailable: bool,
+    timeout: Optional[float],
+    cache_path: Optional[os.PathLike | str],
+) -> None:
+    global _MCP_DISCOVERY_THREAD
+    tools: list[dict[str, Any]] = []
+    complete = False
+    error: Optional[str] = None
+    try:
+        discovery = discover_mcp(
+            config_path=config_path,
+            include_unavailable=include_unavailable,
+            timeout=timeout,
+        )
+        tools = [dict(tool) for tool in discovery.tools]
+        complete = not discovery.errors
+        cfg = load_mcp_config_with_disabled(config_path)
+        signature = _cache_signature(cfg, include_unavailable)
+        _write_mcp_tools_cache(_discovery_cache_file(cache_path), signature, tools, complete=complete)
+    except Exception as e:
+        error = _redact_sensitive(f"{type(e).__name__}: {e}")
+    finally:
+        with _MCP_DISCOVERY_LOCK:
+            _MCP_DISCOVERY_STATE.update(
+                {
+                    "last_finished_at": time.time(),
+                    "last_error": error,
+                    "tool_count": len(tools),
+                    "complete": complete,
+                }
+            )
+            _MCP_DISCOVERY_THREAD = None
+    if error is None:
+        _notify_mcp_discovery_complete(tools, complete)
+
+
+def start_background_discovery(
+    config_path: Optional[os.PathLike | str] = None,
+    include_unavailable: bool = False,
+    timeout: Optional[float] = None,
+    cache_path: Optional[os.PathLike | str] = None,
+) -> Optional[threading.Thread]:
+    """Discover MCP tools off the caller thread; a no-op while one is running."""
+    global _MCP_DISCOVERY_THREAD
+    with _MCP_DISCOVERY_LOCK:
+        if _MCP_DISCOVERY_THREAD is not None and _MCP_DISCOVERY_THREAD.is_alive():
+            return _MCP_DISCOVERY_THREAD
+        _MCP_DISCOVERY_STATE.update({"last_started_at": time.time()})
+        thread = threading.Thread(
+            target=_background_discovery_worker,
+            args=(config_path, include_unavailable, timeout, cache_path),
+            name="ga-mcp-discovery",
+            daemon=True,
+        )
+        _MCP_DISCOVERY_THREAD = thread
+        thread.start()
+        return thread
+
+
+def wait_for_background_discovery(
+    budget: Optional[float] = None,
+    thread: Optional[threading.Thread] = None,
+) -> bool:
+    """Wait up to ``budget`` seconds for the in-flight discovery. True when it finished."""
+    seconds = _mcp_discovery_budget(budget)
+    with _MCP_DISCOVERY_LOCK:
+        target = thread if thread is not None else _MCP_DISCOVERY_THREAD
+    if target is None:
+        return True
+    if seconds <= 0:
+        return not target.is_alive()
+    target.join(timeout=seconds)
+    return not target.is_alive()
+
+
+def mcp_discovery_warmup_state() -> dict[str, Any]:
+    with _MCP_DISCOVERY_LOCK:
+        state = dict(_MCP_DISCOVERY_STATE)
+        thread = _MCP_DISCOVERY_THREAD
+    state["running"] = bool(thread is not None and thread.is_alive())
+    return state
+
+
 def discover_mcp(
     config_path: Optional[os.PathLike | str] = None,
     include_unavailable: bool = False,
@@ -756,6 +933,67 @@ def discover_mcp(
         include_unavailable=include_unavailable,
         timeout=timeout,
     )
+
+
+def _maybe_schedule_discovery_refresh(
+    cached: dict[str, Any],
+    config_path: Optional[os.PathLike | str],
+    include_unavailable: bool,
+    timeout: Optional[float],
+    cache_path: Optional[os.PathLike | str],
+) -> bool:
+    cached_at = cached.get("cached_at")
+    age = None if not isinstance(cached_at, (int, float)) else time.time() - cached_at
+    if not cached.get("complete", True):
+        # A server timed out at discovery: retry it soon, but never block a turn.
+        stale = age is None or age > _MCP_TOOLS_CACHE_PARTIAL_RECHECK_TTL
+    else:
+        stale = age is None or age > _MCP_TOOLS_CACHE_REVERIFY_TTL
+    if not stale:
+        return False
+    start_background_discovery(
+        config_path=config_path,
+        include_unavailable=include_unavailable,
+        timeout=timeout,
+        cache_path=cache_path,
+    )
+    return True
+
+
+def discover_mcp_tools_cached_fast(
+    config_path: Optional[os.PathLike | str] = None,
+    include_unavailable: bool = False,
+    timeout: Optional[float] = None,
+    cache_path: Optional[os.PathLike | str] = None,
+    budget: Optional[float] = None,
+) -> list[dict[str, Any]]:
+    """Tool discovery that never blocks a user turn for long.
+
+    A cache hit (including a partial or aged one) returns immediately and the
+    refresh happens in the background. Without a cache this waits at most
+    ``budget`` seconds (``GA_MCP_DISCOVERY_BUDGET``, default 2s) before handing
+    back whatever is already connected, so a slow remote server only costs the
+    first turn a bounded delay instead of stalling every turn.
+    """
+    cfg = load_mcp_config_with_disabled(config_path)
+    signature = _cache_signature(cfg, include_unavailable)
+    cache_file = _discovery_cache_file(cache_path)
+    cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
+    if cached is not None:
+        _maybe_schedule_discovery_refresh(cached, config_path, include_unavailable, timeout, cache_path)
+        return cached["tools"]
+    thread = start_background_discovery(
+        config_path=config_path,
+        include_unavailable=include_unavailable,
+        timeout=timeout,
+        cache_path=cache_path,
+    )
+    wait_for_background_discovery(budget, thread=thread)
+    cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
+    if cached is not None:
+        return cached["tools"]
+    tools, _errors = available_mcp_tools(config_path=config_path, include_unavailable=include_unavailable)
+    return tools
 
 
 def call_mcp_tool(
@@ -813,7 +1051,17 @@ def _cache_signature(cfg: McpConfig, include_unavailable: bool) -> dict[str, Any
     }
 
 
-def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+def _load_mcp_tools_cache_entry(
+    cache_path: Path,
+    signature: dict[str, Any],
+    allow_stale: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Return the cached discovery entry, or None when it does not match.
+
+    ``allow_stale`` keeps a partial or aged result usable: callers that must not
+    block a user turn return it as-is and schedule a background re-check, while
+    the default keeps the original "partial results expire" contract.
+    """
     try:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
     except Exception:
@@ -823,15 +1071,31 @@ def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Option
     tools = data.get("tools")
     if not isinstance(tools, list):
         return None
+    cached_at = data.get("cached_at")
+    complete = bool(data.get("complete", True))
+    if allow_stale:
+        return {
+            "tools": [dict(tool) for tool in tools if isinstance(tool, dict)],
+            "complete": complete,
+            "cached_at": cached_at if isinstance(cached_at, (int, float)) else None,
+        }
     # Incomplete results (a server failed at discovery) expire after a short TTL
     # so a transient remote-server timeout does not permanently hide its tools.
-    if not data.get("complete", True):
-        cached_at = data.get("cached_at")
+    if not complete:
         if not isinstance(cached_at, (int, float)):
             return None
         if time.time() - cached_at > _MCP_TOOLS_CACHE_INCOMPLETE_TTL:
             return None
-    return [dict(tool) for tool in tools if isinstance(tool, dict)]
+    return {
+        "tools": [dict(tool) for tool in tools if isinstance(tool, dict)],
+        "complete": complete,
+        "cached_at": cached_at if isinstance(cached_at, (int, float)) else None,
+    }
+
+
+def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    entry = _load_mcp_tools_cache_entry(cache_path, signature)
+    return None if entry is None else entry["tools"]
 
 
 def _write_mcp_tools_cache(
