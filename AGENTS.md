@@ -102,3 +102,7 @@ The local `gpt-6-luna` and `deepseek-v4.1-flash` profiles both passed the OpenAI
 ### GenericAgent capability evaluation note (2026-09-30)
 
 真实 `gpt-6-luna` 与 `deepseek-v4.1-flash` 的 skills/TDD、双 subagent、动态 workflow、真实 Tavily MCP 验收记录见 `docs/20260930-gpt6-luna-generic-agent-capability-evaluation.md`。后续修改 agent runtime 或新增能力时，优先复用该报告中的最小真实 E2E 结构；复杂 planner E2E 的 timeout 不能替代基础链路验收。
+
+### Pi subagent reference and GA hardening
+
+Pi subagent design evidence and the GA hardening mapping are documented in `docs/20261001-pi-subagent-design-reference.md`; the implementation plan is `docs/superpowers/plans/2026-10-01-ga-subagent-hardening.md`. For subagent, multi-agent, agent team, and workflow children, enforce isolated context by default (`fork_turns=none`), remove orchestration tools from child schemas unless explicitly enabled, pass parent context only through explicit messages/artifacts/chains, and never let business allowlists deny the internal `no_tool` sentinel. Do not rely on prompts as the only control for identity, recursion, or tool boundaries.
