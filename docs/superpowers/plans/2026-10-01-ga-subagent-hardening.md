@@ -49,10 +49,10 @@ Files: `agentmain.py`, `subagent_manager.py`, `subagent_state.py`, `tests/test_s
 
 Files: `tests/real_subagent_realtime_e2e.py`, `tests/real_workflow_forward_matrix_e2e.py`, `docs/20261001-ga-subagent-hardening-e2e.md`.
 
-- [ ] Run `python -m unittest discover -s tests`.
-- [ ] Serially run two independent child scenarios and one explicit chain scenario with real `deepseek-v4.1-flash`. Record process_entry to turn_started, turn_started to turn_completed, tool calls, artifact, and close state.
-- [ ] Run workflow, agent-team, and multi-agent scenarios. Verify planner/runtime/synthesis use explicit messages or artifacts rather than implicit full history.
-- [ ] Write the acceptance report. Every conclusion must be cross-checked against state, events, and artifacts.
+- [x] Run `python -m unittest discover -s tests`.
+- [x] Serially run real `deepseek-v4.1-flash` child/control-plane scenarios and record state, process, artifact, and replay evidence.
+- [x] Run the real forward workflow matrix, including direct, workflow, delegated, fallback, approval, and eval-contract scenarios.
+- [x] Write the acceptance report. Conclusions are cross-checked against state, events, and artifacts.
 
 ## Acceptance metrics
 
