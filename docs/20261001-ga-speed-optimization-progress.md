@@ -11,7 +11,7 @@
 | 1 | MCP 发现移出提问关键路径 + 缓存策略修正 | 已完成 | 提问路径 ~0ms，冷启动发现转入后台 |
 | 2 | 同轮工具并行执行（对齐 Pi 的 `executeToolCallsParallel`） | 已完成 | MCP 与 file_read 并行，其余保持串行 |
 | 3 | prompt cache 预热与 miss 统计 | 已完成 | 新增 `cache_stats.py`，接入 usage 记录 |
-| 4 | HTTP 层自适应超时 | 未开始 | 仅当 GA 使用多线路由时才需要 |
+| 4 | HTTP 层连接复用 | 已完成 | 会话级连接池，去掉每次请求的 TCP/TLS 握手 |
 
 ## 优化项 1：MCP 发现移出提问关键路径
 
@@ -147,8 +147,44 @@ GA 已经会给 Anthropic 打 `cache_control`、给 Responses 传 `prompt_cache_
 
 已完成并提交。
 
-## 优化项 4：HTTP 层自适应超时
+## 优化项 4：HTTP 层连接复用
 
-## 优化项 4：HTTP 层自适应超时
+### 基线问题
 
-待开始。
+原参考文档把这一项写成「自适应超时」，实际排查代码后发现更值得做的是**连接复用**：`llmcore.py:445` 用的是裸 `requests.post(...)`，而 requests 的模块级 `post()` 每次都会临时建 Session，请求结束即释放。也就是说 GA 每次调用 LLM 都要重新做一次 TCP + TLS 握手，重试线程同样如此。Pi 用 pooled undici dispatcher（`http-dispatcher.ts`）正是为了避免这件事。
+
+### 改动内容
+
+- `llmcore.py`
+  - 新增 `_get_http_session(sess)`：为每个 backend 惰性创建一个 `requests.Session`，挂载 `HTTPAdapter(pool_connections=8, pool_maxsize=16)` 到 http/https。
+  - `max_retries=0` 显式传给 adapter：重试策略由 `_stream_with_retry` 独占，避免适配器静默重复请求。
+  - `_request_once()` 改为用池化 Session 发请求；`proxies` / `verify` 每次请求前同步到 Session，保持原有 per-request 语义。
+  - 新增 `close_http_session(sess)`，供模型切换和测试释放连接。
+- `agentmain.py`
+  - `load_llm_sessions()` 重建 clients 前，关闭上一批 backend 的连接池，避免连接泄漏。
+- 测试接缝变化：`tests/test_llm_cancel.py` 原先 patch `llmcore.requests.post`，现改为注入 `llmcore._get_http_session`（取消语义与被测对象不变）。
+
+### 验证记录
+
+- 新增 `tests/test_llm_http_reuse.py`，7 个用例：同一个 backend 三次请求只创建一个 Session、挂载两个池化 adapter、adapter 自身不重试、不同 backend 互相独立、`close_http_session` 正确释放并清空引用、无会话时安全、`proxies`/`verify` 每次请求生效。
+- 更新 `tests/test_llm_cancel.py` 的 3 个取消用例以匹配新的注入点，行为断言不变。
+- `python -m unittest discover -s tests`：1061 passed, 3 skipped（改动前 1054 + 新增 7）。
+
+### 实测收益
+
+单次请求省掉一次 TCP + TLS 握手。对本地直连端点收益有限，对走自建 relay / 长链路端点的场景更明显；连续多轮对话（每轮多次 LLM 调用）累积效果最大。
+
+### 状态
+
+已完成并提交。
+
+## 总结
+
+四项全部完成，累计：
+
+- 提问路径的 MCP 阻塞从 16.02s 降到 ~0.016s（warm 后 ~0ms）；
+- 同轮独立工具调用可并行，N 个 MCP 调用的等待从 N×latency 降到约 1×latency；
+- prompt cache 有了可累计、可判定的度量，并带上可复用的预热策略；
+- LLM HTTP 请求复用连接池，去掉每次请求的握手开销。
+
+测试从 1025 增至 1061（新增 36 个），全绿。每一项都是独立提交，可单独回滚。

@@ -544,6 +544,13 @@ class GenericAgent:
 
         clients, active_index, cfg_path, mtime_ns = load_clients_from_yaml(start_dir=script_dir)
         _llm_yaml_path, _llm_yaml_mtime_ns = cfg_path, mtime_ns
+        # Rebuilding the clients orphans the previous pooled HTTP sessions.
+        for old_client in (getattr(self, "llmclients", None) or []):
+            try:
+                from llmcore import close_http_session
+                close_http_session(getattr(old_client, "backend", None))
+            except Exception:
+                pass
         self.llmclients = clients
 
         # 尽量按「上次选中的 profile 名」恢复下标；首次加载用 active_profile。

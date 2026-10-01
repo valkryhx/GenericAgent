@@ -2,6 +2,7 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,6 +50,31 @@ class RetryResponse:
         return None
 
 
+class StubHttpSession:
+    """Stands in for the pooled requests.Session inside llmcore.
+
+    The cancel tests are about cancellation semantics, not the HTTP layer, so
+    they replace the pooled transport rather than the raw requests.post call.
+    """
+
+    def __init__(self, impl):
+        self._impl = impl
+        self.calls = 0
+        self.proxies = None
+        self.verify = True
+
+    def post(self, url, **kwargs):
+        self.calls += 1
+        return self._impl()
+
+
+@contextmanager
+def patch_transport(impl):
+    stub = StubHttpSession(impl)
+    with patch("llmcore._get_http_session", return_value=stub):
+        yield stub
+
+
 def make_session(**overrides):
     cfg = {
         "apikey": "test-key",
@@ -74,7 +100,7 @@ class LLMCancelTest(unittest.TestCase):
             except Exception as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
 
-        with patch("llmcore.requests.post", return_value=response):
+        with patch_transport(lambda: response):
             t = threading.Thread(target=consume, daemon=True)
             t.start()
             self.assertTrue(response.iter_started.wait(timeout=1))
@@ -104,7 +130,7 @@ class LLMCancelTest(unittest.TestCase):
             except Exception as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
 
-        with patch("llmcore.requests.post", side_effect=fake_post):
+        with patch_transport(fake_post):
             t = threading.Thread(target=consume, daemon=True)
             t.start()
             time.sleep(0.05)
@@ -134,7 +160,7 @@ class LLMCancelTest(unittest.TestCase):
             except Exception as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
 
-        with patch("llmcore.requests.post", side_effect=fake_post) as post:
+        with patch_transport(fake_post) as post:
             t = threading.Thread(target=consume, daemon=True)
             t.start()
             self.assertTrue(started.wait(timeout=1))
@@ -145,7 +171,7 @@ class LLMCancelTest(unittest.TestCase):
             t.join(timeout=1)
 
         self.assertFalse(t.is_alive())
-        self.assertEqual(1, post.call_count)
+        self.assertEqual(1, post.calls)
         self.assertEqual([], errors)
 
 

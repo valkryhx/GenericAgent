@@ -424,6 +424,54 @@ def _stamp_oai_cache_markers(messages, model):
             c = list(c); c[-1] = dict(c[-1], cache_control={'type': 'ephemeral'})
             messages[idx] = {**messages[idx], 'content': c}
 
+# --- HTTP connection reuse ------------------------------------------------
+#
+# requests.post() builds a throwaway Session per call, so every LLM request paid
+# a fresh TCP + TLS handshake. Pi keeps a pooled undici dispatcher
+# (http-dispatcher.ts) for exactly this reason. One pooled Session per backend
+# is enough: a backend's requests are already serialised by its own lock, and
+# the pool still covers the retry worker threads.
+_HTTP_POOL_LOCK = threading.Lock()
+_HTTP_POOL_CONNECTIONS = 8
+_HTTP_POOL_MAXSIZE = 16
+
+
+def _get_http_session(sess):
+    """Return a pooled requests.Session for this backend, creating it once."""
+    session = getattr(sess, "_http_session", None)
+    if session is not None:
+        return session
+    with _HTTP_POOL_LOCK:
+        session = getattr(sess, "_http_session", None)
+        if session is not None:
+            return session
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_HTTP_POOL_CONNECTIONS,
+            pool_maxsize=_HTTP_POOL_MAXSIZE,
+            max_retries=0,  # _stream_with_retry owns the retry policy.
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        sess._http_session = session
+        return session
+
+
+def close_http_session(sess):
+    """Drop a backend's pooled connections (used on shutdown and in tests)."""
+    session = getattr(sess, "_http_session", None)
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+    try:
+        sess._http_session = None
+    except Exception:
+        pass
+
+
 def _stream_with_retry(sess, url, headers, payload, parse_fn):
     cancel_event = getattr(sess, "_cancel_event", None)
     _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
@@ -442,8 +490,11 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
     def _request_once(outq):
         streamed = False; active = None
         try:
-            with requests.post(url, headers=headers, json=payload, stream=sess.stream,
-                               timeout=(sess.connect_timeout, sess.read_timeout), proxies=sess.proxies, verify=sess.verify) as r:
+            http = _get_http_session(sess)
+            http.proxies = sess.proxies
+            http.verify = sess.verify
+            with http.post(url, headers=headers, json=payload, stream=sess.stream,
+                           timeout=(sess.connect_timeout, sess.read_timeout)) as r:
                 active = r
                 set_active = getattr(sess, "_set_active_response", None)
                 if set_active: set_active(r)
