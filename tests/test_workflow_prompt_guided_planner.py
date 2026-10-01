@@ -188,7 +188,50 @@ def interpolation_literal_plan():
     }
 
 
+def verification_synthesis_same_phase_plan():
+    boundary = "边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。"
+    return {
+        "taskType": "mixed",
+        "meta": {"name": "same-phase-verification-synthesis", "description": "Verification and synthesis crammed into one phase"},
+        "phases": [
+            {"title": "Research and Temporary Coding", "agents": [{"label": "mcp-research-agent", "role": "understanding", "prompt": f"{boundary} 调用真实 MCP 搜索。", "dependsOn": []}]},
+            {"title": "Temporary Workspace Coding", "agents": [{"label": "superpowers-coding-agent", "role": "implementation", "prompt": f"{boundary} 加载 using-superpowers 后在临时 workspace 编码。", "dependsOn": ["mcp-research-agent"]}]},
+            {
+                "title": "Verification and Synthesis",
+                "agents": [
+                    {"label": "verification-agent", "role": "verification", "prompt": f"{boundary} 校验编码产物。", "dependsOn": ["superpowers-coding-agent"]},
+                    {"label": "synthesis-agent", "role": "synthesis", "prompt": f"{boundary} 汇总裁决。", "dependsOn": ["verification-agent"]},
+                ],
+            },
+        ],
+        "schemas": {},
+        "artifacts": ["research", "coding", "synthesis"],
+        "constraints": ["no_secret_files", "no_git_commit"],
+        "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["python_unittest", "verification_schema"]},
+    }
+
+
 class LLMWorkflowPlannerTest(unittest.TestCase):
+    def test_prompt_guided_planner_splits_same_phase_dependency_into_later_phase(self):
+        client = FakePlannerClient(responses=[verification_synthesis_same_phase_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        draft = planner.plan(
+            "设计一个复杂 GA workflow 真实 E2E：MCP research + using-superpowers coding + synthesis",
+            context={"constraints": ["不要读取 mykey.py", "不要提交"]},
+        )
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual(1, len(client.calls))
+        titles = [phase["title"] for phase in draft.plan["phases"]]
+        self.assertEqual(len(titles), len(set(titles)))
+        phase_of = {}
+        for index, phase in enumerate(draft.plan["phases"]):
+            for agent in phase["agents"]:
+                phase_of[agent["label"]] = index
+        self.assertLess(phase_of["superpowers-coding-agent"], phase_of["verification-agent"])
+        self.assertLess(phase_of["verification-agent"], phase_of["synthesis-agent"])
+
     def test_prompt_guided_planner_uses_llm_plan_json_for_dynamic_review_topology(self):
         client = FakePlannerClient(responses=[review_plan()])
         planner = LLMWorkflowPlanner(client=client)
@@ -284,7 +327,15 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertEqual("workflow", draft.plan["mode"])
         self.assertIn(draft.plan["riskLevel"], {"low", "medium", "high"})
         self.assertTrue(draft.plan["successCriteria"])
-        self.assertEqual("inline", draft.plan["evalContract"]["level"])
+        # The review plan has real cross-packet consumption edges
+        # (verify-findings depends on the three reviews, review-report depends
+        # on verify-findings). ultracode treats "one packet produces a surface
+        # another packet consumes" as full regardless of the taskType label.
+        self.assertEqual("full", draft.plan["evalContract"]["level"])
+        self.assertEqual(
+            {"security-review", "performance-review", "test-gap-review", "verify-findings"},
+            {item["producer"] for item in draft.plan["evalContract"]["sharedSurfaces"]},
+        )
         self.assertIn("requiredChecks", draft.plan["evalContract"])
         self.assertEqual(len(draft.plan["phases"]), draft.plan["orchestration"]["maxWaves"])
         self.assertEqual(5, draft.plan["orchestration"]["maxAgents"])
@@ -499,3 +550,18 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    def test_prompt_guided_planner_does_not_split_cyclic_same_phase_dependency(self):
+        plan = verification_synthesis_same_phase_plan()
+        plan["phases"][2]["agents"][1]["dependsOn"] = ["verification-agent"]
+        plan["phases"][2]["agents"][0]["dependsOn"] = ["superpowers-coding-agent", "synthesis-agent"]
+        client = FakePlannerClient(responses=[plan, plan])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        draft = planner.plan(
+            "设计一个复杂 GA workflow 真实 E2E：MCP research + using-superpowers coding + synthesis",
+            context={"constraints": ["不要读取 mykey.py", "不要提交"]},
+        )
+
+        self.assertFalse(draft.validation["ok"])
+        self.assertEqual("rejected", draft.validation["mode"])
+        self.assertEqual(2, len(client.calls))

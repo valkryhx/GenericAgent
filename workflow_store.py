@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
-from sensitive_redaction import sanitize
+from sensitive_redaction import redact_sensitive_text, sanitize
 from subagent_state import (
     atomic_write_json,
     atomic_write_text,
@@ -196,6 +196,87 @@ class WorkflowStore:
         self._write_json(self._run_dir(run) / result_ref, sanitize(payload))
         run.result_ref = result_ref
         return result_ref
+
+    def write_final_audit(self, run: WorkflowRun, payload: dict) -> str:
+        """Render final-audit.md for full-contract runs from recorded facts.
+
+        Everything here comes from host-side records (the plan's computed eval
+        contract, test gate summaries, acceptance/integration metadata). No
+        agent prose is read, so the audit cannot be talked into passing.
+        """
+
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        eval_contract = metadata.get("evalContract") if isinstance(metadata.get("evalContract"), dict) else {}
+        surfaces = [item for item in eval_contract.get("sharedSurfaces") or [] if isinstance(item, dict)]
+        gates = [gate for gate in (payload.get("testGates") or metadata.get("testGates") or []) if isinstance(gate, dict)]
+        payload = payload if isinstance(payload, dict) else {}
+        outcome = str(payload.get("status") or run.status or "unknown")
+
+        if not surfaces:
+            audit_status = "insufficient_evidence"
+        elif outcome == "succeeded" and str(metadata.get("integrationStatus") or "") == "accepted":
+            audit_status = "passed"
+        else:
+            audit_status = "failed"
+
+        lines = [
+            "# Final audit",
+            "",
+            "## Eval contract",
+            f"- level: {eval_contract.get('level') or 'unknown'}",
+            f"- outcome: {eval_contract.get('outcome') or 'unknown'}",
+            f"- shared surfaces: {len(surfaces)}",
+            f"- required checks: {', '.join(str(item) for item in eval_contract.get('requiredChecks') or []) or 'none'}",
+            f"- blocking conditions: {', '.join(str(item) for item in eval_contract.get('blockingConditions') or []) or 'none'}",
+            "",
+            "## Shared surfaces",
+        ]
+        if surfaces:
+            lines.extend(["| surface | producer | consumers | structured |", "| --- | --- | --- | --- |"])
+            for surface in surfaces:
+                consumers = ", ".join(str(item) for item in surface.get("consumers") or []) or "none"
+                lines.append(
+                    f"| {surface.get('surface') or 'unknown'} | {surface.get('producer') or 'unknown'} | {consumers} | {bool(surface.get('structured'))} |"
+                )
+        else:
+            lines.append("- none enumerated: the plan declared no producer/consumer handoff")
+        plan_validation = str(metadata.get("planValidation") or ("pass" if metadata.get("workflowContractRefs") else "unknown"))
+        lines.extend(["", "## Checks applied", f"- plan_validation: {plan_validation}"])
+        acceptance_status = str(metadata.get("acceptanceStatus") or "not_recorded")
+        lines.append(f"- acceptance: {acceptance_status}")
+        if metadata.get("acceptanceFailures"):
+            lines.extend(f"  - {item}" for item in metadata["acceptanceFailures"])
+        if gates:
+            for gate in gates:
+                lines.append(
+                    f"- test gate {gate.get('gateId') or 'unknown'}: {gate.get('status') or 'unknown'}"
+                    f" (pass={gate.get('passCount', 0)}, fail={gate.get('failCount', 0)})"
+                )
+        else:
+            lines.append("- test gates: not_applicable")
+        lines.extend(
+            [
+                "",
+                "## Integration",
+                f"- integrationStatus: {metadata.get('integrationStatus') or 'unknown'}",
+                f"- finalAuditStatus: {audit_status}",
+                f"- executionOutcome: {metadata.get('executionOutcome') or outcome}",
+                f"- run status: {outcome}",
+            ]
+        )
+        if metadata.get("integrationIssues"):
+            lines.append("- integrationIssues:")
+            lines.extend(f"  - {item}" for item in metadata["integrationIssues"])
+        if run.error:
+            lines.append(f"- error: {redact_sensitive_text(str(run.error))}")
+
+        audit_ref = "final-audit.md"
+        self._write_text(self._run_dir(run) / audit_ref, sanitize("\n".join(lines) + "\n"))
+        metadata = dict(metadata)
+        metadata["finalAuditStatus"] = audit_status
+        metadata["finalAuditRef"] = audit_ref
+        run.metadata = metadata
+        return audit_ref
 
     def write_workflow_draft(self, run: WorkflowRun, draft) -> str:
         draft_ref = "workflow-draft.json"

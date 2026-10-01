@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 
@@ -263,6 +264,104 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         script = render_workflow_plan(plan)
 
         self.assertIn("runPythonUnittest(args.workspacePath", script)
+
+    def test_validator_applies_coding_contract_when_mixed_plan_declares_code_work(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "mixed"
+        plan["phases"] = [
+            {"title": "Build", "agents": [
+                {"label": "impl", "role": "implementation", "prompt": "write code", "dependsOn": []},
+            ]},
+        ]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        codes = {issue["code"] for issue in validation["issues"]}
+        self.assertIn("missing_verification_role", codes)
+        self.assertIn("missing_acceptance_contract", codes)
+
+    def test_validator_ignores_role_optional_when_plan_declares_no_code_work(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "research"
+        plan["phases"] = [
+            {"title": "Collect", "agents": [{"label": "collector", "prompt": "collect", "dependsOn": []}]},
+            {"title": "Synthesize", "agents": [{"label": "writer", "prompt": "write", "dependsOn": ["collector"]}]},
+        ]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertTrue(validation["ok"], validation)
+
+    def test_renderer_skips_host_test_gate_for_non_coding_acceptance_contract(self):
+        plan = self.valid_plan()
+        plan["acceptance"] = {
+            "required": True,
+            "failWorkflowOnError": True,
+            "checks": ["python_unittest", "verification_schema"],
+        }
+
+        script = render_workflow_plan(plan)
+
+        self.assertNotIn("runPythonUnittest(args.workspacePath", script)
+
+    def test_renderer_keeps_host_test_gate_for_mixed_plan_that_declares_code_work(self):
+        plan = self.valid_plan()
+        plan["taskType"] = "mixed"
+        plan["acceptance"] = {
+            "required": True,
+            "failWorkflowOnError": True,
+            "checks": ["python_unittest", "verification_schema"],
+        }
+        plan["phases"][0]["agents"][0]["role"] = "implementation"
+        plan["phases"][0]["agents"][0]["writeScope"] = ["src/"]
+
+        script = render_workflow_plan(plan)
+
+        self.assertIn("runPythonUnittest(args.workspacePath", script)
+
+    def test_renderer_keeps_cjk_labels_from_colliding_into_one_identifier(self):
+        # A real deepseek run produced Chinese phase/agent labels; ASCII
+        # sanitization mapped every one to "agent", generating
+        # `const [agent, agent] = await parallel([...])` and killing the run
+        # with "Identifier 'agent' has already been declared".
+        plan = self.valid_plan()
+        plan["taskType"] = "review"
+        plan["phases"] = [
+            {
+                "title": "维度评审 fan out",
+                "agents": [
+                    {"label": "安全审查", "prompt": "a", "dependsOn": []},
+                    {"label": "性能审查", "prompt": "b", "dependsOn": []},
+                    {"label": "测试缺口审查", "prompt": "c", "dependsOn": []},
+                ],
+            },
+            {"title": "验证", "agents": [{"label": "发现核验", "prompt": "d", "dependsOn": ["安全审查"]}]},
+        ]
+
+        script = render_workflow_plan(plan)
+
+        declaration = script.split("= await parallel([", 1)[0]
+        names = re.findall(r"const \[([^\]]+)\]", declaration)[0].split(", ")
+        self.assertEqual(len(names), len(set(names)), f"duplicate identifiers in {declaration!r}")
+        self.assertNotIn("[agent, agent]", script)
+
+    def test_renderer_avoids_shadowing_runtime_helpers(self):
+        plan = self.valid_plan()
+        plan["phases"] = [
+            {
+                "title": "T",
+                "agents": [
+                    {"label": "agent", "prompt": "a", "dependsOn": []},
+                    {"label": "phase", "prompt": "b", "dependsOn": []},
+                ],
+            }
+        ]
+
+        script = render_workflow_plan(plan)
+
+        self.assertNotIn("const [agent,", script)
+        self.assertNotIn("const phase =", script)
 
     def test_renderer_treats_prompt_template_expressions_as_literal_text(self):
         plan = self.valid_plan()

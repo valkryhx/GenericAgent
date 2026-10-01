@@ -185,6 +185,8 @@ class WorkflowRuntime:
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                     metadata["integrationStatus"] = "accepted"
                     metadata["integrationIssues"] = []
+                    # Non-full runs keep the historic "integration outcome"
+                    # meaning; full runs overwrite this from the audit file.
                     metadata["finalAuditStatus"] = "passed"
                     run.metadata = metadata
                     run.status = "succeeded"
@@ -192,6 +194,7 @@ class WorkflowRuntime:
                     refresh_workflow_execution_metadata(run)
                     self.store.save_run(run)
                     self.store.write_workflow_progress(run)
+                    self._write_final_audit(run)
                     final_payload = self._final_payload(run, "succeeded", result=result)
                     self.store.write_final_result(run, final_payload)
                     self.store.save_run(run)
@@ -212,6 +215,7 @@ class WorkflowRuntime:
                 refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
+                self._write_final_audit(run)
                 self.store.write_final_result(
                     run,
                     self._final_payload(run, "killed", result=self._last_worker_result, error=run.error),
@@ -236,6 +240,7 @@ class WorkflowRuntime:
                 refresh_workflow_execution_metadata(run)
                 self.store.save_run(run)
                 self.store.write_workflow_progress(run)
+                self._write_final_audit(run)
                 self.store.write_final_result(
                     run,
                     self._final_payload(run, "failed", result=self._last_worker_result, error=reason),
@@ -332,6 +337,21 @@ class WorkflowRuntime:
         result["gateKey"] = gate_key
         result["expectation"] = expectation
         result["gatePassed"] = self._gate_passed_for_expectation(result, expectation)
+        # A run that never declared test work cannot satisfy a python unittest
+        # gate, and an empty repo is the normal shape for research/review plans.
+        # Record that as not-applicable evidence instead of a failure; a plan
+        # that DID declare tests and produced none stays a hard failure.
+        # CPython's unittest exits 5 when discovery finds zero tests, so the
+        # "empty repo" signal is testCount == 0 plus the NO TESTS RAN sentinel,
+        # not a zero exit code.
+        no_tests_discovered = result.get("testCount") == 0 and (
+            result.get("returncode") in {0, 5}
+            or "NO TESTS RAN" in f"{result.get('stdout') or ''}{result.get('stderr') or ''}"
+        )
+        if no_tests_discovered and not self._plan_declared_tests(run):
+            result["notApplicable"] = True
+            result["notApplicableReason"] = result.get("error") or "no tests discovered"
+            result["error"] = None
         result["phase"] = phase or None
         result["durationMs"] = max(0, int((time.monotonic() - started_at) * 1000))
         result["stdout"] = redact_sensitive_text(str(result.get("stdout") or ""))
@@ -597,10 +617,17 @@ class WorkflowRuntime:
             gate_key = result.get("gateKey") or result.get("gateId")
             if latest_by_key.get(gate_key) is not result:
                 continue
-            if result.get("gatePassed"):
+            if result.get("gatePassed") or result.get("notApplicable"):
                 continue
             return f"workflow test gate failed: {result.get('gateId')}: {self._test_gate_failure_preview(result)}"
         return None
+
+    def _plan_declared_tests(self, run: WorkflowRun) -> bool:
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        contract = metadata.get("acceptanceContract")
+        if not isinstance(contract, dict):
+            return True
+        return bool(contract.get("testsDeclared", True))
 
     @staticmethod
     def _explicit_verification_failure_reason(result: Any) -> str | None:
@@ -619,7 +646,14 @@ class WorkflowRuntime:
         for check in checks:
             check_name = str(check.get("type") if isinstance(check, dict) else check or "").strip()
             if check_name == "python_unittest":
-                if not any(
+                if any(
+                    gate.get("notApplicable") is True and gate.get("expectation") == "pass"
+                    for gate in self._test_gates
+                ):
+                    metadata["notApplicableChecks"] = sorted(
+                        {*(metadata.get("notApplicableChecks") or []), "python_unittest"}
+                    )
+                elif not any(
                     gate.get("gateKey") == "workflow-acceptance"
                     and gate.get("expectation") == "pass"
                     and gate.get("passed") is True
@@ -641,7 +675,8 @@ class WorkflowRuntime:
             metadata["acceptanceFailures"] = failures
             run.metadata = metadata
             return "workflow acceptance failed: " + "; ".join(failures)
-        metadata["acceptanceStatus"] = "passed"
+        not_applicable = metadata.get("notApplicableChecks") or []
+        metadata["acceptanceStatus"] = "not_applicable" if not_applicable and len(not_applicable) == len(checks) else "passed"
         metadata["acceptanceFailures"] = []
         run.metadata = metadata
         return None
@@ -859,6 +894,16 @@ class WorkflowRuntime:
                 scheduler._cancel_job(job, reason=reason)
         scheduler.store.save_run(scheduler.run)
 
+    def _write_final_audit(self, run: WorkflowRun) -> str | None:
+        """Emit final-audit.md only for full-contract runs (host-recorded facts)."""
+
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        eval_contract = metadata.get("evalContract") if isinstance(metadata.get("evalContract"), dict) else {}
+        if str(eval_contract.get("level") or "").strip().lower() != "full":
+            return None
+        payload = {"status": run.status, "testGates": copy.deepcopy(metadata.get("testGates") or [])}
+        return self.store.write_final_audit(run, payload)
+
     def _final_payload(self, run: WorkflowRun, status: str, *, result: Any = None, error: str | None = None) -> dict:
         payload: dict[str, Any] = {
             "runId": run.run_id,
@@ -888,9 +933,12 @@ class WorkflowRuntime:
         if "acceptanceStatus" in metadata:
             payload["acceptanceStatus"] = metadata["acceptanceStatus"]
             payload["acceptanceFailures"] = sanitize(copy.deepcopy(metadata.get("acceptanceFailures") or []))
-        for key in ("integrationStatus", "integrationIssues", "finalAuditStatus"):
+        for key in ("integrationStatus", "integrationIssues", "finalAuditStatus", "finalAuditRef"):
             if key in metadata:
                 payload[key] = sanitize(copy.deepcopy(metadata[key]))
+        eval_contract = metadata.get("evalContract") if isinstance(metadata.get("evalContract"), dict) else {}
+        if eval_contract:
+            payload["evalContract"] = sanitize(copy.deepcopy(eval_contract))
         return sanitize(payload)
 
     def _terminate(self, process: subprocess.Popen) -> None:

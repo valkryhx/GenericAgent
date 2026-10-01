@@ -95,6 +95,30 @@ test('workflowOverviewRows groups agents by progress phaseTitle', () => {
   ])
 })
 
+test('workflowOverviewRows shows integration and final audit status when present', () => {
+  const overview = workflowOverviewFromDetail({
+    run: {
+      runId: 'wf_audit',
+      sessionId: 'session',
+      status: 'succeeded',
+      metadata: { workflowName: 'bounded-recovery', integrationStatus: 'accepted', finalAuditStatus: 'passed' },
+      jobs: [{ jobId: 'agent_1', status: 'succeeded', metadata: { label: 'worker' } }],
+    },
+    script: 'return 1',
+    events: [],
+    progress: {
+      runId: 'wf_audit',
+      sessionId: 'session',
+      status: 'succeeded',
+      workflowProgress: [{ jobId: 'agent_1', label: 'worker', state: 'succeeded' }],
+      integrationStatus: 'accepted',
+      finalAuditStatus: 'passed',
+    } as never,
+  })
+
+  assert.equal(workflowOverviewRows(overview)[0], 'bounded-recovery  1/1 agents · done · integration accepted · audit passed')
+})
+
 test('workflowOverviewFromDetail falls back to draft phases when progress phase is missing', () => {
   const overview = workflowOverviewFromDetail({
     run: {

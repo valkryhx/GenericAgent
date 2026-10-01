@@ -39,6 +39,13 @@ class WorkflowController:
             },
         )
         if isinstance(acceptance_contract, dict):
+            acceptance_contract = dict(acceptance_contract)
+            # The runtime decides whether an empty unittest gate is "not
+            # applicable" or a hard failure; that hinges on whether this plan
+            # ever declared test work, so carry the declaration with the contract.
+            from workflow_planner import plan_declares_tests
+
+            acceptance_contract.setdefault("testsDeclared", plan_declares_tests(draft_plan))
             run.metadata["acceptanceContract"] = acceptance_contract
         for key in ("mode", "riskLevel", "evalContract", "orchestration"):
             if key in draft_plan:

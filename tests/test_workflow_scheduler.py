@@ -43,6 +43,24 @@ class SequenceResultRunner:
         pass
 
 
+class LabelAwareRunner:
+    def __init__(self, results_by_label=None, fail_labels=None):
+        self.results_by_label = results_by_label or {}
+        self.fail_labels = set(fail_labels or set())
+
+    def start(self, job):
+        pass
+
+    def poll(self, job):
+        label = job.metadata.get("label")
+        if label in self.fail_labels:
+            return AgentResult(job_id=job.job_id, status="failed", payload={"error": "child failed"})
+        return AgentResult(job_id=job.job_id, payload=self.results_by_label.get(label, {"summary": f"done {label}"}))
+
+    def cancel(self, job):
+        pass
+
+
 class ProtocolMetadataRunner:
     def __init__(self):
         self.started = []
@@ -171,6 +189,50 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("agent_1", entry["agentId"])
         self.assertEqual("agent_1", entry["jobId"])
         self.assertIn("inspect repo", entry["promptPreview"])
+
+    def test_evidence_roles_get_host_enforced_non_mutating_profile(self):
+        scheduler, _store, _run = self.make_scheduler()
+
+        reviewer = scheduler.register_agent(prompt="review it", label="Review", options={"role": "review"})
+        verifier = scheduler.register_agent(prompt="verify it", label="Verify", options={"role": "verification"})
+        implementer = scheduler.register_agent(prompt="build it", label="Build", options={"role": "implementation"})
+
+        self.assertEqual("verify", reviewer.metadata["permissionProfile"])
+        self.assertEqual("verify", verifier.metadata["permissionProfile"])
+        self.assertEqual("inherit-current-permissions", implementer.metadata["permissionProfile"])
+        self.assertEqual("verify", verifier.metadata["cacheKey"]["permissionProfile"])
+
+    def test_verify_profile_never_loosens_a_read_only_run(self):
+        scheduler, _store, _run = self.make_scheduler(
+            run_kwargs={"permission_profile": "read_only", "permission_policy_version": "read-only-v1"}
+        )
+
+        job = scheduler.register_agent(prompt="verify it", label="Verify", options={"role": "verification"})
+
+        self.assertEqual("read_only", job.metadata["permissionProfile"])
+
+    def test_observed_mutations_are_recorded_from_tool_events(self):
+        scheduler, store, run = self.make_scheduler()
+        job = scheduler.register_agent(prompt="edit it", label="Editor", options={"role": "implementation"})
+        result = AgentResult(
+            job_id=job.job_id,
+            status="succeeded",
+            payload={"summary": "edited"},
+            transcript_events=[
+                {
+                    "type": "tool_allowed",
+                    "toolName": "file_patch",
+                    "decision": "allow",
+                    "permission": {"action": "allow"},
+                }
+            ],
+        )
+
+        scheduler._record_observed_mutations(job, result)
+
+        self.assertEqual(["file_patch"], job.metadata["observedMutations"])
+        self.assertEqual([job.job_id], store.load_run(run.run_id).metadata["observedMutationAgents"])
+        self.assertIn("state_mutation_observed", self.event_types(store))
 
     def test_register_agent_rejects_non_dict_options_with_clear_error(self):
         scheduler, _store, _run = self.make_scheduler()
@@ -522,6 +584,86 @@ class WorkflowSchedulerTest(unittest.TestCase):
 
         rejected = store.replay_events("wf_test")[-1]
         self.assertEqual("delegation_max_agents_exceeded", rejected.payload["reason"])
+
+    def test_wave_scheduler_waits_for_declared_upstream_before_starting_job(self):
+        runner = LabelAwareRunner()
+        scheduler, store, run = self.make_scheduler(max_concurrent=4, runner=runner)
+        upstream = scheduler.register_agent(prompt="collect", label="collect", options={"phase": "Collect"})
+        downstream = scheduler.register_agent(
+            prompt="synthesize",
+            label="synthesize",
+            options={"phase": "Synthesis", "dependsOn": ["collect"]},
+        )
+
+        self.assertEqual(1, upstream.metadata["wave"])
+        self.assertEqual(2, downstream.metadata["wave"])
+        self.assertEqual(["collect"], downstream.metadata["dependsOn"])
+
+        scheduler.run_all()
+
+        self.assertEqual("succeeded", upstream.status)
+        self.assertEqual("succeeded", downstream.status)
+        started_labels = [
+            event.payload.get("label")
+            for event in store.replay_events(run.run_id)
+            if event.event_type == "agent_started"
+        ]
+        self.assertEqual(["collect", "synthesize"], started_labels)
+
+    def test_wave_scheduler_skips_dependents_when_upstream_fails(self):
+        runner = LabelAwareRunner(fail_labels={"collect"})
+        scheduler, store, run = self.make_scheduler(max_concurrent=4, runner=runner)
+        scheduler.register_agent(prompt="collect", label="collect", options={"phase": "Collect"})
+        dependent = scheduler.register_agent(
+            prompt="synthesize",
+            label="synthesize",
+            options={"phase": "Synthesis", "dependsOn": ["collect"]},
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("failed", loaded.jobs[0].status)
+        self.assertEqual("skipped", loaded.jobs[1].status)
+        self.assertEqual("dependency_failed", loaded.jobs[1].metadata.get("skipReason"))
+
+    def test_wave_limit_rejects_job_that_exceeds_declared_max_waves(self):
+        scheduler, store, _run = self.make_scheduler(
+            max_total=10,
+            run_kwargs={
+                "metadata": {
+                    "mode": "delegated",
+                    "orchestration": {"delegationAllowed": True, "maxAgents": 5, "maxWaves": 1},
+                }
+            },
+        )
+        scheduler.register_agent(prompt="wave one", label="one")
+
+        with self.assertRaisesRegex(RuntimeError, "workflow agent limit exceeded"):
+            scheduler.register_agent(prompt="wave two", options={"dependsOn": ["one"]})
+
+        rejected = store.replay_events("wf_test")[-1]
+        self.assertEqual("delegation_max_waves_exceeded", rejected.payload["reason"])
+
+    def test_retry_exhaustion_can_hand_off_to_bounded_repair_role(self):
+        runner = LabelAwareRunner(fail_labels={"primary"})
+        scheduler, store, run = self.make_scheduler(runner=runner)
+        scheduler.register_agent(
+            prompt="primary work",
+            label="primary",
+            options={
+                "retryPolicy": {"maxAttempts": 1, "retryableErrors": ["child failed"], "repairRole": "repair"},
+            },
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual(2, len(loaded.jobs))
+        self.assertEqual("repair", loaded.jobs[1].metadata["label"])
+        self.assertEqual("repair", loaded.jobs[1].metadata["repairRole"])
+        self.assertEqual(loaded.jobs[0].job_id, loaded.jobs[1].metadata["repairOf"])
+        self.assertIn("agent_repair_scheduled", self.event_types(store))
 
     def test_continue_failure_policy_keeps_other_jobs_running(self):
         runner = FakeChildAgentRunner(fail_job_ids={"agent_1"}, delay_ticks=0)

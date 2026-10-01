@@ -30,6 +30,8 @@ export type WorkflowOverview = {
   name: string
   description: string
   status: string
+  integrationStatus?: string | null
+  finalAuditStatus?: string | null
   phases: WorkflowOverviewPhase[]
   selectedPhase: number
   completed: number
@@ -238,6 +240,8 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
     name: workflowOverviewName(run, draft),
     description: workflowOverviewDescription(run, draft),
     status: run.status === 'succeeded' ? 'done' : run.status,
+    integrationStatus: workflowIntegrationStatus(detail),
+    finalAuditStatus: workflowFinalAuditStatus(detail),
     phases: phaseList,
     selectedPhase: clampedSelected,
     completed,
@@ -247,8 +251,13 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
 
 export function workflowOverviewRows(overview: WorkflowOverview): string[] {
   const selectedPhase = overview.phases[overview.selectedPhase]
+  const gateSummary = [
+    overview.integrationStatus ? `integration ${overview.integrationStatus}` : null,
+    overview.finalAuditStatus ? `audit ${overview.finalAuditStatus}` : null,
+  ].filter(Boolean).join(' · ')
+  const headline = `${overview.name}  ${overview.completed}/${overview.total} agents · ${overview.status}${gateSummary ? ` · ${gateSummary}` : ''}`
   const rows = [
-    `${overview.name}  ${overview.completed}/${overview.total} agents · ${overview.status}`,
+    headline,
     overview.description,
     `Phases | ${selectedPhase ? `${selectedPhase.title} · ${selectedPhase.total} ${selectedPhase.total === 1 ? 'agent' : 'agents'}` : 'Agents'}`,
   ]
@@ -260,6 +269,14 @@ export function workflowOverviewRows(overview: WorkflowOverview): string[] {
   }
   rows.push('Enter agent - Up/Down phase - Esc back')
   return rows
+}
+
+function workflowIntegrationStatus(detail: WorkflowDetailPayload): string | null {
+  return stringMetadata(detail.progress?.integrationStatus) || stringMetadata(detail.run.metadata?.integrationStatus) || null
+}
+
+function workflowFinalAuditStatus(detail: WorkflowDetailPayload): string | null {
+  return stringMetadata(detail.progress?.finalAuditStatus) || stringMetadata(detail.run.metadata?.finalAuditStatus) || null
 }
 
 export function workflowAgentDetailPanelFromOverview(

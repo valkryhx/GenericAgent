@@ -53,6 +53,31 @@ Codex CLI 的最新本地源码位于 `D:\git_codes\codex`，是 GenericAgent �
 
 GA 侧已有分析笔记：`docs/ga_subagent_codex_reference_2026-07-13.md`、`docs/ga_codex_vs_ink_stdout_ownership_2026-07-15.md`、`docs/ga_ink_ui_text_selection_copy_diagnosis_2026-07-14.md`。
 
+## 参考实现：Step-Code 的 ultracode / workflow
+
+Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI）。它的 workflow 是我们做 GA 动态 workflow 时最直接的对标实现：同一类"模型生成编排脚本 → 宿主执行 → 多 agent fan-out"的架构，但把稳定性问题收敛得比 GA 更好。开发 GA workflow（planner、runtime、scheduler、progress、UI）前先读这套代码。
+
+关键文件：
+
+- 设计文档：`docs/orchestration-lifecycle.md`（opt-in 语义、生命周期、fan-out 边界、预算、超时与 journal 契约）
+- 编排运行时：`packages/coding-agent/src/features/workflow/runtime.ts`（agent 调用、并发槽、schema 重试、budget、timeout、iterate 循环）
+- 宿主工具与 opt-in：`step-workflow.ts`（workflow 工具本体与系统提示）、`ultraloop-opt-in.ts`（`ultracode`/`ultraloop` 关键字与 session 级开关）
+- 沙箱与契约：`vm.ts`（QuickJS/WASM 隔离）、`types.ts`（JSON-only 契约）、`schema.ts`（结构化输出校验）、`tool-profile.ts`（readOnly/writable 工具与路径 ACL）
+- 恢复与观测：`journal.ts`（可重放 journal）、`progress.ts`、`rendering.ts`、`budget.ts`、`registration-gate.ts`、`acl-extension.ts`、`agent-runner.ts`
+- HoH 迭代：`hoh.ts`（Planner → Developer → 独立 QA 的结构化 schema 与 coverage/stagnation 停止条件）
+
+值得直接借鉴的机制：
+
+1. **opt-in 与能力分离**。workflow 工具注册只是环境能力，是否使用由 per-turn 关键字（`ultracode`/`ultraloop`/显式要求）或 session 级 `/ultraloop on` 决定，`agent_settled` 时清理；模型不得从"任务看起来大/可并行"推断 opt-in。GA 的 approval gate 与 mode 路由可以对齐这个"能力 ≠ 授权"的分层。
+2. **fan-out 只有一层**。子进程带 `STEP_CLI_SUBAGENT_CHILD=1`、`STEP_DISABLE_WORKFLOW=1` 等标记，不能再次 fan-out，也不会持有 cron/goal 调度权。GA 的 workflow child 与 subagent 递归边界可参照此约束。
+3. **JSON-only 契约 + 结构化输出强制**。`agent(prompt, {schema})` 让下游消费的结果必须是 JSON，schema 不匹配带校验错误重试最多 3 次，失败即失败，不降级成自然语言。GA 的 strict verification schema 思路一致，但应保证"哪些检查该跑"由计划显式声明，而不是由任务类型字符串隐式推断（GA 曾因研究型计划被塞入 `python_unittest` 而在无测试文件时误判 `NO TESTS RAN`）。
+4. **预算与超时 fail-closed**。token budget 是 input+output 累计，超额对整个 run 报 `budget_exceeded`，即使脚本 catch 了异常；agent 有默认 30 分钟超时；并发有硬上限。GA 的 retry/delegation 上限应保持同样"有界且不可被脚本绕过"的语义。
+5. **journal 可重放 + resumeFromRunId**。相同 script+args 可重放 cached journal 前缀，首个变化点之后才重新执行。GA 的 run store/journal 可对齐这一可恢复性。
+6. **显式停止条件**。`iterate()` 用 coverage 目标、stagnation 上限、max iterations、empty objective 四类停止条件；`parallel()` 是 barrier 且抛错的 task 变 null、`pipeline()` 无 barrier 逐项并发。GA 的 wave 调度可借用这套"barrier vs pipeline"区分。
+7. **progress 快照独立于后续变更**。每次 `onUpdate` 都带一份完整 `WorkflowProgress` 快照，tool row 在 settled 后保留最后快照并忽略迟到的 child 清理事件。GA 的 Ink UI workflow 面板可对齐该快照语义。
+
+**重要方向性判断**：Step-Code 的 workflow 契约里没有 `taskType`（research/coding/review）这一概念，校验与门禁由计划显式声明的 schema、toolProfile、ACL 和 budget 决定。GA 目前用 `taskType` 分支推导硬门禁（如 coding → `python_unittest` + strict verification schema），这是研究型/混合型任务被错误套上代码型约束的根源。后续优化 GA workflow 时，应把门禁来源从"任务类型"迁移到"计划显式声明的检查项"，任务类型降级为提示信息而非门禁开关。
+
 ## 文档命名约定
 
 新增测试记录、故障复盘、验收报告和技术调研文档时，文件名统一使用 `YYYYMMDD-xxxx.md` 格式，例如 `20260930-gpt6-luna-generic-agent-capability-evaluation.md`。日期使用 Asia/Shanghai 当前日期，`xxxx` 使用简洁、可检索的英文小写短语。

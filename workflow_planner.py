@@ -58,6 +58,201 @@ def _normalize_plan_retry_policy(value: Any) -> dict[str, Any]:
     }
 
 
+CODE_PRODUCING_ROLES = frozenset({"implementation", "tests", "repair"})
+
+
+def plan_produces_code(plan: dict[str, Any] | None) -> bool:
+    """Whether a plan's own agents declare code-producing work.
+
+    This is a contract-consistency signal, not a prediction about the task.
+    GA cannot reliably infer "is this a coding task" from keywords, from the
+    planner's taskType label, or from a role field the model may omit entirely;
+    all three were observed to disagree across identical real runs. What the
+    host can do is check whether the plan itself declares code-producing work
+    and hold the plan to the coding contract when it does.
+
+    ``taskType`` remains a fail-closed fallback: an explicit coding/debugging
+    label always gets the coding contract even if the model forgot roles.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    if str(source.get("taskType") or "").strip().lower() in {"coding", "debugging"}:
+        return True
+    for phase in source.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            if str(agent.get("role") or "").strip().lower() in CODE_PRODUCING_ROLES:
+                return True
+            if agent.get("writeScope"):
+                return True
+    return False
+
+
+def plan_declares_tests(plan: dict[str, Any] | None) -> bool:
+    """Whether the plan itself says it will produce Python tests.
+
+    Used by the runtime to decide whether an empty unittest gate means "this
+    workflow never promised tests" (not applicable) or "the promised tests are
+    missing" (hard failure). Nothing else should infer test intent.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    for phase in source.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            if str(agent.get("role") or "").strip().lower() == "tests":
+                return True
+    return False
+
+
+def plan_shared_surfaces(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Derive producer→consumer handoff surfaces from the plan's own graph.
+
+    Models do not reliably declare ``sharedSurfaces`` (four real runs produced
+    ``[]`` every time), so the host computes the surface list from ``dependsOn``
+    instead of trusting a self-report. A surface exists wherever one agent's
+    output is consumed by another agent; ``structured`` records whether the
+    producer promised a machine-checkable schema or only free text.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    schemas = source.get("schemas") if isinstance(source.get("schemas"), dict) else {}
+    producer_schema: dict[str, str] = {}
+    for phase in source.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            label = str(agent.get("label") or "")
+            schema_ref = str(agent.get("schemaRef") or "")
+            if label and schema_ref:
+                producer_schema[label] = schema_ref
+
+    consumers: dict[str, list[str]] = {}
+    order: list[str] = []
+    for phase in source.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            consumer = str(agent.get("label") or "")
+            for dependency in agent.get("dependsOn") or []:
+                producer = str(dependency)
+                if not producer:
+                    continue
+                if producer not in consumers:
+                    consumers[producer] = []
+                    order.append(producer)
+                if consumer and consumer not in consumers[producer]:
+                    consumers[producer].append(consumer)
+
+    surfaces: list[dict[str, Any]] = []
+    for producer in order:
+        schema_ref = producer_schema.get(producer) or ""
+        surfaces.append(
+            {
+                "surface": schema_ref or f"{producer}->handoff",
+                "producer": producer,
+                "consumers": list(consumers[producer]),
+                "structured": bool(schema_ref and isinstance(schemas.get(schema_ref), dict)),
+            }
+        )
+    return surfaces
+
+
+def plan_risk_level(plan: dict[str, Any] | None) -> str:
+    """Compute risk from the plan's shape, not from a label the model guessed.
+
+    ``riskLevel`` used to default from ``taskType``, which quietly reintroduced
+    the very coupling the eval-contract axis removed: identical phases scored
+    ``high`` under a ``coding`` label and ``low`` under a ``research`` label,
+    and ``high`` then forced ``full``. Risk is now derived from what the plan
+    actually declares, with a model-declared level only able to escalate: a
+    model may raise it, never lower it.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    phases = [phase for phase in (source.get("phases") or []) if isinstance(phase, dict)]
+    write_capable = [
+        agent
+        for phase in phases
+        for agent in phase.get("agents") or []
+        if isinstance(agent, dict)
+        and (
+            str(agent.get("role") or "").strip().lower() in CODE_PRODUCING_ROLES
+            or bool(agent.get("writeScope"))
+        )
+    ]
+    surfaces = plan_shared_surfaces(source)
+    structured = any(surface["structured"] for surface in surfaces)
+
+    if structured or len(write_capable) > 1 or (surfaces and write_capable):
+        computed = "high"
+    elif write_capable or surfaces:
+        computed = "medium"
+    else:
+        computed = "low"
+
+    declared = str(source.get("riskLevel") or "").strip().lower()
+    order = {"low": 0, "medium": 1, "high": 2}
+    if declared in order and order[declared] > order[computed]:
+        return declared
+    return computed
+
+
+def plan_eval_level(plan: dict[str, Any] | None) -> str:
+    """Pick the eval-contract level from the plan's declared shape.
+
+    ``taskType`` is deliberately ignored: the same real task produced ``inline``
+    on one run and ``full`` on another when the level was derived from that
+    label. The level now answers "how much integration risk does this plan
+    carry", computed from phases, handoff surfaces, and code writers.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    phases = [phase for phase in (source.get("phases") or []) if isinstance(phase, dict)]
+    if not phases:
+        return "none"
+
+    # ultracode's criterion is explicit: "one packet produces a surface another
+    # packet consumes" is already full, because the downstream packet can no
+    # longer be verified in isolation. The host does not second-guess that with
+    # its own fragility heuristic -- under-constrained handoffs are exactly the
+    # failure mode this axis exists to remove, and the extra cost of `full` is
+    # one evidence file, not a new blocking gate.
+    if plan_shared_surfaces(source):
+        return "full"
+    write_capable = {
+        str(agent.get("label") or "")
+        for phase in phases
+        for agent in phase.get("agents") or []
+        if isinstance(agent, dict)
+        and (
+            str(agent.get("role") or "").strip().lower() in CODE_PRODUCING_ROLES
+            or bool(agent.get("writeScope"))
+        )
+    }
+    if str(source.get("riskLevel") or "").strip().lower() == "high":
+        return "full"
+    if len(write_capable) > 1:
+        return "full"
+    return "inline"
+
+
+def _plan_declares_code_work(plan: dict[str, Any], task_type: str = "") -> bool:
+    """Backward-compatible alias for :func:`plan_produces_code`."""
+
+    return plan_produces_code(plan)
+
+
 def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, Any]:
     """Add a stable, inspectable orchestration contract to model-produced plans."""
 
@@ -67,11 +262,26 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     mode = str(normalized.get("mode") or "").strip().lower()
     if mode not in WORKFLOW_MODES:
         mode = "workflow" if phases else "direct"
-    risk_level = str(normalized.get("riskLevel") or "").strip().lower()
+    # Host-computed, shape-derived; a declared value can only escalate it.
+    risk_level = plan_risk_level(normalized)
     if risk_level not in WORKFLOW_RISK_LEVELS:
-        risk_level = "high" if task_type in {"coding", "debugging", "mixed"} else "medium" if task_type == "review" else "low"
+        risk_level = "medium"
 
     acceptance = normalized.get("acceptance") if isinstance(normalized.get("acceptance"), dict) else {}
+    # A host-side python unittest gate is only satisfiable when the plan actually
+    # produces code. Models frequently copy the coding acceptance example into
+    # research/review/planning plans, which then run an empty test gate and fail
+    # with "NO TESTS RAN". Decide from what the plan declares (a code-producing
+    # role), not from the taskType label, so mixed plans that really do write
+    # code keep their gate.
+    if acceptance.get("checks") and not plan_produces_code(normalized):
+        acceptance = copy.deepcopy(acceptance)
+        acceptance["checks"] = [
+            check
+            for check in acceptance.get("checks") or []
+            if str(check.get("type") if isinstance(check, dict) else check).strip() != "python_unittest"
+        ]
+        normalized["acceptance"] = acceptance
     acceptance_checks = [
         str(check.get("type") if isinstance(check, dict) else check).strip()
         for check in acceptance.get("checks") or []
@@ -88,10 +298,14 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     for check in ["plan_validation", *acceptance_checks]:
         if check not in required_checks:
             required_checks.append(check)
+    # Both the level and the surface list are host-computed. Model-supplied
+    # values were unreliable in real runs (sharedSurfaces was [] every time and
+    # the level flipped with the taskType label), so the plan's own graph wins.
+    computed_surfaces = plan_shared_surfaces({**normalized, "evalContract": eval_contract})
     eval_contract = {
-        "level": str(eval_contract.get("level") or ("full" if task_type in {"coding", "debugging", "mixed"} else "inline")),
+        "level": plan_eval_level({**normalized, "evalContract": eval_contract}),
         "outcome": str(eval_contract.get("outcome") or "workflow completes with evidence-backed acceptance result"),
-        "sharedSurfaces": list(eval_contract.get("sharedSurfaces") or []),
+        "sharedSurfaces": computed_surfaces,
         "requiredChecks": required_checks,
         "blockingConditions": list(eval_contract.get("blockingConditions") or ["plan_validation_failed", "acceptance_failed"]),
         "handoffEvidence": list(eval_contract.get("handoffEvidence") or ["summary", "evidence", "blockingIssues"]),
@@ -114,6 +328,7 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     }
     policy = normalize_delegation_policy({**normalized, "mode": mode, "riskLevel": risk_level, "orchestration": orchestration})
     orchestration.update(policy)
+    mode = policy["mode"]
 
     normalized["workflowContractVersion"] = int(normalized.get("workflowContractVersion") or 1)
     normalized["mode"] = mode
@@ -130,11 +345,82 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     return normalized
 
 
+def _normalize_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
+    """Apply the full host-side contract normalization pipeline in order.
+
+    Coding acceptance contract first so the verification role/schema is in place
+    before phase topology is repaired, then same-phase dependency splitting, and
+    finally the generic orchestration contract. Review plans in the workflow UI
+    see the same normalized shape as runtime execution.
+    """
+
+    normalized = _normalize_coding_acceptance_contract(plan)
+    normalized = _split_same_phase_dependencies(normalized)
+    return _normalize_workflow_execution_contract(normalized)
+
+
+def _split_same_phase_dependencies(plan: dict[str, Any]) -> dict[str, Any]:
+    """Split agents that depend on same-phase peers into explicit later phases.
+
+    Models routinely pack a verifier and the synthesis consuming it into one
+    phase. GA's validator rejects that topology, so normalize it
+    deterministically instead of spending a repair round-trip or weakening the
+    hard gate. Intra-phase dependencies become their own later phase; cross
+    phase dependencies are left untouched.
+    """
+
+    normalized = copy.deepcopy(plan)
+    phases = normalized.get("phases")
+    if not isinstance(phases, list) or not phases:
+        return normalized
+
+    rebuilt: list[dict[str, Any]] = []
+    for phase in phases:
+        title = str(phase.get("title") or "")
+        agents = [agent for agent in (phase.get("agents") or []) if isinstance(agent, dict)]
+        pending = {str(agent.get("label") or ""): agent for agent in agents}
+        levels: dict[str, int] = {}
+        for _ in range(len(agents) + 1):
+            progressed = False
+            for label, agent in pending.items():
+                if label in levels:
+                    continue
+                intra = [
+                    str(item)
+                    for item in (agent.get("dependsOn") or [])
+                    if str(item) in pending
+                ]
+                if not intra or all(item in levels for item in intra):
+                    levels[label] = 1 + max((levels[item] for item in intra), default=-1) if intra else 0
+                    progressed = True
+            if not progressed:
+                break
+        if len(levels) != len(pending):
+            rebuilt.append({"title": title, "agents": agents})
+            continue
+        max_level = max(levels.values(), default=0)
+        for level in range(max_level + 1):
+            bucket = [
+                agent
+                for agent in agents
+                if levels.get(str(agent.get("label") or "")) == level
+            ]
+            if not bucket:
+                continue
+            if level == 0:
+                part_title = title
+            else:
+                part_title = f"{title} (Part {level + 1})"
+            rebuilt.append({"title": part_title, "agents": bucket})
+    normalized["phases"] = rebuilt
+    return normalized
+
+
 def _normalize_coding_acceptance_contract(plan: dict[str, Any]) -> dict[str, Any]:
     """Normalize model-produced coding plans to GA's strict verification contract."""
 
     normalized = copy.deepcopy(plan)
-    if normalized.get("taskType") != "coding":
+    if not plan_produces_code(normalized):
         return normalized
 
     schemas = normalized.get("schemas")
@@ -496,9 +782,7 @@ class LLMWorkflowPlanner:
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
         try:
-            plan = _normalize_workflow_execution_contract(
-                _normalize_coding_acceptance_contract(self._request_plan(task_text, context, issues=[]))
-            )
+            plan = _normalize_plan_contract(self._request_plan(task_text, context, issues=[]))
             repair_attempts: list[dict[str, Any]] = []
             for _ in range(self.max_repair_attempts + 1):
                 validation = validate_workflow_plan(plan)
@@ -513,10 +797,8 @@ class LLMWorkflowPlanner:
                 if len(repair_attempts) >= self.max_repair_attempts:
                     break
                 repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
-                plan = _normalize_workflow_execution_contract(
-                    _normalize_coding_acceptance_contract(
-                        self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
-                    )
+                plan = _normalize_plan_contract(
+                    self._request_plan(task_text, context, issues=validation["issues"], previous_plan=plan)
                 )
         except Exception as exc:
             return self._fallback_draft(task_text, context, reason=str(exc))
@@ -554,14 +836,16 @@ class LLMWorkflowPlanner:
             "contract": "Return WorkflowPlan JSON only. 不要输出 JS. Do not wrap in markdown. phases must be a non-empty array.",
             "orchestrationPolicy": [
                 "根据任务语义和 classificationHint 决定 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts。",
+                "小任务（单步、低风险、无需多 agent 协作）必须 mode=direct，不要为了简单问题创建 workflow。",
                 "每个 agent 必须声明 bounded retryPolicy（maxAttempts 只能是 1-3），不得生成无界重试；transient/provider/MCP/schema 错误要区分 retryable 与 blocking。",
-                "delegated mode 必须遵守 maxAgents<=5、maxWaves<=4，并在 approvalRequired=true 时停在 awaiting approval。",
+                "delegated mode（有界 sidecar）必须遵守 maxAgents<=5、maxWaves<=4，并在 approvalRequired=true 时停在 awaiting approval；普通 workflow 不受此限制，按任务真实复杂度拆分 phase/agent，宿主会按依赖图计算所需 wave 数。",
                 "如果任务要求审查安全/性能/测试缺口/回归风险，taskType 必须是 review，不要误判为 research。",
                 "如果任务要求规划设计方案或实施计划且明确不要直接写代码，taskType 应为 planning 或 mixed。",
                 "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
                 "coding 任务必须遵守 Understand -> Tests -> Implementation -> Verification，禁止 tests 与 implementation 并行。",
                 "coding 任务的每个 agent.role 都是必填字段，只能使用 canonical role：understanding、contract、tests、implementation、verification、review、repair、summary、synthesis；不要省略 role 或使用 test-writer 等别名。",
-                "coding 任务必须提供 acceptance.required=true 和非空 acceptance.checks；至少包含 verification_schema 或 python_unittest。",
+                "acceptance.checks 必须由任务自身决定，不要照抄示例：只有本次 workflow 会写或运行 Python 测试时才声明 python_unittest；只做研究、审阅或规划时声明 verification_schema 即可。",
+                "如果计划声明了 role=tests 的 agent，就必须真的产出 test_*.py；运行时发现零测试会判定为失败。",
                 "verification agent 必须返回 verificationPassed、checks、blockingIssues；verification schema 不匹配时不得降级为普通文本。",
                 "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。",
                 "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
@@ -575,7 +859,7 @@ class LLMWorkflowPlanner:
                 "schemas": {},
                 "artifacts": [],
                 "constraints": ["no_secret_files", "no_git_commit"],
-                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema", "python_unittest"]},
+                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema"], "notes": "add python_unittest only when this workflow writes or runs Python tests"},
             },
         }
         if issues:
@@ -629,7 +913,7 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 label_phase.setdefault(label, phase_index)
     dependency_graph: dict[str, list[str]] = {}
     schemas = plan.get("schemas") or {}
-    is_coding = plan.get("taskType") == "coding"
+    is_coding = plan_produces_code(plan)
     for phase_index, phase in enumerate(plan.get("phases") or []):
         phase_title = str(phase.get("title") or "")
         phase_labels: set[str] = set()
@@ -749,13 +1033,19 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
         lines.append("")
     result_names: list[str] = []
     rendered_labels: dict[str, str] = {}
+    used_identifiers: set[str] = set()
+    identifier_counter = 0
     for phase in plan.get("phases") or []:
         title = str(phase.get("title") or "")
         lines.append(f"phase('{_js_string(title)}')")
         agents = phase.get("agents") or []
         independent_agents = [agent for agent in agents if not (agent.get("dependsOn") or [])]
         if len(agents) > 1 and len(independent_agents) == len(agents):
-            phase_vars = [_js_identifier(str(agent.get("label") or "agent")) for agent in agents]
+            phase_vars = [
+                _js_identifier(str(agent.get("label") or "agent"), index=identifier_counter + offset, used=used_identifiers)
+                for offset, agent in enumerate(agents)
+            ]
+            identifier_counter += len(agents)
             lines.append(f"const [{', '.join(phase_vars)}] = await parallel([")
             for agent in agents:
                 label = str(agent.get("label") or "agent")
@@ -772,7 +1062,8 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                     else:
                         options["fallback"] = str(agent.get("fallback") or "text")
                 lines.append(f"  () => agent(`{_template_string(prompt)}`, {_render_options(options)}),")
-                rendered_labels[label] = _js_identifier(label)
+            for position, agent in enumerate(agents):
+                rendered_labels[str(agent.get("label") or "agent")] = phase_vars[position]
             lines.append("])")
             result_names.extend(phase_vars)
             lines.append("")
@@ -780,7 +1071,8 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
         phase_vars: list[str] = []
         for agent in agents:
             label = str(agent.get("label") or "agent")
-            var_name = _js_identifier(label)
+            var_name = _js_identifier(label, index=identifier_counter, used=used_identifiers)
+            identifier_counter += 1
             prompt = str(agent.get("prompt") or "")
             dependencies = [rendered_labels[item] for item in agent.get("dependsOn") or [] if item in rendered_labels]
             rendered_prompt = _template_string(prompt)
@@ -791,6 +1083,8 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 options["role"] = str(agent["role"])
             if agent.get("retryPolicy"):
                 options["retryPolicy"] = agent["retryPolicy"]
+            if agent.get("dependsOn"):
+                options["dependsOn"] = [str(item) for item in agent["dependsOn"]]
             if agent.get("schemaRef"):
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
                 if agent.get("strictSchema"):
@@ -804,9 +1098,13 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
         lines.append("")
     acceptance = plan.get("acceptance") or {}
     acceptance_checks = acceptance.get("checks") if isinstance(acceptance, dict) else []
-    if isinstance(acceptance_checks, list) and any(
-        (check.get("type") if isinstance(check, dict) else check) == "python_unittest"
-        for check in acceptance_checks
+    if (
+        plan_produces_code(plan)
+        and isinstance(acceptance_checks, list)
+        and any(
+            (check.get("type") if isinstance(check, dict) else check) == "python_unittest"
+            for check in acceptance_checks
+        )
     ):
         lines.append("const __acceptanceGate = await runPythonUnittest(args.workspacePath, { pattern: 'test_*.py', phase: 'Verification', gateKey: 'workflow-acceptance' })")
         lines.append("")
@@ -817,10 +1115,95 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _js_identifier(label: str) -> str:
-    parts = re.sub(r"[^0-9A-Za-z_]+", "_", label).strip("_") or "agent"
+# Names the generated script binds at top level (runtime functions, script
+# arguments, and JS keywords). A packet label that sanitizes onto one of these
+# would shadow it -- ``const agent = await agent(...)`` is a TDZ ReferenceError,
+# and ``const const = ...`` is a SyntaxError -- so they are never used as-is.
+_JS_RESERVED_IDENTIFIERS = frozenset(
+    {
+        "agent",
+        "parallel",
+        "phase",
+        "runPythonUnittest",
+        "args",
+        "meta",
+        "JSON",
+        "await",
+        "async",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "function",
+        "if",
+        "implements",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "let",
+        "new",
+        "null",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "static",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "with",
+        "yield",
+    }
+)
+
+
+def _js_identifier(label: str, *, index: int = 0, used: set[str] | None = None) -> str:
+    """Map an agent label to a unique, valid JavaScript identifier.
+
+    Non-ASCII labels (a Chinese review plan, say) all collapse to the empty
+    string under ASCII sanitization. Falling back to a shared constant such as
+    ``agent`` made two such agents emit ``const [agent, agent] = await
+    parallel([...])``, a hard ``SyntaxError: Identifier 'agent' has already
+    been declared`` that took the whole run down. The fallback is therefore
+    positional, and a uniqueness guard covers sanitized near-collisions.
+    """
+
+    parts = re.sub(r"[^0-9A-Za-z_]+", "_", str(label)).strip("_")
+    if not parts:
+        parts = f"agent_{index + 1}"
     if parts[0].isdigit():
         parts = "agent_" + parts
+    if parts in _JS_RESERVED_IDENTIFIERS:
+        parts = f"{parts}_packet"
+    if used is not None:
+        base = parts
+        suffix = 2
+        while parts in used:
+            parts = f"{base}_{suffix}"
+            suffix += 1
+        used.add(parts)
     return parts
 
 

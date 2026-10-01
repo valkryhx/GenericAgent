@@ -513,6 +513,61 @@ return {summary: result.summary}
 
             self.assert_runtime_failed_with_marker(store=store, run=run, marker="boom")
 
+    def test_runtime_marks_test_gate_not_applicable_when_no_tests_and_none_declared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', timeoutMs: 5000})
+return {verificationPassed: true, gateSkipped: gate.skipped === true, gatePassed: gate.gatePassed}
+"""
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_test",
+                    session_id="session_test",
+                    script=script,
+                    status="running",
+                    metadata={"acceptanceContract": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema"], "testsDeclared": False}},
+                )
+            )
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+
+            outcome = runtime.run(run, args={"workspacePath": str(workspace)})
+
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            gate_result = json.loads((Path(loaded.artifact_dir) / "test-gates" / "gate-1.json").read_text(encoding="utf-8"))
+            self.assertTrue(gate_result.get("notApplicable"), gate_result)
+            self.assertEqual("no tests discovered", gate_result.get("notApplicableReason"))
+            self.assertFalse(gate_result.get("gatePassed"))
+            # acceptance only required verification_schema here, so the run still
+            # passes while the skipped unittest gate stays auditable.
+            self.assertEqual("passed", loaded.metadata.get("acceptanceStatus"))
+
+    def test_runtime_fails_when_plan_declared_tests_but_none_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const gate = await runPythonUnittest(args.workspacePath, {pattern: 'test_*.py', timeoutMs: 5000, gateKey: 'workflow-acceptance'})
+return {verificationPassed: true, gatePassed: gate.gatePassed}
+"""
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_test",
+                    session_id="session_test",
+                    script=script,
+                    status="running",
+                    metadata={"acceptanceContract": {"required": True, "failWorkflowOnError": True, "checks": ["python_unittest", "verification_schema"], "testsDeclared": True}},
+                )
+            )
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+
+            with self.assertRaisesRegex(RuntimeError, "test gate failed"):
+                runtime.run(run, args={"workspacePath": str(workspace)})
+
     def test_runtime_required_python_unittest_gate_blocks_success_when_tests_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -1264,6 +1319,63 @@ return result
             self.assertEqual("passed", loaded.metadata["finalAuditStatus"])
             self.assertEqual("accepted", outcome.run.metadata["integrationStatus"])
             self.assertEqual("passed", outcome.run.metadata["finalAuditStatus"])
+
+    def test_runtime_writes_final_audit_only_for_full_contract_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            full_run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_full_audit",
+                    session_id="session_test",
+                    script="return await agent('produce evidence')",
+                    status="running",
+                    metadata={
+                        "evalContract": {
+                            "level": "full",
+                            "outcome": "cross-packet handoff is verified",
+                            "sharedSurfaces": [
+                                {
+                                    "surface": "scout->handoff",
+                                    "producer": "scout",
+                                    "consumers": ["writer"],
+                                    "structured": False,
+                                }
+                            ],
+                            "requiredChecks": ["plan_validation"],
+                            "blockingConditions": ["plan_validation_failed"],
+                        }
+                    },
+                )
+            )
+            inline_run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_inline_no_audit",
+                    session_id="session_test",
+                    script="return await agent('produce evidence')",
+                    status="running",
+                    metadata={"evalContract": {"level": "inline"}},
+                )
+            )
+
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            runtime.run(full_run)
+            runtime.run(inline_run)
+
+            loaded_full = store.load_run(full_run.run_id)
+            self.assertEqual("passed", loaded_full.metadata["finalAuditStatus"])
+            audit_path = Path(loaded_full.artifact_dir) / "final-audit.md"
+            self.assertTrue(audit_path.exists())
+            audit = audit_path.read_text(encoding="utf-8")
+            self.assertIn("| scout->handoff | scout | writer | False |", audit)
+            self.assertIn("finalAuditStatus: passed", audit)
+            final_result = json.loads((Path(loaded_full.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("final-audit.md", final_result["finalAuditRef"])
+            self.assertEqual("full", final_result["evalContract"]["level"])
+
+            loaded_inline = store.load_run(inline_run.run_id)
+            self.assertEqual("passed", loaded_inline.metadata["finalAuditStatus"])
+            self.assertFalse((Path(loaded_inline.artifact_dir) / "final-audit.md").exists())
+            self.assertNotIn("finalAuditRef", loaded_inline.metadata)
 
     def test_runtime_agent_truthy_non_object_options_fail_before_registering_job(self):
         scripts = {

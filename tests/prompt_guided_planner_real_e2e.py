@@ -17,7 +17,7 @@ if str(REPO) not in sys.path:
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import LLMWorkflowPlanner
+from workflow_planner import LLMWorkflowPlanner, plan_declares_tests
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
@@ -170,21 +170,116 @@ def contains_any(values: list[str], needles: list[str]) -> bool:
     return any(needle.lower() in haystack for needle in needles)
 
 
-def run_fake_runtime(root: Path, scenario_name: str, script: str) -> dict:
+def _stub_value_for_schema(schema: dict) -> Any:
+    schema_type = str(schema.get("type") or "object")
+    if schema_type == "boolean":
+        return True
+    if schema_type == "number":
+        return 1
+    if schema_type == "integer":
+        return 1
+    if schema_type == "array":
+        return []
+    if schema_type == "object":
+        return {
+            str(key): _stub_value_for_schema(field if isinstance(field, dict) else {})
+            for key in schema.get("required") or []
+        }
+    return "stub"
+
+
+class SchemaAwareFakeRunner(FakeChildAgentRunner):
+    """Fake child that still satisfies each agent's declared strict schema.
+
+    The real planner emits strict schemas (notably the verification contract),
+    so a mock returning only free text makes the harness fail before it can
+    exercise workflow-level behavior. This stub keeps the harness focused on
+    planning/contract wiring rather than on mock payload shape.
+    """
+
+    def poll(self, job):
+        result = super().poll(job)
+        if result is None or result.status != "succeeded":
+            return result
+        options = job.metadata.get("options") or {}
+        payload = dict(result.payload or {})
+        schema = options.get("schema")
+        if isinstance(schema, dict) and schema:
+            for key in schema.get("required") or []:
+                if key not in payload:
+                    payload[str(key)] = _stub_value_for_schema((schema.get("properties") or {}).get(key) or schema)
+        # Acceptance gates require structured verification evidence. Real child
+        # agents produce it; this scripted runner must too, otherwise the
+        # harness would fail on its own stub rather than on workflow wiring.
+        if str(options.get("role") or "").strip().lower() == "verification":
+            payload.setdefault("checks", [])
+            payload.setdefault("blockingIssues", [])
+            payload["verificationPassed"] = True
+        result.payload = payload
+        return result
+
+
+def run_fake_runtime(root: Path, scenario_name: str, draft) -> dict:
+    # Accepts either a planner draft or a pre-rendered script (the latter keeps
+    # the large-fanout contract test working without a planner).
+    script = draft if isinstance(draft, str) else getattr(draft, "script", "")
     store = WorkflowStore(root)
-    run = store.create_run(WorkflowRun(run_id=f"wf_prompt_planner_{scenario_name}", session_id="prompt_planner_real_e2e", script=script, status="running"))
+    plan = {} if isinstance(draft, str) else (getattr(draft, "plan", {}) or {})
+    eval_contract = plan.get("evalContract") or {}
+    metadata = {
+        "mode": plan.get("mode"),
+        "riskLevel": plan.get("riskLevel"),
+        "evalContract": eval_contract,
+        "orchestration": plan.get("orchestration"),
+        "workflowTaskType": plan.get("taskType"),
+    }
+    acceptance_contract = plan.get("acceptance")
+    if isinstance(acceptance_contract, dict):
+        acceptance_contract = dict(acceptance_contract)
+        acceptance_contract.setdefault("testsDeclared", plan_declares_tests(plan))
+        metadata["acceptanceContract"] = acceptance_contract
+    run = store.create_run(WorkflowRun(
+        run_id=f"wf_prompt_planner_{scenario_name}",
+        session_id="prompt_planner_real_e2e",
+        script=script,
+        status="running",
+        metadata=metadata,
+    ))
+    workspace = Path(root) / f"workspace_{scenario_name}"
+    workspace.mkdir(parents=True, exist_ok=True)
+    # This harness drives the planner with a scripted fake runner, so no child
+    # ever writes files. When the plan declares Python tests, seed the artifact
+    # the plan promised -- otherwise the host gate correctly fails with
+    # NO TESTS RAN, which would measure the fixture rather than the planner.
+    if plan_declares_tests(plan):
+        (workspace / "test_planned_workflow.py").write_text(
+            "import unittest\n"
+            "\n"
+            "\n"
+            "class PlannedWorkflowSmokeTest(unittest.TestCase):\n"
+            "    def test_plan_is_executable(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
     outcome = WorkflowRuntime(
         store=store,
-        runner=FakeChildAgentRunner(),
+        runner=SchemaAwareFakeRunner(),
         scheduler_config=SchedulerConfig(max_concurrent=4, max_total=32),
         timeout_seconds=8.0,
-    ).run(run)
+    ).run(run, args={"workspacePath": str(workspace)})
     loaded = store.load_run(run.run_id)
     return {
         "status": loaded.status,
         "runtimePhases": outcome.phases,
         "jobLabels": [job.metadata.get("label") for job in loaded.jobs],
         "jobStatuses": [job.status for job in loaded.jobs],
+        "permissionProfiles": {
+            str(job.metadata.get("label")): job.metadata.get("permissionProfile") for job in loaded.jobs
+        },
+        "evalLevel": eval_contract.get("level"),
+        "riskLevel": plan.get("riskLevel"),
+        "sharedSurfaceCount": len(eval_contract.get("sharedSurfaces") or []),
+        "finalAuditRef": (loaded.metadata or {}).get("finalAuditRef"),
     }
 
 
@@ -218,7 +313,7 @@ def main() -> int:
                 scenario["task"],
                 context={"constraints": ["不要读取 mykey.py", "不要读取 mykey.json", "不要读取 mcp.json", "不要提交"]},
             )
-            runtime = run_fake_runtime(root, scenario["name"], draft.script) if draft.validation.get("ok") else {}
+            runtime = run_fake_runtime(root, scenario["name"], draft) if draft.validation.get("ok") else {}
             scenario_summary = {
                 "name": scenario["name"],
                 "taskType": draft.classification.get("taskType"),
@@ -235,9 +330,15 @@ def main() -> int:
                 summary["issues"].append(f"{scenario['name']}:unexpected_task_type")
             if not draft.validation.get("ok"):
                 summary["issues"].append(f"{scenario['name']}:validation_not_ok")
-            if not contains_any(scenario_summary["phaseTitles"], scenario["requiredPhasesAny"]):
+            # The planner legitimately emits phase titles in the task's own
+            # language, so a phase-only grep is brittle (a real run produced
+            # Chinese titles with correct English labels). Accept either surface
+            # carrying the expected semantics.
+            phases_ok = contains_any(scenario_summary["phaseTitles"], scenario["requiredPhasesAny"])
+            labels_ok = contains_any(scenario_summary["labels"], scenario["requiredLabelsAny"])
+            if not (phases_ok or labels_ok):
                 summary["issues"].append(f"{scenario['name']}:missing_expected_phase_semantics")
-            if not contains_any(scenario_summary["labels"], scenario["requiredLabelsAny"]):
+            if not labels_ok:
                 summary["issues"].append(f"{scenario['name']}:missing_expected_label_semantics")
             if not scenario_summary["scriptContainsMeta"]:
                 summary["issues"].append(f"{scenario['name']}:script_missing_meta")

@@ -150,6 +150,7 @@ class WorkflowControllerTest(unittest.TestCase):
                     "required": True,
                     "failWorkflowOnError": True,
                     "checks": ["python_unittest", "verification_schema"],
+                    "testsDeclared": True,
                 },
                 run.metadata["acceptanceContract"],
             )

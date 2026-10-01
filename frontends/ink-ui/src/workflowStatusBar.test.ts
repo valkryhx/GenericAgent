@@ -204,6 +204,38 @@ test('workflowStatusBarFromState keeps raw workflow status as fallback', () => {
   assert.equal(bar?.status, 'running')
 })
 
+test('workflowStatusBarFromState surfaces completed run with pending integration audit', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [{
+      runId: 'wf_audit_pending',
+      sessionId: 'session',
+      status: 'succeeded',
+      metadata: {
+        workflowName: 'bounded-recovery',
+        integrationStatus: 'accepted',
+        finalAuditStatus: 'passed',
+      },
+      jobs: [{ jobId: 'agent_1', status: 'succeeded', metadata: { label: 'worker' } }],
+    }],
+  }))
+
+  assert.deepEqual(bar, {
+    runId: 'wf_audit_pending',
+    status: 'succeeded',
+    name: 'bounded-recovery',
+    completedAgents: 1,
+    totalAgents: 1,
+    activeAgent: undefined,
+    lastActivity: undefined,
+    tokenText: undefined,
+    integrationText: 'integration accepted · audit passed',
+  })
+  assert.deepEqual(workflowStatusBarRows(bar!), [
+    'Enter view',
+    '› ✓ bounded-recovery  1/1 agents done · integration accepted · audit passed',
+  ])
+})
+
 test('workflowStatusBarFromState displays partial projection without rewriting raw workflow state', () => {
   const run = { runId: 'wf_partial_status', sessionId: 'session', status: 'succeeded' as const, jobs: [] }
   const state = stateWithWorkflows({

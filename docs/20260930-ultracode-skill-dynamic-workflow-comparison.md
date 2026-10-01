@@ -236,4 +236,78 @@ GA 已补充 schema normalization 和硬门禁，但这些事件说明 planner �
 - planner prompt 和 normalized plan 会把 bounded retry、delegation 上限和 approval gate 作为机器可检查 contract；生成的脚本会携带 retry policy。
 - forward-testing 已覆盖 direct、workflow、delegated、fallback、approval 和 eval-contract 场景。
 
-当前仍未做的后续工作：真实多模型 forward-testing 矩阵、repairRole 专用修复 agent、按 wave 的依赖调度可视化，以及将 integration/final-audit 结果接入 UI 展示。上述项目应继续保持有界、可审计和 fail-closed。
+### P2 续：wave 调度、repairRole 与 UI 接入
+
+- `workflow_scheduler.py` 按 `dependsOn` 计算 wave，上游未完成时不启动下游 job；上游失败时下游置为 `skipped`（`skipReason=dependency_failed`），不会带着断裂依赖继续跑。
+- `agent_started` 事件补充 `label` 与 `wave`，`workflow-progress.json` 可还原每个 job 的批次归属。
+- 重试耗尽且配置了 `repairRole` 时，scheduler 创建有界 repair job（每个原 job 最多 1 个），并写入 `agent_repair_scheduled` 事件；修复本身也受同一 retry/delegation 上限约束。
+- `workflow_planner.render_workflow_plan()` 把 `dependsOn` 写入 agent options，使 wave 门禁在真实生成的脚本中生效。
+- Ink UI 的 `WorkflowProgressPayload`、overview 行和状态栏现在展示 `mode`、`riskLevel`、`approvalGate`、`integrationStatus`、`integrationIssues` 和 `finalAuditStatus`；integration/audit 未通过时不会显示成完成。
+
+### 真实模型 forward-testing（deepseek-v4.1-flash）
+
+新增 `tests/real_workflow_forward_matrix_e2e.py`，用真实 `deepseek-v4.1-flash` 跑 direct、workflow、delegated、fallback、approval、eval-contract 六个场景。开启方式：
+
+```
+GA_RUN_REAL_FORWARD_MATRIX=1 python tests/real_workflow_forward_matrix_e2e.py
+```
+
+最近一次结果：`passed: true`，`durationSeconds ≈ 24.7`。
+
+- direct：`mode=direct`，`riskLevel=low`（router 已能对单阶段/无阶段小任务确定性降级，不依赖模型自觉）；
+- workflow：2 个 phase，`jobWaves=[1, 2]`，`waveOrdered=true`，`integrationStatus=accepted`，`finalAuditStatus=passed`；
+- delegated：`maxAgents=3`、`maxWaves=2`、`approvalRequired=true`，wave 1 两个 sidecar、wave 2 综合；
+- fallback：`plannerMode=fallback_deterministic` 且 `fallbackReason` 已持久化；
+- approval：停在 `awaiting_approval`，`gateReason=explicit_workflow_approval_gate`；
+- eval-contract：coding 任务带 `verification_schema` 与 `python_unittest`，绑定 strict schema 引用。
+
+期间修复的一个真实缺陷：router 中 `requested in WORKFLOW_MODES` 的提前返回会挡住“模型把简单问题声明成 workflow”的降级，导致 deepseek 对“3 加 4 等于几”仍返回 `mode=workflow`。调整为先用 phase 数与风险做确定性降级后，direct 场景通过。
+
+### 真实复杂 workflow E2E（deepseek-v4.1-flash）
+
+用 `tests/real_complex_workflow_mcp_skill_coding_e2e.py` 跑真实链路（真实 planner + 真实 Tavily MCP + 真实 using-superpowers skill + 临时 workspace 编码 + synthesis）：
+
+```
+GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 \
+GA_WORKFLOW_LLM_PROFILE=deepseek-v4.1-flash \
+GA_REAL_API_EXPECTED_MODEL=deepseek-v4.1-flash \
+GA_REAL_API_EXPECTED_NAME=deepseek-v4.1-flash \
+python tests/real_complex_workflow_mcp_skill_coding_e2e.py
+```
+
+首轮真实运行暴露一个可复现缺陷：deepseek 把 `verification` 和依赖它的 `synthesis` 放进同一个 phase，触发 `same_phase_dependency` 硬门禁；planner 的一次自动 repair 没有修好，最终 `validation.ok=false`，`planner_validation_not_ok`。
+
+根因是模型对“verification → synthesis 必须跨 phase”这条拓扑约束命中不稳定，属于典型的“模型偶发输出 + 硬门禁”组合。按本仓库既有做法（保留硬门禁、在 host 侧做确定性归一化，而不是放宽校验或只加长 prompt），新增 `_split_same_phase_dependencies()`：把同 phase 内的依赖按拓扑分层，拆成显式后续 phase（`Part 2`、`Part 3`…），跨 phase 依赖原样保留，环依赖不拆、仍交给 validator 报 `dependency_cycle` 并走 repair/reject。
+
+归一化流水线收敛为单一入口 `_normalize_plan_contract()`：coding acceptance contract → 同相位依赖拆分 → 通用 orchestration contract，首轮请求与 repair 响应走同一路径，保证 repair 结果也被规范化。
+
+修复后真实 E2E 结果：`passed: true`，`plannerCallCount=1`（无 repair），`validation.ok=true`，3 个 job 全部 `succeeded`，真实 MCP 调用与返回、`using-superpowers` 加载、编码文件写入读回均通过，无 tool denial。
+
+### 真实 forward matrix 第二轮：门禁来源与 taskType 解耦
+
+重跑 `tests/real_workflow_forward_matrix_e2e.py` 时，`workflow` 用例失败：
+
+```
+RuntimeError: workflow test gate failed: gate-1: Ran 0 tests in 0.000s
+NO TESTS RAN
+```
+
+根因不是模型连接，也不该通过放宽门禁解决。链路是：
+
+1. `_normalize_workflow_execution_contract()` 的 planner prompt `requiredShape.acceptance` 示例无条件写着 `["verification_schema", "python_unittest"]`，不区分任务类型；
+2. 模型照抄该形状，研究型计划也带上 `python_unittest`；
+3. `render_workflow_plan()` 只看 acceptance 是否含 `python_unittest` 就下发宿主测试门禁；
+4. 研究型工作区没有 `test_*.py`，门禁 `Ran 0 tests`，被 `_gate_passed_for_expectation` 判为不通过 → 整个 run 失败。
+
+修复方向是**让门禁来源跟随计划显式声明的形状，而不是 taskType 字符串**：新增 `_plan_declares_code_work()`，只有当计划真的声明了代码产出（`role` 属于 implementation/tests/repair，或声明了 `writeScope`）时才保留 `python_unittest` 检查并下发宿主测试门禁；纯 research/review/planning 计划剥离该检查。`coding`/`debugging` plan 仍然无条件视为代码工作，strict verification schema 与 `python_unittest` 门禁行为不变。
+
+回归覆盖：
+
+- 非 coding 计划即使被模型塞入 `python_unittest`，renderer 不再下发测试门禁；
+- mixed 计划只要声明了 `implementation` role 或 `writeScope`，门禁仍然保留（防止误删）。
+
+修复后真实结果：`passed: true`，六个场景全绿；`workflow` 场景 4 个 job、`jobWaves=[1,1,2,3]`、`waveOrdered=true`、`integrationStatus=accepted`、`finalAuditStatus=passed`。
+
+这一步只是止血。更彻底的方向（见 AGENTS.md「参考实现：Step-Code 的 ultracode / workflow」）是把 workflow 硬门禁整体从 `taskType` 迁移到计划声明的检查项/schema/toolProfile，taskType 仅作提示——Step-Code 的 workflow 契约里根本没有 taskType 概念，因而不会出现"枚举猜错 → 全套门禁挂错"的失效模式。
+
+当前仍未做的后续工作：真实多模型（非 deepseek）forward-testing 矩阵。上述项目应继续保持有界、可审计和 fail-closed。

@@ -213,6 +213,12 @@ export type WorkflowProgressPayload = {
   runId: string
   sessionId?: string | null
   status: WorkflowRunStatus
+  mode?: string
+  riskLevel?: string
+  approvalGate?: Record<string, unknown>
+  integrationStatus?: string | null
+  integrationIssues?: unknown[]
+  finalAuditStatus?: string | null
   workflowIssues?: unknown[]
   workflowProgress: WorkflowProgressEntry[]
 }

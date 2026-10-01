@@ -32,6 +32,19 @@ class ToolPermissionPolicyTest(unittest.TestCase):
                 decision = policy.evaluate(tool_name, {})
                 self.assertEqual("allow", decision.action)
 
+    def test_verify_profile_denies_mutation_but_allows_execution(self):
+        policy = ToolPermissionPolicy(profile="verify")
+
+        for tool_name in ["file_write", "file_patch"]:
+            with self.subTest(tool_name=tool_name):
+                decision = policy.evaluate(tool_name, {})
+                self.assertEqual("deny", decision.action)
+                self.assertEqual("verify_profile_no_mutation", decision.reason)
+
+        for tool_name in ["code_run", "file_read", "web_scan"]:
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual("allow", policy.evaluate(tool_name, {}).action)
+
     def test_restricted_mcp_allows_only_configured_server_or_tool(self):
         policy = ToolPermissionPolicy(
             profile="restricted_mcp",

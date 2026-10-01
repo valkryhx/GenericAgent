@@ -11,15 +11,19 @@ export type WorkflowStatusBarSummary = {
   activeAgent?: string
   lastActivity?: string
   tokenText?: string
+  integrationText?: string
 }
 
 const liveStatuses = new Set(['running', 'awaiting_approval'])
+const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'killed', 'interrupted', 'partial'])
 export function workflowStatusBarFromState(state: AppState): WorkflowStatusBarSummary | null {
   for (let index = state.workflows.length - 1; index >= 0; index--) {
     const run = state.workflows[index]!
     const commonRecord = state.agents.find(record => record.recordKind === 'workflow_run' && record.runId === run.runId)
     const status = commonRecord?.status ?? run.status
-    if (!liveStatuses.has(status) && status !== 'partial') continue
+    if (liveStatuses.has(status) || status === 'partial') return workflowStatusBarFromRun(run, state, status)
+    if (!terminalStatuses.has(status)) continue
+    if (!workflowIntegrationText(run, state)) continue
     return workflowStatusBarFromRun(run, state, status)
   }
   return null
@@ -31,7 +35,7 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = ru
   const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached').length
   const totalAgents = agents.length
   const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
-  return {
+  const summary: WorkflowStatusBarSummary = {
     runId: run.runId,
     status,
     name: workflowDisplayName(run),
@@ -41,6 +45,20 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = ru
     lastActivity: typeof active?.lastToolName === 'string' && active.lastToolName.trim() ? active.lastToolName.trim() : undefined,
     tokenText: formatTokenUsage(sumTokenUsage(agents)),
   }
+  const integrationText = workflowIntegrationText(run, state)
+  if (integrationText) summary.integrationText = integrationText
+  return summary
+}
+
+function workflowIntegrationText(run: WorkflowRun, state: AppState): string | undefined {
+  const progress = state.workflowDetails[run.runId]?.progress
+  const integration = stringValue(progress?.integrationStatus) || stringValue(run.metadata?.integrationStatus)
+  const audit = stringValue(progress?.finalAuditStatus) || stringValue(run.metadata?.finalAuditStatus)
+  const pieces = [
+    integration ? `integration ${integration}` : null,
+    audit ? `audit ${audit}` : null,
+  ].filter(Boolean)
+  return pieces.length > 0 ? pieces.join(' · ') : undefined
 }
 
 function progressFromJobs(jobs: WorkflowJob[]): WorkflowProgressEntry[] {
@@ -59,7 +77,9 @@ export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
   const pieces = [`${bar.completedAgents}/${bar.totalAgents} agents done`]
   if (bar.activeAgent) pieces.push(bar.lastActivity ? `${bar.activeAgent}: ${bar.lastActivity}` : bar.activeAgent)
   if (bar.tokenText) pieces.push(bar.tokenText)
-  return [bar.status === 'running' ? 'Enter view · x stop' : 'Enter view', `› ◌ ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
+  if (bar.integrationText) pieces.push(bar.integrationText)
+  const icon = bar.status === 'succeeded' ? '✓' : bar.status === 'failed' ? '✗' : '◌'
+  return [bar.status === 'running' ? 'Enter view · x stop' : 'Enter view', `› ${icon} ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
 }
 
 export function workflowStatusBarCommandForKey(

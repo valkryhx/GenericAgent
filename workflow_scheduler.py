@@ -60,6 +60,8 @@ def normalize_retry_policy(policy: dict | None) -> dict:
         "attempts": max(0, attempts),
         "lastError": raw.get("lastError"),
         "retryNotBefore": raw.get("retryNotBefore"),
+        "repairRole": str(raw.get("repairRole") or "").strip()[:64] or None,
+        "repairAttempts": max(0, int(raw.get("repairAttempts") or 0)),
     }
 
 
@@ -121,6 +123,25 @@ def normalize_agent_options(options: dict | None) -> dict:
     if not isinstance(options, dict):
         raise TypeError("agent options must be a plain object")
     return dict(options)
+
+
+def resolve_job_permission_profile(run_profile: str, options: dict | None) -> str:
+    """Pick the effective tool policy for one child agent.
+
+    The plan only *declares* intent; the host still enforces the capability. A
+    packet that only judges another packet's work must not be able to author the
+    artifact it judges, so declared evidence roles get the non-mutating `verify`
+    profile even when the run default is permissive. A run-level read-only
+    profile is already strictly stronger, so it is never loosened.
+    """
+
+    from workflow_permissions import EVIDENCE_ROLES, READ_ONLY, VERIFY
+
+    base = str(run_profile or "").strip() or "inherit-current-permissions"
+    role = str((options or {}).get("role") or "").strip().lower()
+    if role in EVIDENCE_ROLES and base not in {READ_ONLY, VERIFY}:
+        return VERIFY
+    return base
 
 
 def validate_agent_payload_against_schema(payload, schema) -> list[str]:
@@ -220,21 +241,28 @@ class AgentScheduler:
 
     def register_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None) -> WorkflowJob:
         options = normalize_agent_options(options)
-        max_allowed, reason = self._agent_limit()
+        wave, wave_error = self._resolve_wave(options)
+        max_allowed, reason = self._agent_limit(wave=wave)
+        if wave_error:
+            self._append("agent_rejected", payload={"reason": wave_error, "maxWaves": self._max_waves()})
+            raise RuntimeError("workflow agent limit exceeded")
         if len(self.jobs) >= max_allowed:
             self._append("agent_rejected", payload={"reason": reason, "maxTotal": max_allowed})
             raise RuntimeError("workflow agent limit exceeded")
         workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
+        permission_profile = resolve_job_permission_profile(self.run.permission_profile, options)
         metadata = {
             "callIndex": call_index,
             "label": label,
             "options": options,
             "runId": self.run.run_id,
-            "permissionProfile": self.run.permission_profile,
+            "permissionProfile": permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
         }
         metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
+        metadata["wave"] = wave
+        metadata["dependsOn"] = [str(item) for item in (options.get("dependsOn") or []) if str(item)]
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
@@ -253,24 +281,31 @@ class AgentScheduler:
 
     def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None) -> WorkflowJob:
         options = normalize_agent_options(options)
-        max_allowed, reason = self._agent_limit()
+        wave, wave_error = self._resolve_wave(options)
+        max_allowed, reason = self._agent_limit(wave=wave)
+        if wave_error:
+            self._append("agent_rejected", payload={"reason": wave_error, "maxWaves": self._max_waves()})
+            raise RuntimeError("workflow agent limit exceeded")
         if len(self.jobs) >= max_allowed:
             self._append("agent_rejected", payload={"reason": reason, "maxTotal": max_allowed})
             raise RuntimeError("workflow agent limit exceeded")
         workspace_path = self._sync_workspace_metadata()
         call_index = len(self.jobs)
+        permission_profile = resolve_job_permission_profile(self.run.permission_profile, options)
         metadata = {
             "callIndex": call_index,
             "label": label,
             "options": options,
             "runId": self.run.run_id,
-            "permissionProfile": self.run.permission_profile,
+            "permissionProfile": permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
             "result": sanitize(result.payload),
             "cachedFromRunId": source_run_id,
             "cachedFromJobId": source_job_id,
         }
         metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
+        metadata["wave"] = wave
+        metadata["dependsOn"] = [str(item) for item in (options.get("dependsOn") or []) if str(item)]
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
@@ -321,7 +356,32 @@ class AgentScheduler:
             self.store.save_run(self.run)
         return workspace_path
 
-    def _agent_limit(self) -> tuple[int, str]:
+    def _max_waves(self) -> int:
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
+        orchestration = metadata.get("orchestration") if isinstance(metadata.get("orchestration"), dict) else {}
+        try:
+            return max(1, int(orchestration.get("maxWaves") or 10_000))
+        except (TypeError, ValueError):
+            return 10_000
+
+    def _resolve_wave(self, options: dict) -> tuple[int, str | None]:
+        dependencies = [str(item) for item in (options.get("dependsOn") or []) if str(item)]
+        if not dependencies:
+            return 1, None
+        wave = 1
+        for dependency in dependencies:
+            upstream = next(
+                (job for job in self.jobs if job.metadata.get("label") == dependency),
+                None,
+            )
+            if upstream is None:
+                return wave, "unknown_dependency"
+            wave = max(wave, int(upstream.metadata.get("wave") or 1) + 1)
+        if wave > self._max_waves():
+            return wave, "delegation_max_waves_exceeded"
+        return wave, None
+
+    def _agent_limit(self, *, wave: int | None = None) -> tuple[int, str]:
         limit = self.config.max_total
         reason = "max_total_exceeded"
         metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
@@ -418,11 +478,14 @@ class AgentScheduler:
     def _start_queued_jobs(self) -> None:
         if self._stopping:
             return
+        self._skip_blocked_jobs()
         slots = self.config.max_concurrent - self.running_count
         for job in self.jobs:
             if slots <= 0:
                 return
             if job.status != "queued":
+                continue
+            if not self._dependencies_satisfied(job):
                 continue
             retry_policy = job.metadata.get("retryPolicy") or {}
             retry_not_before = float(retry_policy.get("retryNotBefore") or 0)
@@ -434,9 +497,35 @@ class AgentScheduler:
             retry_policy["retryNotBefore"] = None
             job.metadata["retryPolicy"] = retry_policy
             self.runner.start(job)
-            self._append("agent_started", job)
+            self._append("agent_started", job, {"label": job.metadata.get("label"), "wave": job.metadata.get("wave")})
             slots -= 1
         self.store.save_run(self.run)
+
+    def _dependencies_satisfied(self, job: WorkflowJob) -> bool:
+        for dependency in job.metadata.get("dependsOn") or []:
+            upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
+            if upstream is None or upstream.status not in {"succeeded", "cached"}:
+                return False
+        return True
+
+    def _skip_blocked_jobs(self) -> None:
+        for job in self.jobs:
+            if job.status != "queued" or not job.metadata.get("dependsOn"):
+                continue
+            if self._dependencies_satisfied(job):
+                continue
+            if self._has_failed_dependency(job):
+                job.status = "skipped"
+                job.error = "dependency_failed"
+                job.metadata["skipReason"] = "dependency_failed"
+                self._append("agent_skipped", job, {"reason": "dependency_failed", "dependsOn": job.metadata.get("dependsOn")})
+
+    def _has_failed_dependency(self, job: WorkflowJob) -> bool:
+        for dependency in job.metadata.get("dependsOn") or []:
+            upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
+            if upstream is not None and upstream.status in {"failed", "cancelled", "killed", "skipped"}:
+                return True
+        return False
 
     def _update_run_completion_state(self) -> None:
         if self.run.status != "running" or not self.jobs:
@@ -488,6 +577,7 @@ class AgentScheduler:
         if result.tool_summary is not None:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
+        self._record_observed_mutations(job, result)
         self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
 
     def _build_handoff(self, result: AgentResult, *, error: str | None = None) -> dict:
@@ -517,7 +607,7 @@ class AgentScheduler:
         text = " ".join(text_parts)
         retryable = any(pattern and pattern in text for pattern in policy["retryableErrors"])
         if not retryable or policy["attempts"] >= policy["maxAttempts"]:
-            return False
+            return self._schedule_repair(job, error, policy)
         policy["lastError"] = redact_sensitive_text(error)
         policy["retryNotBefore"] = time.time() + (policy["backoffMs"] / 1000.0)
         job.metadata["retryPolicy"] = policy
@@ -535,6 +625,60 @@ class AgentScheduler:
             },
         )
         return True
+
+    def _schedule_repair(self, job: WorkflowJob, error: str, policy: dict) -> bool:
+        repair_role = str(policy.get("repairRole") or "").strip()
+        if not repair_role:
+            return False
+        if int(policy.get("repairAttempts") or 0) >= 1:
+            return False
+        max_allowed, _reason = self._agent_limit(wave=int(job.metadata.get("wave") or 1))
+        if len(self.jobs) >= max_allowed:
+            return False
+        self._sync_workspace_metadata()
+        call_index = len(self.jobs)
+        repair_policy = normalize_retry_policy({"maxAttempts": 1})
+        metadata = {
+            "callIndex": call_index,
+            "label": repair_role,
+            "options": {"phase": job.phase, "role": repair_role, "repairOf": job.job_id},
+            "runId": self.run.run_id,
+            "permissionProfile": self.run.permission_profile,
+            "permissionPolicyVersion": self.run.permission_policy_version,
+            "retryPolicy": repair_policy,
+            "wave": int(job.metadata.get("wave") or 1),
+            "dependsOn": [],
+            "repairRole": repair_role,
+            "repairOf": job.job_id,
+        }
+        workspace_path = self.workspace_path
+        if workspace_path:
+            metadata["workspacePath"] = workspace_path
+        prompt = (
+            f"Repair the failed upstream child {job.job_id}. Failure: {redact_sensitive_text(error)[:1_000]}. "
+            "Make the smallest safe repair and summarise what changed."
+        )
+        repair_job = WorkflowJob(
+            job_id=f"agent_{call_index + 1}",
+            prompt=prompt,
+            status="queued",
+            phase=job.phase,
+            metadata=metadata,
+        )
+        repair_job.metadata["cacheKey"] = self._cache_key(repair_job)
+        policy["repairAttempts"] = int(policy.get("repairAttempts") or 0) + 1
+        job.metadata["retryPolicy"] = policy
+        self.jobs.append(repair_job)
+        self._append(
+            "agent_repair_scheduled",
+            repair_job,
+            {
+                "repairOf": job.job_id,
+                "repairRole": repair_role,
+                "error": redact_sensitive_text(error)[:1_000],
+            },
+        )
+        return False
 
     def _apply_schema_contract(self, job: WorkflowJob, result: AgentResult) -> AgentResult:
         options = job.metadata.get("options") or {}
@@ -639,7 +783,46 @@ class AgentScheduler:
             payload["resultRef"] = job.result_ref
             payload["result"] = self._event_result_summary(result)
             self._append_permission_events_from_result(job, result)
+            self._record_observed_mutations(job, result)
         self._append("agent_failed", job, payload)
+
+    def _record_observed_mutations(self, job: WorkflowJob, result: AgentResult) -> None:
+        """Record write-capability from observed tool calls, not from declarations.
+
+        Real runs showed the model omitting ``role``/``writeScope`` entirely while
+        still writing files, so "did this packet mutate state" cannot be
+        predicted from the plan. It can be observed: when a child actually
+        invokes a mutating tool, that is recorded as a fact on the job and the
+        run. Downstream gates read this instead of guessing.
+        """
+
+        from workflow_permissions import MUTATING_TOOL_NAMES
+
+        allowing = {"allow", "ask"}
+        observed: list[str] = []
+        for event in result.transcript_events:
+            if event.get("type") != "tool_allowed":
+                continue
+            tool_name = str(event.get("toolName") or event.get("tool_name") or "").strip()
+            if tool_name not in MUTATING_TOOL_NAMES:
+                continue
+            decision = event.get("decision") or (event.get("permission") or {}).get("action")
+            if decision and str(decision) not in allowing:
+                continue
+            if tool_name not in observed:
+                observed.append(tool_name)
+        if not observed:
+            return
+        job.metadata["observedMutations"] = observed
+        metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
+        labels = list(metadata.get("observedMutationAgents") or [])
+        if job.job_id not in labels:
+            labels.append(job.job_id)
+        metadata["observedMutationAgents"] = labels
+        metadata["observedMutationTools"] = sorted({*(metadata.get("observedMutationTools") or []), *observed})
+        self.run.metadata = metadata
+        self.store.save_run(self.run)
+        self._append("state_mutation_observed", job, {"toolNames": observed})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
         for event in result.transcript_events:
@@ -673,8 +856,8 @@ class AgentScheduler:
             "callIndex": job.metadata.get("callIndex", 0),
             "promptHash": _stable_hash(job.prompt),
             "optionsHash": _stable_hash(options),
-            "permissionProfile": self.run.permission_profile,
-            "permissionPolicyVersion": self.run.permission_policy_version,
+            "permissionProfile": job.metadata.get("permissionProfile") or self.run.permission_profile,
+            "permissionPolicyVersion": job.metadata.get("permissionPolicyVersion") or self.run.permission_policy_version,
             "toolContextHash": _stable_hash(metadata.get("toolContext")),
             "mcpContextHash": _stable_hash(metadata.get("mcpContext")),
         }

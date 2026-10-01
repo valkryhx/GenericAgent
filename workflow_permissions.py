@@ -7,10 +7,23 @@ from workflow_models import DEFAULT_PERMISSION_PROFILE
 
 INHERIT_CURRENT_PERMISSIONS = DEFAULT_PERMISSION_PROFILE
 READ_ONLY = "read_only"
+VERIFY = "verify"
 RESTRICTED_MCP = "restricted_mcp"
 EXPLICIT_APPROVAL = "explicit_approval"
 
-DENIED_READ_ONLY_STATIC_TOOLS = frozenset({"file_write", "file_patch", "code_run", "web_execute_js"})
+# Roles whose value comes from being unable to author the artifact they judge.
+# A verifier that can write can fabricate the evidence it is supposed to
+# collect, so the host removes that capability instead of relying on the prompt
+# asking it not to. Mirrors Step-Code's read-only `qa` tool profile.
+EVIDENCE_ROLES = frozenset({"verification", "review"})
+
+# Single source of truth for "this tool changes state". The read-only profile
+# denies exactly these, and the runtime uses the same set to record observed
+# mutation evidence (a fact) instead of predicting "is this a coding task"
+# from model-declared roles.
+MUTATING_TOOL_NAMES = frozenset({"file_write", "file_patch"})
+EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
+DENIED_READ_ONLY_STATIC_TOOLS = MUTATING_TOOL_NAMES | EXECUTE_TOOL_NAMES
 ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({"file_read", "web_scan", "no_tool", "ask_user", "load_skill"})
 READ_ONLY_NAME_PREFIXES = ("read", "list", "get", "scan", "search", "show", "status", "inspect", "query", "fetch")
 READ_ONLY_NAME_PARTS = ("_read", "_list", "_get", "_scan", "_search", "_show", "_status", "_query", "_fetch")
@@ -55,6 +68,8 @@ class ToolPermissionPolicy:
             return self._decision("allow", "inherit_current", tool_name)
         if self.profile == READ_ONLY:
             return self._evaluate_read_only(tool_name)
+        if self.profile == VERIFY:
+            return self._evaluate_verify(tool_name)
         if self.profile == RESTRICTED_MCP:
             return self._evaluate_restricted_mcp(tool_name)
         if self.profile == EXPLICIT_APPROVAL:
@@ -72,6 +87,21 @@ class ToolPermissionPolicy:
         if tool_name in ALLOWED_READ_ONLY_STATIC_TOOLS or _is_read_only_name(tool_name):
             return self._decision("allow", "read_only_static_safe", tool_name)
         return self._decision("deny", "read_only_static_unknown", tool_name)
+
+    def _evaluate_verify(self, tool_name: str) -> PermissionDecision:
+        """Read + execute, never mutate.
+
+        Verification and review need to run commands to produce evidence, so
+        they are not plain read-only. They must not be able to edit the code
+        under test, which is the one capability that would let them manufacture
+        their own evidence.
+        """
+
+        if tool_name in MUTATING_TOOL_NAMES:
+            return self._decision("deny", "verify_profile_no_mutation", tool_name)
+        if tool_name in EXECUTE_TOOL_NAMES:
+            return self._decision("allow", "verify_profile_execute_allowed", tool_name)
+        return self._evaluate_read_only(tool_name)
 
     def _evaluate_restricted_mcp(self, tool_name: str) -> PermissionDecision:
         if not is_mcp_tool_name(tool_name):
