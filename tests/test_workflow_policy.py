@@ -34,8 +34,8 @@ class WorkflowPolicyTest(unittest.TestCase):
             {"mode": "delegated", "orchestration": {"maxAgents": 99, "maxWaves": 99, "delegationAllowed": True}}
         )
         self.assertEqual("delegated", policy["mode"])
-        self.assertEqual(5, policy["maxAgents"])
-        self.assertEqual(4, policy["maxWaves"])
+        self.assertEqual(99, policy["maxAgents"])
+        self.assertEqual(64, policy["maxWaves"])
         self.assertTrue(policy["approvalRequired"])
 
     def test_workflow_mode_is_not_capped_by_delegated_sidecar_budget(self):
@@ -57,7 +57,7 @@ class WorkflowPolicyTest(unittest.TestCase):
 
         self.assertEqual("delegated", policy["mode"])
         self.assertEqual(5, policy["maxAgents"])
-        self.assertEqual(4, policy["maxWaves"])
+        self.assertEqual(5, policy["maxWaves"])
 
     def test_plan_required_waves_counts_the_longest_dependency_chain(self):
         self.assertEqual(5, plan_required_waves(deep_tdd_plan()))

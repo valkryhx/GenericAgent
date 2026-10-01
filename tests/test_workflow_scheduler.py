@@ -627,6 +627,28 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("skipped", loaded.jobs[1].status)
         self.assertEqual("dependency_failed", loaded.jobs[1].metadata.get("skipReason"))
 
+    def test_wave_scheduler_skips_dependents_when_upstream_is_stale(self):
+        runner = LabelAwareRunner()
+        scheduler, store, run = self.make_scheduler(max_concurrent=4, runner=runner)
+        upstream = scheduler.register_agent(prompt="collect", label="collect", options={"phase": "Collect"})
+        dependent = scheduler.register_agent(
+            prompt="synthesize",
+            label="synthesize",
+            options={"phase": "Synthesis", "dependsOn": ["collect"]},
+        )
+        upstream.status = "stale"
+
+        scheduler.tick()
+
+        self.assertEqual("skipped", dependent.status)
+        self.assertEqual("dependency_failed", dependent.metadata.get("skipReason"))
+        started_labels = [
+            event.payload.get("label")
+            for event in store.replay_events(run.run_id)
+            if event.event_type == "agent_started"
+        ]
+        self.assertNotIn("synthesize", started_labels)
+
     def test_wave_limit_rejects_job_that_exceeds_declared_max_waves(self):
         scheduler, store, _run = self.make_scheduler(
             max_total=10,
@@ -680,6 +702,7 @@ class WorkflowSchedulerTest(unittest.TestCase):
             ["agent_registered", "agent_registered", "agent_started", "agent_started", "agent_failed", "agent_completed"],
             self.event_types(store),
         )
+        self.assertEqual("partial", scheduler.run.metadata.get("executionOutcome"))
 
     def test_fail_fast_failure_policy_cancels_queued_and_running_jobs_and_fails_run(self):
         runner = FakeChildAgentRunner(fail_job_ids={"agent_1"}, delay_ticks=1)

@@ -71,6 +71,13 @@ def project_workflow_execution_outcome(
         return "failed"
     if raw_status == "failed":
         return "failed"
+    if raw_status == "running" and summary.get("running", 0) == 0 and summary.get("total", 0):
+        success_like = summary.get("succeeded", 0) + summary.get("cached", 0)
+        failure_like = summary.get("failed", 0) + summary.get("cancelled", 0) + summary.get("killed", 0) + summary.get("stale", 0) + summary.get("skipped", 0)
+        if failure_like:
+            return "partial" if success_like else "failed"
+        if success_like == summary.get("total", 0):
+            return "succeeded"
     if raw_status in {"succeeded", "completed"}:
         success_like = summary["succeeded"] + summary["cached"]
         return "succeeded" if success_like == summary["total"] else "partial"

@@ -23,6 +23,18 @@ HARD_MAX_WORKFLOW_AGENTS = 1000
 HARD_MAX_WORKFLOW_WAVES = 64
 
 
+class WorkflowCapacityError(ValueError):
+    def __init__(self, *, requested, configured, resource, effective):
+        self.requested = int(requested)
+        self.configured = configured
+        self.resource = resource
+        self.effective = int(effective)
+        super().__init__(
+            f"requested {self.requested} agents exceeds workflow capacity "
+            f"(configured={self.configured}, resource={self.resource}, effective={self.effective})"
+        )
+
+
 def plan_required_waves(plan: dict[str, Any] | None) -> int:
     """Longest dependency chain in the plan, counted in waves.
 
@@ -87,7 +99,7 @@ def route_workflow_mode(
     return "workflow"
 
 
-def normalize_delegation_policy(plan: dict[str, Any] | None) -> dict[str, Any]:
+def normalize_delegation_policy(plan: dict[str, Any] | None, *, capacity: int | None = None) -> dict[str, Any]:
     source = plan if isinstance(plan, dict) else {}
     orchestration = source.get("orchestration") if isinstance(source.get("orchestration"), dict) else {}
     phase_count = len(source.get("phases") or [])
@@ -111,12 +123,25 @@ def normalize_delegation_policy(plan: dict[str, Any] | None) -> dict[str, Any]:
     # The host never sizes the budget below what the plan actually contains.
     raw_agents = max(declared_agents, agent_count)
     raw_waves = max(declared_waves, phase_count, plan_required_waves(source))
-    if mode == "delegated":
-        max_agents = max(1, min(MAX_DELEGATED_AGENTS, raw_agents))
-        max_waves = max(1, min(MAX_DELEGATED_WAVES, raw_waves))
-    else:
-        max_agents = max(1, min(HARD_MAX_WORKFLOW_AGENTS, raw_agents))
-        max_waves = max(1, min(HARD_MAX_WORKFLOW_WAVES, raw_waves))
+    configured_capacity = capacity
+    resource_capacity = HARD_MAX_WORKFLOW_AGENTS
+    if configured_capacity is not None:
+        try:
+            resource_capacity = int(configured_capacity)
+        except (TypeError, ValueError):
+            raise ValueError("workflow capacity must be an integer")
+        if resource_capacity < 1:
+            raise ValueError("workflow capacity must be at least 1")
+    effective_capacity = resource_capacity
+    if raw_agents > effective_capacity:
+        raise WorkflowCapacityError(
+            requested=raw_agents,
+            configured=configured_capacity,
+            resource=resource_capacity,
+            effective=effective_capacity,
+        )
+    max_agents = max(1, raw_agents)
+    max_waves = max(1, min(HARD_MAX_WORKFLOW_WAVES, raw_waves))
     delegation_allowed = bool(orchestration.get("delegationAllowed", mode == "delegated"))
     approval_required = bool(orchestration.get("approvalRequired", False)) or mode == "delegated"
     failure_policy = str(orchestration.get("failurePolicy") or "continue")
@@ -129,6 +154,12 @@ def normalize_delegation_policy(plan: dict[str, Any] | None) -> dict[str, Any]:
         "delegationAllowed": delegation_allowed,
         "approvalRequired": approval_required,
         "failurePolicy": failure_policy,
+        "capacityDecision": {
+            "requestedMaxAgents": raw_agents,
+            "configuredMaxAgents": configured_capacity,
+            "resourceMaxAgents": resource_capacity,
+            "effectiveMaxAgents": effective_capacity,
+        },
     }
 
 

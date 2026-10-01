@@ -523,7 +523,7 @@ class AgentScheduler:
     def _has_failed_dependency(self, job: WorkflowJob) -> bool:
         for dependency in job.metadata.get("dependsOn") or []:
             upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
-            if upstream is not None and upstream.status in {"failed", "cancelled", "killed", "skipped"}:
+            if upstream is not None and upstream.status in {"failed", "cancelled", "killed", "skipped", "stale"}:
                 return True
         return False
 
