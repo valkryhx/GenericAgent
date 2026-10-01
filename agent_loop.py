@@ -1,4 +1,4 @@
-import json, re, os
+import json, re, os, queue, threading
 from dataclasses import dataclass
 from typing import Any, Optional
 @dataclass
@@ -39,6 +39,149 @@ def get_pretty_json(data):
         data = data.copy(); data["script"] = data["script"].replace("; ", ";\n  ")
     return json.dumps(data, indent=2, ensure_ascii=False).replace('\\n', '\n')
 
+# Tools with no shared handler state and no process-global side effects can
+# overlap. Everything else keeps the original strictly-ordered execution:
+# browser control, code_run (it can chdir the process), writes, subagent
+# control, and ask_user all depend on ordering or on exclusive access.
+_PARALLEL_SAFE_TOOLS = frozenset({"file_read"})
+
+
+def _tool_execution_mode(tool_name):
+    """Return "parallel" for tools that are safe to run concurrently."""
+    name = str(tool_name or "")
+    if name.startswith("mcp__"):
+        return "parallel"
+    return "parallel" if name in _PARALLEL_SAFE_TOOLS else "sequential"
+
+
+def _batch_tool_calls(tool_calls):
+    """Group consecutive tool calls that share an execution mode."""
+    batches = []
+    for index, tc in enumerate(tool_calls):
+        mode = _tool_execution_mode(tc.get("tool_name"))
+        if batches and batches[-1][0] == mode:
+            batches[-1][1].append((index, tc))
+        else:
+            batches.append((mode, [(index, tc)]))
+    return batches
+
+
+def _tool_header(tool_name, args, verbose):
+    if tool_name == "no_tool":
+        return None
+    if verbose:
+        return f"🔨 Tool: `{tool_name}`  📥 args:\n````text\n{get_pretty_json(args)}\n````\n"
+    return f"🔨 {tool_name}({_compact_tool_args(tool_name, args)})\n\n\n"
+
+
+def _dispatch_tool(handler, response, tool_name, args, index, tool_num):
+    """Drive one dispatch generator and return (yielded_texts, outcome)."""
+    gen = handler.dispatch(tool_name, args, response, index=index, tool_num=tool_num)
+    if not hasattr(gen, "__next__"):
+        return [], gen
+    texts = []
+    try:
+        while True:
+            chunk = next(gen)
+            if chunk:
+                texts.append(chunk)
+    except StopIteration as e:
+        return texts, e.value
+
+
+def _run_single_tool(handler, response, tool_call, index, tool_num, verbose):
+    """Run one tool call, streaming its output exactly as the old loop did.
+
+    Verbose mode streams each chunk to the caller. Non-verbose mode discards
+    the intermediate chunks and returns only the outcome, which is what the
+    original ``exhaust(proxy())`` path did.
+    """
+    name = tool_call.get("tool_name")
+    args = dict(tool_call.get("args") or {})
+    header = _tool_header(name, args, verbose)
+    if header:
+        yield header
+    gen = handler.dispatch(name, args, response, index=index, tool_num=tool_num)
+    if not hasattr(gen, "__next__"):
+        return gen
+    if not verbose:
+        return exhaust(gen)
+    try:
+        first = next(gen)
+    except StopIteration as e:
+        return e.value
+    # The fence opens only once the generator has produced something, exactly
+    # as in the original loop.
+    yield "`````\n"
+    yield first
+    outcome = None
+    while True:
+        try:
+            yield next(gen)
+        except StopIteration as e:
+            outcome = e.value
+            break
+    yield "`````\n"
+    return outcome
+
+def _run_parallel_tools(handler, response, batch, tool_num, verbose):
+    """Run a batch of independent tool calls concurrently.
+
+    Yields streamed tool output as it arrives. Returns one
+    ``(index, tool_call, outcome)`` tuple per tool, in the original order, so
+    the caller can use ``yield from`` and still get the results. Threads only
+    ever run calls whose mode is "parallel", so no handler state is touched
+    from two threads at once.
+    """
+    sink = queue.Queue()
+    close = "`````\n"
+    for index, tool_call in batch:
+        header = _tool_header(tool_call.get("tool_name"), tool_call.get("args", {}), verbose)
+        if header:
+            yield header
+        if verbose:
+            yield close
+
+    def worker(index, tool_call):
+        name = tool_call.get("tool_name")
+        args = dict(tool_call.get("args") or {})
+        try:
+            texts, outcome = _dispatch_tool(handler, response, name, args, index, tool_num)
+            for chunk in texts:
+                sink.put(("text", index, chunk))
+            sink.put(("outcome", index, outcome))
+        except BaseException as e:  # re-raised on the agent thread below
+            sink.put(("error", index, e))
+
+    threads = []
+    for index, tool_call in batch:
+        thread = threading.Thread(target=worker, args=(index, tool_call), name=f"ga-tool-{index}", daemon=True)
+        thread.start()
+        threads.append(thread)
+
+    pending = {index for index, _ in batch}
+    outcomes = {}; failures = {}
+    while pending:
+        kind, index, payload = sink.get()
+        if kind == "text":
+            if verbose:
+                yield payload
+        elif kind == "outcome":
+            outcomes[index] = payload
+            if verbose:
+                yield close
+            pending.discard(index)
+        else:
+            failures[index] = payload
+            pending.discard(index)
+    for thread in threads:
+        thread.join(timeout=1.0)
+    for index in sorted(failures):
+        raise failures[index]
+    # Returned (not yielded) so callers can use ``yield from`` and still receive
+    # the outcome tuples; the strings above stream straight through.
+    return [(index, tool_call, outcomes.get(index)) for index, tool_call in batch]
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=40, verbose=True, initial_user_content=None):
     messages = [
         {"role": "system", "content": system_prompt},
@@ -65,31 +208,34 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                           for tc in response.tool_calls]
        
         tool_results = []; next_prompts = set(); exit_reason = {}
-        for ii, tc in enumerate(tool_calls):
-            tool_name, args, tid = tc['tool_name'], tc['args'], tc.get('id', '')
-            if tool_name == 'no_tool': pass
-            else: 
-                if verbose: yield f"🛠️ Tool: `{tool_name}`  📥 args:\n````text\n{get_pretty_json(args)}\n````\n"
-                else: yield f"🛠️ {tool_name}({_compact_tool_args(tool_name, args)})\n\n\n"
-            handler.current_turn = turn
-            gen = handler.dispatch(tool_name, args, response, index=ii, tool_num=len(tool_calls))
-            try:
-                v = next(gen)
-                def proxy(): yield v; return (yield from gen)
-                if verbose: yield '`````\n'
-                outcome = (yield from proxy()) if verbose else exhaust(proxy())
-                if verbose: yield '`````\n'
-            except StopIteration as e: outcome = e.value
-            
-            if outcome.should_exit: 
-                exit_reason = {'result': 'EXITED', 'data': outcome.data}; break
-            if not outcome.next_prompt: 
-                exit_reason = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break
-            if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''
-            if outcome.data is not None and tool_name != 'no_tool': 
-                datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if type(outcome.data) in [dict, list] else str(outcome.data) 
-                tool_results.append({'tool_use_id': tid, 'content': datastr})
-            next_prompts.add(outcome.next_prompt)
+        handler.current_turn = turn
+        tool_num = len(tool_calls)
+        for mode, batch in _batch_tool_calls(tool_calls):
+            batch_outcomes = []
+            if mode == 'parallel' and len(batch) > 1:
+                # Independent calls (MCP tools, reads) overlap instead of
+                # paying each other's latency one after another.
+                for ii, tc, outcome in (yield from _run_parallel_tools(handler, response, batch, tool_num, verbose)):
+                    batch_outcomes.append((ii, tc, outcome))
+            else:
+                for ii, tc in batch:
+                    outcome = yield from _run_single_tool(handler, response, tc, ii, tool_num, verbose)
+                    batch_outcomes.append((ii, tc, outcome))
+            for ii, tc, outcome in batch_outcomes:
+                tool_name, tid = tc.get('tool_name'), tc.get('id', '')
+                if outcome is None:
+                    continue
+                if outcome.should_exit:
+                    exit_reason = {'result': 'EXITED', 'data': outcome.data}; break
+                if not outcome.next_prompt:
+                    exit_reason = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break
+                if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''
+                if outcome.data is not None and tool_name != 'no_tool':
+                    datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if type(outcome.data) in [dict, list] else str(outcome.data)
+                    tool_results.append({'tool_use_id': tid, 'content': datastr})
+                next_prompts.add(outcome.next_prompt)
+            if exit_reason:
+                break
         if len(next_prompts) == 0 or exit_reason:
             if len(handler._done_hooks) == 0 or exit_reason.get('result', '') == 'EXITED': break
             next_prompts.add(handler._done_hooks.pop(0))

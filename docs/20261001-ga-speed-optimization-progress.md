@@ -9,7 +9,7 @@
 | # | 项目 | 状态 | 备注 |
 |---|---|---|---|
 | 1 | MCP 发现移出提问关键路径 + 缓存策略修正 | 已完成 | 提问路径 ~0ms，冷启动发现转入后台 |
-| 2 | 同轮工具并行执行（对齐 Pi 的 `executeToolCallsParallel`） | 未开始 | |
+| 2 | 同轮工具并行执行（对齐 Pi 的 `executeToolCallsParallel`） | 已完成 | MCP 与 file_read 并行，其余保持串行 |
 | 3 | prompt cache 预热与 miss 统计 | 未开始 | |
 | 4 | HTTP 层自适应超时 | 未开始 | 仅当 GA 使用多线路由时才需要 |
 
@@ -84,7 +84,37 @@ turn at t=10.0s ->  0.000s, 16 tools
 
 ## 优化项 2：同轮工具并行执行
 
-待开始。
+### 基线问题
+
+`agent_loop.py` 原先把一轮里的多个 tool_call 严格逐个 `yield from`：同一轮发出 3 个 MCP 搜索就要串行付 3 次网络往返。Pi 的 `agent-loop.ts:508-522` 默认走 `executeToolCallsParallel()`，只有工具显式标记 `executionMode === "sequential"` 才串行。
+
+### 改动内容
+
+- `agent_loop.py`
+  - 新增 `_tool_execution_mode()` / `_batch_tool_calls()`：把连续的同模式 tool_call 分组成批。
+  - 并行白名单只有两类：所有 `mcp__*` 工具，以及 `file_read`。这两类没有共享 handler 状态、不写全局副作用。
+  - 显式保持串行的：`code_run`（会 `os.chdir` 进程）、`file_write` / `file_patch`、浏览器控制、subagent 控制、`ask_user`、`update_working_checkpoint`。它们依赖执行顺序或独占访问，混进线程会改变语义。
+  - 新增 `_run_single_tool()`：逐 chunk 流式输出，与旧循环的围栏语义、非 verbose 只取 outcome 的行为一致。
+  - 新增 `_run_parallel_tools()`：线程 + queue 收集输出，边到边打印，最终**按原始顺序**返回 `(index, tool_call, outcome)`，保证 tool_results 与模型给出的顺序对齐。
+  - 单元素并行批不会起线程，直接走串行路径。
+
+### 验证记录
+
+- 新增 `tests/test_agent_loop_parallel_tools.py`，10 个用例：
+  - 模式判定：MCP / `file_read` 为并行；`code_run`、`file_write`、`file_patch`、`web_execute_js`、`ask_user`、`spawn_agent`、`close_agent`、`update_working_checkpoint`、`no_tool` 为串行。
+  - 分批：`[mcp, mcp, code_run, file_read, mcp]` → `[(parallel,[0,1]),(sequential,[2]),(parallel,[3,4])]`。
+  - 两个各 0.4s 的并行调用整体 < 0.75s（证明真的重叠）。
+  - 慢调用排在前面时，结果顺序仍按模型给的顺序（`slow` 先于 `fast`）。
+  - 串行工具保持调用顺序；单元素并行批不起线程；verbose 模式保留流式输出与围栏；工具抛异常会传播出来。
+- `python -m unittest discover -s tests`：1037 passed, 3 skipped（改动前 1027 + 新增 10）。
+
+### 实测收益
+
+两个各 0.4s 的 MCP 调用：串行 ≈0.8s → 并行 ≈0.4s。真实场景里一轮并发几个 MCP 搜索/读取时，收益按并发数线性放大。
+
+### 状态
+
+已完成并提交。
 
 ## 优化项 3：prompt cache 预热与 miss 统计
 
