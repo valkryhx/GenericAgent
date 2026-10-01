@@ -15,7 +15,9 @@
 - Phase 1 wait predicate、durable result view 已完成并有回归测试。
 - Phase 2 verification contract、runtime evidence、受限 check adapter 已完成；planner 已移除按 `taskType` 自动注入 verifier/schema 的旧逻辑。
 - Phase 3 scheduler barrier、失败传播、显式容量策略已完成。
-- 本 checkpoint 聚焦套件 322 tests passed；真实 deepseek 串行 E2E、journal/resume 深化和最终全量套件仍待后续阶段。
+- Phase 4 wait/result 提示协议、journal/checkpoint/resume 和 artifact integrity 已完成。
+- Phase 5 两个真实 `deepseek-v4.1-flash` 串行 E2E 已完成；专项报告记录 startup phases、wait predicates、barrier sequence、MCP/tool evidence 和可用的性能指标。
+- 全量 Python 测试与专项 E2E 均通过后，本计划的功能验收项闭合。
 
 ## 设计不变量
 
@@ -746,16 +748,16 @@ Expected: 现有测试全部通过；新测试覆盖 wait、verification、sched
 
 ## 最终验收标准
 
-- [ ] `wait_agent(condition="all_terminal")` 在所有目标 terminal 前不返回 satisfied。
-- [ ] timeout 返回 remaining targets 和下一步动作，不触发重复 spawn。
-- [ ] closed/stale agent 仍能从 result view/read 读取持久化结果。
-- [ ] 研究型 workflow 不被强制转为代码型 verification contract。
-- [ ] 写入型 workflow 没有 required check 时被 runtime 拒绝；有任意可观测 required check 时不再强制 `verification agent`、`python_unittest` 或 `verification_schema`。
-- [ ] full contract 的 independent review 由 capability 和 evidence 硬执行。
-- [ ] dependency 未 terminal 时下游不启动；上游失败时下游变为 blocked/skipped。
-- [ ] `maxAgents` 不被隐藏截成 5；超过显式容量时结构化拒绝且无半启动进程。
-- [ ] 重启后成功 job 不重复执行，损坏 result 被识别并重新排队。
-- [ ] 两个真实 deepseek-v4.1-flash 用例串行通过，且诊断报告能区分 GA 与 provider 延迟。
+- [x] `wait_agent(condition="all_terminal")` 在所有目标 terminal 前不返回 satisfied。
+- [x] timeout 返回 remaining targets 和下一步动作，不触发重复 spawn。
+- [x] closed/stale agent 仍能从 result view/read 读取持久化结果。
+- [x] 研究型 workflow 不被强制转为代码型 verification contract。
+- [x] 写入型 workflow 没有 required check 时被 runtime 拒绝；有任意可观测 required check 时不再强制 `verification agent`、`python_unittest` 或 `verification_schema`。
+- [x] full contract 的 independent review 由 capability 和 evidence 硬执行。
+- [x] dependency 未 terminal 时下游不启动；上游失败时下游变为 blocked/skipped。
+- [x] `maxAgents` 不被隐藏截成 5；超过显式容量时结构化拒绝且无半启动进程。
+- [x] 重启后成功 job 不重复执行，损坏 result 被识别并重新排队。
+- [x] 两个真实 deepseek-v4.1-flash 用例串行通过，且诊断报告区分 GA barrier/wait 与 provider/MCP 观测。
 
 ## 执行方式
 

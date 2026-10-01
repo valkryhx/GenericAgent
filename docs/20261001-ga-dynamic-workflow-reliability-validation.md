@@ -72,3 +72,33 @@ GA_RUN_REAL_API_E2E=1 GA_RUN_REAL_MCP_E2E=1 GA_WORKFLOW_LLM_PROFILE=deepseek-v4.
 本次复测确认第二次 planner 响应补齐契约后可继续使用 prompt-guided plan，避免把真实成功的 MCP/Skill/文件工作误报为 deterministic fallback 计划缺失。
 
 MCP 预热 discovery 同时显示 `fetch` 与 `context7` 的远程服务可能出现 partial discovery timeout；Tavily 目标工具仍成功发现并执行。该类外部 MCP 瞬态错误应保持有界重试和按工具报告，不应影响已经可用的目标工具。
+
+## 2026-10-01 Phase 5 专项 E2E
+
+### 真实 subagent terminal wait
+
+入口：`tests/real_subagent_wait_terminal_e2e.py`。
+
+- 模型：`deepseek-v4.1-flash`。
+- 执行：严格串行，先 child A，再 child B。
+- 耗时：42.735 秒。
+- `waitReturnCount=3`，谓词序列为 `all_terminal -> turn_terminal -> all_terminal`。
+- spawn 后立即用 `all_terminal` 探测，返回 `satisfied=false` 且保留 `remainingTargets`，没有把 `agent_started/turn_started` 当作完成。
+- 最终 `all_terminal` 返回两个持久化 `resultRefs`，`recommendedNextAction=read_agent_result`。
+- 两个 child 的 `events.jsonl` 均包含 `turn_started` 和 `turn_completed`，startup.jsonl 保留了 `process_entry` 到 `turn_started_complete` 的阶段耗时。
+- `duplicateSpawnCount=0`。
+
+### 真实 workflow barrier + MCP + host evidence
+
+入口：`tests/real_workflow_wait_barrier_e2e.py`。
+
+- 模型：`deepseek-v4.1-flash`。
+- MCP：真实 `mcp__tavily__tavily_search`，本次真实调用被记录。
+- 耗时：63.307 秒。
+- 两个 job 均 `succeeded`；journal sequence 显示上游 `agent_completed`（sequence 12）早于下游 `agent_started`（sequence 15）。
+- 两个临时 workspace artifact 和受限 `python -m compileall` 检查均通过。
+- host 生成 `workflow-summary.md`，verification evidence 为 `analysis-artifact=passed`、`suggestions-artifact=passed`、`workspace-compile=passed`。
+- `waitReturnCount=1`，`waitPredicates=[workflow_terminal]`，`duplicateSpawnCount=0`。
+- 当前 child transcript 未提供可可靠解析的 MCP call/result 时间戳，因此 `mcpDurationMs` 明确记录为 `null`，不伪造耗时；MCP 是否调用由 tool call/result 证据判定。
+
+这两项测试补齐了设计文档中原先缺失的真实 terminal wait、workflow barrier、result ref、verification evidence、MCP 和分阶段诊断入口。

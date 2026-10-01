@@ -867,3 +867,13 @@ GA 的正确优化方向不是简单提高 polling 频率或把默认 timeout �
 2026-10-01 的真实 `deepseek-v4.1-flash` 复杂 workflow 证明：child runtime、MCP、skill、文件读写和 synthesis 均可成功，但模型偶尔会生成不完整的 verification schema，或使用计划中真实存在的动态 agent label 作为 check owner。
 
 这类错误属于“模型计划契约错误”，不是 provider 不可用，也不应触发 deterministic fallback。GA 现在将 normalization exception 投影成 validator issue，复用有界 repair loop；owner 则由固定 host capability 与受限动态 label 两层规则共同校验。这个分层比继续扩大固定枚举更稳健，也与 Step-Code/ultracode 的“显式计划 + runtime 硬校验”方向一致。
+
+
+## 15. Phase 5 真实串行验收
+
+新增两个显式 opt-in 的真实 DeepSeek E2E：
+
+- `real_subagent_wait_terminal_e2e.py` 证明 terminal predicate 不会被 `agent_started/turn_started` 提前满足，并验证两个串行 child 的 result refs。
+- `real_workflow_wait_barrier_e2e.py` 证明 journal 中上游 completion sequence 先于下游 start sequence，并验证 MCP、临时文件、host verification evidence 和 summary artifact。
+
+两个用例必须串行执行；报告保留 startup phases、wait predicates、duplicate spawn、workflow total latency 和可用的 MCP timing 字段。无法从 provider transcript 得出的指标记录为 `null`，不以猜测填充。
