@@ -514,7 +514,7 @@ class NativeGPTChildAgentRunner:
             f"permissionProfile: {permission_profile}",
             f"permissionPolicyVersion: {permission_policy_version}",
             f"workspacePath: {self._child_cwd(job)}",
-            "workspacePolicy: cwd-rooted-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
+            "workspacePolicy: project-temp-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
         ]
         if dependency_handoff:
             lines.extend([

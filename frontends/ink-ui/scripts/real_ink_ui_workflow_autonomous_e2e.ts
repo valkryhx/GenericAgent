@@ -157,9 +157,19 @@ async function main(): Promise<number> {
       && event.tools.some(tool => tool.function?.name === EXPECTED_MCP_TOOL)
     )), 180_000)
 
+    // Two legitimate activation routes reach the same planner:
+    //   * an explicit `/workflow <task>` line becomes the `workflow_plan` bridge command;
+    //   * plain task text becomes `submit`, and the host's activation resolver
+    //     decides from the task signals (search + artifact + synthesis, ...).
+    // The harness must accept either; asserting only on `submit` made an
+    // explicit `/workflow` run look like a hang.
     const submitBefore = commands.filter(command => command.type === 'submit').length
+    const planBefore = commands.filter(command => command.type === 'workflow_plan').length
     await typeInput(stdin, TASK)
-    await waitFor('semantic submit command', () => commands.filter(command => command.type === 'submit').length > submitBefore, 20_000)
+    await waitFor('workflow activation command', () => (
+      commands.filter(command => command.type === 'submit').length > submitBefore
+      || commands.filter(command => command.type === 'workflow_plan').length > planBefore
+    ), 20_000)
     await waitFor('autonomous workflow started or planner failed', () => (
       state.workflows.some(run => run.status === 'running' || run.status === 'succeeded' || run.status === 'failed')
       || events.some(event => event.type === 'error' && event.code.startsWith('workflow_plan'))
@@ -265,7 +275,7 @@ async function main(): Promise<number> {
     assert.equal(path.win32.isAbsolute(artifact), false, 'artifact contract must not use a Windows absolute path')
     const resolvedArtifact = path.resolve(resolvedWorkspace, artifact)
     assert.ok(resolvedArtifact.startsWith(`${resolvedWorkspace}${path.sep}`), 'artifact path escaped workspace')
-    assert.equal(String(run?.metadata?.workspacePolicy || ''), 'cwd-rooted-workspace-write-v1', 'workspace policy metadata missing')
+    assert.equal(String(run?.metadata?.workspacePolicy || ''), 'project-temp-workspace-write-v1', 'workspace policy metadata missing')
     let artifactBytes: number
     if (/\.docx$/i.test(artifact)) {
       const docx = await readFile(resolvedArtifact)

@@ -10,8 +10,28 @@ class WorkspacePathError(ValueError):
     """Raised when a path cannot be safely contained by a workspace."""
 
 
+def default_workspace_root() -> Path:
+    """The directory workflow artifacts are rooted at.
+
+    Product decision (2026-10-03): artifacts must not land next to GA's own
+    source. ``os.getcwd()`` did exactly that for the normal ``ga`` launch, which
+    starts in the repository root, so a finished report showed up beside
+    ``agentmain.py``. The default root is the repository ``temp/`` directory --
+    already the project's scratch-output location and already gitignored -- and
+    children may create subdirectories under it (or write a file directly in
+    it). ``GA_WORKFLOW_WORKSPACE_ROOT`` overrides the location for tests and
+    embedding; an explicitly supplied workspace still wins over both.
+    """
+
+    override = os.environ.get("GA_WORKFLOW_WORKSPACE_ROOT")
+    if override and str(override).strip():
+        return Path(str(override).strip()).expanduser()
+    project_dir = Path(__file__).resolve().parent
+    return project_dir / "temp"
+
+
 def resolve_workspace_root(raw: str | os.PathLike[str] | None = None) -> Path:
-    candidate = Path(raw if raw is not None else os.getcwd()).expanduser()
+    candidate = Path(raw).expanduser() if raw is not None else default_workspace_root()
     try:
         root = candidate.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -86,4 +106,4 @@ def resolve_workspace_child(raw: str | os.PathLike[str], root: Path) -> Path:
 
 def workspace_metadata(root: Path) -> dict[str, str]:
     workspace = resolve_workspace_root(root)
-    return {"workspacePath": str(workspace), "workspacePolicy": "cwd-rooted-workspace-write-v1"}
+    return {"workspacePath": str(workspace), "workspacePolicy": "project-temp-workspace-write-v1"}

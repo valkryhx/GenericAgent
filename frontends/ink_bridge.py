@@ -23,7 +23,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from sensitive_redaction import sanitize, redact_sensitive_text
-from workflow_workspace import resolve_workspace_root, workspace_metadata
+from workflow_workspace import default_workspace_root, resolve_workspace_root, workspace_metadata
 
 
 def _configure_protocol_stdio() -> None:
@@ -187,7 +187,11 @@ class GenericAgentBridge:
         agent_control: Any | None = None,
     ) -> None:
         self.agent_factory = agent_factory
-        self.workspace_root = resolve_workspace_root(os.getcwd())
+        # Artifacts must not land in GA's own source tree. ``os.getcwd()`` was
+        # the repository root for a normal ``ga`` launch, so a generated report
+        # appeared next to agentmain.py. The canonical root is the project's
+        # gitignored temp/ directory.
+        self.workspace_root = resolve_workspace_root(default_workspace_root())
         with backend_output_redirect():
             self.agent = self.agent_factory()
             self.agent.inc_out = True

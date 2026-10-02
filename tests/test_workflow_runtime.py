@@ -520,6 +520,12 @@ return {summary: result.summary}
             self.assertEqual("workflow_finished", events[-1].event_type)
 
     def test_runtime_creates_and_persists_default_workspace(self):
+        """The default root is the project temp/ dir, not the launch cwd.
+
+        Deriving it from cwd put generated artifacts next to GA's own source for
+        a normal ``ga`` launch. The project temp/ directory is the product
+        default; an explicit workspace still wins.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             script = "return await agent('run without explicit workspace')"
@@ -528,7 +534,7 @@ return {summary: result.summary}
 
             outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
 
-            expected = Path.cwd().resolve()
+            expected = (Path(__file__).resolve().parents[1] / "temp").resolve()
             self.assertEqual("completed agent_1", outcome.result["summary"])
             self.assertTrue(expected.is_dir())
             self.assertEqual(str(expected), runner.started_jobs[0].metadata["workspacePath"])
