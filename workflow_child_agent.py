@@ -145,6 +145,7 @@ class NativeGPTChildAgentRunner:
         self.enable_tools = bool(enable_tools)
         self.max_turns = int(max_turns)
         self.last_capability_snapshot: dict = {}
+        self._run_capability_schemas: dict[str, tuple[list[dict], dict]] = {}
         self.last_llm_binding: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -314,7 +315,7 @@ class NativeGPTChildAgentRunner:
         if cancelled:
             handler.cancel()
         with mcp_cancellation_scope(handler.code_stop_signal):
-            tools_schema = self._load_tools_schema()
+            tools_schema = self._load_tools_schema(job)
         transcript_events.append({
             "type": "capability_snapshot",
             "runId": job.metadata.get("runId"),
@@ -354,7 +355,7 @@ class NativeGPTChildAgentRunner:
             llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])),
             _turn_end_hooks={},
         )
-        handler = GenericAgentHandler(parent, cwd=parent.task_dir)
+        handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
         handler.workflow_permission_policy = ToolPermissionPolicy(profile=profile, options=copy.deepcopy(job.metadata.get("options") or {}))
         handler.workflow_permission_context = {
             "runId": job.metadata.get("runId"),
@@ -381,7 +382,32 @@ class NativeGPTChildAgentRunner:
         handler.tool_after_callback = after
         return handler
 
-    def _load_tools_schema(self):
+    def clear_run_capabilities(self, run_id: str) -> None:
+        self._run_capability_schemas.pop(str(run_id or ""), None)
+
+    def prepare_run_capabilities(self, run_id: str, required_tools: list[str]) -> dict:
+        run_id = str(run_id or "")
+        if not run_id:
+            raise ValueError("workflow capability preflight requires a run id")
+        cached = self._run_capability_schemas.get(run_id)
+        if cached is None:
+            schemas = self._load_tools_schema()
+            snapshot = copy.deepcopy(self.last_capability_snapshot)
+            self._run_capability_schemas[run_id] = (copy.deepcopy(schemas), snapshot)
+        else:
+            schemas, snapshot = cached
+        available = {_tool_name(tool) for tool in schemas}
+        missing = sorted({str(name) for name in required_tools or [] if str(name) and str(name) not in available})
+        if missing:
+            raise RuntimeError("capability_unavailable: required workflow tools are missing: " + ", ".join(missing))
+        return copy.deepcopy(snapshot)
+
+    def _load_tools_schema(self, job=None):
+        run_id = str((getattr(job, "metadata", {}) or {}).get("runId") or "") if job is not None else ""
+        if run_id and run_id in self._run_capability_schemas:
+            schemas, snapshot = self._run_capability_schemas[run_id]
+            self.last_capability_snapshot = copy.deepcopy(snapshot)
+            return copy.deepcopy(schemas)
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tools_schema.json"), "r", encoding="utf-8") as f:
             tools = json.load(f)
         if os.name != "nt":
@@ -452,7 +478,9 @@ class NativeGPTChildAgentRunner:
             if not workspace.is_dir():
                 raise ValueError("job workspacePath must be an existing directory")
             return str(workspace)
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp", "workflow_child_agents", str(job.job_id))
+        workspace = Path(os.path.dirname(os.path.abspath(__file__))) / "temp" / "workflow_child_agents" / str(job.job_id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return str(workspace.resolve())
 
     def _permission_profile(self, job) -> str:
         return job.metadata.get("permissionProfile") or DEFAULT_PERMISSION_PROFILE
@@ -473,6 +501,7 @@ class NativeGPTChildAgentRunner:
             "verification": "Independently verify the result. Run the requested checks and report machine-observed commands, exit codes, and failures. Return the required structured verification fields. Never infer pass from another agent's summary; missing evidence means verificationPassed=false.",
             "review": "Review independently against the supplied rubric. Report only actionable findings with concrete evidence; do not modify files unless the task explicitly permits it.",
         }.get(str(role), "")
+        dependency_handoff = job.metadata.get("dependencyHandoff") or []
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
             f"runId: {run_id}",
@@ -484,8 +513,32 @@ class NativeGPTChildAgentRunner:
             f"options: {options}",
             f"permissionProfile: {permission_profile}",
             f"permissionPolicyVersion: {permission_policy_version}",
+            f"workspacePath: {self._child_cwd(job)}",
+            "workspacePolicy: cwd-rooted-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
+        ]
+        if dependency_handoff:
+            lines.extend([
+                "",
+                "Dependency handoff (bounded; upstream full transcripts are not included):",
+            ])
+            for item in dependency_handoff:
+                lines.append(f"- label: {item.get('label') or ''}")
+                lines.append(f"  status: {item.get('status') or ''}")
+                lines.append(f"  summary: {item.get('summary') or ''}")
+                if item.get("resultRef"):
+                    lines.append(f"  resultRef: {item['resultRef']}")
+                if item.get("artifactRefs"):
+                    lines.append(f"  artifactRefs: {', '.join(str(ref) for ref in item['artifactRefs'])}")
+                if item.get("handoffRef"):
+                    lines.append(f"  handoffRef: {item['handoffRef']}")
+                if item.get("blockingIssues"):
+                    lines.append(f"  blockingIssues: {item['blockingIssues']}")
+            lines.extend([
+                "Read detailed information only from workspace-relative artifactRefs or handoffRef when needed; transcriptRef is audit-only.",
+            ])
+        lines.extend([
             "",
             "Task:",
             job.prompt,
-        ]
+        ])
         return "\n".join(lines)

@@ -14,10 +14,11 @@ import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const PYTHON = process.env.PYTHON || 'python'
 const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink_bridge.py')
-const EXPECTED_MODEL = 'luna/gpt-5.6-luna'
-const EXPECTED_PROVIDER = 'gpt-super-responses'
-const SUBAGENT_MARKER = 'GA_UI_SUBAGENT_CHILD_OK_20260807'
-const WORKFLOW_MARKER = 'GA_UI_WORKFLOW_CHILD_OK_20260807'
+const EXPECTED_PROFILE = process.env.GA_UI_EXPECTED_PROFILE || 'luna'
+const EXPECTED_MODEL = process.env.GA_UI_EXPECTED_MODEL || `${EXPECTED_PROFILE}/gpt-5.6-luna`
+const EXPECTED_PROVIDER = process.env.GA_UI_EXPECTED_PROVIDER || 'gpt-super-responses'
+const SUBAGENT_MARKER = process.env.GA_UI_SUBAGENT_MARKER || 'GA_UI_SUBAGENT_CHILD_OK_20260807'
+const WORKFLOW_MARKER = process.env.GA_UI_WORKFLOW_MARKER || 'GA_UI_WORKFLOW_CHILD_OK_20260807'
 const SUBAGENT_NAME = `ga_ui_subagent_${Date.now()}`
 
 class CaptureWriteStream extends EventEmitter {
@@ -210,7 +211,7 @@ async function main(): Promise<number> {
 
   const summary: Record<string, unknown> = {
     passed: false,
-    profile: 'luna',
+    profile: EXPECTED_PROFILE,
     model: EXPECTED_MODEL,
     provider: EXPECTED_PROVIDER,
     terminal: { columns: stdout.columns, rows: stdout.rows },
@@ -221,9 +222,9 @@ async function main(): Promise<number> {
     await waitFor('initial composer frame', () => chromeFrames(stdout).length > 0, 10_000)
     validateFrame(chromeFrames(stdout).at(-1) || '', 'initial')
 
-    await typeUserInput(stdin, '/model luna')
-    await waitFor('model switch command', () => commands.some(command => command.type === 'model_switch' && command.selector === 'luna'), 10_000)
-    await waitFor('luna model selected', () => (
+    await typeUserInput(stdin, `/model ${EXPECTED_PROFILE}`)
+    await waitFor('model switch command', () => commands.some(command => command.type === 'model_switch' && command.selector === EXPECTED_PROFILE), 10_000)
+    await waitFor(`${EXPECTED_PROFILE} model selected`, () => (
       events.some(event => event.type === 'model_switch_result' && event.ok)
       && events.some(event => event.type === 'model_status' && event.models.some(model => model.current && model.name === EXPECTED_MODEL))
     ), 60_000)
@@ -389,6 +390,7 @@ async function main(): Promise<number> {
       error: state.error,
       workflowStatuses: state.workflows.map(run => ({ runId: run.runId, status: run.status })),
       agentKinds: state.agents.map(record => record.recordKind),
+      agentEventPreview: state.agentEvents.slice(-30).map(event => ({ type: event.type, executionId: event.executionId, agentPath: event.agentPath })),
     }
     return printSummary(summary, instance, cursorPark)
   }
@@ -408,7 +410,7 @@ main().then(code => {
 }).catch(error => {
   console.log(JSON.stringify({
     passed: false,
-    profile: 'luna',
+    profile: EXPECTED_PROFILE,
     model: EXPECTED_MODEL,
     provider: EXPECTED_PROVIDER,
     error: String(error).replaceAll(REPO, '<repo>').slice(0, 1_000),

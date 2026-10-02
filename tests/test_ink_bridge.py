@@ -416,6 +416,30 @@ class InkBridgeTest(unittest.TestCase):
             events,
         )
 
+    def test_submit_routes_high_confidence_multi_step_request_to_workflow(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        task = "先搜索多个来源，再生成 HTML 文件并验证"
+        started = threading.Event()
+        calls = []
+
+        def start_workflow(task_text, **kwargs):
+            calls.append((task_text, kwargs))
+            started.set()
+            return "wf_auto"
+
+        bridge.workflow_plan = start_workflow
+        task_id = bridge.submit(task)
+        self.assertTrue(started.wait(1))
+        bridge._workflow_planning_thread.join(timeout=1)
+
+        self.assertEqual(1, task_id)
+        self.assertEqual([], agent.prompts)
+        self.assertEqual(task, calls[0][0])
+        self.assertEqual("recommended", calls[0][1]["context"]["activation"]["action"])
+        self.assertTrue(any(event.get("type") == "user" and event.get("text") == task for event in events))
+
     def test_submit_forwards_images_to_put_task(self):
         agent = FakeAgent()
         events = []
@@ -489,7 +513,7 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual(-1, result)
         self.assertEqual([("first", "user", [])], agent.prompts)
-        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+        self.assertEqual({"type": "error", "code": "busy", "message": "agent or workflow planner is running"}, events[-1])
 
     def test_submit_can_drive_resume_agent_tool_through_frontend_bridge(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1582,6 +1606,10 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("workflow_plan_rejected", run_event["run"]["error"])
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertEqual(["workflow_planned", "workflow_plan_rejected"], workflow_events)
+            final_event = next((event for event in events if event["type"] == "workflow_final"), None)
+            self.assertIsNotNone(final_event, "rejected plans must emit a terminal workflow_final event")
+            self.assertEqual("failed", final_event["result"]["status"])
+            self.assertEqual("workflow_plan_rejected", final_event["result"]["error"])
 
     def test_workflow_detail_includes_workflow_progress_and_draft_when_available(self):
         agent = FakeAgent()

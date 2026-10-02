@@ -24,4 +24,7 @@ def _pinit(self, *a, **k):
     if os.name == 'nt': k['creationflags'] = (k.get('creationflags') or 0) | 0x08000000
     _Pi(self, *a, **k)
 subprocess.Popen.__init__ = _pinit
+if os.environ.get('GA_WORKFLOW_WORKSPACE_ROOT'):
+    from workflow_workspace_guard import install as _install_workspace_guard
+    _install_workspace_guard(os.environ['GA_WORKFLOW_WORKSPACE_ROOT'])
 sys.excepthook = lambda t, v, tb: (sys.__excepthook__(t, v, tb), print(f"\n[Agent Hint]: NO GUESSING! You MUST probe first. If missing common package, pip.")) if issubclass(t, (ImportError, AttributeError)) else sys.__excepthook__(t, v, tb)

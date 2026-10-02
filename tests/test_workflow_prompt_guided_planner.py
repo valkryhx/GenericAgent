@@ -248,7 +248,9 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertIn("label: 'security-review'", draft.script)
         self.assertIn("label: 'performance-review'", draft.script)
         self.assertIn("label: 'test-gap-review'", draft.script)
-        self.assertIn("JSON.stringify", draft.script)
+        # Dependency results are handed off by the host as a bounded envelope.
+        self.assertNotIn("JSON.stringify", draft.script)
+        self.assertIn("dependency handoff", draft.script)
         self.assertEqual(1, len(client.calls))
         self.assertIn("WorkflowPlan JSON", client.calls[0][0]["content"])
         self.assertIn("不要输出 JS", client.calls[0][0]["content"])
@@ -466,7 +468,9 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertIn("await parallel([", draft.script)
         self.assertIn("label: 'credibility-check'", draft.script)
         self.assertIn("label: 'research-synthesis'", draft.script)
-        self.assertIn("JSON.stringify", draft.script)
+        # Dependency results are handed off by the host as a bounded envelope.
+        self.assertNotIn("JSON.stringify", draft.script)
+        self.assertIn("dependency handoff", draft.script)
 
     def test_prompt_guided_planner_returns_rejected_draft_when_repair_attempts_exhausted(self):
         client = FakePlannerClient(responses=[invalid_coding_parallel_plan()])

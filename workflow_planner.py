@@ -4,16 +4,21 @@ import copy
 import json
 import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
 from workflow_policy import normalize_delegation_policy
+from workflow_activation import resolve_workflow_activation
 from workflow_verification import normalize_verification_contract
 
 
 CODING_AGENT_ROLES = frozenset(
     {
         "understanding",
+        "research",
         "contract",
         "tests",
         "implementation",
@@ -37,6 +42,16 @@ GA_WORKFLOW_VERIFICATION_SCHEMA = {
 
 WORKFLOW_MODES = frozenset({"direct", "workflow", "delegated"})
 WORKFLOW_RISK_LEVELS = frozenset({"low", "medium", "high"})
+ARTIFACT_ACCEPTANCE_CHECKS = frozenset({
+    "artifact_exists",
+    "artifact_readback",
+    "artifact_structure",
+    "required_tool_evidence",
+    "source_count",
+    "schema_valid",
+    "command_exit_zero",
+    "no_secret_pattern",
+})
 
 
 def _normalize_plan_retry_policy(value: Any) -> dict[str, Any]:
@@ -60,6 +75,65 @@ def _normalize_plan_retry_policy(value: Any) -> dict[str, Any]:
 
 
 CODE_PRODUCING_ROLES = frozenset({"implementation", "tests", "repair"})
+
+
+def normalize_plan_workspace_paths(plan: dict[str, Any], workspace_root) -> dict[str, Any]:
+    """Canonicalize declared artifact paths before validation and scheduling."""
+    from workflow_workspace import normalize_declared_artifact_path
+
+    normalized = copy.deepcopy(plan if isinstance(plan, dict) else {})
+    contract = normalized.get("executionContract")
+    artifacts = contract.get("artifacts") if isinstance(contract, dict) else []
+    replacements: dict[str, str] = {}
+    for artifact in artifacts or []:
+        if not isinstance(artifact, dict) or not str(artifact.get("path") or "").strip():
+            continue
+        raw = str(artifact["path"])
+        relative = normalize_declared_artifact_path(raw, workspace_root)
+        artifact["path"] = relative
+        replacements[raw] = relative
+        replacements["/" + relative] = relative
+        if relative.startswith("tmp/"):
+            replacements["/tmp/" + relative[4:]] = relative
+
+    for phase in normalized.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            for field in ("writeScope", "deliverables"):
+                values = agent.get(field)
+                if not isinstance(values, list):
+                    continue
+                updated = []
+                for value in values:
+                    raw = str(value)
+                    try:
+                        relative = normalize_declared_artifact_path(raw, workspace_root)
+                    except ValueError:
+                        relative = raw
+                    replacements[raw] = relative
+                    updated.append(relative)
+                agent[field] = updated
+            prompt = agent.get("prompt")
+            if isinstance(prompt, str):
+                for raw, relative in replacements.items():
+                    prompt = prompt.replace(raw, relative)
+                agent["prompt"] = prompt
+
+    def rewrite(value):
+        if isinstance(value, str):
+            for raw, relative in replacements.items():
+                value = value.replace(raw, relative)
+            return value
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        return value
+
+    return rewrite(normalized)
 
 
 def plan_produces_code(plan: dict[str, Any] | None) -> bool:
@@ -257,6 +331,25 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
 
     normalized = copy.deepcopy(plan)
     phases = normalized.get("phases") or []
+    # Models may follow the object-shaped action example in the execution
+    # contract and emit [{"id": "search", "tool": "..."}] while the
+    # validator/runtime consume the compact packet form ["search"].
+    # Normalize both representations at the boundary, preserving unknown ids
+    # so strict validation can still reject genuinely unmapped actions.
+    for phase in phases:
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict) or not isinstance(agent.get("actions"), list):
+                continue
+            action_ids: list[str] = []
+            for action in agent["actions"]:
+                action_id = (
+                    str(action.get("id") or "").strip()
+                    if isinstance(action, dict)
+                    else str(action or "").strip()
+                )
+                if action_id and action_id not in action_ids:
+                    action_ids.append(action_id)
+            agent["actions"] = action_ids
     task_type = str(normalized.get("taskType") or "planning").strip().lower()
     mode = str(normalized.get("mode") or "").strip().lower()
     if mode not in WORKFLOW_MODES:
@@ -286,6 +379,145 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
         for check in acceptance.get("checks") or []
         if str(check.get("type") if isinstance(check, dict) else check).strip()
     ]
+    execution_contract = normalized.get("executionContract")
+    if isinstance(execution_contract, dict):
+        execution_contract = copy.deepcopy(execution_contract)
+        normalized_evidence = []
+        for raw_evidence in execution_contract.get("requiredToolEvidence") or []:
+            if not isinstance(raw_evidence, dict):
+                normalized_evidence.append(raw_evidence)
+                continue
+            evidence = copy.deepcopy(raw_evidence)
+            tool = str(evidence.get("tool") or "").strip()
+            mode = str(evidence.get("mode") or "").strip().lower()
+            if not mode:
+                mode = "preferred" if tool in {"file_write", "file_patch"} else "required"
+            evidence["mode"] = mode
+            normalized_evidence.append(evidence)
+        execution_contract["requiredToolEvidence"] = normalized_evidence
+        for artifact in execution_contract.get("artifacts") or []:
+            if not isinstance(artifact, dict):
+                continue
+            if not artifact.get("writeModes"):
+                artifact["writeModes"] = ["file_write", "file_patch", "code_run"]
+        normalized["executionContract"] = execution_contract
+    evidence_contract = execution_contract.get("requiredToolEvidence") or [] if isinstance(execution_contract, dict) else []
+    verification = normalized.get("verification")
+    if evidence_contract and isinstance(verification, dict) and isinstance(verification.get("checks"), list):
+        verification = copy.deepcopy(verification)
+        verification["checks"] = [
+            check for check in verification["checks"]
+            if not (
+                isinstance(check, dict)
+                and str(check.get("id") or "").strip() == "required_tool_evidence"
+            )
+        ]
+
+    # --- Artifact verification ownership ---------------------------------
+    # ``executionContract.artifacts`` is the single source of truth for an
+    # artifact's path, writer and existence/readback checks. ``verification``
+    # checks of kind ``artifact`` are a host-derived view of that contract, not
+    # an independent registry the model must keep in sync (two registries drift
+    # exactly the way real runs drifted). Binding is deterministic and never
+    # guessed from prose, owner labels or file extensions:
+    #   1. an explicit ``path`` (``artifact``/``artifactRef`` are accepted
+    #      aliases and normalized to ``path``);
+    #   2. a check id that names one artifact's declared required check and is
+    #      declared by exactly one artifact;
+    #   3. exactly one declared artifact in the whole contract.
+    # A pathless check that cannot be bound is dropped: the execution contract
+    # already enforces it, so keeping an unbound required check only creates a
+    # spurious blocking failure.
+    if isinstance(verification, dict) and isinstance(verification.get("checks"), list):
+        verification = copy.deepcopy(verification)
+        artifact_check_ids = {"artifact_exists", "artifact_readback", "artifact_structure", "source_count"}
+        check_paths: dict[str, set[str]] = {}
+        artifact_paths: set[str] = set()
+        if isinstance(execution_contract, dict):
+            for artifact in execution_contract.get("artifacts") or []:
+                if not isinstance(artifact, dict):
+                    continue
+                path = str(artifact.get("path") or "").replace("\\", "/").strip("/")
+                if not path:
+                    continue
+                artifact_paths.add(path)
+                for check_id in artifact.get("requiredChecks") or []:
+                    check_paths.setdefault(str(check_id), set()).add(path)
+
+        kept_checks = []
+        for check in verification["checks"]:
+            if not isinstance(check, dict):
+                kept_checks.append(check)
+                continue
+            check_id = str(check.get("id") or "").strip()
+            if check_id in artifact_check_ids:
+                check["kind"] = "artifact"
+            if str(check.get("kind") or "").strip().lower() == "artifact":
+                path = str(check.get("path") or "").strip()
+                for alias in ("artifact", "artifactRef"):
+                    if not path and isinstance(check.get(alias), str) and check[alias].strip():
+                        path = check[alias].strip()
+                if not path:
+                    candidates = check_paths.get(check_id, set())
+                    if len(candidates) == 1:
+                        path = next(iter(candidates))
+                if not path and len(artifact_paths) == 1:
+                    path = next(iter(artifact_paths))
+                if path:
+                    check["path"] = path.replace("\\", "/").strip("/")
+                else:
+                    # Defer to the authoritative execution contract instead of
+                    # keeping an unbound required artifact check that can only
+                    # fail the run for the wrong reason.
+                    continue
+            elif str(check.get("kind") or "").strip().lower() == "schema":
+                # GA has no host evaluator wired from a plan schema to a
+                # standalone verification check, and no child is required to
+                # emit evidence for an arbitrary model-named schema id. Treating
+                # such a restatement as a hard gate fails runs that produced a
+                # valid artifact. Keep it visible but advisory; the enforceable
+                # requirement is the artifact's own ``schema_valid`` check on the
+                # execution contract.
+                check["required"] = False
+                check["advisory"] = True
+                check["deferredToExecutionContract"] = True
+            kept_checks.append(check)
+        # If the model left the verification view empty, materialize it from
+        # the authoritative execution contract. ``requiredChecks`` on the
+        # artifact contract are host-defined machine checks
+        # (artifact_exists / artifact_readback / ...), so the derived entries
+        # are always bindable and never guessed.
+        if not kept_checks and isinstance(execution_contract, dict):
+            derived: list[dict[str, Any]] = []
+            seen_derived: set[tuple[str, str]] = set()
+            for artifact in execution_contract.get("artifacts") or []:
+                if not isinstance(artifact, dict):
+                    continue
+                path = str(artifact.get("path") or "").replace("\\", "/").strip("/")
+                if not path:
+                    continue
+                for check_id in artifact.get("requiredChecks") or []:
+                    check_id = str(check_id)
+                    key = (check_id, path)
+                    if not check_id or key in seen_derived:
+                        continue
+                    seen_derived.add(key)
+                    derived.append({
+                        "id": f"{Path(path).stem}_{check_id}",
+                        "kind": "artifact",
+                        "check": check_id,
+                        "path": path,
+                        "required": True,
+                        "owner": "host",
+                        "derivedFromExecutionContract": True,
+                    })
+            if derived:
+                verification["checks"] = derived
+            else:
+                verification["checks"] = kept_checks
+        else:
+            verification["checks"] = kept_checks
+        normalized["verification"] = verification
     verification_contract = normalize_verification_contract({**normalized, "acceptance": acceptance})
     normalized["verification"] = copy.deepcopy(verification_contract)
     success_criteria = normalized.get("successCriteria")
@@ -347,6 +579,70 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
     return normalized
 
 
+def _normalize_execution_contract_assignments(plan: dict[str, Any]) -> dict[str, Any]:
+    """Copy explicit action/tool/artifact ownership into executable packets."""
+    normalized = copy.deepcopy(plan)
+    contract = normalized.get("executionContract")
+    if not isinstance(contract, dict) or contract.get("requiresExecution") is not True:
+        return normalized
+
+    agents_by_label = {
+        str(agent.get("label") or ""): agent
+        for phase in normalized.get("phases") or []
+        for agent in phase.get("agents") or []
+        if isinstance(agent, dict) and str(agent.get("label") or "")
+    }
+
+    def add(agent: dict[str, Any], field: str, value: str) -> None:
+        values = agent.get(field)
+        if not isinstance(values, list):
+            values = []
+        if value not in [str(item) for item in values]:
+            values.append(value)
+        agent[field] = values
+
+    for item in contract.get("actions") or []:
+        if isinstance(item, dict):
+            action_id = str(item.get("id") or "").strip()
+            agent = agents_by_label.get(str(item.get("agent") or "").strip())
+            if action_id and agent:
+                add(agent, "actions", action_id)
+
+    required_tools = {str(item).strip() for item in contract.get("requiredTools") or [] if str(item).strip()}
+    for item in contract.get("requiredToolEvidence") or []:
+        if isinstance(item, dict):
+            tool = str(item.get("tool") or "").strip()
+            agent = agents_by_label.get(str(item.get("agent") or "").strip())
+            if tool in required_tools and agent:
+                add(agent, "requiredTools", tool)
+
+    for artifact in contract.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        path = str(artifact.get("path") or "").replace("\\", "/").strip("/")
+        writer = agents_by_label.get(str(artifact.get("writer") or "").strip())
+        if not path or not writer:
+            continue
+        add(writer, "writeScope", path)
+        add(writer, "deliverables", path)
+        checks = {str(item).strip() for item in artifact.get("requiredChecks") or [] if str(item).strip()}
+        for check in checks:
+            add(writer, "acceptanceChecks", check)
+        # Only materialize local tools named by the contract; writer/path and
+        # readback semantics provide their explicit ownership.
+        if "file_write" in required_tools:
+            add(writer, "requiredTools", "file_write")
+        if "code_run" in required_tools:
+            # A writable artifact may be produced by an allowlisted code
+            # action (for example python-docx) instead of file_write.
+            # Materialize the declared capability on the actual writer so
+            # validation checks the union consistently.
+            add(writer, "requiredTools", "code_run")
+        if "artifact_readback" in checks and "file_read" in required_tools:
+            add(writer, "requiredTools", "file_read")
+    return normalized
+
+
 def _normalize_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
     """Apply legacy conversion, topology normalization, and runtime contracts.
 
@@ -356,6 +652,7 @@ def _normalize_plan_contract(plan: dict[str, Any]) -> dict[str, Any]:
 
     normalized = _normalize_coding_acceptance_contract(plan)
     normalized = _split_same_phase_dependencies(normalized)
+    normalized = _normalize_execution_contract_assignments(normalized)
     return _normalize_workflow_execution_contract(normalized)
 
 
@@ -466,15 +763,24 @@ class WorkflowPlanner:
     def classify(self, task_text: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         text = str(task_text or "")
         lowered = text.lower()
-        if any(word in text for word in ("调研", "研究", "资料", "来源")) or any(word in lowered for word in ("research", "source")):
+        activation = resolve_workflow_activation(text)
+        if activation.plan_only:
+            task_type = "planning"
+            read_write_mode = "read_only"
+            needs_code_change = False
+        elif activation.action == "recommended":
+            task_type = "mixed"
+            read_write_mode = "may_write" if "artifact" in activation.matched_signals else "read_only"
+            needs_code_change = "artifact" in activation.matched_signals
+        elif any(word in text for word in ("\u8c03\u7814", "\u7814\u7a76", "\u8d44\u6599", "\u6765\u6e90")) or any(word in lowered for word in ("research", "source")):
             task_type = "research"
             read_write_mode = "read_only"
             needs_code_change = False
-        elif any(word in text for word in ("实现", "修复", "开发", "修改")) or any(word in lowered for word in ("implement", "fix", "code")):
+        elif any(word in text for word in ("\u5b9e\u73b0", "\u4fee\u590d", "\u5f00\u53d1", "\u4fee\u6539")) or any(word in lowered for word in ("implement", "fix", "code")):
             task_type = "coding"
             read_write_mode = "may_write"
             needs_code_change = True
-        elif any(word in text for word in ("审查", "评审", "review")) or "review" in lowered:
+        elif any(word in text for word in ("\u5ba1\u67e5", "\u8bc4\u5ba1", "review")) or "review" in lowered:
             task_type = "review"
             read_write_mode = "read_only"
             needs_code_change = False
@@ -485,15 +791,74 @@ class WorkflowPlanner:
         return {
             "taskType": task_type,
             "readWriteMode": read_write_mode,
-            "needsMcp": False,
+            "needsMcp": "search" in activation.matched_signals,
             "needsCodeChange": needs_code_change,
-            "needsVerification": True,
+            "needsVerification": activation.action != "none" or task_type in {"coding", "mixed"},
             "riskLevel": "medium" if needs_code_change else "low",
             "clarifyingQuestions": [],
             "constraints": list((context or {}).get("constraints") or []),
         }
 
     def _build_plan(self, task_text: str, context: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
+        if classification["taskType"] == "mixed":
+            html_output = bool(re.search(r"\bhtml\b|\bweb\s*page\b|\u7f51\u9875|html", task_text, re.I))
+            artifact_path = "artifacts/overview.html" if html_output else "artifacts/summary.md"
+            research_artifact_path = "artifacts/research-sources.json"
+            artifact_kind = "HTML" if html_output else "Markdown"
+            search_tool = "mcp__tavily__tavily_search" if "tavily" in task_text.lower() else "web_scan"
+            return {
+                "taskType": "mixed",
+                "meta": {"name": "dynamic-workflow-research-artifact", "description": "Research, create the requested artifact, and verify it"},
+                "phases": [
+                    {"title": "Research", "agents": [{
+                        "label": "research-sources", "role": "research",
+                        "prompt": f"Research the user's request using the required search capability. Task: {task_text}. Return a concise conclusion and write detailed sources/facts/uncertainty as JSON to {research_artifact_path} using file_write, then read it back with file_read. Do not create the final artifact.",
+                        "actions": ["research", "persist_research"], "requiredTools": [search_tool, "file_write", "file_read"], "writeScope": [research_artifact_path], "deliverables": [research_artifact_path],
+                        "acceptanceChecks": ["required_tool_evidence", "artifact_exists", "artifact_readback"], "dependsOn": [],
+                    }]},
+                    {"title": "Create Artifact", "agents": [{
+                        "label": "write-html", "role": "implementation",
+                        "prompt": f"Using the research result, create a self-contained {artifact_kind} artifact at {artifact_path}. Use file_write, then read it back with file_read. Task: {task_text}",
+                        "actions": ["create_artifact"], "requiredTools": ["file_write", "file_read"], "writeScope": [artifact_path],
+                        "deliverables": [artifact_path], "acceptanceChecks": ["artifact_exists", "artifact_readback"],
+                        "dependsOn": ["research-sources"],
+                    }]},
+                    {"title": "Verify Artifact", "agents": [{
+                        "label": "verify-html", "role": "verification",
+                        "prompt": f"Independently inspect {artifact_path}; verify it exists, is non-empty, and has valid {artifact_kind} structure. Return verificationPassed, checks, and blockingIssues. Do not modify the artifact.",
+                        "actions": ["verify_artifact"], "requiredTools": ["file_read"], "schemaRef": "VERIFICATION_SCHEMA", "strictSchema": True,
+                        "deliverables": ["artifact_verification"], "acceptanceChecks": ["artifact_structure"],
+                        "dependsOn": ["write-html"],
+                    }]},
+                ],
+                "schemas": {"VERIFICATION_SCHEMA": GA_WORKFLOW_VERIFICATION_SCHEMA},
+                "artifacts": [research_artifact_path, artifact_path, "artifact_verification"],
+                "executionContract": {
+                    "requiresExecution": True,
+                    "actions": [
+                        {"id": "research", "agent": "research-sources"},
+                        {"id": "persist_research", "agent": "research-sources"},
+                        {"id": "create_artifact", "agent": "write-html"},
+                        {"id": "verify_artifact", "agent": "verify-html"},
+                    ],
+                    "requiredTools": [search_tool, "file_write", "file_read"],
+                    "requiredToolEvidence": [{"tool": search_tool, "agent": "research-sources", "minimumCalls": 1}],
+                    "artifacts": [{
+                        "path": research_artifact_path,
+                        "writer": "research-sources",
+                        "requiredChecks": ["artifact_exists", "artifact_readback"],
+                    }, {
+                        "path": artifact_path,
+                        "writer": "write-html",
+                        "requiredChecks": ["artifact_exists", "artifact_readback"],
+                    }],
+                },
+                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": []},
+                "verification": {"level": "full", "checks": [
+                    {"id": "artifact-exists", "kind": "artifact", "path": artifact_path, "required": True, "owner": "host"},
+                ], "independentReview": True},
+                "constraints": ["no_secret_files", "no_git_commit"],
+            }
         if classification["taskType"] == "research":
             return {
                 "taskType": "research",
@@ -834,8 +1199,19 @@ class LLMWorkflowPlanner:
                 "review 任务按 security/performance/test-gap/regression 等独立维度 fan out。",
                 "如果计划声明 role=tests，就必须产出与任务对应的测试证据；该 role 不能由 taskType 推断。",
                 "对实际声明为代码产出的计划，role 如有填写必须使用 canonical role：understanding、contract、tests、implementation、verification、review、repair、summary、synthesis；不要使用 test-writer 等别名。",
-                "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。",
+                "research 任务可多来源并行，synthesis 必须依赖上游结果，并应包含 credibility/evidence 检查。依赖结果通过宿主 bounded dependency handoff 传递：只放短摘要、逻辑 resultRef、workspace-relative artifactRefs/handoffRef 和审计 transcriptRef，禁止在 prompt 或脚本中 JSON.stringify 上游完整结果/transcript。对大研究结果优先要求上游将详细证据写入 workspace-relative JSON/Markdown 产物，下游按路径 file_read。",
                 "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
+                "When the user asks to perform work, produce executable action packets; 不要只返回计划。",
+                "Artifact paths are workspace-relative only (for example tmp/report.html). Never emit /tmp, D:\tmp, ~, UNC, or .. traversal paths; the host hard-normalizes and rejects paths outside the launch workspace, so do not treat prompt text as permission.",
+                "执行型计划必须声明 executionContract.requiresExecution、actions、requiredTools 和 artifact acceptance checks，并把每个 action 映射到实际执行它的 agent。",
+                "schemas 的 key 是不透明的 schemaRef 字符串，优先使用 SOURCE_SCHEMA、VERIFICATION_SCHEMA 等逻辑名称；不要把文件路径写入 schemaRef。无论 schemaRef 形状如何，必须保持与 schemas key 完全一致，schema 必须是纯 JSON Schema 数据而不是 JavaScript 代码。",
+                "requiredTools 表示 agent 可用的能力集合，不要把普通文件写入工具当作必须逐字调用的硬门禁。requiredToolEvidence 只有 mode=required 才阻塞；MCP 来源证据默认 required，file_write/file_patch 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
+                "action id must match the exact same string in the assigned agent.actions array; action ids are stable ids such as search, create_artifact, verify_artifact, never display labels or prose.",
+                "Use canonical tool names exactly: Tavily is mcp__tavily__tavily_search; local file tools are file_read and file_write. requiredTools must be assigned to the agent that actually calls each tool, and the contract list must be the union of those agent declarations.",
+                "acceptanceChecks and executionContract.artifacts[].requiredChecks must use machine-checkable ids only: artifact_exists, artifact_readback, artifact_structure, required_tool_evidence, source_count, schema_valid, command_exit_zero, no_secret_pattern. Never put natural-language sentences in check arrays. Host artifact requiredChecks must match the writer checks; independent structure checks belong to the verifier agent.",
+                "parallel is a phase barrier for independent work; pipeline expresses ordered dependencies without pretending all work is independent.",
+                "Schema validation retries, retry counts, token/time budgets and max agents must be bounded; report terminal success/failure and blocking issues explicitly.",
+                "Host preflights MCP/tool requirements and passes a capability snapshot; child agents must not probe local configuration or rediscover credentials.",
                 "agent label 使用清晰英文短语，避免无意义缩写。",
             ],
             "requiredShape": {
@@ -845,12 +1221,28 @@ class LLMWorkflowPlanner:
                 "codingAgentRoles": sorted(CODING_AGENT_ROLES),
                 "schemas": {},
                 "artifacts": [],
+                "executionContract": {
+                    "requiresExecution": "boolean",
+                    "actions": [{"id": "...", "agent": "..."}],
+                    "requiredTools": ["..."],
+                    "requiredToolEvidence": [{"tool": "...", "agent": "...", "minimumCalls": 1}],
+                    "artifacts": [{"path": "...", "writer": "...", "requiredChecks": ["..."]}],
+                },
                 "constraints": ["no_secret_files", "no_git_commit"],
                 "verification": {"level": "none | inline | full", "checks": [{"id": "...", "kind": "command | schema | artifact", "required": True, "owner": "host | <agent-label>"}], "independentReview": False},
             },
         }
         if issues:
-            prompt["repair"] = {"validatorIssues": issues, "previousPlan": previous_plan}
+            prompt["repair"] = {
+                "validatorIssues": issues,
+                "previousPlan": previous_plan,
+                "repairRules": [
+                    "Fix every listed issue in the JSON fields named by the validator; do not merely rewrite prompts or explain the issue.",
+                    "Keep action ids identical between executionContract.actions and the assigned agent.actions.",
+                    "Use only canonical tool ids and machine-checkable acceptance ids from orchestrationPolicy.",
+                    "Preserve valid phases and dependencies; return a complete replacement WorkflowPlan JSON object.",
+                ],
+            }
         return json.dumps(prompt, ensure_ascii=False, indent=2)
 
     def _fallback_draft(self, task_text: str, context: dict[str, Any], *, reason: str) -> WorkflowDraft:
@@ -889,6 +1281,34 @@ class LLMWorkflowPlanner:
         )
 
 
+def validate_rendered_workflow_script(script: str) -> dict[str, Any]:
+    """Compile a rendered workflow without executing any agent calls."""
+
+    source = str(script or "")
+    if not source.strip():
+        return {"ok": False, "error": "workflow script is empty"}
+    # Match workflow_js_worker.transformScript for syntax-only checking.
+    source = source.replace("export const meta =", "const meta =", 1)
+    newline = chr(10)
+    wrapped = "(async () => {" + newline + source + newline + "})()" + newline
+    executable = "node.exe" if sys.platform.startswith("win") else "node"
+    try:
+        completed = subprocess.run(
+            [executable, "--check", "-"],
+            input=wrapped,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"workflow script syntax preflight unavailable: {exc}"}
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "syntax check failed").strip()
+        return {"ok": False, "error": detail[:2000]}
+    return {"ok": True}
+
+
 def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
     labels: set[str] = set()
@@ -899,7 +1319,30 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             if label:
                 label_phase.setdefault(label, phase_index)
     dependency_graph: dict[str, list[str]] = {}
-    schemas = plan.get("schemas") or {}
+    raw_schemas = plan.get("schemas")
+    schemas = raw_schemas if isinstance(raw_schemas, dict) else {}
+    if raw_schemas is not None and not isinstance(raw_schemas, dict):
+        issues.append({"code": "invalid_schema_registry", "message": "schemas must be a JSON object keyed by schemaRef"})
+    if len(schemas) > 32:
+        issues.append({"code": "schema_registry_too_large", "message": "schemas may contain at most 32 definitions"})
+    total_schema_bytes = 0
+    for schema_ref, schema in schemas.items():
+        ref = str(schema_ref)
+        if not ref.strip():
+            issues.append({"code": "invalid_schema_ref", "message": "schemaRef keys must be non-empty strings"})
+        if not isinstance(schema, (dict, bool)):
+            issues.append({"code": "invalid_schema_definition", "message": f"schema {ref or '<empty>'} must be a JSON Schema object or boolean"})
+            continue
+        try:
+            encoded_schema = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            issues.append({"code": "invalid_schema_definition", "message": f"schema {ref or '<empty>'} is not JSON serializable"})
+            continue
+        total_schema_bytes += len(encoded_schema.encode("utf-8"))
+        if len(encoded_schema.encode("utf-8")) > 64_000:
+            issues.append({"code": "schema_definition_too_large", "message": f"schema {ref or '<empty>'} exceeds 64 KiB"})
+    if total_schema_bytes > 256_000:
+        issues.append({"code": "schema_registry_too_large", "message": "schema registry exceeds 256 KiB"})
     is_coding = plan_produces_code(plan)
     for phase_index, phase in enumerate(plan.get("phases") or []):
         phase_title = str(phase.get("title") or "")
@@ -921,8 +1364,11 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             elif is_coding and role not in CODING_AGENT_ROLES:
                 issues.append({"code": "invalid_coding_role", "message": f"coding agent {label} has non-canonical role: {role}"})
             schema_ref = agent.get("schemaRef")
-            if schema_ref and schema_ref not in schemas:
-                issues.append({"code": "undefined_schema", "message": f"agent {label} references undefined schema: {schema_ref}"})
+            if schema_ref is not None:
+                if not isinstance(schema_ref, str) or not schema_ref.strip():
+                    issues.append({"code": "invalid_schema_ref", "message": f"agent {label} schemaRef must be a non-empty string"})
+                elif schema_ref not in schemas:
+                    issues.append({"code": "undefined_schema", "message": f"agent {label} references undefined schema: {schema_ref}"})
             dependencies = agent.get("dependsOn") or []
             dependency_graph[label] = [str(item) for item in dependencies if str(item) in label_phase]
             if len(dependencies) != len(set(str(item) for item in dependencies)):
@@ -938,6 +1384,99 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
         labels.update(phase_labels)
     if not plan.get("phases"):
         issues.append({"code": "missing_phase", "message": "workflow plan requires at least one phase"})
+
+    execution_contract = plan.get("executionContract")
+    if isinstance(execution_contract, dict) and execution_contract.get("requiresExecution") is True:
+        agents_by_label = {
+            str(agent.get("label") or ""): agent
+            for phase in (plan.get("phases") or [])
+            for agent in (phase.get("agents") or [])
+            if str(agent.get("label") or "")
+        }
+        actionable_roles = {"research", "implementation", "tests", "verification", "review", "repair", "synthesis"}
+        actionable_agents = [
+            agent for agent in agents_by_label.values()
+            if str(agent.get("role") or "").strip().lower() in actionable_roles
+            or agent.get("actions")
+            or agent.get("requiredTools")
+            or agent.get("writeScope")
+        ]
+        if not actionable_agents:
+            issues.append({"code": "plan_only_execution", "message": "execution contract requires at least one executable non-planner agent"})
+
+        actions = execution_contract.get("actions") or []
+        if not actions:
+            issues.append({"code": "missing_execution_actions", "message": "execution contract requires explicit action mappings"})
+        mapped_actions = {
+            str(action.get("id") or "")
+            for action in actions
+            if isinstance(action, dict) and str(action.get("id") or "")
+        }
+        declared_actions = {
+            str(action)
+            for agent in agents_by_label.values()
+            for action in (agent.get("actions") or [])
+            if str(action)
+        }
+        for action_id in sorted(declared_actions - mapped_actions):
+            issues.append({"code": "unmapped_agent_action", "message": f"agent action is missing from execution contract: {action_id}"})
+        for action in actions:
+            action_id = str(action.get("id") or "") if isinstance(action, dict) else ""
+            agent_label = str(action.get("agent") or "") if isinstance(action, dict) else ""
+            agent = agents_by_label.get(agent_label)
+            if not action_id or not agent:
+                issues.append({"code": "invalid_action_mapping", "message": f"execution action {action_id or '<missing>'} references an unknown agent"})
+            elif action_id not in {str(item) for item in (agent.get("actions") or [])}:
+                issues.append({"code": "action_not_declared_by_agent", "message": f"agent {agent_label} does not declare action {action_id}"})
+
+        declared_tools = {str(item) for item in execution_contract.get("requiredTools") or []}
+        agent_tools = {str(tool) for agent in agents_by_label.values() for tool in (agent.get("requiredTools") or [])}
+        for tool in sorted(declared_tools - agent_tools):
+            issues.append({"code": "missing_required_tool", "message": f"required tool is not assigned to an agent: {tool}"})
+
+        for evidence in execution_contract.get("requiredToolEvidence") or []:
+            if not isinstance(evidence, dict):
+                issues.append({"code": "invalid_tool_evidence_contract", "message": "tool evidence contract must be an object"})
+                continue
+            tool = str(evidence.get("tool") or "")
+            agent_label = str(evidence.get("agent") or "")
+            mode = str(evidence.get("mode") or "required").strip().lower()
+            minimum_calls = evidence.get("minimumCalls", 1)
+            agent = agents_by_label.get(agent_label)
+            try:
+                minimum_calls = int(minimum_calls)
+            except (TypeError, ValueError):
+                minimum_calls = 0
+            if mode not in {"required", "preferred", "informational"}:
+                issues.append({"code": "invalid_tool_evidence_contract", "message": f"unsupported tool evidence mode: {mode or '<missing>'}"})
+            if not tool or tool not in declared_tools or not agent or tool not in {str(item) for item in (agent.get("requiredTools") or [])} or minimum_calls < 1:
+                issues.append({"code": "invalid_tool_evidence_contract", "message": f"tool evidence must bind a required tool to its executing agent: {tool or '<missing>'}"})
+
+        for artifact in execution_contract.get("artifacts") or []:
+            if not isinstance(artifact, dict):
+                issues.append({"code": "invalid_artifact_contract", "message": "execution artifact contract must be an object"})
+                continue
+            artifact_path = str(artifact.get("path") or "").replace("\\", "/").strip("/")
+            writer_label = str(artifact.get("writer") or "")
+            writer = agents_by_label.get(writer_label)
+            if not artifact_path or not writer:
+                issues.append({"code": "invalid_artifact_contract", "message": f"artifact {artifact_path or '<missing>'} has no valid writer"})
+                continue
+            write_scopes = [str(item).replace("\\", "/").strip("/") for item in writer.get("writeScope") or []]
+            deliverables = [str(item).replace("\\", "/").strip("/") for item in writer.get("deliverables") or []]
+            if not any(artifact_path == scope or artifact_path.startswith(scope.rstrip("/") + "/") for scope in write_scopes if scope):
+                issues.append({"code": "missing_artifact_write_scope", "message": f"writer {writer_label} has no write scope covering {artifact_path}"})
+            if artifact_path not in deliverables:
+                issues.append({"code": "missing_artifact_deliverable", "message": f"writer {writer_label} does not declare artifact deliverable {artifact_path}"})
+            required_checks = {str(item) for item in artifact.get("requiredChecks") or []}
+            if not required_checks:
+                issues.append({"code": "missing_artifact_acceptance_check", "message": f"artifact {artifact_path} requires at least one acceptance check"})
+            unsupported_checks = required_checks - ARTIFACT_ACCEPTANCE_CHECKS
+            if unsupported_checks:
+                issues.append({"code": "unsupported_artifact_acceptance_check", "message": f"artifact {artifact_path} has non-machine-checkable checks: {', '.join(sorted(unsupported_checks))}"})
+            agent_checks = {str(item) for item in writer.get("acceptanceChecks") or []}
+            if required_checks - agent_checks:
+                issues.append({"code": "missing_artifact_acceptance_check", "message": f"writer {writer_label} does not declare checks: {', '.join(sorted(required_checks - agent_checks))}"})
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -991,8 +1530,15 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
     lines.append("export const meta = " + json.dumps({"name": meta.get("name"), "description": meta.get("description"), "phases": phases}, ensure_ascii=False, indent=2))
     lines.append("")
     schemas = plan.get("schemas") or {}
-    for name, schema in schemas.items():
-        lines.append(f"const {name} = " + json.dumps(schema, ensure_ascii=False, indent=2))
+    if schemas:
+        # Schema refs are model-produced data and may contain paths, spaces,
+        # Unicode, or punctuation. Keep them as object keys instead of
+        # interpolating them into JavaScript identifiers.
+        lines.append(
+            "const __workflowSchemas = Object.freeze("
+            + json.dumps(schemas, ensure_ascii=False, indent=2)
+            + ")"
+        )
         lines.append("")
     result_names: list[str] = []
     rendered_labels: dict[str, str] = {}
@@ -1014,6 +1560,9 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 label = str(agent.get("label") or "agent")
                 prompt = str(agent.get("prompt") or "")
                 options = {"label": label, "phase": title}
+                for key in ("actions", "requiredTools", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
+                    if agent.get(key):
+                        options[key] = agent[key]
                 if agent.get("role"):
                     options["role"] = str(agent["role"])
                 if agent.get("retryPolicy"):
@@ -1040,8 +1589,13 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
             dependencies = [rendered_labels[item] for item in agent.get("dependsOn") or [] if item in rendered_labels]
             rendered_prompt = _template_string(prompt)
             if dependencies:
-                rendered_prompt += "\n\n上游结果：${JSON.stringify({" + ", ".join(dependencies) + "})}"
+                # Upstream payloads can contain large transcripts. The host scheduler
+                # injects a bounded dependency handoff (summary + logical refs).
+                rendered_prompt += '\n\n依赖结果由宿主以 bounded dependency handoff 提供；请根据摘要和产物路径按需读取，不要期待完整 transcript。'
             options = {"label": label, "phase": title}
+            for key in ("actions", "requiredTools", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
+                if agent.get(key):
+                    options[key] = agent[key]
             if agent.get("role"):
                 options["role"] = str(agent["role"])
             if agent.get("retryPolicy"):
@@ -1086,6 +1640,7 @@ _JS_RESERVED_IDENTIFIERS = frozenset(
     {
         "agent",
         "parallel",
+        "__workflowSchemas",
         "phase",
         "runPythonUnittest",
         "args",
@@ -1182,7 +1737,10 @@ def _render_options(options: dict[str, Any]) -> str:
     parts: list[str] = []
     for key, value in options.items():
         if isinstance(value, dict) and value.get("__schema_ref__"):
-            parts.append(f"{key}: {value['__schema_ref__']}")
+            schema_ref = str(value["__schema_ref__"])
+            parts.append(
+                f"{key}: __workflowSchemas[{json.dumps(schema_ref, ensure_ascii=False)}]"
+            )
         elif isinstance(value, (dict, list)):
             parts.append(f"{key}: {json.dumps(value, ensure_ascii=False, separators=(',', ':'))}")
         elif isinstance(value, bool):

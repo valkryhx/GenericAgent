@@ -54,13 +54,15 @@ def _stop_requested(stop_signal):
     is_set = getattr(stop_signal, "is_set", None)
     return bool(is_set()) if callable(is_set) else bool(stop_signal)
 
-def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000):
+def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, workspace_root=None):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
     优先使用python，仅在必要系统操作时使用powershell"""
     preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
+    if workspace_root and code_type not in {"python", "py"}:
+        return {"status": "error", "msg": "workflow code_run only permits Python under the workspace guard"}
     cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
     if code_type in ["python", "py"]:
         if code_cwd is not None and not os.path.isdir(code_cwd):
@@ -98,10 +100,14 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         except: pass
 
     try:
+        child_env = None
+        if workspace_root:
+            child_env = os.environ.copy()
+            child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            bufsize=0, cwd=cwd, startupinfo=startupinfo,
+            bufsize=0, cwd=cwd, startupinfo=startupinfo, env=child_env,
             creationflags=0x08000000 if os.name == 'nt' else 0
         )
         start_t = time.time()
@@ -309,10 +315,11 @@ def consume_file(dr, file):
 
 class GenericAgentHandler(BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
-    def __init__(self, parent, last_history=None, cwd='./temp'):
+    def __init__(self, parent, last_history=None, cwd='./temp', workspace_root=None):
         self.parent = parent
         self.working = {}
         self.cwd = cwd;  self.current_turn = 0
+        self.workspace_root = str(workspace_root) if workspace_root else None
         self.history_info = last_history if last_history else []
         self.code_stop_signal = threading.Event()
         self._done_hooks = []
@@ -461,7 +468,10 @@ class GenericAgentHandler(BaseHandler):
 
     def _get_abs_path(self, path):
         if not path: return ""
-        return os.path.abspath(os.path.join(self.cwd, path))   
+        if self.workspace_root:
+            from workflow_workspace import resolve_workspace_child
+            return str(resolve_workspace_child(path, Path(self.workspace_root)))
+        return os.path.abspath(os.path.join(self.cwd, path))
 
     def _extract_code_block(self, response, code_type):
         code_type = {'python':'python|py', 'powershell':'powershell|ps1|pwsh', 'bash':'bash|sh|shell'}.get(code_type, re.escape(code_type))
@@ -477,9 +487,16 @@ class GenericAgentHandler(BaseHandler):
             if not code: return StepOutcome("[Error] Code missing. Must use reply code block or 'script' arg.", next_prompt="\n")
         try: timeout = int(args.get("timeout", 60))
         except: timeout = 60
-        raw_path = os.path.join(self.cwd, args.get("cwd", './'))
-        cwd = os.path.normpath(os.path.abspath(raw_path))
-        code_cwd = os.path.normpath(self.cwd)
+        if self.workspace_root:
+            try:
+                cwd = str(self._get_abs_path(args.get("cwd", './') or './'))
+            except Exception as exc:
+                return StepOutcome({"status": "error", "msg": f"code_run cwd denied: {exc}"}, next_prompt="\n")
+            code_cwd = os.path.normpath(self.workspace_root)
+        else:
+            raw_path = os.path.join(self.cwd, args.get("cwd", './'))
+            cwd = os.path.normpath(os.path.abspath(raw_path))
+            code_cwd = os.path.normpath(self.cwd)
         maxlen = 10000 // args.get('_tool_num', 1)
         if code_type == 'python' and args.get("inline_eval"):
             ns = {'handler':self, 'parent':self.parent, 'history':json.dumps(self.parent.llmclient.backend.history)}
@@ -491,7 +508,7 @@ class GenericAgentHandler(BaseHandler):
                     except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
-        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen)
+        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, workspace_root=self.workspace_root)
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
     

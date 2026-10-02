@@ -6,6 +6,8 @@ import copy
 VERIFICATION_LEVELS = frozenset({"none", "inline", "full"})
 CHECK_KINDS = frozenset({"command", "schema", "review", "diff", "manual", "artifact"})
 CHECK_OWNERS = frozenset({"host", "implementation", "independent_agent"})
+ADVISORY_ARTIFACT_CHECKS = frozenset({"artifact_structure", "source_count"})
+ADVISORY_CONTENT_SCHEMA_TOKENS = frozenset({"structure", "format", "content", "source_count", "html", "docx", "pdf"})
 
 
 def _text(value):
@@ -51,11 +53,39 @@ def _normalize_check(raw, index):
     check["kind"] = kind
     check["required"] = required
     check["owner"] = owner
+    if kind == "artifact" and check_id in ADVISORY_ARTIFACT_CHECKS:
+        strict = check.get("strict") is True or check.get("contentValidation") is True
+        check["strict"] = strict
+        if not strict and required:
+            # Generic artifact content is deliberately not a host-owned
+            # contract. A DOCX/HTML/PDF can be valid in many forms, so these
+            # checks remain observable unless the plan explicitly opts in to
+            # a content validator. Existence/readback stay hard gates.
+            check["required"] = False
+            check["advisory"] = True
+    elif kind == "schema" and _is_advisory_content_schema(check_id, check) and required:
+        # A model may invent a schema check such as html_structure_valid while
+        # still returning a perfectly valid artifact. Unless strict is
+        # explicit, keep it as an audit hint instead of requiring the host to
+        # reverse-engineer an agent-specific evidence payload.
+        check["strict"] = check.get("strict") is True or check.get("contentValidation") is True
+        if not check["strict"]:
+            check["required"] = False
+            check["advisory"] = True
     if kind == "schema" and not _text(check.get("schemaRef")):
         raise ValueError(f"verification schema check {check_id} requires schemaRef")
     if kind == "command" and not (check.get("command") or check.get("adapter")):
         raise ValueError(f"verification command check {check_id} requires command or adapter")
     return check
+
+
+def _is_advisory_content_schema(check_id, check):
+    if check.get("strict") is True or check.get("contentValidation") is True:
+        return False
+    normalized = _text(check_id).lower()
+    if normalized in {"verification_schema", "verification_result", "schema_valid"}:
+        return False
+    return any(token in normalized for token in ADVISORY_CONTENT_SCHEMA_TOKENS)
 
 
 def normalize_checks(raw_checks):

@@ -12,9 +12,12 @@ from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore
+from workflow_workspace import resolve_workspace_child, WorkspacePathError
+from subagent_state import atomic_write_json
 
 
 SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+_CACHE_ARGS_UNSET = object()
 
 
 DEFAULT_RETRYABLE_ERRORS = (
@@ -220,6 +223,7 @@ class AgentScheduler:
         config: SchedulerConfig | None = None,
         manage_run_completion: bool = True,
         args=None,
+        cache_args=_CACHE_ARGS_UNSET,
     ):
         self.store = store
         self.run = run
@@ -227,6 +231,8 @@ class AgentScheduler:
         self.config = config or SchedulerConfig()
         self.manage_run_completion = bool(manage_run_completion)
         self.args = args
+        self._has_explicit_cache_args = cache_args is not _CACHE_ARGS_UNSET
+        self.cache_args = args if cache_args is _CACHE_ARGS_UNSET else cache_args
         self.workspace_path = None
         self.jobs = self.run.jobs
         self._stopping = False
@@ -330,6 +336,7 @@ class AgentScheduler:
         if cached_result.tool_summary is not None:
             job.metadata["toolSummary"] = cached_result.tool_summary
         self.store.write_agent_result(self.run, job, cached_result)
+        job.metadata["handoff"] = self._build_handoff(job, cached_result)
         self.jobs.append(job)
         self.store.save_run(self.run)
         self._append(
@@ -348,6 +355,8 @@ class AgentScheduler:
 
     def _sync_workspace_metadata(self) -> str | None:
         workspace_path = normalize_workflow_workspace(self.args)
+        if workspace_path is None and isinstance(self.run.metadata, dict):
+            workspace_path = self.run.metadata.get("workspacePath")
         self.workspace_path = workspace_path
         if workspace_path:
             metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
@@ -475,6 +484,28 @@ class AgentScheduler:
                 self.runner.cancel(job)
         self.store.save_run(self.run)
 
+    def _prepare_declared_workspace(self, job: WorkflowJob) -> None:
+        """Pre-create declared artifact parents before a child starts.
+
+        ``file_write`` intentionally writes only files. Directory creation is a
+        host responsibility so a child does not burn LLM turns guessing mkdir
+        commands, and every created path still passes the workspace guard.
+        """
+        workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
+        if not workspace:
+            return
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        paths: list[str] = []
+        if isinstance(options, dict):
+            for key in ("writeScope", "deliverables"):
+                raw = options.get(key) or []
+                if isinstance(raw, str):
+                    raw = [raw]
+                paths.extend(str(item) for item in raw if str(item).strip())
+        for raw in paths:
+            target = resolve_workspace_child(raw, Path(workspace))
+            target.parent.mkdir(parents=True, exist_ok=True)
+
     def _start_queued_jobs(self) -> None:
         if self._stopping:
             return
@@ -496,7 +527,17 @@ class AgentScheduler:
             retry_policy["attempts"] += 1
             retry_policy["retryNotBefore"] = None
             job.metadata["retryPolicy"] = retry_policy
-            self.runner.start(job)
+            dependency_handoff = self._build_dependency_handoff(job)
+            if dependency_handoff:
+                job.metadata["dependencyHandoff"] = dependency_handoff
+            else:
+                job.metadata.pop("dependencyHandoff", None)
+            try:
+                self._prepare_declared_workspace(job)
+                self.runner.start(job)
+            except Exception as exc:
+                self._fail_job(job, redact_sensitive_text(str(exc)) or "child startup failed")
+                continue
             self._append("agent_started", job, {"label": job.metadata.get("label"), "wave": job.metadata.get("wave")})
             slots -= 1
         self.store.save_run(self.run)
@@ -567,7 +608,7 @@ class AgentScheduler:
             transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
             result.transcript_ref = result.transcript_ref or transcript_ref
         self.store.write_agent_result(self.run, job, result)
-        handoff = self._build_handoff(result)
+        handoff = self._build_handoff(job, result)
         job.metadata["result"] = result.payload
         job.metadata["handoff"] = handoff
         if result.transcript_ref:
@@ -580,24 +621,153 @@ class AgentScheduler:
         self._record_observed_mutations(job, result)
         self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
 
-    def _build_handoff(self, result: AgentResult, *, error: str | None = None) -> dict:
+    @staticmethod
+    def _compact_handoff_summary(payload: dict, error: str | None = None) -> str:
+        raw = payload.get("summary") or payload.get("text") or payload.get("error") or error or ""
+        text = str(raw).strip()
+        # Prefer the final turn when native child output includes tool-call logs.
+        marker = '\nTurn '
+        last = text.rfind(marker)
+        if last >= 0:
+            text = text[last:].lstrip('\n ')
+        rows = [line for line in text.splitlines() if not line.lstrip().startswith(("🔨", "Tool call:", "tool_call:"))]
+        return redact_sensitive_text('\n'.join(rows).strip())[:2_000]
+
+    @staticmethod
+    def _artifact_refs_from_payload(payload: dict) -> list[str]:
+        """Extract only small, workspace-relative artifact references.
+
+        A child result may contain a large ``text`` field or tool transcript.
+        Handoffs expose paths, never those bodies.
+        """
+        refs: list[str] = []
+        keys = {"artifacts", "artifactRef", "artifactRefs", "artifactPaths", "deliverables", "path"}
+
+        def visit(value, key: str = ""):
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    if child_key in keys:
+                        visit(child, child_key)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    visit(child, key)
+            elif isinstance(value, str) and key in keys:
+                candidate = value.strip().replace("\\", "/")
+                if not candidate or candidate.startswith(("/", "\\")) or "://" in candidate:
+                    return
+                if candidate.startswith("../") or candidate == ".." or "/../" in candidate:
+                    return
+                # Semantic deliverable names are not paths; extensions or a slash
+                # are sufficient to distinguish actual workspace artifacts.
+                if "/" not in candidate and "." not in candidate:
+                    return
+                if candidate not in refs:
+                    refs.append(candidate[:300])
+
+        visit(payload)
+        return refs[:32]
+
+    def _build_handoff(self, job: WorkflowJob, result: AgentResult, *, error: str | None = None) -> dict:
         payload = result.payload if isinstance(result.payload, dict) else {}
         summary = payload.get("summary") or payload.get("text") or payload.get("error") or error or ""
         evidence = payload.get("evidence")
         if not isinstance(evidence, list):
             evidence = []
-        if result.transcript_ref and not evidence:
-            evidence = [{"transcriptRef": result.transcript_ref}]
         blocking = payload.get("blockingIssues")
         if not isinstance(blocking, list):
             blocking = []
-        return {
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        declared = options.get("deliverables") if isinstance(options, dict) else []
+        artifact_refs = self._artifact_refs_from_payload(payload)
+        artifact_refs.extend(ref for ref in self._artifact_refs_from_payload({"deliverables": declared}) if ref not in artifact_refs)
+        handoff = {
             "status": result.status,
-            "summary": redact_sensitive_text(str(summary))[:2_000],
-            "evidence": sanitize(copy.deepcopy(evidence)),
-            "blockingIssues": sanitize(copy.deepcopy(blocking)),
+            "summary": self._compact_handoff_summary(payload, error),
+            "evidence": sanitize(copy.deepcopy(evidence[:8])),
+            "blockingIssues": sanitize(copy.deepcopy(blocking[:8])),
+            # These are logical refs for audit/recovery. They are not expanded into
+            # the next LLM request; workspace artifactRefs are the only read path.
+            "resultRef": job.result_ref,
+            "artifactRefs": artifact_refs,
             "transcriptRef": result.transcript_ref,
         }
+        handoff_ref = self._write_handoff_artifact(job, result, handoff)
+        if handoff_ref:
+            handoff["handoffRef"] = handoff_ref
+        return handoff
+
+    def _write_handoff_artifact(self, job: WorkflowJob, result: AgentResult, handoff: dict) -> str | None:
+        """Persist detailed child output in the workspace, never in the next prompt."""
+        workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
+        if not workspace:
+            return None
+        ref = f"workflow-handoffs/{job.job_id}.json"
+        try:
+            target = resolve_workspace_child(ref, Path(workspace))
+            envelope = {
+                "version": 1,
+                "jobId": job.job_id,
+                "label": job.metadata.get("label"),
+                "status": result.status,
+                "summary": handoff.get("summary"),
+                "resultRef": handoff.get("resultRef"),
+                "transcriptRef": handoff.get("transcriptRef"),
+                "artifactRefs": handoff.get("artifactRefs") or [],
+                # Detailed research belongs in declared workspace artifacts. Keep
+                # this control-plane file bounded; never mirror payload.text here.
+            }
+            atomic_write_json(target, envelope)
+            return ref
+        except (WorkspacePathError, OSError, TypeError, ValueError):
+            return None
+
+    def _build_dependency_handoff(self, job: WorkflowJob) -> list[dict]:
+        handoffs: list[dict] = []
+        for dependency in job.metadata.get("dependsOn") or []:
+            upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
+            if upstream is None:
+                continue
+            raw = upstream.metadata.get("handoff") or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            handoffs.append({
+                "label": upstream.metadata.get("label") or dependency,
+                "status": upstream.status,
+                "summary": self._compact_handoff_summary(raw, None),
+                "evidence": sanitize(copy.deepcopy(raw.get("evidence") or []))[:8],
+                "blockingIssues": sanitize(copy.deepcopy(raw.get("blockingIssues") or []))[:8],
+                "resultRef": raw.get("resultRef") or upstream.result_ref,
+                "artifactRefs": [str(ref) for ref in (raw.get("artifactRefs") or []) if str(ref)][:32],
+                "handoffRef": raw.get("handoffRef"),
+                "transcriptRef": raw.get("transcriptRef") or upstream.metadata.get("transcriptRef"),
+            })
+        return handoffs
+
+    def downstream_result(self, job: WorkflowJob) -> dict:
+        """Return the bounded value exposed to the workflow script/next child.
+
+        Durable result.json and transcript files retain full audit data, but the
+        RPC boundary must not put a child transcript into the next LLM request.
+        """
+        handoff = job.metadata.get("handoff") if isinstance(job.metadata, dict) else None
+        if not isinstance(handoff, dict):
+            handoff = {}
+        result = {
+            "status": job.status,
+            "summary": handoff.get("summary") or "",
+            "resultRef": handoff.get("resultRef") or job.result_ref,
+            "handoffRef": handoff.get("handoffRef"),
+            "artifactRefs": list(handoff.get("artifactRefs") or []),
+            "transcriptRef": handoff.get("transcriptRef") or job.metadata.get("transcriptRef"),
+            "evidence": sanitize(copy.deepcopy(handoff.get("evidence") or []))[:8],
+            "blockingIssues": sanitize(copy.deepcopy(handoff.get("blockingIssues") or []))[:8],
+        }
+        payload = job.metadata.get("result") if isinstance(job.metadata, dict) else {}
+        if isinstance(payload, dict):
+            for key in ("verificationPassed", "schemaFallback", "schemaValidation", "statusCode", "category", "providerAnomaly"):
+                if key in payload:
+                    result[key] = sanitize(copy.deepcopy(payload[key]))
+        return result
 
     def _schedule_retry(self, job: WorkflowJob, error: str, *, result: AgentResult | None = None) -> bool:
         policy = normalize_retry_policy(job.metadata.get("retryPolicy"))
@@ -773,7 +943,7 @@ class AgentScheduler:
                 result.transcript_ref = result.transcript_ref or transcript_ref
             self.store.write_agent_result(self.run, job, result)
             job.metadata["result"] = result.payload
-            job.metadata["handoff"] = self._build_handoff(result, error=error)
+            job.metadata["handoff"] = self._build_handoff(job, result, error=error)
             if result.transcript_ref:
                 job.metadata["transcriptRef"] = result.transcript_ref
             if result.token_usage:
@@ -852,7 +1022,8 @@ class AgentScheduler:
         metadata = self.run.metadata or {}
         return {
             "scriptHash": _stable_hash(self.run.script),
-            "argsHash": _stable_hash(self.args),
+            "argsHash": _stable_hash(self.cache_args if self._has_explicit_cache_args else self.args),
+            "workspacePathHash": _stable_hash(metadata.get("workspacePath")),
             "callIndex": job.metadata.get("callIndex", 0),
             "promptHash": _stable_hash(job.prompt),
             "optionsHash": _stable_hash(options),

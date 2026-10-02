@@ -106,6 +106,31 @@ class WorkflowStoreTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.read_agent_transcript_events(run_b, "../state.json")
 
+    def test_transcript_reader_sees_events_beyond_legacy_64k_head_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_late",
+                    session_id="session_late",
+                    script="",
+                    jobs=[WorkflowJob(job_id="agent_1")],
+                )
+            )
+            filler = "x" * 4000
+            events = [
+                {"type": "message", "index": index, "text": filler} for index in range(20)
+            ]
+            events.append({"type": "tool_call", "toolName": "file_read", "args": {"path": "tmp/late.html"}})
+            transcript_ref = store.write_agent_transcript(run, run.jobs[0], events)
+
+            transcript_bytes = (store._run_dir(run) / transcript_ref).stat().st_size
+            self.assertGreater(transcript_bytes, 64_000)
+
+            read_events = store.read_agent_transcript_events(run, transcript_ref)
+            late = [event for event in read_events if event.get("toolName") == "file_read"]
+            self.assertTrue(late, "tool_call after the legacy 64k head window must be visible")
+
     def test_append_permission_event_maps_raw_event_to_workflow_journal_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

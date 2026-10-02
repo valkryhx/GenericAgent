@@ -252,6 +252,33 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual("awaiting_approval", run.status)
             self.assertEqual("explicit_workflow_approval_gate", run.metadata["approvalGate"]["reason"])
 
+    def test_create_planned_run_rejects_invalid_rendered_script_before_starting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = WorkflowDraft(
+                task_text="invalid rendered workflow",
+                context={},
+                classification={"taskType": "research"},
+                plan={"taskType": "research", "phases": [{"title": "Collect", "agents": []}]},
+                validation={"ok": True, "issues": []},
+                script="const research/source_1.json = {}",
+            )
+
+            class Planner:
+                def plan(self, *_args, **_kwargs):
+                    return draft
+
+            controller = WorkflowController(WorkflowStore(root=tmp))
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text=draft.task_text,
+                planner=Planner(),
+            )
+
+            self.assertEqual("failed", run.status)
+            self.assertEqual("workflow_plan_rejected", run.error)
+            events = controller.store.replay_events(run.run_id)
+            self.assertIn("invalid_workflow_script", str(events[-1].payload["issues"]))
+
     def test_create_planned_run_records_rejected_draft_without_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))

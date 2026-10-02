@@ -103,6 +103,57 @@ class WorkflowVerificationContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported verification check kind"):
             validate_verification_contract(contract)
 
+    def test_artifact_content_checks_are_advisory_without_explicit_strict_mode(self):
+        plan = {
+            "verification": {
+                "level": "inline",
+                "checks": [
+                    {"id": "artifact_structure", "kind": "artifact", "required": True, "path": "report.docx"},
+                    {"id": "source_count", "kind": "artifact", "required": True, "path": "report.docx"},
+                ],
+            }
+        }
+
+        contract = normalize_verification_contract(plan)
+
+        self.assertTrue(all(check["required"] is False for check in contract["checks"]))
+        self.assertTrue(all(check["advisory"] is True for check in contract["checks"]))
+        self.assertTrue(all(check["strict"] is False for check in contract["checks"]))
+
+    def test_artifact_content_check_can_opt_into_strict_validation(self):
+        contract = validate_verification_contract({
+            "level": "inline",
+            "checks": [{
+                "id": "artifact_structure",
+                "kind": "artifact",
+                "required": True,
+                "strict": True,
+                "path": "report.docx",
+            }],
+            "independentReview": False,
+        })
+
+        check = contract["checks"][0]
+        self.assertTrue(check["required"])
+        self.assertTrue(check["strict"])
+        self.assertNotIn("advisory", check)
+
+    def test_unknown_content_schema_is_advisory_until_explicitly_strict(self):
+        contract = validate_verification_contract({
+            "level": "inline",
+            "checks": [{
+                "id": "html_structure_valid",
+                "kind": "schema",
+                "required": True,
+                "schemaRef": "VERIFICATION_SCHEMA",
+            }],
+            "independentReview": False,
+        })
+
+        check = contract["checks"][0]
+        self.assertFalse(check["required"])
+        self.assertTrue(check["advisory"])
+
 
 if __name__ == "__main__":
     unittest.main()

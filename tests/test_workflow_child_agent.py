@@ -217,6 +217,36 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual("read_only", metadata_event["permissionProfile"])
         self.assertEqual("read-only-v1", metadata_event["permissionPolicyVersion"])
 
+    def test_child_prompt_uses_bounded_dependency_handoff_instead_of_transcript(self):
+        job = WorkflowJob(
+            job_id="agent_2",
+            prompt="write the final report",
+            metadata={
+                "runId": "wf_test",
+                "label": "Writer",
+                "dependsOn": ["Researcher"],
+                "dependencyHandoff": [
+                    {
+                        "label": "Researcher",
+                        "status": "succeeded",
+                        "summary": "short research conclusion",
+                        "resultRef": "agents/agent_1/result.json",
+                        "artifactRefs": ["artifacts/research.json"],
+                        "transcriptRef": "agents/agent_1/transcript.jsonl",
+                    }
+                ],
+            },
+        )
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertIn("Dependency handoff", prompt)
+        self.assertIn("short research conclusion", prompt)
+        self.assertIn("artifacts/research.json", prompt)
+        self.assertIn("resultRef: agents/agent_1/result.json", prompt)
+        self.assertNotIn("x" * 1000, prompt)
+
     def test_child_prompt_and_transcript_carry_workflow_role(self):
         created = []
 
@@ -551,7 +581,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         job = WorkflowJob(
             job_id="agent_tool_read",
             prompt="read test file",
-            metadata={"runId": "wf_test", "permissionProfile": "inherit-current-permissions", "permissionPolicyVersion": "inherit-current-v1"},
+            metadata={"runId": "wf_test", "permissionProfile": "inherit-current-permissions", "permissionPolicyVersion": "inherit-current-v1", "workspacePath": str(Path(__file__).resolve().parent.parent)},
         )
         tools = [
             {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},

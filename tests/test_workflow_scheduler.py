@@ -553,6 +553,46 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertIn("evidence", handoff)
         self.assertEqual([], handoff["blockingIssues"])
 
+    def test_dependent_job_receives_compact_handoff_not_upstream_payload(self):
+        runner = LabelAwareRunner(
+            results_by_label={
+                "Researcher": {
+                    "summary": "bounded conclusion",
+                    "text": "x" * 100_000,
+                    "artifacts": ["artifacts/research.json"],
+                },
+                "Writer": {"summary": "written"},
+            }
+        )
+        scheduler, store, run = self.make_scheduler(runner=runner, max_concurrent=1)
+        workspace = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(workspace, ignore_errors=True))
+        scheduler.args = {"workspacePath": str(workspace)}
+        scheduler._sync_workspace_metadata()
+        scheduler.register_agent(prompt="research", label="Researcher")
+        scheduler.register_agent(
+            prompt="write",
+            label="Writer",
+            options={"dependsOn": ["Researcher"]},
+        )
+
+        scheduler.run_all()
+
+        writer = store.load_run(run.run_id).jobs[1]
+        handoff = writer.metadata.get("dependencyHandoff")
+        self.assertEqual(1, len(handoff))
+        self.assertEqual("bounded conclusion", handoff[0]["summary"])
+        self.assertEqual(["artifacts/research.json"], handoff[0]["artifactRefs"])
+        self.assertNotIn("x" * 10_000, str(handoff))
+        self.assertEqual("workflow-handoffs/agent_1.json", handoff[0]["handoffRef"])
+        handoff_path = workspace / handoff[0]["handoffRef"]
+        self.assertTrue(handoff_path.exists())
+        persisted = json.loads(handoff_path.read_text(encoding="utf-8"))
+        self.assertEqual("bounded conclusion", persisted["summary"])
+        self.assertNotIn("payload", persisted)
+        downstream = scheduler.downstream_result(store.load_run(run.run_id).jobs[1])
+        self.assertNotIn("x" * 10_000, json.dumps(downstream, ensure_ascii=False))
+
     def test_total_agents_cap_rejects_excess_job_and_records_event(self):
         scheduler, store, _ = self.make_scheduler(max_total=2)
         scheduler.register_agent(prompt="one")

@@ -217,6 +217,324 @@ return {summary: result.summary}
             self.assertEqual(expected, loaded.metadata["workspacePath"])
             self.assertEqual(expected, loaded.jobs[0].metadata["workspacePath"])
 
+    def test_execution_contract_requires_recorded_required_tool_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_tool_evidence",
+                session_id="session_test",
+                script="",
+                metadata={"executionContract": {
+                    "requiresExecution": True,
+                    "requiredToolEvidence": [{"tool": "mcp__tavily__tavily_search", "agent": "research", "minimumCalls": 1}],
+                }},
+            ))
+            job = WorkflowJob(job_id="agent_1", prompt="search", metadata={"label": "research"})
+            job.metadata["transcriptRef"] = store.write_agent_transcript(run, job, [
+                {"type": "tool_call", "toolName": "mcp__tavily__tavily_search", "args": {"query": "safe test query"}},
+            ])
+            run.jobs.append(job)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+            run.jobs[0].metadata.pop("transcriptRef")
+            error = runtime._evaluate_execution_contract_evidence(run)
+            self.assertIn("missing_required_tool_evidence", error)
+
+    def test_file_write_evidence_is_preferred_when_artifact_is_written_by_code_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_code_run_docx_write",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "requiredToolEvidence": [{"tool": "file_write", "agent": "Document Writer", "minimumCalls": 1}],
+                        "artifacts": [{"path": "report.docx", "writer": "Document Writer", "requiredChecks": ["artifact_exists", "artifact_readback"]}],
+                    },
+                },
+            ))
+            (workspace / "report.docx").write_bytes(b"PKfake-docx")
+            writer = WorkflowJob(job_id="agent_1", prompt="write docx", metadata={"label": "Document Writer"})
+            writer.metadata["transcriptRef"] = store.write_agent_transcript(run, writer, [
+                {"type": "tool_call", "toolName": "code_run", "args": {"script": "from docx import Document; p='report.docx'; Document(p); print(__import__('os').path.getsize(p))"}},
+                {"type": "tool_result", "toolName": "code_run", "data": {"status": "success"}},
+            ])
+            run.jobs.append(writer)
+
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_explicit_required_file_write_evidence_remains_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_required_file_write",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "requiredToolEvidence": [{"tool": "file_write", "agent": "writer", "minimumCalls": 1, "mode": "required"}],
+                        "artifacts": [{"path": "report.html", "writer": "writer", "requiredChecks": ["artifact_exists", "artifact_readback"]}],
+                    },
+                },
+            ))
+            (workspace / "report.html").write_text("<html></html>", encoding="utf-8")
+            writer = WorkflowJob(job_id="agent_1", prompt="write", metadata={"label": "writer"})
+            writer.metadata["transcriptRef"] = store.write_agent_transcript(run, writer, [])
+            run.jobs.append(writer)
+
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            error = runtime._evaluate_execution_contract_evidence(run)
+            self.assertIn("missing_required_tool_evidence", error)
+
+    def test_execution_contract_checks_artifact_scope_existence_and_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_artifact_contract",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(Path(tmp, "workspace")),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{
+                            "path": "artifacts/page.html",
+                            "writer": "writer",
+                            "requiredChecks": ["artifact_exists", "artifact_readback"],
+                        }],
+                    },
+                },
+            ))
+            workspace = Path(run.metadata["workspacePath"])
+            artifact = workspace / "artifacts" / "page.html"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("<html></html>", encoding="utf-8")
+            writer = WorkflowJob(job_id="agent_1", prompt="write", metadata={"label": "writer"})
+            writer.metadata["transcriptRef"] = store.write_agent_transcript(run, writer, [
+                {"type": "tool_call", "toolName": "file_read", "args": {"path": "artifacts/page.html"}},
+            ])
+            run.jobs.append(writer)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+            writer.metadata.pop("transcriptRef")
+            self.assertIn("missing_artifact_readback_evidence", runtime._evaluate_execution_contract_evidence(run))
+            run.metadata["executionContract"]["artifacts"][0]["path"] = "../outside.html"
+            self.assertIn("invalid_artifact_path", runtime._evaluate_execution_contract_evidence(run))
+
+    def test_required_tool_evidence_matches_agent_labels_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_label_case",
+                session_id="session_test",
+                script="",
+                metadata={"executionContract": {
+                    "requiresExecution": True,
+                    "requiredToolEvidence": [{"tool": "file_read", "agent": "Artifact verifier", "minimumCalls": 1}],
+                }},
+            ))
+            job = WorkflowJob(job_id="agent_1", prompt="verify", metadata={"label": "Artifact Verifier"})
+            job.metadata["transcriptRef"] = store.write_agent_transcript(run, job, [
+                {"type": "tool_call", "toolName": "file_read", "args": {"path": "page.html"}},
+            ])
+            run.jobs.append(job)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_required_file_read_evidence_accepts_successful_artifact_code_run_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_code_run_readback",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "requiredToolEvidence": [{"tool": "file_read", "agent": "verify", "minimumCalls": 1}],
+                        "artifacts": [{"path": "./artifacts/page.html", "writer": "writer", "requiredChecks": ["artifact_readback"]}],
+                    },
+                },
+            ))
+            (workspace / "artifacts").mkdir()
+            (workspace / "artifacts" / "page.html").write_text("<html></html>", encoding="utf-8")
+            verify = WorkflowJob(job_id="agent_2", prompt="verify", metadata={"label": "verify"})
+            verify.metadata["transcriptRef"] = store.write_agent_transcript(run, verify, [
+                {"type": "tool_call", "toolName": "code_run", "args": {"script": "from pathlib import Path; Path('artifacts/page.html').read_text()"}},
+                {"type": "tool_result", "toolName": "code_run", "data": {"status": "success"}},
+            ])
+            run.jobs.append(verify)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_artifact_readback_preserves_leading_dot_in_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            filename = ".decode-mods-vs-deepseek-harness-report.html"
+            run = store.create_run(WorkflowRun(
+                run_id="wf_hidden_artifact_readback",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "requiredToolEvidence": [{"tool": "file_read", "agent": "writer", "minimumCalls": 1}],
+                        "artifacts": [{"path": filename, "writer": "writer", "requiredChecks": ["artifact_readback"]}],
+                    },
+                },
+            ))
+            (workspace / filename).write_text("<html><body>ok</body></html>", encoding="utf-8")
+            writer = WorkflowJob(job_id="agent_1", prompt="write", metadata={"label": "writer"})
+            writer.metadata["transcriptRef"] = store.write_agent_transcript(run, writer, [
+                {"type": "tool_call", "toolName": "code_run", "args": {"script": f"from pathlib import Path; Path('{filename}').read_text()"}},
+                {"type": "tool_result", "toolName": "code_run", "data": {"status": "success"}},
+            ])
+            run.jobs.append(writer)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_artifact_readback_accepts_verifier_agent_code_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            filename = "reports/decode-mods-vs-deepseek-harness.html"
+            (workspace / "reports").mkdir()
+            (workspace / filename).write_text("<html><body>ok</body></html>", encoding="utf-8")
+            run = store.create_run(WorkflowRun(
+                run_id="wf_verifier_agent_readback",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": filename, "writer": "writer", "requiredChecks": ["artifact_readback"]}],
+                    },
+                },
+            ))
+            verifier = WorkflowJob(job_id="agent_2", prompt="verify", metadata={"label": "Report Verifier", "role": "verification"})
+            verifier.metadata["transcriptRef"] = store.write_agent_transcript(run, verifier, [
+                {"type": "tool_call", "toolName": "code_run", "args": {"script": f"from pathlib import Path; Path(r'{workspace / filename}').read_text()"}},
+                {"type": "tool_result", "toolName": "code_run", "data": {"status": "success"}},
+            ])
+            run.jobs.append(verifier)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_artifact_readback_accepts_explicit_verifier_file_read_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_verifier_readback",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "requiredToolEvidence": [{"tool": "file_read", "agent": "verify", "minimumCalls": 1}],
+                        "artifacts": [{"path": "page.html", "writer": "writer", "requiredChecks": ["artifact_exists", "artifact_readback"]}],
+                    },
+                },
+            ))
+            (workspace / "page.html").write_text("<html></html>", encoding="utf-8")
+            verify = WorkflowJob(job_id="agent_2", prompt="verify", metadata={"label": "verify"})
+            verify.metadata["transcriptRef"] = store.write_agent_transcript(run, verify, [
+                {"type": "tool_call", "toolName": "file_read", "args": {"path": "page.html"}},
+            ])
+            run.jobs.append(verify)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_artifact_readback_accepts_non_verifier_dependent_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_dependent_reader_readback",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": "research/source.json", "writer": "researcher", "requiredChecks": ["artifact_exists", "artifact_readback"]}],
+                    },
+                },
+            ))
+            artifact = workspace / "research" / "source.json"
+            artifact.parent.mkdir()
+            artifact.write_text("{}", encoding="utf-8")
+            reader = WorkflowJob(job_id="agent_2", prompt="synthesize", metadata={"label": "Synthesis Writer"})
+            reader.metadata["transcriptRef"] = store.write_agent_transcript(run, reader, [
+                {"type": "tool_call", "toolName": "file_read", "args": {"path": "research/source.json"}},
+            ])
+            run.jobs.append(reader)
+            self.assertIsNone(WorkflowRuntime(store=store, runner=FakeChildAgentRunner())._evaluate_execution_contract_evidence(run))
+
+    def test_successful_run_writes_terminal_workflow_finished_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_terminal_event",
+                session_id="session_test",
+                script="const result = await agent('finish work', {label: 'worker'}); return result.summary",
+                status="running",
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            outcome = runtime.run(run)
+
+            self.assertEqual("succeeded", outcome.run.status)
+            events = store.replay_events(run.run_id)
+            terminal = [event for event in events if event.event_type == "workflow_finished"]
+            self.assertEqual(1, len(terminal))
+            self.assertEqual("succeeded", terminal[0].payload["status"])
+            self.assertEqual("accepted", terminal[0].payload["integrationStatus"])
+            self.assertEqual("workflow_finished", events[-1].event_type)
+
+    def test_runtime_creates_and_persists_default_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = "return await agent('run without explicit workspace')"
+            run = store.create_run(WorkflowRun(run_id="wf_default_workspace", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
+
+            expected = Path.cwd().resolve()
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertTrue(expected.is_dir())
+            self.assertEqual(str(expected), runner.started_jobs[0].metadata["workspacePath"])
+            loaded = store.load_run(run.run_id)
+            self.assertEqual(str(expected), loaded.metadata["workspacePath"])
+
     def test_runtime_rejects_missing_workspace_directory_before_child_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -374,7 +692,7 @@ return { summary: result.summary, phaseDone: true }
             self.assertEqual("final-result.json", loaded.result_ref)
             events = store.replay_events("wf_test")
             self.assertEqual(
-                ["workflow_phase", "workflow_log", "agent_registered", "agent_started", "agent_completed"],
+                ["workflow_phase", "workflow_log", "agent_registered", "agent_started", "agent_completed", "workflow_finished"],
                 [event.event_type for event in events],
             )
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))

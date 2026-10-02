@@ -106,3 +106,7 @@ The local `gpt-6-luna` and `deepseek-v4.1-flash` profiles both passed the OpenAI
 ### Pi subagent reference and GA hardening
 
 Pi subagent design evidence and the GA hardening mapping are documented in `docs/20261001-pi-subagent-design-reference.md`; the implementation plan is `docs/superpowers/plans/2026-10-01-ga-subagent-hardening.md`. For subagent, multi-agent, agent team, and workflow children, enforce isolated context by default (`fork_turns=none`), remove orchestration tools from child schemas unless explicitly enabled, pass parent context only through explicit messages/artifacts/chains, and never let business allowlists deny the internal `no_tool` sentinel. Do not rely on prompts as the only control for identity, recursion, or tool boundaries.
+
+## Workflow autonomous activation hardening
+
+GA workflow activation, explicit execution contracts, host MCP/tool preflight, run-scoped workspace/resume behavior, terminal events, and the DeepSeek + Tavily Ink UI E2E are tracked in `docs/20261002-ga-workflow-autonomous-activation-hardening-reference.md` and the implementation progress in `docs/20261002-ga-workflow-autonomous-activation-hardening-progress.md`. Read these before changing workflow planner/runtime/Ink routing. Preserve the invariant that `taskType` is advisory only: declared actions, tools, scopes, artifacts, and machine-checkable evidence determine execution gates.

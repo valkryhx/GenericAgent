@@ -20,8 +20,19 @@ class WorkflowController:
         planner,
         context: dict | None = None,
         auto_approve: bool = True,
+        workspace_path: str | None = None,
     ) -> WorkflowRun:
         draft = planner.plan(task_text, context or {})
+        if workspace_path:
+            from workflow_planner import normalize_plan_workspace_paths, render_workflow_plan, validate_workflow_plan
+            draft.plan = normalize_plan_workspace_paths(draft.plan, workspace_path)
+            planner_validation = getattr(draft, "validation", {}) or {}
+            if bool(planner_validation.get("ok")):
+                draft.validation = validate_workflow_plan(draft.plan)
+            if draft.validation.get("ok"):
+                draft.script = render_workflow_plan(draft.plan)
+            else:
+                draft.script = ""
         validation = getattr(draft, "validation", {}) or {}
         draft_context = getattr(draft, "context", {}) or {}
         classification = getattr(draft, "classification", {}) or {}
@@ -29,6 +40,21 @@ class WorkflowController:
         task_type = str(classification.get("taskType") or getattr(draft, "plan", {}).get("taskType") or "unknown")
         is_valid = bool(validation.get("ok"))
         script = getattr(draft, "script", "") if is_valid else ""
+        if is_valid and script:
+            from workflow_planner import validate_rendered_workflow_script
+
+            preflight = validate_rendered_workflow_script(script)
+            if not preflight.get("ok"):
+                validation = dict(validation)
+                validation["ok"] = False
+                validation["issues"] = list(validation.get("issues") or [])
+                validation["issues"].append({
+                    "code": "invalid_workflow_script",
+                    "message": str(preflight.get("error") or "workflow script syntax check failed"),
+                })
+                draft.validation = validation
+                is_valid = False
+                script = ""
         draft_plan = getattr(draft, "plan", {}) or {}
         run_verification_contract = normalize_verification_contract(draft_plan)
         acceptance_contract = draft_plan.get("acceptance") if isinstance(draft_plan, dict) else None
@@ -50,7 +76,7 @@ class WorkflowController:
 
             acceptance_contract.setdefault("testsDeclared", plan_declares_tests(draft_plan))
             run.metadata["acceptanceContract"] = acceptance_contract
-        for key in ("mode", "riskLevel", "evalContract", "orchestration"):
+        for key in ("mode", "riskLevel", "evalContract", "orchestration", "executionContract"):
             if key in draft_plan:
                 run.metadata[key] = draft_plan[key]
         orchestration = draft_plan.get("orchestration") if isinstance(draft_plan, dict) else None

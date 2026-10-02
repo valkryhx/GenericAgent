@@ -473,6 +473,17 @@ class WorkflowStore:
         max_bytes: int = 64_000,
         max_events: int = 256,
     ) -> list[dict]:
+        """Return transcript events without positional bias.
+
+        A transcript grows append-only and can be hundreds of KB once a child
+        pastes file contents into tool calls. Reading a fixed head window made
+        late evidence (for example an artifact readback after a large write)
+        invisible: the runtime then failed a run whose evidence was physically
+        present. ``max_bytes`` is therefore a per-line safety bound, not a
+        scan window; the file is streamed end to end and ``max_events`` bounds
+        the returned list.
+        """
+
         if not transcript_ref:
             return []
         max_bytes = max(0, int(max_bytes))
@@ -489,20 +500,26 @@ class WorkflowStore:
             raise ValueError("transcript_ref must stay within the workflow artifact directory")
         if not transcript_path.exists():
             return []
-        with transcript_path.open("rb") as fh:
-            raw = fh.read(max_bytes)
+
         events: list[dict] = []
-        for line in raw.decode("utf-8", errors="replace").splitlines():
-            if len(events) >= max_events:
-                break
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(sanitize(event))
+        with transcript_path.open("rb") as fh:
+            for raw_line in fh:
+                if len(events) >= max_events:
+                    break
+                if len(raw_line) > max_bytes:
+                    # Oversized tool payloads stay useful for evidence via
+                    # parsing the JSON head; decode a bounded prefix so an
+                    # enormous log line cannot blow up memory.
+                    raw_line = raw_line[:max_bytes]
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(sanitize(event))
         return events
 
     @staticmethod

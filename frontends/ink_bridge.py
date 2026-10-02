@@ -23,6 +23,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from sensitive_redaction import sanitize, redact_sensitive_text
+from workflow_workspace import resolve_workspace_root, workspace_metadata
 
 
 def _configure_protocol_stdio() -> None:
@@ -186,6 +187,7 @@ class GenericAgentBridge:
         agent_control: Any | None = None,
     ) -> None:
         self.agent_factory = agent_factory
+        self.workspace_root = resolve_workspace_root(os.getcwd())
         with backend_output_redirect():
             self.agent = self.agent_factory()
             self.agent.inc_out = True
@@ -210,6 +212,9 @@ class GenericAgentBridge:
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
         self._mcp_watch_lock = threading.Lock()
         self._mcp_watch_thread: threading.Thread | None = None
+        self._workflow_planning_lock = threading.Lock()
+        self._workflow_planning = False
+        self._workflow_planning_thread: threading.Thread | None = None
         self.workflow_runtime_factory = workflow_runtime_factory
         self.workflow_planner_factory = workflow_planner_factory
         with backend_output_redirect():
@@ -233,7 +238,7 @@ class GenericAgentBridge:
                 ]
             )
         self.agent_control = agent_control
-        self.agent_cursors: dict[str, int] = {}
+        self.agent_cursors: dict[str, int] = self._initial_agent_cursors()
         self._agent_event_ids: set[str] = set()
         self._agent_errors: dict[str, str] = {}
         self._agent_snapshot_fingerprint: str | None = None
@@ -249,9 +254,17 @@ class GenericAgentBridge:
         if not text.strip() and not images:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
-        if getattr(self.agent, "is_running", False) or self._is_consuming():
-            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+        with self._workflow_planning_lock:
+            workflow_planning = self._workflow_planning
+        if getattr(self.agent, "is_running", False) or self._is_consuming() or workflow_planning:
+            self.emit({"type": "error", "code": "busy", "message": "agent or workflow planner is running"})
             return -1
+        if not images:
+            from workflow_activation import resolve_workflow_activation
+
+            activation = resolve_workflow_activation(text)
+            if activation.action == "recommended":
+                return self._submit_recommended_workflow(text, activation)
         if not self._auto_compact_if_needed(text):
             return -1
         self._task_seq += 1
@@ -275,6 +288,49 @@ class GenericAgentBridge:
         )
         self._consume_thread.start()
         return task_id
+
+    def _submit_recommended_workflow(self, task_text: str, activation) -> int:
+        with self._workflow_planning_lock:
+            if self._workflow_planning:
+                self.emit({"type": "error", "code": "busy", "message": "workflow planner is running"})
+                return -1
+            self._workflow_planning = True
+        self._task_seq += 1
+        task_id = self._task_seq
+        self._rewind_snapshots[task_id] = self._snapshot_agent_state()
+        self._rewind_snapshots[task_id]["text"] = task_text
+        self.emit({"type": "user", "taskId": task_id, "text": task_text})
+        self.emit({"type": "status", "status": "running", "taskId": task_id})
+        self.emit({"type": "activity", "label": "Planning workflow"})
+        thread = threading.Thread(
+            target=self._run_recommended_workflow,
+            args=(task_text, activation),
+            daemon=True,
+            name=f"ga-ink-workflow-plan-{task_id}",
+        )
+        self._workflow_planning_thread = thread
+        thread.start()
+        return task_id
+
+    def _run_recommended_workflow(self, task_text: str, activation) -> None:
+        try:
+            self.workflow_plan(
+                task_text,
+                context={"activation": {
+                    "mode": activation.mode,
+                    "action": activation.action,
+                    "confidence": activation.confidence,
+                    "matchedSignals": list(activation.matched_signals),
+                    "reason": activation.reason,
+                    "requiresFanout": activation.requires_fanout,
+                    "requiresPhases": activation.requires_phases,
+                }},
+                auto_approve=True,
+                _activation_internal=True,
+            )
+        finally:
+            with self._workflow_planning_lock:
+                self._workflow_planning = False
 
     def stop(self) -> None:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
@@ -602,8 +658,9 @@ class GenericAgentBridge:
         auto_approve: bool = True,
         args: Any = None,
         timeout_seconds: float | None = None,
+        _activation_internal: bool = False,
     ) -> str:
-        if getattr(self.agent, "is_running", False) or self._is_consuming():
+        if getattr(self.agent, "is_running", False) or self._is_consuming() or (self._workflow_planning and not _activation_internal):
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return ""
         task_text = str(task_text or "")
@@ -621,14 +678,21 @@ class GenericAgentBridge:
                     planner=planner,
                     context=context if isinstance(context, dict) else {},
                     auto_approve=bool(auto_approve),
+                    workspace_path=str(self.workspace_root),
                 )
             self._emit_agent_read_model()
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
             self._emit_workflow_events(run.run_id)
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
             return ""
         if run.status != "running":
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
+            if run.status in {"succeeded", "failed", "cancelled", "killed", "interrupted"}:
+                self.emit({"type": "workflow_final", "runId": run.run_id, "result": self._workflow_final_payload(run)})
             return run.run_id
         thread = threading.Thread(
             target=self._run_workflow_runtime,
@@ -820,6 +884,8 @@ class GenericAgentBridge:
             self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
             with backend_output_redirect():
                 run = self.workflow_store.load_run(run_id)
+                run.metadata.update(workspace_metadata(self.workspace_root))
+                self.workflow_store.save_run(run)
                 runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
                 runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
                 current = self.workflow_store.load_run(run_id)
@@ -901,6 +967,10 @@ class GenericAgentBridge:
         }
         if self.workflow_runtime_factory is not None:
             return self.workflow_runtime_factory(**kwargs)
+        # Production runs use the bridge launch directory as the user
+        # workspace. The injected factory branch intentionally stays minimal
+        # for unit-test doubles that predate this keyword.
+        kwargs["workspace_root"] = str(self.workspace_root)
         with backend_output_redirect():
             from workflow_child_agent import NativeGPTChildAgentRunner
             from workflow_llm import binding_from_agent
@@ -928,6 +998,44 @@ class GenericAgentBridge:
                 continue
             seen.add(event.sequence)
             self.emit({"type": "workflow_event", "event": event.to_dict()})
+
+    def _initial_agent_cursors(self) -> dict[str, int]:
+        """Start live control streams at their current durable tails.
+
+        The process event bus is shared by all GA sessions. Starting a new Ink
+        bridge at cursor 0 replays the entire historical bus in one frame;
+        the UI's bounded event list then evicts the freshly spawned child's
+        terminal event. Seed only the process cursor here. Workflow cursors
+        remain per-run and are initialized by their adapter when a run exists.
+        """
+        cursors: dict[str, int] = {}
+        for adapter in getattr(self.agent_control, "adapters", ()) or ():
+            engine = getattr(adapter, "engine", None)
+            if engine == "process":
+                manager = getattr(adapter, "manager", None)
+                bus = getattr(manager, "event_bus", None)
+                last_event_seq = getattr(bus, "last_event_seq", None)
+                if callable(last_event_seq):
+                    try:
+                        cursors[str(getattr(adapter, "source_cursor", "process"))] = int(last_event_seq() or 0)
+                    except Exception:
+                        pass
+            elif engine == "workflow":
+                # Workflow sources are per-run. Seed existing runs to their
+                # current tails so a fresh Ink session does not replay every
+                # historical workflow event into the bounded UI event list.
+                store = getattr(adapter, "store", None)
+                try:
+                    from agent_runtime_models import make_workflow_source_cursor
+                    for run in store.list_runs() if store is not None else ():
+                        rows = store.replay_events(run.run_id)
+                        cursors[make_workflow_source_cursor(run.run_id)] = max(
+                            (int(row.sequence or 0) for row in rows),
+                            default=0,
+                        )
+                except Exception:
+                    pass
+        return cursors
 
     def _emit_agent_read_model(self) -> None:
         self._emit_agent_events()

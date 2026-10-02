@@ -4,13 +4,27 @@ import unittest
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import render_workflow_plan, validate_workflow_plan
+from workflow_planner import normalize_plan_workspace_paths, render_workflow_plan, validate_rendered_workflow_script, validate_workflow_plan
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
 
 
 class WorkflowPlanValidatorTest(unittest.TestCase):
+    def test_normalizes_legacy_tmp_artifact_and_writer_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = {
+                "executionContract": {"artifacts": [{"path": "/tmp/report.html", "writer": "writer", "requiredChecks": ["artifact_exists"]}]},
+                "phases": [{"title": "write", "agents": [{"label": "writer", "prompt": "write /tmp/report.html", "writeScope": ["/tmp/report.html"], "deliverables": ["/tmp/report.html"]}]}],
+            }
+            normalized = normalize_plan_workspace_paths(plan, tmp)
+            artifact = normalized["executionContract"]["artifacts"][0]
+            writer = normalized["phases"][0]["agents"][0]
+            self.assertEqual("tmp/report.html", artifact["path"])
+            self.assertEqual(["tmp/report.html"], writer["writeScope"])
+            self.assertEqual(["tmp/report.html"], writer["deliverables"])
+            self.assertIn("write tmp/report.html", writer["prompt"])
+
     def valid_plan(self):
         return {
             "taskType": "research",
@@ -42,6 +56,24 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
             "artifacts": ["sources", "synthesis"],
             "constraints": ["no_secret_files", "no_git_commit"],
         }
+
+    def test_rejects_non_string_schema_ref(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["schemaRef"] = {"name": "COLLECT_SCHEMA"}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("invalid_schema_ref", {issue["code"] for issue in validation["issues"]})
+
+    def test_rejects_non_json_schema_definition(self):
+        plan = self.valid_plan()
+        plan["schemas"]["COLLECT_SCHEMA"] = ["not", "a", "schema"]
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("invalid_schema_definition", {issue["code"] for issue in validation["issues"]})
 
     def test_rejects_undefined_dependency_and_schema_without_prompt_boundary(self):
         plan = self.valid_plan()
@@ -244,7 +276,29 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertIn("await parallel([", script)
         self.assertIn("label: 'collector'", script)
         self.assertIn("label: 'repo-scout'", script)
-        self.assertIn("JSON.stringify", script)
+        self.assertNotIn("JSON.stringify", script)
+
+    def test_rendered_workflow_script_syntax_preflight_rejects_invalid_javascript(self):
+        result = validate_rendered_workflow_script("const research/source_1.json = {}")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("SyntaxError", result["error"])
+
+    def test_renderer_keeps_path_like_schema_refs_as_object_keys(self):
+        plan = self.valid_plan()
+        plan["schemas"] = {
+            "research/source_1.json": {
+                "type": "object",
+                "required": ["sources"],
+            }
+        }
+        plan["phases"][0]["agents"][0]["schemaRef"] = "research/source_1.json"
+
+        script = render_workflow_plan(plan)
+
+        self.assertNotIn("const research/source_1.json", script)
+        self.assertIn("__workflowSchemas", script)
+        self.assertIn('__workflowSchemas["research/source_1.json"]', script)
 
     def test_renderer_propagates_agent_role_to_child_options(self):
         plan = self.valid_plan()
@@ -489,7 +543,7 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertTrue(validation["ok"], validation)
         self.assertIn("\\${notInterpolation}", script)
-        self.assertIn("${JSON.stringify({collector})}", script)
+        self.assertIn("bounded dependency handoff", script)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -509,8 +563,8 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertEqual("collector", loaded.jobs[0].metadata.get("label"))
         self.assertEqual("writer", loaded.jobs[1].metadata.get("label"))
         self.assertIn("${notInterpolation}", loaded.jobs[1].prompt)
-        self.assertIn("上游结果：", loaded.jobs[1].prompt)
-        self.assertIn("completed agent_1", loaded.jobs[1].prompt)
+        self.assertIn("bounded dependency handoff", loaded.jobs[1].prompt)
+        self.assertNotIn("completed agent_1", loaded.jobs[1].prompt)
 
 
 if __name__ == "__main__":

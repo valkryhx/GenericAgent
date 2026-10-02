@@ -18,6 +18,13 @@ from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChi
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
 from workflow_store import WorkflowStore
+from workflow_workspace import (
+    WorkspacePathError,
+    normalize_workspace_relative,
+    resolve_workspace_child,
+    resolve_workspace_root,
+    workspace_metadata,
+)
 from workflow_check_adapters import run_check
 from workflow_verification import validate_verification_contract
 
@@ -58,9 +65,11 @@ class WorkflowRuntime:
         worker_path: str | Path | None = None,
         timeout_seconds: float = 10.0,
         llm_binding_provider=None,
+        workspace_root: str | Path | None = None,
     ):
         self.store = store or WorkflowStore()
         self.llm_binding_provider = llm_binding_provider
+        self.workspace_root = resolve_workspace_root(workspace_root) if workspace_root is not None else resolve_workspace_root()
         # Production default: real child via llm.yaml (or binding_provider).
         # Unit tests must pass runner=FakeChildAgentRunner() explicitly.
         if runner is not None:
@@ -108,26 +117,44 @@ class WorkflowRuntime:
         except Exception:
             pass
         workspace_path = normalize_workflow_workspace(args)
-        if workspace_path:
-            meta = run.metadata if isinstance(run.metadata, dict) else {}
-            meta = dict(meta)
-            meta["workspacePath"] = workspace_path
-            run.metadata = meta
         if not run.artifact_dir:
             run = self.store.create_run(run)
+        if workspace_path is None:
+            saved_workspace = (run.metadata or {}).get("workspacePath") if isinstance(run.metadata, dict) else None
+            if not saved_workspace and resume_from_run_id:
+                try:
+                    source_run = self.store.load_run(resume_from_run_id)
+                    saved_workspace = (source_run.metadata or {}).get("workspacePath") if isinstance(source_run.metadata, dict) else None
+                    if not saved_workspace and source_run.artifact_dir:
+                        saved_workspace = str(Path(source_run.artifact_dir) / "workspace")
+                except (FileNotFoundError, OSError, ValueError):
+                    saved_workspace = None
+            if saved_workspace:
+                workspace = resolve_workspace_root(saved_workspace)
+            else:
+                workspace = self.workspace_root
+            workspace_path = str(workspace)
+        meta = run.metadata if isinstance(run.metadata, dict) else {}
+        meta = dict(meta)
+        meta.update(workspace_metadata(Path(workspace_path)))
+        run.metadata = meta
+        runtime_args = dict(args) if isinstance(args, dict) else ({} if args is None else args)
+        if isinstance(runtime_args, dict):
+            runtime_args["workspacePath"] = workspace_path
         if run.status in {"draft", "awaiting_approval"}:
             run.status = "running"
             self.store.save_run(run)
-        elif workspace_path:
+        else:
             self.store.save_run(run)
-        resume_plan = self._build_resume_plan(run, args=args, resume_from_run_id=resume_from_run_id)
+        resume_plan = self._build_resume_plan(run, args=runtime_args, cache_args=args, resume_from_run_id=resume_from_run_id)
         scheduler = AgentScheduler(
             store=self.store,
             run=run,
             runner=self.runner,
             config=self.scheduler_config,
             manage_run_completion=False,
-            args=args,
+            args=runtime_args,
+            cache_args=args,
         )
         process = subprocess.Popen(
             [self._node_executable(), str(self.worker_path)],
@@ -145,13 +172,13 @@ class WorkflowRuntime:
             if ready.get("type") != "ready":
                 raise RuntimeError(f"workflow worker did not become ready: {ready}")
             timeout_ms = max(1, int(self.timeout_seconds * 1000))
-            self._send(process, {"type": "start", "script": run.script, "args": args, "timeoutMs": timeout_ms})
+            self._send(process, {"type": "start", "script": run.script, "args": runtime_args, "timeoutMs": timeout_ms})
             while True:
                 self._raise_if_deadline_expired(deadline)
                 self._raise_if_externally_killed(run, scheduler, process)
 
                 for completed_job in scheduler.tick(failure_policy="continue"):
-                    self._complete_pending_rpc(process, pending_rpc_jobs, completed_job)
+                    self._complete_pending_rpc(process, scheduler, pending_rpc_jobs, completed_job)
 
                 message = self._next_message(process, reader_queue, reader_done, deadline)
                 if message is None:
@@ -164,7 +191,7 @@ class WorkflowRuntime:
                         pending_rpc_jobs,
                         resume_plan=resume_plan,
                         process=process,
-                        args=args,
+                        args=runtime_args,
                         deadline=deadline,
                     )
                 elif message_type == "event":
@@ -174,16 +201,17 @@ class WorkflowRuntime:
                     self._last_worker_result = result
                     gate_error = self._test_gate_failure_reason()
                     verification_error = self._explicit_verification_failure_reason(result)
-                    acceptance_error = self._evaluate_acceptance(run, result, args=args)
-                    if gate_error or verification_error or acceptance_error:
+                    execution_contract_error = self._evaluate_execution_contract_evidence(run)
+                    acceptance_error = self._evaluate_acceptance(run, result, args=runtime_args)
+                    if gate_error or verification_error or execution_contract_error or acceptance_error:
                         metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                         metadata["integrationStatus"] = "rejected"
                         metadata["integrationIssues"] = [
-                            item for item in (gate_error, verification_error, acceptance_error) if item
+                            item for item in (gate_error, verification_error, execution_contract_error, acceptance_error) if item
                         ]
                         metadata["finalAuditStatus"] = "failed"
                         run.metadata = metadata
-                        raise RuntimeError(gate_error or verification_error or acceptance_error)
+                        raise RuntimeError(gate_error or verification_error or execution_contract_error or acceptance_error)
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                     metadata["integrationStatus"] = "accepted"
                     metadata["integrationIssues"] = []
@@ -200,6 +228,16 @@ class WorkflowRuntime:
                     final_payload = self._final_payload(run, "succeeded", result=result)
                     self.store.write_final_result(run, final_payload)
                     self.store.save_run(run)
+                    self._append(run, "workflow_finished", {
+                        "status": run.status,
+                        "outcome": (run.metadata or {}).get("executionOutcome", "succeeded"),
+                        "integrationStatus": (run.metadata or {}).get("integrationStatus", "accepted"),
+                        "auditStatus": (run.metadata or {}).get("finalAuditStatus", "passed"),
+                        "resultRef": run.result_ref,
+                        "artifactDir": run.artifact_dir,
+                        "workspacePath": (run.metadata or {}).get("workspacePath"),
+                        "blockingIssues": [],
+                    })
                     return WorkflowRuntimeResult(run=run, result=result, logs=list(self._logs), phases=list(self._phases))
                 elif message_type == "error":
                     raise RuntimeError(redact_sensitive_text(message.get("error") or "workflow worker failed"))
@@ -248,11 +286,22 @@ class WorkflowRuntime:
                     self._final_payload(run, "failed", result=self._last_worker_result, error=reason),
                 )
                 self.store.save_run(run)
-                self._append(run, "workflow_failed", {"error": reason})
+                self._append(run, "workflow_failed", {
+                    "status": run.status,
+                    "outcome": (run.metadata or {}).get("executionOutcome", "failed"),
+                    "integrationStatus": (run.metadata or {}).get("integrationStatus", "rejected"),
+                    "auditStatus": (run.metadata or {}).get("finalAuditStatus", "failed"),
+                    "resultRef": run.result_ref,
+                    "artifactDir": run.artifact_dir,
+                    "blockingIssues": copy.deepcopy((run.metadata or {}).get("integrationIssues") or [reason]),
+                    "error": reason,
+                })
             raise
         finally:
             self._terminate(process)
             reader_done.set()
+            if hasattr(self.runner, "clear_run_capabilities"):
+                self.runner.clear_run_capabilities(run.run_id)
 
     def _handle_rpc(
         self,
@@ -287,6 +336,22 @@ class WorkflowRuntime:
         if label is not None and not isinstance(label, str):
             raise TypeError("agent option label must be a string")
         prompt = str(params.get("prompt") or "")
+        required_tools = options.get("requiredTools") or []
+        if required_tools and hasattr(self.runner, "prepare_run_capabilities"):
+            try:
+                snapshot = self.runner.prepare_run_capabilities(scheduler.run.run_id, required_tools)
+            except Exception as exc:
+                self._append(scheduler.run, "workflow_capability_preflight_failed", {
+                    "requiredTools": [str(name) for name in required_tools],
+                    "error": redact_sensitive_text(str(exc)),
+                })
+                raise
+            metadata = dict(scheduler.run.metadata) if isinstance(scheduler.run.metadata, dict) else {}
+            if not metadata.get("capabilitySnapshot"):
+                metadata["capabilitySnapshot"] = sanitize(snapshot)
+                scheduler.run.metadata = metadata
+                scheduler.store.save_run(scheduler.run)
+                scheduler._append("workflow_capability_snapshot", payload=sanitize(snapshot))
         call_index = len(scheduler.jobs)
         cached = self._match_cached_agent(resume_plan, call_index=call_index, prompt=prompt, options=options, scheduler=scheduler)
         if cached is not None:
@@ -299,7 +364,7 @@ class WorkflowRuntime:
                 source_job_id=cached.get("sourceJobId"),
             )
             if process is not None:
-                self._send(process, {"type": "rpc_result", "id": int(message.get("id")), "ok": True, "value": job.metadata.get("result") or {}})
+                self._send(process, {"type": "rpc_result", "id": int(message.get("id")), "ok": True, "value": scheduler.downstream_result(job)})
             return
         job = scheduler.register_agent(prompt=prompt, label=label, options=options)
         pending_rpc_jobs[int(message.get("id"))] = job
@@ -686,6 +751,155 @@ class WorkflowRuntime:
         run.metadata = metadata
         return None
 
+    def _evaluate_execution_contract_evidence(self, run) -> str | None:
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        contract = metadata.get("executionContract")
+        if not isinstance(contract, dict) or contract.get("requiresExecution") is not True:
+            return None
+        transcript_cache: dict[str, list[dict]] = {}
+
+        def events_for(label: str) -> list[dict]:
+            wanted = " ".join(str(label or "").split()).casefold()
+            job = next(
+                (
+                    item
+                    for item in run.jobs
+                    if " ".join(str((item.metadata or {}).get("label") or "").split()).casefold() == wanted
+                ),
+                None,
+            )
+            if not job:
+                return []
+            if label not in transcript_cache:
+                transcript_cache[label] = self.store.read_agent_transcript_events(run, (job.metadata or {}).get("transcriptRef"))
+            return transcript_cache[label]
+
+        artifact_paths: set[str] = set()
+        for artifact in contract.get("artifacts") or []:
+            if not isinstance(artifact, dict) or not str(artifact.get("path") or "").strip():
+                continue
+            if "artifact_readback" not in {str(item) for item in artifact.get("requiredChecks") or []}:
+                continue
+            normalized_path = Path(str(artifact.get("path") or "").replace("\\", "/")).as_posix()
+            artifact_paths.add(normalized_path)
+            # Treat ./foo and foo as equivalent, but preserve a legitimate
+            # leading dot in a filename such as .report.html.
+            if normalized_path.startswith("./"):
+                artifact_paths.add(normalized_path[2:])
+
+        evidence_report: list[dict[str, object]] = []
+
+        def code_run_readback_count(events: list[dict]) -> int:
+            count = 0
+            pending = False
+            for event in events:
+                if event.get("type") == "tool_call" and event.get("toolName") == "code_run":
+                    script = str((event.get("args") or {}).get("script") or "").replace("\\", "/").lower()
+                    # A successful code_run can read text, binary/ZIP/DOCX files,
+                    # or inspect their existence/size. Treat those as semantic
+                    # readback, not only literal file_read calls.
+                    read_operation = any(token in script for token in (
+                        "read_text", "read_bytes", ".open(", "open(", "document(",
+                        "zipfile", "getsize(", "stat(", "exists(", "path.exists",
+                    ))
+                    pending = bool(script and read_operation and any(path.lower() in script for path in artifact_paths))
+                elif pending and event.get("type") == "tool_result" and event.get("toolName") == "code_run":
+                    data = event.get("data") or {}
+                    if isinstance(data, dict) and data.get("status") == "success":
+                        count += 1
+                    pending = False
+            return count
+
+        for evidence in contract.get("requiredToolEvidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            tool = str(evidence.get("tool") or "")
+            label = str(evidence.get("agent") or "")
+            mode = str(evidence.get("mode") or "").strip().lower()
+            if not mode:
+                mode = "preferred" if tool in {"file_write", "file_patch", "file_read", "code_run"} else "required"
+            minimum_calls = max(1, int(evidence.get("minimumCalls") or 1))
+            events = events_for(label)
+            calls = sum(1 for event in events if event.get("type") == "tool_call" and event.get("toolName") == tool)
+            if tool == "file_read" and calls < minimum_calls:
+                calls += code_run_readback_count(events)
+            observed = calls >= minimum_calls
+            evidence_report.append({"tool": tool, "agent": label, "mode": mode, "requiredCalls": minimum_calls, "observedCalls": calls, "satisfied": observed})
+            if not observed and mode == "required":
+                return f"missing_required_tool_evidence: {tool} expected at least {minimum_calls} call(s) from {label}"
+
+        metadata["executionToolEvidence"] = evidence_report
+        run.metadata = metadata
+
+        workspace_raw = metadata.get("workspacePath")
+        if contract.get("artifacts") and not workspace_raw:
+            return "missing_artifact_workspace: execution contract requires a workspacePath"
+        workspace = resolve_workspace_root(workspace_raw) if workspace_raw else None
+        if workspace:
+            for artifact in contract.get("artifacts") or []:
+                if not isinstance(artifact, dict):
+                    continue
+                raw_path = str(artifact.get("path") or "").strip()
+                if not raw_path:
+                    continue
+                try:
+                    relative = normalize_workspace_relative(raw_path, workspace)
+                    target = resolve_workspace_child(raw_path, workspace)
+                except WorkspacePathError:
+                    # Keep the contract error classification stable while
+                    # routing all path semantics through the shared resolver.
+                    artifact_paths.add(raw_path.replace("\\", "/"))
+                    continue
+                artifact_paths.add(relative)
+                artifact_paths.add(str(target).replace("\\", "/"))
+        explicit_file_readers = {
+            str(evidence.get("agent") or "")
+            for evidence in contract.get("requiredToolEvidence") or []
+            if isinstance(evidence, dict)
+            and str(evidence.get("tool") or "") == "file_read"
+            and str(evidence.get("agent") or "")
+        }
+        for artifact in contract.get("artifacts") or []:
+            raw_path = str(artifact.get("path") or "").strip()
+            relative_path = raw_path.replace("\\", "/")
+            if not relative_path:
+                return "invalid_artifact_path: <missing>"
+            try:
+                relative_path = normalize_workspace_relative(raw_path, workspace)
+                target = resolve_workspace_child(raw_path, workspace)
+            except WorkspacePathError:
+                return f"invalid_artifact_path: {relative_path}"
+            checks = {str(item) for item in artifact.get("requiredChecks") or []}
+            if "artifact_exists" in checks and not target.is_file():
+                return f"missing_artifact: {relative_path}"
+            if "artifact_readback" in checks:
+                filename = target.name.lower()
+                # Readback may be performed by a synthesis/review child whose
+                # role label is model-defined. Search every completed job; the
+                # artifact path match below prevents an unrelated file read from
+                # satisfying this check.
+                reader_labels = {str(artifact.get("writer") or "")} | explicit_file_readers
+                reader_labels.update(
+                    str((job.metadata or {}).get("label") or "")
+                    for job in run.jobs
+                    if str((job.metadata or {}).get("label") or "")
+                )
+                reader_events = [event for label in reader_labels for event in events_for(label)]
+                read_calls = [
+                    event for event in reader_events
+                    if event.get("type") == "tool_call" and event.get("toolName") == "file_read"
+                ]
+                direct_read = any(filename in json.dumps(event.get("args") or {}, ensure_ascii=False).lower() for event in read_calls)
+                all_job_events = []
+                for job in run.jobs:
+                    label = str((job.metadata or {}).get("label") or "")
+                    if label:
+                        all_job_events.extend(events_for(label))
+                code_read = code_run_readback_count(all_job_events or reader_events) > 0
+                if not direct_read and not code_read:
+                    return f"missing_artifact_readback_evidence: {relative_path}"
+        return None
+
     def _evaluate_verification_contract(self, run, result, raw_contract, metadata, *, args=None):
         try:
             contract = validate_verification_contract(raw_contract)
@@ -763,7 +977,7 @@ class WorkflowRuntime:
         text = redact_sensitive_text(str(text)).strip()
         return text[:2_000]
 
-    def _complete_pending_rpc(self, process: subprocess.Popen, pending_rpc_jobs: dict[int, WorkflowJob], job: WorkflowJob) -> None:
+    def _complete_pending_rpc(self, process: subprocess.Popen, scheduler: AgentScheduler, pending_rpc_jobs: dict[int, WorkflowJob], job: WorkflowJob) -> None:
         rpc_id = None
         for candidate_id, candidate_job in pending_rpc_jobs.items():
             if candidate_job.job_id == job.job_id:
@@ -773,7 +987,7 @@ class WorkflowRuntime:
             return
         pending_rpc_jobs.pop(rpc_id, None)
         if job.status == "succeeded":
-            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": job.metadata.get("result") or {}})
+            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": scheduler.downstream_result(job)})
         else:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": redact_sensitive_text(job.error or f"workflow agent failed: {job.job_id}")})
 
@@ -789,7 +1003,7 @@ class WorkflowRuntime:
             self._logs.append(text)
             self._append(run, "workflow_log", {"message": text})
 
-    def _build_resume_plan(self, run: WorkflowRun, *, args: Any = None, resume_from_run_id: str | None = None) -> list[dict]:
+    def _build_resume_plan(self, run: WorkflowRun, *, args: Any = None, cache_args: Any = None, resume_from_run_id: str | None = None) -> list[dict]:
         if not resume_from_run_id or resume_from_run_id == run.run_id:
             return []
         try:
@@ -799,7 +1013,7 @@ class WorkflowRuntime:
         if source_run.session_id != run.session_id:
             return []
         plan: list[dict] = []
-        probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args)
+        probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args, cache_args=cache_args)
         for source_job in source_run.jobs:
             if source_job.status not in {"succeeded", "cached"}:
                 break
@@ -813,6 +1027,7 @@ class WorkflowRuntime:
                 "permissionPolicyVersion",
                 "toolContextHash",
                 "mcpContextHash",
+                "workspacePathHash",
             ):
                 if source_key.get(field) != expected_key.get(field):
                     return plan
