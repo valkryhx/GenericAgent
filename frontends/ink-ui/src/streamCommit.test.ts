@@ -4,6 +4,7 @@ import {
   commitStreamingAssistantMessages,
   committedAssistantPrefix,
   DEFAULT_STREAM_LIVE_TAIL_LINES,
+  findFenceSafeOverflowCount,
   remainingAssistantTextAfterCommits,
 } from './streamCommit.js'
 import type { ChatMessage } from './protocol.js'
@@ -76,6 +77,61 @@ function fenceBalance(text: string): number {
   }
   return open
 }
+
+test('commitStreamingAssistantMessages keeps committing while a tool-args block is still open', () => {
+  // Regression (2026-10-03): requiring the live tail to be fence-balanced as well as the
+  // head stalled every commit for the whole duration of each tool-args block. Live text
+  // then grew far past the ~12-row live viewport, so a freshly emitted
+  // '[Action] Spawning subagent: X' / '[Status] ...' pair was covered by its own args
+  // payload before it could reach Static — "the third subagent never showed up".
+  const lines: string[] = [
+    '`````',
+    '🔨 Tool: `spawn_agent`  📥 args:',
+    '````text',
+    '{',
+    ...Array.from({ length: 40 }, (_, i) => `  "field_${i}": "value_${i}",`),
+    '}',
+    '````',
+    '[Action] Spawning subagent: beta',
+    '[Status] Subagent /root/beta started (pid=2).',
+    '`````',
+    '`````',
+    '🔨 Tool: `spawn_agent`  📥 args:',
+    '````text',
+    '{',
+    ...Array.from({ length: 10 }, (_, i) => `  "still_streaming_${i}": "v",`),
+  ]
+  const overflow = findFenceSafeOverflowCount(lines, 8)
+  assert.ok(overflow > 0, 'an open trailing args block must not stall commits')
+  assert.equal(fenceBalance(lines.slice(0, overflow).join('\n')), 0, 'committed head must end outside a fence')
+
+  const messages: ChatMessage[] = [liveAssistant(11, lines.join('\n'))]
+  const next = commitStreamingAssistantMessages(messages, 11, 8)
+  const commits = next.filter(m => m.id.startsWith('a-11-c'))
+  assert.ok(commits.length >= 1)
+  assert.ok(commits.some(m => m.text.includes('[Action] Spawning subagent: beta')))
+  const live = next.find(m => m.id === 'a-11')
+  assert.ok((live?.text.split('\n').length ?? 99) < lines.length, 'live tail must shrink below the in-flight text')
+  for (const segment of [...commits]) {
+    assert.equal(fenceBalance(segment.text), 0, `commit ${segment.id} left an open fence:\n${segment.text}`)
+  }
+})
+
+test('findFenceSafeOverflowCount picks a balanced head instead of stalling behind a trailing fence', () => {
+  // Bare fence lines only, so the module's fence classifier and this file's fenceBalance agree.
+  const lines = [
+    'before',
+    '`````',
+    'inside_a_code_block',
+    '`````',
+    'after',
+    '`````',
+    'open_never_closed',
+  ]
+  const overflow = findFenceSafeOverflowCount(lines, 2)
+  assert.ok(overflow > 0, 'a balanced head must be found instead of stalling')
+  assert.equal(fenceBalance(lines.slice(0, overflow).join('\n')), 0)
+})
 
 test('commitStreamingAssistantMessages commits overflow lines and keeps a short live tail', () => {
   const lines = Array.from({ length: 12 }, (_, i) => `L${i}`).join('\n')

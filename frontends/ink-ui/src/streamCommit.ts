@@ -56,31 +56,33 @@ export function commitStreamingAssistantMessages(
 /**
  * Choose how many leading lines to commit so:
  * - live tail has at least `maxTail` lines when possible
- * - neither overflow nor tail starts/ends with an unmatched fence
- * If every candidate leaves a fence open, prefer committing nothing this tick
- * (wait for more lines) rather than splitting mid-fence.
+ * - the committed head ends *outside* a code fence
+ * If no candidate leaves the head balanced, commit nothing this tick (wait for more
+ * lines) rather than ending a permanent segment inside a fence.
+ *
+ * Only the head has to balance. An even number of fence lines in the head means it ends
+ * closed, so the live tail necessarily *starts* outside a fence — a lone closing fence
+ * can never be re-read as an opener that swallows the next "**LLM Running (Turn N)**"
+ * header. The tail is still streaming, so a large tool-args block legitimately sits
+ * mid-fence; requiring the tail to be balanced too stalled every commit for the whole
+ * duration of each block. During that stall the live text grew to ~59 lines while the
+ * live viewport only paints the last ~12, so a freshly emitted `[Action] Spawning
+ * subagent: X` / `[Status] ...` pair was covered by its own args payload before it could
+ * reach Static — the "third subagent never appeared" symptom (2026-10-03).
  */
 export function findFenceSafeOverflowCount(lines: string[], maxTail: number): number {
   const total = lines.length
   const maxTailSafe = Math.max(1, Math.floor(maxTail))
   if (total <= maxTailSafe) return 0
 
-  // Preferred cut: keep last maxTail lines live.
+  // Preferred cut: keep last maxTail lines live. If that cut ends the head mid-fence,
+  // walk overflow downward (commit less / keep more live) until the head is balanced.
   let overflow = total - maxTailSafe
-  // If that cut is mid-fence, walk overflow downward (commit less / keep more live)
-  // until fences balance on both sides, or overflow hits 0.
   while (overflow > 0) {
-    if (isFenceSafeCut(lines, overflow)) return overflow
+    if (overflow < lines.length && fenceOpenState(lines.slice(0, overflow)) === 0) return overflow
     overflow -= 1
   }
   return 0
-}
-
-function isFenceSafeCut(lines: string[], overflowCount: number): boolean {
-  if (overflowCount <= 0 || overflowCount >= lines.length) return false
-  const head = lines.slice(0, overflowCount)
-  const tail = lines.slice(overflowCount)
-  return fenceOpenState(head) === 0 && fenceOpenState(tail) === 0
 }
 
 /** Toggle on fence-only lines (` ``` ` / longer). 0 = closed, 1 = open. */
