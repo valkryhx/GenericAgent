@@ -15,15 +15,28 @@ export function buildBridgeEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS
   }
 }
 
-export function writeBridgeCommand(
-  stdin: Pick<NodeJS.WritableStream, 'write'>,
-  command: BridgeCommand,
-): void {
+type BridgeStdin = {
+  write(chunk: string): unknown
+  on?(event: 'error', listener: (error: unknown) => void): unknown
+  destroyed?: boolean
+  writableEnded?: boolean
+}
+
+export function writeBridgeCommand(stdin: BridgeStdin, command: BridgeCommand): void {
+  if (stdin.destroyed || stdin.writableEnded) return
   try {
-    stdin.write(`${JSON.stringify(command)}\n`)
+    stdin.write(`${JSON.stringify(command)}
+`)
   } catch {
     // The bridge may already be gone during Ctrl+C or app teardown.
   }
+}
+
+export function guardBridgeStdin(stdin: BridgeStdin): void {
+  // A closed child pipe reports EPIPE asynchronously via the stream's 'error'
+  // event, which a synchronous try/catch cannot intercept. Without a listener
+  // that event is unhandled and tears down the whole Ink host during teardown.
+  stdin.on?.('error', () => {})
 }
 
 export function startBridge(
@@ -36,6 +49,7 @@ export function startBridge(
     stdio: ['pipe', 'pipe', 'pipe'],
     env: buildBridgeEnv(),
   })
+  guardBridgeStdin(child.stdin)
   const stdout = createInterface({ input: child.stdout })
   stdout.on('line', line => {
     try {
@@ -49,13 +63,16 @@ export function startBridge(
   })
   child.on('exit', code => onExit(code))
 
+  let stopped = false
   return {
     send(command: BridgeCommand) {
       writeBridgeCommand(child.stdin, command)
     },
     stop() {
+      if (stopped) return
+      stopped = true
       writeBridgeCommand(child.stdin, { type: 'shutdown' })
-      child.kill()
+      if (child.exitCode === null && child.signalCode === null) child.kill()
     },
   }
 }

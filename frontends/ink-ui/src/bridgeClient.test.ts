@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildBridgeEnv, writeBridgeCommand } from './bridgeClient.js'
+import { Writable } from 'node:stream'
+import { buildBridgeEnv, guardBridgeStdin, writeBridgeCommand } from './bridgeClient.js'
 
 test('buildBridgeEnv forces Python stdio to UTF-8', () => {
   const env = buildBridgeEnv({ PATH: 'x' })
@@ -99,4 +100,50 @@ test('writeBridgeCommand serializes permission_status as one JSON line', () => {
 
   assert.equal(lines.length, 1)
   assert.deepEqual(JSON.parse(lines[0]), { type: 'permission_status' })
+})
+
+test('guardBridgeStdin absorbs asynchronous EPIPE write errors', async () => {
+  const stream = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    },
+  })
+  guardBridgeStdin(stream)
+
+  writeBridgeCommand(stream, { type: 'permission_status' })
+
+  // Without the guard, the 'error' event is unhandled and throws.
+  await new Promise(resolve => setTimeout(resolve, 50))
+})
+
+test('writeBridgeCommand skips a destroyed bridge stdin', () => {
+  const writes: string[] = []
+  const stdin = {
+    destroyed: true,
+    writableEnded: false,
+    write(chunk: string) {
+      writes.push(chunk)
+      return true
+    },
+  }
+
+  writeBridgeCommand(stdin, { type: 'permission_status' })
+
+  assert.equal(writes.length, 0)
+})
+
+test('writeBridgeCommand skips a closed bridge stdin', () => {
+  const writes: string[] = []
+  const stdin = {
+    destroyed: false,
+    writableEnded: true,
+    write(chunk: string) {
+      writes.push(chunk)
+      return true
+    },
+  }
+
+  writeBridgeCommand(stdin, { type: 'permission_status' })
+
+  assert.equal(writes.length, 0)
 })
