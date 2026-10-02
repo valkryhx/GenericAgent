@@ -4,7 +4,7 @@ import unittest
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import normalize_plan_workspace_paths, render_workflow_plan, validate_rendered_workflow_script, validate_workflow_plan
+from workflow_planner import _normalize_plan_contract, normalize_plan_workspace_paths, render_workflow_plan, validate_rendered_workflow_script, validate_workflow_plan
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
@@ -198,7 +198,14 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertFalse(validation["ok"])
         self.assertIn("missing_verification_check", {issue["code"] for issue in validation["issues"]})
 
-    def test_rejects_coding_plan_that_omits_roles_even_when_labels_describe_roles(self):
+    def test_write_plan_without_declared_roles_is_not_told_to_declare_them(self):
+        """Role is optional metadata; the contract comes from declared checks.
+
+        This plan writes files and declares no roles. Under the old
+        writeScope-implies-coding rule it was rejected for missing roles and for
+        missing checks. Role stays optional now, and the write contract is the
+        enforceable part: the plan still owes a host-evaluable check.
+        """
         plan = self.valid_plan()
         plan["taskType"] = "coding"
         plan["phases"] = [
@@ -224,13 +231,111 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         validation = validate_workflow_plan(plan)
 
+        codes = {issue["code"] for issue in validation["issues"]}
         self.assertFalse(validation["ok"])
-        self.assertEqual(
-            {"missing_coding_role", "missing_verification_check"},
-            {issue["code"] for issue in validation["issues"]},
-        )
+        self.assertNotIn("missing_coding_role", codes)
+        self.assertIn("missing_verification_check", codes)
+
+    def test_write_plan_accepts_host_derived_checks_without_model_authored_verification(self):
+        """A research plan that writes artifacts is not a coding task.
+
+        Real deepseek run: five parallel Tavily researchers, one cross-verifier and
+        one HTML writer. The model declared machine-checkable requiredChecks on the
+        execution contract but only an advisory schema check in verification.checks,
+        and the validator rejected the whole run with missing_verification_check.
+        The host can evaluate the declared contract itself, so the plan must pass.
+        """
+        plan = {
+            "taskType": "research",
+            "meta": {"name": "research-report", "description": "search then write html"},
+            "phases": [
+                {"title": "Research", "agents": [
+                    {"label": "Source A", "role": "research", "prompt": "search", "dependsOn": [],
+                     "writeScope": ["tmp/research/a.json"], "deliverables": ["tmp/research/a.json"],
+                     "acceptanceChecks": ["artifact_exists", "artifact_readback"]},
+                ]},
+                {"title": "Synthesize", "agents": [
+                    {"label": "HTML Writer", "role": "synthesis", "prompt": "write html",
+                     "dependsOn": ["Source A"], "writeScope": ["tmp/report.html"],
+                     "deliverables": ["tmp/report.html"],
+                     "acceptanceChecks": ["artifact_exists", "artifact_readback"]},
+                ]},
+            ],
+            "schemas": {},
+            "verification": {
+                "level": "inline",
+                "checks": [{"id": "cross_verify_schema_valid", "kind": "schema",
+                            "schemaRef": "VERIFICATION_SCHEMA", "required": False, "owner": "host"}],
+                "independentReview": False,
+            },
+            "executionContract": {
+                "requiresExecution": True,
+                "actions": [
+                    {"id": "search", "agent": "Source A"},
+                    {"id": "create_artifact", "agent": "HTML Writer"},
+                ],
+                "requiredTools": ["file_write", "file_read"],
+                "requiredToolEvidence": [
+                    {"tool": "file_write", "agent": "HTML Writer", "minimumCalls": 1},
+                ],
+                "artifacts": [
+                    {"path": "tmp/research/a.json", "writer": "Source A",
+                     "requiredChecks": ["artifact_exists", "artifact_readback"]},
+                    {"path": "tmp/report.html", "writer": "HTML Writer",
+                     "requiredChecks": ["artifact_exists", "artifact_readback"]},
+                ],
+            },
+        }
+
+        normalized = _normalize_plan_contract(plan)
+        validation = validate_workflow_plan(normalized)
+
+        self.assertTrue(validation["ok"], validation)
+        required = [c for c in normalized["verification"]["checks"] if c.get("required")]
+        self.assertTrue(required, "host must derive required checks from the execution contract")
+
+    def test_write_work_without_any_host_evaluable_check_is_rejected(self):
+        plan = self.valid_plan()
+        plan["phases"] = [
+            {"title": "Write", "agents": [
+                {"label": "writer", "role": "synthesis", "prompt": "write",
+                 "writeScope": ["tmp/report.html"], "deliverables": ["tmp/report.html"], "dependsOn": []},
+            ]},
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("missing_verification_check", {issue["code"] for issue in validation["issues"]})
+
+    def test_a_role_is_optional_metadata_and_is_not_inferred_from_write_scope(self):
+        """Declaring a write scope does not make an agent a coder.
+
+        GA used to treat any writer as a coding agent, so research and report
+        plans were told "coding agent X must declare role" and were held to
+        coding-only topology rules. Step-Code has no such task-type gate: role is
+        optional metadata, and the enforceable contract is the declared checks.
+        """
+        plan = self.valid_plan()
+        plan["phases"] = [
+            {"title": "Write", "agents": [
+                {"label": "writer", "prompt": "write the report",
+                 "writeScope": ["tmp/report.html"], "deliverables": ["tmp/report.html"],
+                 "acceptanceChecks": ["artifact_exists"], "dependsOn": []},
+            ]},
+        ]
+        plan["schemas"] = {}
+
+        validation = validate_workflow_plan(plan)
+
+        self.assertNotIn("missing_coding_role", {issue["code"] for issue in validation["issues"]})
+        self.assertNotIn("invalid_coding_role", {issue["code"] for issue in validation["issues"]})
 
     def test_rejects_noncanonical_coding_role_that_could_bypass_topology_check(self):
+        # A misspelled route in a coding plan must not read as "not a coding
+        # role": that is the bypass which would skip the tests/implementation
+        # topology check entirely.
         plan = self.valid_plan()
         plan["taskType"] = "coding"
         plan["phases"] = [

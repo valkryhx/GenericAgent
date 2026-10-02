@@ -140,14 +140,16 @@ def plan_produces_code(plan: dict[str, Any] | None) -> bool:
     """Whether a plan's own agents declare code-producing work.
 
     This is a contract-consistency signal, not a prediction about the task.
-    GA cannot reliably infer "is this a coding task" from keywords, from the
-    planner's taskType label, or from a role field the model may omit entirely;
-    all three were observed to disagree across identical real runs. What the
-    host can do is check whether the plan itself declares code-producing work
-    and hold the plan to the coding contract when it does.
 
-    ``taskType`` is a planner hint only. Runtime contracts are activated by
-    declared write scope or code-producing roles, never by classification.
+    GA once treated ``writeScope`` as proof of a coding task, so a five-agent
+    Tavily research plan that wrote JSON evidence and an HTML report was held to
+    the coding contract and rejected with ``missing_verification_check``. Writing
+    a file is not writing code: research, review and report plans all persist
+    artifacts. Only the declared code-producing roles activate the coding rules,
+    and ``taskType`` stays a planner hint.
+
+    Role is optional metadata. A plan that declares no code role is simply not
+    held to coding topology; the enforceable contract is the checks it declares.
     """
 
     source = plan if isinstance(plan, dict) else {}
@@ -159,7 +161,29 @@ def plan_produces_code(plan: dict[str, Any] | None) -> bool:
                 continue
             if str(agent.get("role") or "").strip().lower() in CODE_PRODUCING_ROLES:
                 return True
-            if agent.get("writeScope"):
+    return False
+
+
+def plan_declares_writes(plan: dict[str, Any] | None) -> bool:
+    """Whether a plan promises to persist any surface at all.
+
+    Used only to decide whether the plan owes the host at least one evaluable
+    required check. It deliberately says nothing about task type: a read-only
+    research plan owes nothing, while a research plan that writes evidence files
+    and a report owes the same artifact checks a coding plan owes its sources.
+    """
+
+    source = plan if isinstance(plan, dict) else {}
+    contract = source.get("executionContract")
+    if isinstance(contract, dict) and contract.get("artifacts"):
+        return True
+    for phase in source.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for agent in phase.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            if agent.get("writeScope") or agent.get("deliverables"):
                 return True
     return False
 
@@ -482,12 +506,17 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
                 check["advisory"] = True
                 check["deferredToExecutionContract"] = True
             kept_checks.append(check)
-        # If the model left the verification view empty, materialize it from
-        # the authoritative execution contract. ``requiredChecks`` on the
-        # artifact contract are host-defined machine checks
-        # (artifact_exists / artifact_readback / ...), so the derived entries
-        # are always bindable and never guessed.
-        if not kept_checks and isinstance(execution_contract, dict):
+        # If the plan declares no required check, materialize the host-owned
+        # ones from the authoritative execution contract. ``requiredChecks`` on
+        # the artifact contract are host-defined machine checks
+        # (artifact_exists / artifact_readback / ...), so the derived entries are
+        # always bindable and never guessed. An advisory-only verification view
+        # (the shape real research plans produce) must not leave the run with
+        # nothing evaluable.
+        has_required_check = any(
+            isinstance(check, dict) and check.get("required") is True for check in kept_checks
+        )
+        if not has_required_check and isinstance(execution_contract, dict):
             derived: list[dict[str, Any]] = []
             seen_derived: set[tuple[str, str]] = set()
             for artifact in execution_contract.get("artifacts") or []:
@@ -511,10 +540,11 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
                         "owner": "host",
                         "derivedFromExecutionContract": True,
                     })
-            if derived:
-                verification["checks"] = derived
-            else:
-                verification["checks"] = kept_checks
+            # Append, never replace: a model-authored advisory/enumerated check
+            # (for example a schema restatement downgraded to advisory) is still
+            # part of the audit view, and the host-owned derived checks are what
+            # make the contract evaluable.
+            verification["checks"] = [*kept_checks, *derived] if derived else kept_checks
         else:
             verification["checks"] = kept_checks
         normalized["verification"] = verification
@@ -1188,7 +1218,7 @@ class LLMWorkflowPlanner:
             "contract": "Return WorkflowPlan JSON only. 不要输出 JS. Do not wrap in markdown. phases must be a non-empty array.",
             "orchestrationPolicy": [
                 "根据任务语义和 classificationHint 规划 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts；taskType 仅为提示，不触发硬门禁。",
-                "计划声明 writeScope 或 implementation/tests/repair 等代码产出角色时，必须在 verification.checks 中显式声明至少一个可观测 required check；不写入的研究、审阅和规划任务不需要伪造代码验收项。",
+                "任何会写出产物的计划（research 写证据文件、synthesis 写报告、coding 写源码都一样）都必须在 verification.checks 或 executionContract.artifacts[].requiredChecks 中声明至少一个宿主可求值的 required check，优先使用 artifact_exists / artifact_readback 这类机器检查；宿主会在 verification.checks 为空时从执行契约派生。只读的研究、审阅和规划任务不需要伪造验收项。写文件不等于写代码：是否套用 coding 拓扑规则只由 implementation/tests/repair 这些代码产出角色触发，role 本身是可选元数据。",
                 "verification.level 使用 none/inline/full；full 才需要 independentReview，且应显式声明 review agent 或独立 review capability。",
                 "验收检查项由任务决定，可使用 command、schema、artifact 等受支持 kind；不要把 verification agent、verification_schema 或 python_unittest 当作所有代码任务的固定要求。",
                 "小任务（单步、低风险、无需多 agent 协作）必须 mode=direct，不要为了简单问题创建 workflow。",
@@ -1217,7 +1247,7 @@ class LLMWorkflowPlanner:
             "requiredShape": {
                 "taskType": "research | coding | review | debugging | planning | mixed",
                 "meta": {"name": "...", "description": "..."},
-                "phases": [{"title": "...", "agents": [{"label": "...", "role": "required for coding; see codingAgentRoles", "prompt": "...", "dependsOn": []}]}],
+                "phases": [{"title": "...", "agents": [{"label": "...", "role": "optional metadata; canonical values in codingAgentRoles, required to be canonical only inside code-producing plans", "prompt": "...", "dependsOn": []}]}],
                 "codingAgentRoles": sorted(CODING_AGENT_ROLES),
                 "schemas": {},
                 "artifacts": [],
@@ -1359,9 +1389,18 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 issues.append({"code": "duplicate_label", "message": f"duplicate agent label: {label}"})
             phase_labels.add(label)
             role = str(agent.get("role") or "").strip().lower()
-            if is_coding and not role:
-                issues.append({"code": "missing_coding_role", "message": f"coding agent {label} must declare role"})
-            elif is_coding and role not in CODING_AGENT_ROLES:
+            # Role is optional metadata, not a task-type gate. Coding topology is
+            # activated by an agent declaring a code-producing role, never by the
+            # plan writing artifacts: a research/report plan writing files is not
+            # a coding plan, and must not flip contracts depending on whether the
+            # model happened to fill in ``role``.
+            #
+            # Inside a coding plan a role that is present must still be canonical.
+            # Accepting an alias such as ``test-writer`` as "not a coding role"
+            # would silently skip the tests/implementation topology check, which
+            # is exactly the bypass this guard exists to stop. An omitted role
+            # stays legal; a misspelled one does not.
+            if is_coding and role and role not in CODING_AGENT_ROLES:
                 issues.append({"code": "invalid_coding_role", "message": f"coding agent {label} has non-canonical role: {role}"})
             schema_ref = agent.get("schemaRef")
             if schema_ref is not None:
@@ -1501,12 +1540,12 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         verification_contract = {"level": "none", "checks": [], "independentReview": False}
         issues.append({"code": "invalid_verification_contract", "message": str(exc)})
+    required_checks = [check for check in verification_contract.get("checks", []) if check.get("required") is True]
     if is_coding:
-        required_checks = [check for check in verification_contract.get("checks", []) if check.get("required") is True]
         if not required_checks:
             issues.append({
                 "code": "missing_verification_check",
-                "message": "write-capable workflow requires at least one required observable verification check",
+                "message": "coding workflow requires at least one required observable verification check",
             })
         if verification_contract.get("independentReview"):
             review_agents = [
@@ -1520,6 +1559,18 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
                     "code": "missing_independent_review_agent",
                     "message": "full verification contract requires an independent review capability or agent",
                 })
+    elif plan_declares_writes(plan) and not required_checks:
+        # A plan that persists artifacts owes the host something deterministic to
+        # evaluate. This replaces a task-type gate with a contract gate: the
+        # requirement is "declare an evaluable check for what you write", and it
+        # applies identically to research, review and coding plans. Model-authored
+        # required checks are always honored above; the normalizer derives them
+        # from ``executionContract.artifacts[].requiredChecks`` when the plan
+        # leaves the verification view empty.
+        issues.append({
+            "code": "missing_verification_check",
+            "message": "write-capable workflow requires at least one host-evaluable required check",
+        })
     return {"ok": not issues, "issues": issues}
 
 
