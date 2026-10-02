@@ -47,6 +47,90 @@ TEST_GATE_FIELDS = frozenset(
 SENSITIVE_TEST_FILENAMES = frozenset({"mykey.py", "mykey.json", "mcp.json"})
 
 
+
+# Artifacts whose declared writer runs under a non-mutating profile. Step-Code
+# solves this the same way: its QA/verifier agent is read-only and *returns*
+# structured evidence, and the runtime persists it
+# (workflow/runtime.ts writeEvidence -> journal.appendEvidence). GA used to
+# require the verifier to write the file itself while the host forbade exactly
+# that write, so a run where every agent succeeded still failed with
+# missing_artifact.
+NON_MUTATING_PROFILES = frozenset({"read_only", "verify"})
+
+
+def _result_payload_for_write(job: WorkflowJob) -> Any:
+    payload = (job.metadata or {}).get("result")
+    if payload is None:
+        transcript = (job.metadata or {}).get("handoff")
+        payload = {"summary": str(transcript or "")}
+    return payload
+
+
+def write_contract_evidence_if_needed(run: WorkflowRun) -> list[str]:
+    """Persist contract artifacts whose writer could not write, host-side.
+
+    Returns the workspace-relative paths the host authored. Only artifacts that
+    do not exist yet, whose declared writer is a completed job running a
+    non-mutating permission profile, and whose payload is structured, are
+    written. Everything else keeps the existing enforcement: a writer that
+    *can* write still owns its own artifact, and a missing artifact still fails
+    the run.
+    """
+
+    metadata = run.metadata if isinstance(run.metadata, dict) else {}
+    contract = metadata.get("executionContract")
+    if not isinstance(contract, dict) or contract.get("requiresExecution") is not True:
+        return []
+    workspace_raw = metadata.get("workspacePath")
+    if not workspace_raw:
+        return []
+    try:
+        workspace = resolve_workspace_root(workspace_raw)
+    except (OSError, ValueError):
+        return []
+    jobs_by_label = {
+        " ".join(str((job.metadata or {}).get("label") or "").split()): job
+        for job in run.jobs
+        if str((job.metadata or {}).get("label") or "").strip()
+    }
+    written: list[str] = []
+    for artifact in contract.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        raw_path = str(artifact.get("path") or "").strip()
+        writer_label = " ".join(str(artifact.get("writer") or "").split())
+        if not raw_path or not writer_label:
+            continue
+        writer = jobs_by_label.get(writer_label)
+        if writer is None or writer.status != "succeeded":
+            continue
+        profile = str((writer.metadata or {}).get("permissionProfile") or "").strip().lower()
+        if profile not in NON_MUTATING_PROFILES:
+            continue
+        try:
+            target = resolve_workspace_child(raw_path, workspace)
+        except WorkspacePathError:
+            continue
+        if target.exists():
+            continue
+        payload = _result_payload_for_write(writer)
+        if not isinstance(payload, (dict, list)):
+            continue
+        document = copy.deepcopy(payload)
+        document = sanitize(document)
+        document.setdefault("evidenceAuthor", writer_label)
+        document["evidenceAuthorProfile"] = profile
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            continue
+        written.append(normalize_workspace_relative(raw_path, workspace))
+    if written:
+        metadata["hostAuthoredEvidence"] = written
+        run.metadata = metadata
+    return written
+
 @dataclass
 class WorkflowRuntimeResult:
     run: WorkflowRun
@@ -199,6 +283,9 @@ class WorkflowRuntime:
                 elif message_type == "done":
                     result = sanitize(message.get("result"))
                     self._last_worker_result = result
+                    # Host-owned evidence persistence, before any contract check
+                    # reads the filesystem. See write_contract_evidence_if_needed.
+                    write_contract_evidence_if_needed(run)
                     gate_error = self._test_gate_failure_reason()
                     verification_error = self._explicit_verification_failure_reason(result)
                     execution_contract_error = self._evaluate_execution_contract_evidence(run)

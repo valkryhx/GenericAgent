@@ -1,9 +1,11 @@
+import json
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
 from workflow_check_adapters import run_check
+from workflow_models import WorkflowJob, WorkflowRun
 
 
 class WorkflowCheckAdapterTest(unittest.TestCase):
@@ -197,3 +199,122 @@ class AdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostAuthoredEvidenceTest(unittest.TestCase):
+    """A verifier cannot be both read-only and the writer of its own evidence.
+
+    Real deepseek run wf_06af574f: the plan named the cross-verifier as the
+    writer of evidence/verification_result.json and attached three hard checks,
+    while the host had already given that role the non-mutating ``verify``
+    profile. The verifier's file_write was denied (verify_profile_no_mutation),
+    the file never existed and the whole run failed on missing_artifact even
+    though every agent succeeded.
+
+    Step-Code never puts that contradiction in front of the model: its QA agent
+    is read-only and *returns* structured evidence, and the host persists it
+    (runtime.ts writeEvidence -> journal.appendEvidence). The host must own the
+    write for any artifact whose declared writer runs under a non-mutating
+    profile.
+    """
+
+    def test_host_writes_evidence_for_a_read_only_writer(self):
+        from workflow_runtime import write_contract_evidence_if_needed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = WorkflowRun(
+                run_id="wf_evidence", script="",
+                session_id="s_evidence",
+                metadata={
+                    "workspacePath": tmp,
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [
+                            {"path": "evidence/verification_result.json", "writer": "Verifier",
+                             "requiredChecks": ["artifact_exists", "artifact_readback"]},
+                        ],
+                    },
+                },
+            )
+            run.jobs = [
+                WorkflowJob(
+                    job_id="agent_1",
+                    prompt="verify",
+                    status="succeeded",
+                    metadata={
+                        "label": "Verifier",
+                        "role": "verification",
+                        "permissionProfile": "verify",
+                        "result": {"verificationPassed": True, "checks": [], "blockingIssues": []},
+                    },
+                )
+            ]
+
+            written = write_contract_evidence_if_needed(run)
+
+            self.assertEqual(["evidence/verification_result.json"], written)
+            target = Path(tmp) / "evidence" / "verification_result.json"
+            self.assertTrue(target.is_file())
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            self.assertTrue(payload["verificationPassed"])
+            self.assertEqual("Verifier", payload["evidenceAuthor"])
+
+    def test_host_does_not_write_for_a_mutating_writer(self):
+        from workflow_runtime import write_contract_evidence_if_needed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run = WorkflowRun(
+                run_id="wf_evidence_2", script="",
+                session_id="s_evidence_2",
+                metadata={
+                    "workspacePath": tmp,
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [
+                            {"path": "report.html", "writer": "Writer",
+                             "requiredChecks": ["artifact_exists"]},
+                        ],
+                    },
+                },
+            )
+            run.jobs = [
+                WorkflowJob(
+                    job_id="agent_1", prompt="write", status="succeeded",
+                    metadata={"label": "Writer", "role": "synthesis",
+                              "permissionProfile": "inherit-current-permissions",
+                              "result": {"text": "<html></html>"}},
+                )
+            ]
+
+            self.assertEqual([], write_contract_evidence_if_needed(run))
+            self.assertFalse((Path(tmp) / "report.html").exists())
+
+    def test_host_does_not_overwrite_an_artifact_the_writer_already_produced(self):
+        from workflow_runtime import write_contract_evidence_if_needed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "evidence" / "verification_result.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"verificationPassed": false}', encoding="utf-8")
+            run = WorkflowRun(
+                run_id="wf_evidence_3", script="", session_id="s_evidence_3",
+                metadata={
+                    "workspacePath": tmp,
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [
+                            {"path": "evidence/verification_result.json", "writer": "Verifier",
+                             "requiredChecks": ["artifact_exists"]},
+                        ],
+                    },
+                },
+            )
+            run.jobs = [
+                WorkflowJob(job_id="agent_1", prompt="verify", status="succeeded",
+                            metadata={"label": "Verifier", "role": "verification",
+                                      "permissionProfile": "verify",
+                                      "result": {"verificationPassed": True}}),
+            ]
+
+            self.assertEqual([], write_contract_evidence_if_needed(run))
+            self.assertFalse(json.loads(target.read_text(encoding="utf-8"))["verificationPassed"])
