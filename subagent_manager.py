@@ -11,7 +11,7 @@ from subagent_artifacts import SubagentArtifactStore
 from subagent_event_bus import SubagentEventBus
 from subagent_mailbox import QUEUE_ONLY, TRIGGER_TURN, SubagentMailbox
 from subagent_permissions import INHERIT_CURRENT_PERMISSIONS, normalize_permission_metadata
-from subagent_registry import SubagentRegistry
+from subagent_registry import SubagentRegistry, _default_process_identity
 from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
@@ -205,6 +205,20 @@ def _default_process_exists(pid):
             return False
 
 
+def _process_create_time(pid):
+    """Best-effort process identity for a freshly spawned child.
+
+    Recorder side of the pid-reuse guard: the registry compares this against the pid's start
+    time at reap time, so a recycled pid is not mistaken for the original agent.
+    """
+    if not pid:
+        return None
+    try:
+        return _default_process_identity(pid)
+    except Exception:
+        return None
+
+
 def _default_terminate_process(pid):
     if not pid:
         return
@@ -220,7 +234,7 @@ class SubagentManager:
     STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
     STARTUP_HANDSHAKE_POLL_S = 0.05
 
-    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None):
+    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None):
         self.root_dir = Path(root_dir or Path(__file__).resolve().parent)
         self.temp_dir = self.root_dir / "temp"
         from subagent_registry import resolve_tree_limits_from_env
@@ -239,6 +253,7 @@ class SubagentManager:
         self._realtime_channels = {}
         self.event_bus = SubagentEventBus(self.temp_dir / "subagents", publisher=self._publish_realtime_event)
         self.process_exists = process_exists or _default_process_exists
+        self.process_identity = process_identity or _default_process_identity
         self.terminate_process = terminate_process or _default_terminate_process
         self.sleep = sleep or time.sleep
         self.popen = popen
@@ -503,22 +518,68 @@ class SubagentManager:
         """
         from subagent_registry import SubagentNameConflictError, SubagentTreeLimitError
 
-        try:
-            return self.registry.create_child(
-                parent_path=self.self_agent_path,
-                task_name=task_name,
-                task_dir=task_dir,
-                state_path=state_path,
-                parent_session_id=parent_session_id,
-                last_task_message=message,
-                parent_permission_mode=permission_metadata.get("parent_permission_mode"),
-                permission_profile=permission_metadata["permission_profile"],
-                permission_options=permission_metadata["options"],
-                **entry_fields,
-            )
-        except (SubagentTreeLimitError, SubagentNameConflictError) as e:
-            self._record_spawn_rejection(task_name, e)
-            raise
+        attempts = 0
+        while True:
+            try:
+                return self.registry.create_child(
+                    parent_path=self.self_agent_path,
+                    task_name=task_name,
+                    task_dir=task_dir,
+                    state_path=state_path,
+                    parent_session_id=parent_session_id,
+                    last_task_message=message,
+                    parent_permission_mode=permission_metadata.get("parent_permission_mode"),
+                    permission_profile=permission_metadata["permission_profile"],
+                    permission_options=permission_metadata["options"],
+                    **entry_fields,
+                )
+            except SubagentTreeLimitError as e:
+                # Codex does not refuse a spawn while an idle finished agent occupies the
+                # budget: it unloads the least-recently-used resident first
+                # (control/residency.rs::try_unload_one_resident). Reap dead rows once more,
+                # then evict one idle agent and retry; only a genuinely busy tree is refused.
+                if e.reason != "active_limit" or attempts >= 32:
+                    self._record_spawn_rejection(task_name, e)
+                    raise
+                attempts += 1
+                if not self._evict_one_idle_agent():
+                    self._record_spawn_rejection(task_name, e)
+                    raise
+            except SubagentNameConflictError as e:
+                self._record_spawn_rejection(task_name, e)
+                raise
+
+    def _evict_one_idle_agent(self):
+        """Unload the least-recently-used idle agent to make room, Codex residency style.
+
+        Returns True when something was unloaded. Only agents that are finished *and* idle
+        are candidates, so an agent mid-turn is never sacrificed to admit a new sibling.
+        """
+        for entry in self.registry.residency_eviction_candidates():
+            try:
+                # A short grace lets the child's idle loop consume ``_stop`` and exit on its
+                # own, which is Codex's graceful shutdown_and_wait rather than a kill.
+                result = self._close_single_agent(
+                    str(entry.agent_path),
+                    reason="residency_eviction",
+                    grace_s=1.0,
+                    cleanup_worktree=False,
+                )
+            except Exception:
+                continue
+            try:
+                self.event_bus.append_event(
+                    "agent_evicted",
+                    agent_path=str(entry.agent_path),
+                    run_id=entry.run_id,
+                    task_name=entry.task_name,
+                    status={"turn_status": entry.turn_status, "process_status": entry.process_status},
+                    payload={"reason": "residency_eviction", "previousStatus": result.previous_state.turn_status},
+                )
+            except Exception:
+                pass
+            return True
+        return False
 
     def _record_spawn_rejection(self, task_name, exc):
         """One place for "this spawn was refused", so every refusal reason is observable."""
@@ -873,9 +934,11 @@ class SubagentManager:
             stdout.close()
             stderr.close()
         pid = getattr(proc, "pid", None)
+        pid_create_time = _process_create_time(pid)
         state.update(
             {
                 "pid": pid,
+                "pid_create_time": pid_create_time,
                 "process_status": "alive",
                 "startup_phase": "process_spawned",
                 "startup_phase_at": now_iso(),
@@ -1150,9 +1213,17 @@ class SubagentManager:
             notify=True,
         )
         raw["last_event_seq"] = bus_event["event_seq"]
+        pid_create_time = _process_create_time(pid)
+        raw["pid_create_time"] = pid_create_time
         atomic_write_json(state_path, raw)
         self._write_registry_entry(previous.task_name, raw, task_dir)
-        self.registry.mark_running(previous.agent_path, pid=pid, turn_status="pending", process_status="alive")
+        self.registry.mark_running(
+            previous.agent_path,
+            pid=pid,
+            turn_status="pending",
+            process_status="alive",
+            pid_create_time=pid_create_time,
+        )
         handle = AgentHandle(
             previous.task_name,
             previous.agent_path,
@@ -1677,8 +1748,15 @@ class SubagentManager:
             if grace_s > 0:
                 self.sleep(grace_s)
             if self.process_exists(previous.pid):
-                self.terminate_process(previous.pid)
-                close_process_status = "killed"
+                try:
+                    self.terminate_process(previous.pid)
+                    close_process_status = "killed"
+                except Exception:
+                    # Terminating is best-effort escalation, not a precondition for releasing the
+                    # slot. A pid that vanished between the liveness check and the signal is the
+                    # outcome we wanted, and on Windows the fallback os.kill raises here; letting
+                    # that escape aborted the close and left the row open forever.
+                    close_process_status = "shutdown" if self.process_exists(previous.pid) else "exited"
 
         closed_turn_status = previous.turn_status
         if closed_turn_status not in {"completed", "errored"}:
@@ -1950,6 +2028,7 @@ class SubagentManager:
             self.registry.update(
                 agent_path,
                 pid=state.get("pid"),
+                pid_create_time=state.get("pid_create_time"),
                 task_dir=str(task_dir),
                 state_path=str(task_dir / "state.json"),
                 artifact_dir=state.get("artifact_dir") or str(task_dir),
@@ -1977,6 +2056,7 @@ class SubagentManager:
                 task_dir=task_dir,
                 state_path=task_dir / "state.json",
                 pid=state.get("pid"),
+                pid_create_time=state.get("pid_create_time"),
                 parent_session_id=state.get("parent_session_id"),
                 last_task_message=state.get("last_message"),
                 parent_permission_mode=state.get("parent_permission_mode"),

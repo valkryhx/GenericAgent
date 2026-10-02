@@ -1133,6 +1133,31 @@ def _signal_parent():
         return False
 
 
+def _release_subagent_slot(task_dir):
+    """Hand the registry slot back the moment this child finishes its work.
+
+    Mirrors Codex's explicit ``release_spawned_thread``: the value of an identity-keyed release
+    is that it does not depend on observing the pid, which Windows recycles. The registry
+    re-checks the caller's identity, so a stale child cannot close its own successor's row.
+    """
+    try:
+        state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
+        agent_path = state.get('agent_path')
+        if not agent_path:
+            return None
+        from subagent_registry import SubagentRegistry, _default_process_identity
+
+        pid = os.getpid()
+        try:
+            pid_create_time = _default_process_identity(pid)
+        except Exception:
+            pid_create_time = None
+        registry = SubagentRegistry(os.path.join(os.path.dirname(task_dir), 'subagents'))
+        return registry.release_agent_slot(agent_path, pid=pid, pid_create_time=pid_create_time)
+    except Exception:
+        return None
+
+
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
     is_turn_started = event.get('type') == 'turn_started'
@@ -1509,6 +1534,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     if realtime_subscriber is not None:
         realtime_subscriber.close()
     _set_realtime_subscriber(None)
+    _release_subagent_slot(task_dir)
 
 def start_task_background(
     task_name,

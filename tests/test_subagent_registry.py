@@ -281,7 +281,7 @@ class SubagentTreeLimitsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             registry = self._registry(td)
             self.assertEqual(registry.max_depth, 3)
-            self.assertEqual(registry.max_active_agents, 8)
+            self.assertEqual(registry.max_active_agents, 32)
 
         self.assertEqual(
             resolve_tree_limits_from_env({"GA_SUBAGENT_MAX_DEPTH": "5", "GA_SUBAGENT_MAX_ACTIVE": "20"}),
@@ -442,6 +442,111 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
                 self._child(registry, "/root", "third", td, pid=333)
 
             self.assertEqual([str(e.agent_path) for e in registry.list_agents()], ["/root/second", "/root/unknowable"])
+
+    def test_terminal_process_status_frees_the_slot_even_when_the_pid_still_exists(self):
+        """A row the child itself marked finished must not hold a slot on a reused pid.
+
+        GA's cap is cross-process, so it cannot use Codex's in-memory ``release_spawned_thread``.
+        The authoritative replacement is the status the child writes about itself: once it is
+        ``exited``/``shutdown``/``killed``/``errored``, the process cannot come back and the
+        slot must be reusable even if the OS handed the pid to something else.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td, max_active_agents=2, process_exists=lambda _pid: True)
+            done = self._child(registry, "/root", "finished", td, pid=111)
+            registry.update(done.agent_path, process_status="exited")
+            self._child(registry, "/root", "still_working", td, pid=222)
+
+            survivor = self._child(registry, "/root", "newcomer", td, pid=888)
+
+            self.assertEqual(str(survivor.agent_path), "/root/newcomer")
+            self.assertEqual(registry.get(done.agent_path).closed_status, "stale")
+
+    def test_a_reused_pid_does_not_count_as_the_same_process(self):
+        """Windows recycles pids: pid_exists(26112) was true for an unrelated npx process.
+
+        The row has to remember the child's process start time so a recycled pid is recognised
+        as *a different process* rather than as the original agent still running.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(
+                td,
+                max_active_agents=2,
+                process_identity=lambda _pid: 5_000.0,
+            )
+            recycled = self._child(registry, "/root", "recycled", td, pid=111, pid_create_time=1_000.0)
+            self._child(registry, "/root", "genuine", td, pid=222, pid_create_time=5_000.0)
+
+            survivor = self._child(registry, "/root", "newcomer", td, pid=888, pid_create_time=9_000.0)
+
+            self.assertEqual(str(survivor.agent_path), "/root/newcomer")
+            self.assertEqual(registry.get(recycled.agent_path).closed_status, "stale")
+
+    def test_a_pid_less_row_does_not_hold_a_slot_forever(self):
+        """A crash between ``create_child`` and Popen used to be an uncollectable slot.
+
+        ``pid=None`` has to mean "starting" only for a short window. The 8-slot cap filled up
+        with rows that never got a pid at all, and every later spawn was refused.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            from subagent_registry import SubagentTreeLimitError
+
+            registry = self._registry(
+                td,
+                max_active_agents=2,
+                process_exists=lambda _pid: True,
+                startup_grace_s=0.0,
+            )
+            self._child(registry, "/root", "never_launched", td)
+            self._child(registry, "/root", "live", td, pid=222)
+
+            survivor = self._child(registry, "/root", "newcomer", td, pid=888)
+
+            self.assertEqual(str(survivor.agent_path), "/root/newcomer")
+
+    def test_a_pid_less_row_still_counts_as_starting_within_the_grace_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            from subagent_registry import SubagentTreeLimitError
+
+            registry = self._registry(td, max_active_agents=1, process_exists=lambda _pid: False, startup_grace_s=60.0)
+            self._child(registry, "/root", "just_registered", td)
+
+            with self.assertRaises(SubagentTreeLimitError):
+                self._child(registry, "/root", "second", td)
+
+    def test_explicit_release_closes_the_row_and_frees_the_slot(self):
+        """The child hands its own slot back, the way Codex calls release_spawned_thread."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td, max_active_agents=1, process_exists=lambda _pid: True)
+            child = self._child(registry, "/root", "worker", td, pid=111, pid_create_time=1_000.0)
+
+            released = registry.release_agent_slot(child.agent_path, pid=111, pid_create_time=1_000.0)
+
+            self.assertEqual(released.status, "closed")
+            self.assertEqual(released.closed_status, "released")
+            survivor = self._child(registry, "/root", "next", td, pid=222)
+            self.assertEqual(str(survivor.agent_path), "/root/next")
+
+    def test_release_is_ignored_when_the_caller_is_not_the_row_owner(self):
+        """A stale child lingering past its replacement must not close the new owner's row."""
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td, max_active_agents=2, process_exists=lambda _pid: True)
+            current = self._child(registry, "/root", "worker", td, pid=222, pid_create_time=9_000.0)
+
+            stale = registry.release_agent_slot(current.agent_path, pid=111, pid_create_time=1_000.0)
+
+            self.assertIsNone(stale)
+            self.assertEqual(registry.get(current.agent_path).status, "running")
+
+    def test_release_is_ignored_when_the_pid_was_recycled_onto_another_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._registry(td, max_active_agents=2, process_exists=lambda _pid: True)
+            current = self._child(registry, "/root", "worker", td, pid=222, pid_create_time=9_000.0)
+
+            recycled = registry.release_agent_slot(current.agent_path, pid=222, pid_create_time=1_000.0)
+
+            self.assertIsNone(recycled)
+            self.assertEqual(registry.get(current.agent_path).status, "running")
 
     def test_manager_gives_the_registry_its_own_liveness_probe(self):
         from subagent_manager import SubagentManager

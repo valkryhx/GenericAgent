@@ -2170,6 +2170,98 @@ class ResumeAgentGuardTest(unittest.TestCase):
 
             self.assertEqual(len(launched), 3)
 
+class ResidencyEvictionTest(unittest.TestCase):
+    """Codex does not refuse a spawn while an idle finished agent holds a slot.
+
+    ``control/residency.rs::try_unload_one_resident`` unloads the least-recently-used agent whose
+    ``is_unloadable`` holds (completed/errored/interrupted, no active turn, no pending mailbox).
+    GA's cap had no such eviction, so idle finished subagents held all 8 slots until their idle
+    timeout and every later spawn was refused — reproduced as "only one of two subagents started".
+    """
+
+    def _manager(self, td, *, alive_pids="all", process_exists=None):
+        class FakeProcess:
+            next_pid = 9100
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.returncode = -15
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        manager = SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+            process_exists=process_exists or (lambda pid: pid in set(alive_pids) or alive_pids == "all"),
+        )
+        manager.STARTUP_HANDSHAKE_TIMEOUT_S = 0
+        from subagent_registry import resolve_tree_limits_from_env
+        manager.registry.max_active_agents = 2
+        return manager
+
+    def _finish(self, manager, handle):
+        task_dir = Path(handle.task_dir)
+        (task_dir / "output.txt").write_text("done" + chr(10) + chr(10) + "[ROUND END]" + chr(10), encoding="utf-8")
+        state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+        state["turn_status"] = "completed"
+        state["process_status"] = "waiting_reply"
+        state["completion_status"] = "completed"
+        atomic_write_json(task_dir / "state.json", state)
+        manager.registry.update(handle.agent_path, turn_status="completed", process_status="waiting_reply")
+
+    def test_an_idle_finished_agent_is_evicted_instead_of_refusing_the_spawn(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            first = manager.spawn_agent("worker_a", "first")
+            self._finish(manager, first)
+            second = manager.spawn_agent("worker_b", "second")
+            self._finish(manager, second)
+
+            third = manager.spawn_agent("worker_c", "third")
+
+            self.assertEqual(str(third.agent_path), "/root/worker_c")
+            # Room came from unloading exactly one resident (LRU: the older first agent), not
+            # from refusing the spawn. The newer idle agent is untouched and stays resumable.
+            self.assertEqual(manager.registry.get(first.agent_path).status, "closed")
+            self.assertEqual(manager.registry.get(second.agent_path).status, "running")
+
+    def test_an_agent_mid_turn_is_never_evicted_to_admit_a_sibling(self):
+        """Only idle-and-finished agents qualify; sacrificing a working agent would lose work."""
+        from subagent_registry import SubagentTreeLimitError
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("busy_a", "stay busy")
+            manager.spawn_agent("busy_b", "stay busy too")
+
+            with self.assertRaises(SubagentTreeLimitError):
+                manager.spawn_agent("worker_c", "no room")
+
+            self.assertEqual(manager.registry.get("/root/busy_a").status, "running")
+
+    def test_eviction_is_observable_as_an_agent_evicted_event(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            first = manager.spawn_agent("worker_a", "first")
+            self._finish(manager, first)
+            manager.spawn_agent("worker_b", "second")
+            self._finish(manager, manager.read_agent("worker_b"))
+
+            manager.spawn_agent("worker_c", "third")
+
+            events = [json.loads(line) for line in manager.event_bus.events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(row.get("type") == "agent_evicted" for row in events))
+
 
 if __name__ == "__main__":
     unittest.main()
