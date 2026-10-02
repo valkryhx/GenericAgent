@@ -50,6 +50,12 @@ ga ink
 | `/workflow stop <runId> [原因]` | 停止正在运行的 workflow |
 | `/workflow resume <runId>` | 从可恢复的终态 run 继续（cache 前缀可复用） |
 
+### 2.1 普通输入的 workflow 自动激活
+
+无需输入 slash 命令时，Ink UI 会对每轮任务独立解析 workflow 意图。只有同时包含多个独立动作（例如搜索 + 生成产物）和明确顺序/组合信号（例如“然后”“再”“并验证”）的高置信任务，才会由 bridge 在后台启动 planner；普通问答、单步搜索以及“只规划/不要执行”不会自动切入 workflow。可用 `/workflow on` 显式开启 session 模式，`/workflow off` 关闭。
+
+自动激活只是入口路由，不会替用户扩大任务授权。任务中仍应写清楚是否允许联网/MCP、目标 workspace、可写路径和验证要求。planner 生成的执行计划要声明 action、required tools、artifact/write scope 和 machine-checkable acceptance checks；host 会在 child 启动前检查能力，并在成功前校验工具调用证据与 artifact。
+
 已移除的用户入口（不要再依赖）：
 
 - `/workflow plan ...`：仍兼容，会映射到 `/workflow ...` 自动执行
@@ -352,6 +358,14 @@ wf_abc123...
 ```
 
 ---
+
+## 11.1 自动激活与执行契约排障
+
+- 输入多步自然语言后若没有 workflow：确认文本包含两个独立动作及顺序信号；或直接使用 `/workflow <任务>`。
+- planner 失败或计划被拒绝：查看错误码、workflow detail 与 run journal；执行任务缺 `executionContract`、required tool、write scope、action mapping 或 artifact check 时会 fail-closed，不会静默降级为“只返回计划”。
+- required MCP 缺失：检查事件中的 `workflow_capability_snapshot` / `workflow_capability_preflight_failed`；host 使用该 run 的固定 capability snapshot，缺少必需工具时不会启动 child。
+- 未提供 workspacePath：runtime 会在 run artifact 目录下创建并持久化 workspace；resume 会继承源 run workspace，cache key 同时纳入原始 args 与规范化 workspace。
+- 成功闭环应包含 required tool transcript evidence、artifact 存在与 read-back 证据，以及 `workflow_finished` 终态事件；Ink UI 最终回到 idle。
 
 ## 12. 判断测试是否成功
 
