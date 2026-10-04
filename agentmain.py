@@ -109,6 +109,21 @@ def _image_block(path):
     return image_codec.build_image_block(enc)
 
 
+def resolve_reasoning_effort_for_model(current, supported, default):
+    """Resolve a session effort against target-model capabilities.
+
+    ``supported is None`` means legacy/unknown metadata, so the value is
+    preserved rather than replaced with an invented global default.
+    """
+    if supported is None:
+        return current
+    if current in supported:
+        return current
+    if default in supported:
+        return default
+    return supported[0] if supported else None
+
+
 def _build_user_content_with_images(text, images=None):
     extra = _extract_image_paths(text)
     return image_codec.build_user_content_with_images(text, images=images, extra_paths=extra)
@@ -585,13 +600,36 @@ class GenericAgent:
         if not result.get("ok"):
             raise Exception(result.get("message") or "model switch failed")
 
-    def select_llm(self, selector):
+    @staticmethod
+    def _backend_for_client(client):
+        backend = getattr(client, "backend", client)
+        return getattr(backend, "primary", backend)
+
+    def _llm_descriptor(self, index, client, current=False):
+        backend = self._backend_for_client(client)
+        efforts = getattr(backend, "reasoning_efforts", None)
+        known = bool(getattr(backend, "reasoning_capabilities_known", efforts is not None))
+        return {
+            "index": int(index),
+            "name": str(self.get_llm_name(client)),
+            "current": bool(current),
+            "reasoningEfforts": list(efforts) if efforts is not None else [],
+            "reasoningEffortKnown": known,
+            "defaultReasoningEffort": getattr(backend, "default_reasoning_effort", None),
+            "reasoningEffort": getattr(backend, "reasoning_effort", None),
+        }
+
+    def current_llm_descriptor(self):
+        self.load_llm_sessions()
+        return self._llm_descriptor(self.llm_no, self.llmclient, current=True)
+
+    def select_llm(self, selector, reasoning_effort=None):
         self.load_llm_sessions()
         selector = str(selector or "").strip()
         if not selector:
             return {"ok": False, "code": "empty", "message": "model selector is empty"}
         if selector.isdigit():
-            return self._switch_llm_index(int(selector))
+            return self._switch_llm_index(int(selector), reasoning_effort=reasoning_effort)
         lowered = selector.lower()
         # Prefer an exact profile/display name when a chat variant reuses the
         # same API model (for example deepseek-v4.1-flash and its -chat
@@ -603,7 +641,7 @@ class GenericAgent:
             or lowered == getattr(client.backend, "name", "").lower()
         ]
         if len(exact_profile_matches) == 1:
-            return self._switch_llm_index(exact_profile_matches[0])
+            return self._switch_llm_index(exact_profile_matches[0], reasoning_effort=reasoning_effort)
         if len(exact_profile_matches) > 1:
             return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
         exact_model_matches = [
@@ -611,7 +649,7 @@ class GenericAgent:
             if lowered == getattr(client.backend, "model", "").lower()
         ]
         if len(exact_model_matches) == 1:
-            return self._switch_llm_index(exact_model_matches[0])
+            return self._switch_llm_index(exact_model_matches[0], reasoning_effort=reasoning_effort)
         if len(exact_model_matches) > 1:
             return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
         matches = [
@@ -621,27 +659,96 @@ class GenericAgent:
             or lowered in getattr(client.backend, "name", "").lower()
         ]
         if len(matches) == 1:
-            return self._switch_llm_index(matches[0])
+            return self._switch_llm_index(matches[0], reasoning_effort=reasoning_effort)
         if not matches:
             return {"ok": False, "code": "not_found", "message": f"model not found: {selector}"}
         return {"ok": False, "code": "ambiguous", "message": f"ambiguous model selector: {selector}"}
 
-    def _switch_llm_index(self, index):
+    def _switch_llm_index(self, index, reasoning_effort=None):
         self.load_llm_sessions()
         if not (0 <= index < len(self.llmclients)):
             return {"ok": False, "code": "out_of_range", "message": f"model index out of range: {index}"}
         lastc = self.llmclient
+        last_backend = self._backend_for_client(lastc)
+        target_client = self.llmclients[index]
+        target_backend = self._backend_for_client(target_client)
+        target_efforts = getattr(target_backend, "reasoning_efforts", None)
+        target_known = bool(getattr(target_backend, "reasoning_capabilities_known", target_efforts is not None))
+        requested = None if reasoning_effort is None else str(reasoning_effort).strip().lower()
+        if requested is not None:
+            if not target_known:
+                return {
+                    "ok": False,
+                    "code": "reasoning_capabilities_unknown",
+                    "message": "目标模型未声明可选思考等级",
+                }
+            if requested not in target_efforts:
+                return {
+                    "ok": False,
+                    "code": "unsupported_reasoning_effort",
+                    "message": f"目标模型不支持 {requested}；支持：{', '.join(target_efforts)}",
+                }
+        source_effort = getattr(last_backend, "reasoning_effort", None)
+        target_current = getattr(target_backend, "reasoning_effort", None)
+        if requested is not None:
+            next_effort = requested
+        elif target_known:
+            next_effort = resolve_reasoning_effort_for_model(
+                source_effort if source_effort is not None else target_current,
+                target_efforts,
+                getattr(target_backend, "default_reasoning_effort", None),
+            )
+        else:
+            next_effort = target_current if target_current is not None else source_effort
         self.llm_no = index
         self.llmclient = self.llmclients[self.llm_no]
         try: self.llmclient.backend.history = lastc.backend.history
         except Exception:
             raise Exception('[ERROR] BAD session switch: history 无法迁移到新 backend')
         self.llmclient.last_tools = ''
+        if next_effort is not None:
+            self.llmclient.backend.reasoning_effort = next_effort
         name = self.get_llm_name(model=True)
         if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn', include_mcp_tools=False)
         else: load_tool_schema(include_mcp_tools=False)
-        return {"ok": True, "index": self.llm_no, "name": self.get_llm_name(), "model": self.get_llm_name(model=True)}
-    def list_llms(self): 
+        return {
+            "ok": True,
+            "index": self.llm_no,
+            "name": self.get_llm_name(),
+            "model": self.get_llm_name(model=True),
+            "reasoning_effort": next_effort,
+        }
+
+    def select_reasoning_effort(self, effort):
+        self.load_llm_sessions()
+        if getattr(self, "is_running", False):
+            return {"ok": False, "code": "busy", "message": "agent is running"}
+        descriptor = self.current_llm_descriptor()
+        supported = descriptor["reasoningEfforts"]
+        if not descriptor["reasoningEffortKnown"]:
+            return {
+                "ok": False,
+                "code": "reasoning_capabilities_unknown",
+                "message": "当前模型未声明可选思考等级",
+            }
+        normalized = str(effort or "").strip().lower()
+        if normalized not in supported:
+            return {
+                "ok": False,
+                "code": "unsupported_reasoning_effort",
+                "message": f"当前模型不支持 {normalized}；支持：{', '.join(supported)}",
+            }
+        self.llmclient.backend.reasoning_effort = normalized
+        return {"ok": True, "effort": normalized, "model": descriptor["name"]}
+
+    def list_llm_descriptors(self):
+        self.load_llm_sessions()
+        return [
+            self._llm_descriptor(i, client, current=i == self.llm_no)
+            for i, client in enumerate(self.llmclients)
+        ]
+
+    def list_llms(self):
         self.load_llm_sessions()
         return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(self.llmclients)]
     def get_llm_name(self, b=None, model=False):

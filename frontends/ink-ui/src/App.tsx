@@ -38,7 +38,16 @@ import {
   visibleMcpServerRows,
   type McpPanelState,
 } from './mcpPanel.js'
-import { modelPanelRows, moveModelSelection, panelFromModelStatus, shouldApplyModelStatus, type ModelPanelState } from './modelPanel.js'
+import {
+  modelPanelRows,
+  moveModelSelection,
+  moveReasoningSelection,
+  openReasoningPanel,
+  panelFromModelStatus,
+  shouldApplyModelStatus,
+  shouldOpenReasoningPanel,
+  type ModelPanelState,
+} from './modelPanel.js'
 import {
   movePermissionSelection,
   panelFromPermissionStatus,
@@ -261,6 +270,25 @@ function McpStartupStatusView({ rows, loading, theme }: { rows: string[]; loadin
 }
 
 function ModelPanelView({ panel, theme }: { panel: ModelPanelState; theme: InkTheme }) {
+  if (panel.reasoning) {
+    const model = panel.reasoning.model
+    const efforts = model.reasoningEfforts ?? []
+    return (
+      <Box flexDirection="column" paddingX={1} flexShrink={0}>
+        <Text bold>{`Reasoning levels · ${model.name}`}</Text>
+        {efforts.length === 0 ? <Text color={theme.muted}>No reasoning levels declared for this model.</Text> : null}
+        {efforts.map((effort, index) => (
+          <Text key={effort} color={index === panel.reasoning?.selected ? theme.accent : undefined}>
+            {index === panel.reasoning?.selected ? '> ' : '  '}
+            <Text color={model.reasoningEffort === effort ? theme.success : theme.muted}>{model.reasoningEffort === effort ? '✓' : ' '}</Text>
+            {` ${effort}`}
+            <Text color={theme.muted}>{model.defaultReasoningEffort === effort ? '  default' : ''}</Text>
+          </Text>
+        ))}
+        <Text color={theme.muted}>Enter select - Up/Down move - Esc back</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column" paddingX={1} flexShrink={0}>
       <Text bold>Models</Text>
@@ -1100,9 +1128,55 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     }
     if (modelPanel) {
       if (key.escape) {
-        modelPanelOpenRef.current = false
-        setModelPanel(null)
+        if (modelPanel.reasoning) {
+          setModelPanel(panel => panel ? { ...panel, reasoning: null } : panel)
+        } else {
+          modelPanelOpenRef.current = false
+          setModelPanel(null)
+        }
         dismissPendingLocalCommand()
+        return
+      }
+      if (modelPanel.reasoning) {
+        const efforts = modelPanel.reasoning.model.reasoningEfforts ?? []
+        if (key.upArrow) {
+          setModelPanel(panel => panel?.reasoning
+            ? {
+                ...panel,
+                reasoning: {
+                  ...panel.reasoning,
+                  selected: moveReasoningSelection(panel.reasoning.selected, -1, efforts.length),
+                },
+              }
+            : panel)
+          return
+        }
+        if (key.downArrow) {
+          setModelPanel(panel => panel?.reasoning
+            ? {
+                ...panel,
+                reasoning: {
+                  ...panel.reasoning,
+                  selected: moveReasoningSelection(panel.reasoning.selected, 1, efforts.length),
+                },
+              }
+            : panel)
+          return
+        }
+        if (key.return) {
+          const effort = efforts[modelPanel.reasoning.selected]
+          if (effort) {
+            bridgeRef.current?.send({
+              type: 'model_switch',
+              selector: String(modelPanel.reasoning.model.index),
+              reasoningEffort: effort,
+            })
+          }
+          modelPanelOpenRef.current = false
+          modelPanelPendingRef.current = false
+          setModelPanel(null)
+          return
+        }
         return
       }
       if (key.upArrow) {
@@ -1116,6 +1190,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (key.return) {
         const selected = modelPanel.models[modelPanel.selected]
         if (selected) {
+          if (shouldOpenReasoningPanel(selected)) {
+            setModelPanel(panel => panel ? openReasoningPanel(panel, selected) : panel)
+            return
+          }
           bridgeRef.current?.send({ type: 'model_switch', selector: String(selected.index) })
         }
         modelPanelOpenRef.current = false

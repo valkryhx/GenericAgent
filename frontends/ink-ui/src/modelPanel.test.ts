@@ -1,6 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modelPanelRows, moveModelSelection, panelFromModelStatus, shouldApplyModelStatus } from './modelPanel.js'
+import {
+  modelPanelRows,
+  moveModelSelection,
+  moveReasoningSelection,
+  openReasoningPanel,
+  panelFromModelStatus,
+  shouldApplyModelStatus,
+} from './modelPanel.js'
 
 test('panelFromModelStatus selects current model', () => {
   const panel = panelFromModelStatus({
@@ -13,6 +20,7 @@ test('panelFromModelStatus selects current model', () => {
 
   assert.equal(panel.selected, 1)
   assert.equal(panel.models[1].name, 'NativeOAISession/kimi-native')
+  assert.equal(panel.reasoning, null)
 })
 
 test('moveModelSelection wraps at both ends', () => {
@@ -41,4 +49,29 @@ test('modelPanelRows budgets title, model rows, and footer', () => {
   })
 
   assert.equal(modelPanelRows(panel), 11)
+})
+
+test('reasoning panel follows the selected model and highlights its current effort', () => {
+  const panel = panelFromModelStatus({
+    type: 'model_status',
+    models: [{
+      index: 0,
+      name: 'gpt-6-luna/gpt-6-luna',
+      current: true,
+      reasoningEfforts: ['none', 'medium', 'ultra'],
+      reasoningEffortKnown: true,
+      defaultReasoningEffort: 'medium',
+      reasoningEffort: 'ultra',
+    }],
+  })
+  const next = openReasoningPanel(panel, panel.models[0])
+  assert.equal(next.reasoning?.selected, 2)
+  assert.equal(modelPanelRows(next), 5)
+})
+
+test('reasoning selection stops at both boundaries', () => {
+  assert.equal(moveReasoningSelection(0, -1, 3), 0)
+  assert.equal(moveReasoningSelection(2, 1, 3), 2)
+  assert.equal(moveReasoningSelection(0, 1, 3), 1)
+  assert.equal(moveReasoningSelection(0, 1, 0), 0)
 })

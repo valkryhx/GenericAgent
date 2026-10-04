@@ -30,11 +30,21 @@ def _make_session(resolved: ResolvedModel):
 
     cfg = resolved.to_legacy_cfg()
     if resolved.wire_api == "anthropic":
-        return llmcore.NativeClaudeSession(cfg=cfg)
-    if resolved.wire_api in ("openai_chat", "openai_responses"):
+        session = llmcore.NativeClaudeSession(cfg=cfg)
+    elif resolved.wire_api in ("openai_chat", "openai_responses"):
         # api_mode 已由 to_legacy_cfg() 按 wire_api 写好。
-        return llmcore.NativeOAISession(cfg=cfg)
-    raise ValueError(f"未知 wire_api：{resolved.wire_api!r}")
+        session = llmcore.NativeOAISession(cfg=cfg)
+    else:
+        raise ValueError(f"未知 wire_api：{resolved.wire_api!r}")
+
+    # Keep model capability metadata beside the live session. The wire layer
+    # remains lossless; agentmain owns model-aware validation and fallback.
+    session.reasoning_efforts = resolved.supported_reasoning_efforts
+    session.reasoning_capabilities_known = resolved.supported_reasoning_efforts is not None
+    session.default_reasoning_effort = resolved.default_reasoning_effort
+    session.configured_reasoning_effort = resolved.reasoning_effort
+    session.model_key = resolved.params.get("_model_key")
+    return session
 
 
 def _wrap_client(session):
@@ -119,6 +129,8 @@ def _resolve_model_directly(config: LLMConfig, model_key: str) -> ResolvedModel:
     params["_model_key"] = model_key
     # 统一 thinking 级别 → 该 wire 的底层字段（与 LLMConfig.resolve 一致）。
     apply_thinking_translation(params, provider.wire_api)
+    if params.get("reasoning_effort") is None and model.default_reasoning_effort is not None:
+        params["reasoning_effort"] = model.default_reasoning_effort
     return ResolvedModel(model_key, model, provider, model.provider, params)
 
 

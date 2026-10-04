@@ -40,9 +40,8 @@ KNOWN_CAPABILITIES = frozenset({
     "thinking", "prompt_cache", "1m_context", "image_input", "responses",
 })
 
-# 统一思考级别（thinking 字段的合法取值）。三种 wire 写法一致，由配置层按 wire
-# 翻译成各自底层字段，屏蔽 Claude(thinking_type+effort) 与 OpenAI/Grok(reasoning_effort)
-# 的差异。想精细控制的高级用户仍可直接写 thinking_type / reasoning_effort（优先级更高）。
+# 兼容旧配置的统一思考级别。新模型不要用它声明能力；请使用
+# ModelCfg.reasoning_efforts/default_reasoning_effort/reasoning_effort。
 THINKING_LEVELS = ("off", "low", "medium", "high", "max")
 
 # YAML 的 "Norway problem"：裸写 thinking: off 会被 YAML 解析成布尔 False
@@ -97,6 +96,28 @@ def apply_thinking_translation(params: dict[str, Any], wire_api: str) -> None:
     for key, value in mapping.items():
         if params.get(key) is None:
             params[key] = value
+
+
+def _validate_reasoning_efforts(
+    efforts: Optional[list[str]],
+    default: Optional[str],
+    current: Optional[str],
+    *,
+    field_name: str,
+) -> None:
+    """Validate model-declared reasoning metadata without imposing a global list."""
+    if efforts is None:
+        return
+    if not efforts:
+        raise ValueError(f"{field_name} 的 reasoning_efforts 不能是空列表；未知能力请省略该字段")
+    if any(not isinstance(item, str) or not item.strip() for item in efforts):
+        raise ValueError(f"{field_name} 的 reasoning_efforts 中每项必须是非空字符串")
+    if len(set(efforts)) != len(efforts):
+        raise ValueError(f"{field_name} 的 reasoning_efforts 不能包含重复等级")
+    if default is not None and default not in efforts:
+        raise ValueError(f"{field_name} 的 default_reasoning_effort 必须位于 reasoning_efforts 中")
+    if current is not None and current not in efforts:
+        raise ValueError(f"{field_name} 的 reasoning_effort 必须位于 reasoning_efforts 中")
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -195,13 +216,16 @@ class ModelCfg(_Strict):
     auto_compact_tokens: Optional[int] = None
     hard_limit_tokens: Optional[int] = None
     supports: list[str] = Field(default_factory=list)
-    # 【推荐】统一思考级别：off/low/medium/high/max，三种 wire 写法一致，
-    # 由配置层按 wire 翻译成底层字段。日常只需写这一个。
+    # Deprecated compatibility entry point. New models should use the
+    # per-model reasoning fields below.
     thinking: Optional[str] = None
     # 【高级逃生舱】想绕过统一翻译、直接控制底层字段时才填（优先级高于 thinking）。
     thinking_type: Optional[str] = None            # anthropic 专属：adaptive/enabled/disabled
     thinking_budget_tokens: Optional[int] = None   # 仅 thinking_type=enabled 时用
-    reasoning_effort: Optional[str] = None          # none/minimal/low/medium/high/xhigh
+    reasoning_effort: Optional[str] = None          # 当前会话等级
+    # Model-specific reasoning capability metadata. None means unknown, not all values supported.
+    reasoning_efforts: Optional[list[str]] = None
+    default_reasoning_effort: Optional[str] = None
     # 采样 / 传输默认（可被 profile 覆盖）。
     service_tier: Optional[str] = None
     temperature: Optional[float] = None
@@ -229,6 +253,12 @@ class ModelCfg(_Strict):
             raise ValueError(
                 f"model 的 thinking={self.thinking!r} 非法；合法级别：{list(THINKING_LEVELS)}"
             )
+        _validate_reasoning_efforts(
+            self.reasoning_efforts,
+            self.default_reasoning_effort,
+            self.reasoning_effort,
+            field_name="model",
+        )
         for name in ("auto_compact_ratio", "hard_limit_ratio"):
             r = getattr(self, name)
             if not (0 < r <= 1):
@@ -324,6 +354,13 @@ class ResolvedModel:
         self.provider_key = provider_key
         self.params = params              # 合并后的最终参数
         self.wire_api: WireApi = provider.wire_api
+        self.supported_reasoning_efforts = (
+            list(model.reasoning_efforts)
+            if model.reasoning_efforts is not None
+            else None
+        )
+        self.default_reasoning_effort = model.default_reasoning_effort
+        self.reasoning_effort = params.get("reasoning_effort")
 
     def supports(self, capability: str) -> bool:
         return capability in self.model.supports
@@ -476,6 +513,14 @@ class LLMConfig(_Strict):
         params["_model_key"] = prof.model
         # 统一 thinking 级别 → 该 wire 的底层字段（显式底层字段优先，不被覆盖）。
         apply_thinking_translation(params, provider.wire_api)
+        if params.get("reasoning_effort") is None and model.default_reasoning_effort is not None:
+            params["reasoning_effort"] = model.default_reasoning_effort
+        _validate_reasoning_efforts(
+            model.reasoning_efforts,
+            model.default_reasoning_effort,
+            params.get("reasoning_effort"),
+            field_name=f"model '{prof.model}'",
+        )
         return ResolvedModel(name, model, provider, model.provider, params)
 
 

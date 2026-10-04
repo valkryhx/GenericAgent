@@ -7,7 +7,7 @@ import stringWidth from 'string-width'
 import { App, helpText } from './App.js'
 import { createCursorParkStdout } from './stdoutCursorPark.js'
 import type { BridgeClient } from './bridgeClient.js'
-import type { BridgeEvent } from './protocol.js'
+import type { BridgeCommand, BridgeEvent } from './protocol.js'
 
 class CaptureWriteStream extends EventEmitter {
   columns = 80
@@ -715,6 +715,82 @@ test('App hides the native input cursor while the model selection panel is open'
     const latestPanel = combined.slice(combined.lastIndexOf('Models'))
     assert.doesNotMatch(latestPanel, /\x1b\[\?25h/, 'panel selection should not expose a native cursor on a panel row')
     assert.match(stdout.chunks.map(stripAnsi).join(''), /Models[\s\S]*provider\/model-a/)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App opens the model-specific reasoning panel and submits the selected effort', async () => {
+  const commands: BridgeCommand[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        commands.push(command)
+        if (command.type === 'model_status') {
+          onEvent({
+            type: 'model_status',
+            models: [
+              {
+                index: 0,
+                name: 'gpt-6-luna/gpt-6-luna',
+                current: true,
+                reasoningEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+                reasoningEffortKnown: true,
+                defaultReasoningEffort: 'medium',
+                reasoningEffort: 'medium',
+              },
+              {
+                index: 1,
+                name: 'deepseek-v4.1-flash/deepseek-v4.1-flash',
+                current: false,
+                reasoningEfforts: ['low', 'high', 'max'],
+                reasoningEffortKnown: true,
+                defaultReasoningEffort: 'high',
+                reasoningEffort: 'high',
+              },
+            ],
+          })
+        }
+        if (command.type === 'model_switch') {
+          onEvent({ type: 'model_switch_result', ok: true, message: `Set model ${command.selector} ${command.reasoningEffort ?? ''}` })
+        }
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    stdin.send('/model')
+    await waitForFrame(stdout, frame => frame.includes('/model'))
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('Models') && output.includes('gpt-6-luna/gpt-6-luna'))
+    await delay(50)
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('Reasoning levels') && output.includes('gpt-6-luna'))
+    await delay(50)
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('Set model 0 medium'))
+    const switchCommand = commands.find(command => command.type === 'model_switch' && command.reasoningEffort)
+    assert.deepEqual(switchCommand, { type: 'model_switch', selector: '0', reasoningEffort: 'medium' })
   } finally {
     instance.unmount()
   }

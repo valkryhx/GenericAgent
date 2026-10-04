@@ -18,7 +18,8 @@ export type BridgeCommand =
   | { type: 'mcp_enable'; server: string }
   | { type: 'mcp_disable'; server: string }
   | { type: 'model_status' }
-  | { type: 'model_switch'; selector: string }
+  | { type: 'model_switch'; selector: string; reasoningEffort?: string }
+  | { type: 'reasoning_effort_switch'; effort: string }
   | { type: 'permission_status' }
   | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
   | { type: 'permission_response'; requestId: string; decision: 'accept' | 'deny' }
@@ -71,6 +72,10 @@ export type ModelStatus = {
   index: number
   name: string
   current: boolean
+  reasoningEfforts?: string[]
+  reasoningEffortKnown?: boolean
+  defaultReasoningEffort?: string | null
+  reasoningEffort?: string | null
 }
 
 export type PermissionMode = 'read_only' | 'ask' | 'full_access'
@@ -293,6 +298,7 @@ export type BridgeEvent =
   | { type: 'mcp_progress'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading: boolean; discovery_running: boolean; discovery_complete: boolean | null }
   | { type: 'model_status'; models: ModelStatus[] }
   | { type: 'model_switch_result'; ok: boolean; message: string }
+  | { type: 'reasoning_effort_switch_result'; ok: boolean; message: string }
   | { type: 'permission_status'; mode: PermissionMode | string; default: PermissionMode | string; modes: (PermissionMode | string)[] }
   | { type: 'permission_switch_result'; ok: boolean; mode: PermissionMode | string }
   | {

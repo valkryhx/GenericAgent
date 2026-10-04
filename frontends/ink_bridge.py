@@ -475,23 +475,39 @@ class GenericAgentBridge:
     def model_status(self) -> None:
         try:
             with backend_output_redirect():
-                models = [
-                    {"index": int(index), "name": str(name), "current": bool(current)}
-                    for index, name, current in self.agent.list_llms()
-                ]
+                if hasattr(self.agent, "list_llm_descriptors"):
+                    models = self.agent.list_llm_descriptors()
+                else:
+                    models = [
+                        {"index": int(index), "name": str(name), "current": bool(current)}
+                        for index, name, current in self.agent.list_llms()
+                    ]
             self.emit({"type": "model_status", "models": models})
         except Exception as exc:
             self.emit({"type": "error", "code": "model_status_failed", "message": str(exc)})
 
-    def model_switch(self, selector: str) -> None:
+    def model_switch(self, selector: str, reasoning_effort: str | None = None) -> None:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return
         try:
             with backend_output_redirect():
-                result = self.agent.select_llm(str(selector or ""))
+                # Keep the bridge compatible with lightweight/legacy agent
+                # adapters that only implement ``select_llm(selector)``.
+                # The optional effort is only part of the new protocol, so do
+                # not force an extra keyword into the old call shape when the
+                # user is merely switching models.
+                if reasoning_effort is None:
+                    result = self.agent.select_llm(str(selector or ""))
+                else:
+                    result = self.agent.select_llm(
+                        str(selector or ""),
+                        reasoning_effort=reasoning_effort,
+                    )
             if result.get("ok"):
-                self.emit({"type": "model_switch_result", "ok": True, "message": f"Set model to {result.get('name')}"})
+                effort = result.get("reasoning_effort")
+                suffix = f" ({effort})" if effort else ""
+                self.emit({"type": "model_switch_result", "ok": True, "message": f"Set model to {result.get('name')}{suffix}"})
             else:
                 self.emit({"type": "model_switch_result", "ok": False, "message": str(result.get("message") or "model switch failed")})
         except Exception as exc:
@@ -1528,7 +1544,29 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
         elif cmd_type == "model_status":
             bridge.model_status()
         elif cmd_type == "model_switch":
-            bridge.model_switch(str(command.get("selector") or ""))
+            selector = str(command.get("selector") or "")
+            if command.get("reasoningEffort") is None:
+                bridge.model_switch(selector)
+            else:
+                bridge.model_switch(
+                    selector,
+                    reasoning_effort=str(command.get("reasoningEffort")).strip().lower(),
+                )
+        elif cmd_type == "reasoning_effort_switch":
+            if getattr(bridge.agent, "is_running", False) or bridge._is_consuming():
+                bridge.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            else:
+                try:
+                    with backend_output_redirect():
+                        result = bridge.agent.select_reasoning_effort(str(command.get("effort") or ""))
+                    bridge.emit({
+                        "type": "reasoning_effort_switch_result",
+                        "ok": bool(result.get("ok")),
+                        "message": str(result.get("message") or result.get("effort") or ""),
+                    })
+                except Exception as exc:
+                    bridge.emit({"type": "error", "code": "reasoning_effort_switch_failed", "message": str(exc)})
+            bridge.model_status()
         elif cmd_type == "permission_status":
             bridge.permission_status()
         elif cmd_type == "set_permission_mode":

@@ -85,14 +85,19 @@ models:
   #   api_model: gpt-6-luna
   #   context_window: 272000
   #   supports: [image_input]
-  #   thinking: off
+  #   reasoning_efforts: [none, minimal, low, medium, high, xhigh, max]
+  #   default_reasoning_effort: medium
+  #   reasoning_effort: medium
   #   max_tokens: 8192
   # deepseek-v4.1-flash:
   #   provider: xem-deepseek-v41-flash
   #   api_model: deepseek-v4.1-flash
   #   context_window: 128000
   #   supports: [image_input]
-  #   thinking: off
+  #   # Confirmed by the 2026-10-04 real API smoke test.
+  #   reasoning_efforts: [none, low, high, max]
+  #   default_reasoning_effort: high
+  #   reasoning_effort: high
 
   claude-opus-4-8:
     provider: my-claude              # ← 必填：指向上面 providers 里的某个 key

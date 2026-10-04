@@ -536,6 +536,88 @@ active_profile: default
         self.assertNotIn("thinking_type", legacy)
 
 
+class ModelReasoningCapabilitiesTest(unittest.TestCase):
+    def test_model_reasoning_capabilities_are_model_specific(self):
+        text = """
+providers:
+  luna:
+    wire_api: openai_responses
+    base_url: https://x/v1
+    api_key: k
+  deepseek:
+    wire_api: openai_responses
+    base_url: https://x/v1
+    api_key: k
+models:
+  gpt-6-luna:
+    provider: luna
+    reasoning_efforts: [none, minimal, low, medium, high, xhigh, max]
+    default_reasoning_effort: medium
+    reasoning_effort: medium
+  deepseek-v4.1-flash:
+    provider: deepseek
+    reasoning_efforts: [none, low, high, max]
+    default_reasoning_effort: high
+    reasoning_effort: high
+profiles:
+  luna: {model: gpt-6-luna}
+  deepseek: {model: deepseek-v4.1-flash}
+active_profile: luna
+"""
+        cfg = _parse(text)
+        luna = cfg.resolve("luna")
+        deepseek = cfg.resolve("deepseek")
+        self.assertEqual(
+            luna.supported_reasoning_efforts,
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(deepseek.supported_reasoning_efforts, ["none", "low", "high", "max"])
+        self.assertEqual(deepseek.default_reasoning_effort, "high")
+        self.assertEqual(deepseek.reasoning_effort, "high")
+
+    def test_legacy_model_without_capabilities_keeps_unknown_state(self):
+        cfg = _parse(BASE_YAML)
+        resolved = cfg.resolve("default")
+        self.assertIsNone(resolved.supported_reasoning_efforts)
+
+    def test_default_reasoning_effort_becomes_current_when_current_is_omitted(self):
+        text = BASE_YAML.replace(
+            "    reasoning_effort: high\n",
+            "    reasoning_efforts: [low, high]\n"
+            "    default_reasoning_effort: high\n",
+        ).replace("    reasoning_effort: minimal\n", "")
+        resolved = _parse(text).resolve("fast")
+        self.assertEqual(resolved.reasoning_effort, "high")
+
+    def test_reasoning_default_and_current_must_be_supported(self):
+        bad_default = BASE_YAML.replace(
+            "    reasoning_effort: high\n",
+            "    reasoning_efforts: [low, high]\n"
+            "    default_reasoning_effort: medium\n"
+            "    reasoning_effort: high\n",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(bad_default)
+
+        bad_current = BASE_YAML.replace(
+            "    reasoning_effort: high\n",
+            "    reasoning_efforts: [low, high]\n"
+            "    default_reasoning_effort: high\n"
+            "    reasoning_effort: ultra\n",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(bad_current)
+
+    def test_thinking_off_is_rejected_if_declared_model_does_not_support_none(self):
+        text = BASE_YAML.replace(
+            "    reasoning_effort: high\n",
+            "    reasoning_efforts: [low, high]\n"
+            "    thinking: off\n",
+        )
+        with self.assertRaises(ValueError):
+            _parse(text).resolve("fast")
+
+
 class MixinAndResolveHelpersTest(unittest.TestCase):
     def test_mixin_chain_validated(self):
         text = BASE_YAML + """

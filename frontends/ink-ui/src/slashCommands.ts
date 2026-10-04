@@ -12,7 +12,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/help', description: 'Show available commands' },
   { name: '/status', description: 'Show frontend and bridge status' },
   { name: '/mcp', description: 'Show and manage MCP servers' },
-  { name: '/model', description: 'Show and switch AI models' },
+  { name: '/model', description: 'Show and switch AI models and reasoning effort' },
   { name: '/llm', description: 'Alias for /model' },
   { name: '/theme', description: 'Show and switch Ink themes' },
   { name: '/permissions', description: 'Show and switch permission mode (read only / ask / full access)' },
