@@ -27,8 +27,8 @@
 
 本轮不删除 `thinking` 字段，而是将它标记为 deprecated 兼容入口：
 
-- OpenAI Chat/Responses：`thinking: off` 继续映射为 `reasoning_effort: none`；`low/medium/high/max` 继续映射为对应等级，其中 `max` 维持历史兼容映射到 `xhigh`。
-- Anthropic：`thinking: off` 继续映射为 `thinking_type: disabled`；其它旧等级继续映射为 `thinking_type: adaptive` 加 `output_config.effort`。
+- OpenAI Chat/Responses：`thinking: off` 映射为 `reasoning_effort: none`；`low/medium/high/max/xhigh/ultra` 均按原值传递，`max` 与 `xhigh` 不互相映射；具体模型支持哪些等级由 `reasoning_efforts` 声明决定。
+- Anthropic：`thinking: off` 映射为 `thinking_type: disabled`；其它等级使用 `thinking_type: adaptive`，支持的 `output_config.effort` 值按原值传递，`max` 与 `xhigh` 保持独立。
 - 若同时存在 `reasoning_effort` 与 `thinking`，显式 `reasoning_effort` 优先，这是现有行为，迁移后继续保持。
 - 新增或迁移的 `gpt-6-luna`、`deepseek-v4.1-flash` 配置不再写 `thinking`，直接使用 `reasoning_efforts`、`default_reasoning_effort` 和 `reasoning_effort`。
 - 只有在未来确认所有本地配置和 Anthropic 适配器都完成迁移后，才另起版本移除 `thinking`；本轮不能删除，因为现有 Claude 配置、profile 和回归测试仍依赖其语义。

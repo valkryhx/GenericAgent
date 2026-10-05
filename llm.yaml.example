@@ -122,9 +122,9 @@ models:
     # 绝对值优先于上面的 ratio 派生（= 窗口×ratio 的结果，写死便于一眼看清）：
     auto_compact_tokens: 360000   # 软线：摘要式压缩触发（ink 前端）
     hard_limit_tokens: 380000     # 硬线：裁剪兜底触发（所有前端安全网）
-    # 【推荐】统一思考级别：off | low | medium | high | max
+    # 【兼容】统一思考级别：off | low | medium | high | max | xhigh | ultra
     #   一个字段搞定所有 wire。配置层按 provider.wire_api 自动翻译：
-    #     anthropic → thinking_type=adaptive + output_config.effort
+    #     anthropic → thinking_type=adaptive + output_config.effort（支持项按原值传递）
     #     openai_*  → reasoning_effort
     #   off 关思考（anthropic→disabled，openai→reasoning_effort=none）。
     thinking: high
@@ -150,7 +150,7 @@ models:
     # ── 高级逃生舱（一般不用；想绕过统一翻译、精细控制底层时才填，优先级高于 thinking）──
     # thinking_type: adaptive        # anthropic 专属：adaptive | enabled | disabled
     # thinking_budget_tokens: 32768  # 仅 thinking_type=enabled 时用
-    # reasoning_effort: high         # none|minimal|low|medium|high|xhigh（个别模型的硬约束在这里兜底）
+    # reasoning_effort: high         # wire 层保留原值；具体可用等级由模型 reasoning_efforts 决定
 
 
 # ── 3. profiles：命名预设（这是你日常「用哪个模型」的开关）───────────────────

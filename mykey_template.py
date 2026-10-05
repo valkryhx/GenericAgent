@@ -62,7 +62,7 @@
 #      /session.temperature=0.3
 #      /session.max_tokens=16384
 #  会在当前 session 的 backend 上做 setattr，当场生效，直到换模型或重启。
-#  reasoning_effort 合法值: none / minimal / low / medium / high / xhigh
+#  reasoning_effort wire 层保留原值；是否可用由各模型能力配置决定
 #  thinking_type 合法值:     adaptive / enabled / disabled
 #
 # ══════════════════════════════════════════════════════════════════════════════
@@ -92,7 +92,7 @@ tui_recent_sessions_limit = 10
 #   read_timeout    流式读取超时秒数，默认 30。
 # ─── 推理 / 思考 ─────────────────────────────────────────────────────────────
 #   reasoning_effort  OpenAI o 系列或 Responses API 的思考预算等级。Claude 侧
-#                     会映射到 output_config.effort（xhigh → max）。
+#                     会映射到 output_config.effort（xhigh 与 max 保持独立）。
 #   thinking_type     Claude 原生 thinking 块。
 #                     'adaptive'  (CC 默认)   → 让模型自己决定预算
 #                     'enabled'                → 必须配合 thinking_budget_tokens
@@ -193,9 +193,8 @@ mixin_config = {
 #     # 'thinking_budget_tokens': 32768,       # int，仅 thinking_type='enabled' 生效
 #                                              #   参考: low≈4096 / medium≈10240 / high≈32768
 #     # ── 推理等级（Claude 侧写进 payload.output_config.effort）──
-#     #   合法值: 'none' / 'minimal' / 'low' / 'medium' / 'high' / 'xhigh'
-#     #   映射:  low/medium/high 原值传递；xhigh → 'max'；
-#     #          none/minimal 被 llmcore 打 WARN 丢弃（Claude 不支持这两档）
+#     #   本适配器将 low/medium/high/xhigh/max 原值传递；xhigh 与 max 保持独立。
+#     #   none/minimal/ultra 会由 llmcore 告警并忽略。
 #     #   运行时可覆盖: REPL 输入 /session.reasoning_effort=high 当场生效
 #     # 'reasoning_effort': 'high',
 #     'temperature': 1,                        # float 默认 1.0

@@ -42,7 +42,7 @@ KNOWN_CAPABILITIES = frozenset({
 
 # 兼容旧配置的统一思考级别。新模型不要用它声明能力；请使用
 # ModelCfg.reasoning_efforts/default_reasoning_effort/reasoning_effort。
-THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+THINKING_LEVELS = ("off", "low", "medium", "high", "max", "xhigh", "ultra")
 
 # YAML 的 "Norway problem"：裸写 thinking: off 会被 YAML 解析成布尔 False
 # （on/yes/no 同理）。用户自然会写 thinking: off，所以在校验前把布尔还原成字符串，
@@ -58,7 +58,7 @@ def _coerce_thinking(v: Any) -> Any:
 
 # 统一级别 → 各 wire 的底层字段翻译表。
 #   anthropic：off → 关思考；其余 → adaptive 思考 + output_config.effort（由 reasoning_effort 承载）
-#   openai   ：直接映射到 chat/responses 的 reasoning_effort（none/low/medium/high/xhigh）
+#   openai   ：直接映射到 chat/responses 的 reasoning_effort（保留 max/xhigh/ultra）
 # 注意：个别模型有硬约束（如 grok-4.5 思考不可关、无 xhigh），那种情况用显式
 # reasoning_effort 逃生舱覆盖即可；此表覆盖通用情形。
 _THINKING_TO_ANTHROPIC = {
@@ -66,14 +66,18 @@ _THINKING_TO_ANTHROPIC = {
     "low":    {"thinking_type": "adaptive", "reasoning_effort": "low"},
     "medium": {"thinking_type": "adaptive", "reasoning_effort": "medium"},
     "high":   {"thinking_type": "adaptive", "reasoning_effort": "high"},
-    "max":    {"thinking_type": "adaptive", "reasoning_effort": "xhigh"},
+    "max":    {"thinking_type": "adaptive", "reasoning_effort": "max"},
+    "xhigh":  {"thinking_type": "adaptive", "reasoning_effort": "xhigh"},
+    "ultra":  {"thinking_type": "adaptive", "reasoning_effort": "ultra"},
 }
 _THINKING_TO_OPENAI = {
     "off":    {"reasoning_effort": "none"},
     "low":    {"reasoning_effort": "low"},
     "medium": {"reasoning_effort": "medium"},
     "high":   {"reasoning_effort": "high"},
-    "max":    {"reasoning_effort": "xhigh"},
+    "max":    {"reasoning_effort": "max"},
+    "xhigh":  {"reasoning_effort": "xhigh"},
+    "ultra":  {"reasoning_effort": "ultra"},
 }
 
 def apply_thinking_translation(params: dict[str, Any], wire_api: str) -> None:

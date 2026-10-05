@@ -442,9 +442,29 @@ active_profile: default
         self.assertEqual(legacy["thinking_type"], "adaptive")
         self.assertEqual(legacy["reasoning_effort"], "high")
 
-    def test_anthropic_max_maps_to_xhigh(self):
+    def test_anthropic_max_is_preserved_as_max(self):
         legacy = self._cfg_with_thinking("anthropic", "max")
+        self.assertEqual(legacy["reasoning_effort"], "max")
+
+    def test_openai_max_is_preserved_as_max(self):
+        legacy = self._cfg_with_thinking("openai_responses", "max")
+        self.assertEqual(legacy["reasoning_effort"], "max")
+
+    def test_openai_xhigh_is_preserved(self):
+        legacy = self._cfg_with_thinking("openai_responses", "xhigh")
         self.assertEqual(legacy["reasoning_effort"], "xhigh")
+
+    def test_openai_ultra_is_preserved(self):
+        legacy = self._cfg_with_thinking("openai_responses", "ultra")
+        self.assertEqual(legacy["reasoning_effort"], "ultra")
+
+    def test_anthropic_xhigh_is_preserved(self):
+        legacy = self._cfg_with_thinking("anthropic", "xhigh")
+        self.assertEqual(legacy["reasoning_effort"], "xhigh")
+
+    def test_anthropic_ultra_is_preserved(self):
+        legacy = self._cfg_with_thinking("anthropic", "ultra")
+        self.assertEqual(legacy["reasoning_effort"], "ultra")
 
     def test_openai_chat_maps_level_to_reasoning_effort(self):
         legacy = self._cfg_with_thinking("openai_chat", "medium")
@@ -495,9 +515,9 @@ profiles:
 active_profile: default
 """
         legacy = _parse(text).resolve("default").to_legacy_cfg()
-        self.assertEqual(legacy["reasoning_effort"], "xhigh")
+        self.assertEqual(legacy["reasoning_effort"], "max")
 
-    def test_invalid_thinking_level_rejected(self):
+    def test_unknown_thinking_level_is_rejected(self):
         text = """
 providers:
   p:
@@ -507,7 +527,7 @@ providers:
 models:
   m:
     provider: p
-    thinking: ultra
+    thinking: future_level
 profiles:
   default:
     model: m

@@ -47,6 +47,34 @@ class ReasoningEffortWireTests(unittest.TestCase):
     def test_chat_completions_preserves_max(self):
         self.assertEqual(self.capture_payload("chat_completions", "max")["reasoning_effort"], "max")
 
+    def test_chat_completions_keeps_max_and_xhigh_distinct(self):
+        self.assertEqual(self.capture_payload("chat_completions", "max")["reasoning_effort"], "max")
+        self.assertEqual(self.capture_payload("chat_completions", "xhigh")["reasoning_effort"], "xhigh")
+
+    def test_native_claude_keeps_max_and_xhigh_distinct(self):
+        for effort in ("max", "xhigh"):
+            with self.subTest(effort=effort):
+                session = llmcore.NativeClaudeSession({
+                    "apikey": "test-key",
+                    "apibase": "https://example.test",
+                    "model": "claude-test",
+                    "reasoning_effort": effort,
+                })
+                payload = {}
+                session._apply_claude_thinking(payload)
+                self.assertEqual(payload["output_config"]["effort"], effort)
+
+    def test_native_claude_omits_unsupported_ultra_effort(self):
+        session = llmcore.NativeClaudeSession({
+            "apikey": "test-key",
+            "apibase": "https://example.test",
+            "model": "claude-test",
+            "reasoning_effort": "ultra",
+        })
+        payload = {}
+        session._apply_claude_thinking(payload)
+        self.assertNotIn("output_config", payload)
+
     def test_base_session_accepts_extended_and_custom_efforts(self):
         for effort in ("none", "max", "ultra", "provider_future_level"):
             session = llmcore.BaseSession({
