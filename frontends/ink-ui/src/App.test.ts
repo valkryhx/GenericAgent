@@ -1136,3 +1136,59 @@ test('App keeps the input composer visible when the tall help panel opens', asyn
     instance.unmount()
   }
 })
+
+
+test("App shows a Codex-style completion summary only after each turn ends", async () => {
+  const bridge = { emit: null as null | ((event: BridgeEvent) => void) }
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    bridge.emit = onEvent
+    setTimeout(() => onEvent({ type: "ready", version: 1 }), 0)
+    return { send() {}, stop() {} }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: "python",
+    bridgeScript: "bridge.py",
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForOutput(stdout, output => output.includes("Enter send"))
+    if (!bridge.emit) throw new Error("bridge emit not ready")
+    bridge.emit({ type: "status", status: "running", taskId: 1 })
+    bridge.emit({ type: "activity", label: "Calculating" })
+    bridge.emit({ type: "token_usage", taskId: 1, inputTokens: 12000, outputTokens: 1000, totalTokens: 13000 })
+    const runningFrame = await waitForFrame(stdout, frame => frame.includes("Calculating ("))
+    assert.ok(runningFrame.includes("Calculating ("))
+
+    await delay(1100)
+    bridge.emit({ type: "status", status: "idle", taskId: 1 })
+    const firstCompletion = await waitForFrame(stdout, frame => frame.includes("Worked for"))
+    assert.ok(firstCompletion.includes("Worked for 1s •"))
+    assert.ok(firstCompletion.includes("↑12k ↓1k Σ13k"))
+    assert.ok(!firstCompletion.includes("Calculating ("))
+
+    bridge.emit({ type: "status", status: "running", taskId: 2 })
+    bridge.emit({ type: "activity", label: "Thinking" })
+    const nextRunning = await waitForFrame(stdout, frame => frame.includes("Thinking ("))
+    assert.ok(nextRunning.includes("Thinking ("))
+    assert.ok(!nextRunning.includes("Worked for"))
+    bridge.emit({ type: "status", status: "idle", taskId: 2 })
+    const nextCompletion = await waitForFrame(stdout, frame => frame.includes("Worked for <1s"))
+    assert.ok(nextCompletion.includes("Worked for <1s •"))
+    assert.ok(!nextCompletion.includes("Thinking ("))
+  } finally {
+    instance.unmount()
+  }
+})

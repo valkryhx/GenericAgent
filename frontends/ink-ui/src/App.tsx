@@ -87,7 +87,7 @@ import {
   renderInputLine,
   type InputViewport,
 } from './promptChrome.js'
-import { formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
+import { formatCompletedStatus, formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { footerPanelRows, modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
@@ -462,10 +462,15 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
   )
 }
 
-function ActivityView({ seconds, label, tokenUsage, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; theme: InkTheme }) {
+type CompletedTurnActivity = { durationSeconds: number; completedAt: number }
+
+function ActivityView({ seconds, label, tokenUsage, completedTurn, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; completedTurn: CompletedTurnActivity | null; theme: InkTheme }) {
+  const statusText = completedTurn
+    ? formatCompletedStatus(completedTurn.durationSeconds, new Date(completedTurn.completedAt), tokenUsage)
+    : formatRunningStatus(seconds, label, tokenUsage)
   return (
     <Box paddingX={1}>
-      <Text color={theme.warning}>{formatRunningStatus(seconds, label, tokenUsage)}</Text>
+      <Text color={completedTurn ? theme.muted : theme.warning}>{statusText}</Text>
     </Box>
   )
 }
@@ -565,10 +570,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [staticTranscriptGeneration, setStaticTranscriptGeneration] = useState(0)
   const [terminalReady, setTerminalReady] = useState(false)
   const [runningStartedAt, setRunningStartedAt] = useState<number | null>(null)
+  const [completedTurnActivity, setCompletedTurnActivity] = useState<CompletedTurnActivity | null>(null)
   const [lastActivitySeconds, setLastActivitySeconds] = useState(0)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
+  const activeTurnStartedAtRef = useRef<number | null>(null)
   const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
   const transcriptRowsRef = useRef({ totalRows: 0, viewportRows: 1 })
   const liveViewportGeometryRef = useRef({ rows: 1, cursorRow: 0 })
@@ -837,6 +844,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         bridgeRef.current?.send({ type: 'mcp_watch_start' })
       }
       if (event.type === 'status') {
+        if (event.status === "running" && activeTurnStartedAtRef.current === null) {
+          activeTurnStartedAtRef.current = Date.now()
+          setCompletedTurnActivity(null)
+        } else if (event.status === "idle" && activeTurnStartedAtRef.current !== null) {
+          const completedAt = Date.now()
+          setCompletedTurnActivity({
+            durationSeconds: Math.max(0, Math.floor((completedAt - activeTurnStartedAtRef.current) / 1000)),
+            completedAt,
+          })
+          activeTurnStartedAtRef.current = null
+        }
         if (stopEchoGateAfterStatus(event.status) === 'reset') {
           stopTranscriptEchoedRef.current = false
         }
@@ -1417,7 +1435,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }), [canvasColumns, cursorOffset, input])
   const inputRows = promptViewport.lines.length
   const errorRows = state.error ? 1 : 0
-  const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage)
+  const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage, completedTurnActivity !== null)
   const panelRows = approvalPanel
     ? approvalPanelRows(approvalPanel)
     : modelPanel
@@ -1661,7 +1679,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         ) : null}
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
-          {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} theme={theme} /> : <ActivityPlaceholder />}
+          {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>
       </Box>

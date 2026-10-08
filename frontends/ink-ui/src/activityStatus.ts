@@ -76,11 +76,29 @@ export function formatRunningStatus(seconds: number, label = 'Hyperspacing', usa
   return `✻ ${label} (${parts.join(' · ')})`
 }
 
+export function formatCompletedStatus(seconds: number, completedAt: Date, usage?: TokenUsage | null): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const rest = safeSeconds % 60
+  const elapsed = hours > 0
+    ? `${hours}h ${minutes}m ${rest}s`
+    : minutes > 0
+      ? `${minutes}m ${rest}s`
+      : rest > 0 ? `${rest}s` : '<1s'
+  const date = completedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const time = `${String(completedAt.getHours()).padStart(2, '0')}:${String(completedAt.getMinutes()).padStart(2, '0')}`
+  const parts = [`Worked for ${elapsed}`, `${date} at ${time}`]
+  if (usage) parts.push(formatTokenUsage(usage))
+  return parts.join(' • ')
+}
+
 export function shouldShowActivityStatus(
   status: 'connecting' | 'idle' | 'running' | 'stopping',
   hasRunningTimer: boolean,
   usage?: TokenUsage | null,
+  hasCompletedTurn = false,
 ): boolean {
   if ((status === 'running' || status === 'stopping') && hasRunningTimer) return true
-  return status === 'idle' && usage !== null && usage !== undefined
+  return status === 'idle' && (hasCompletedTurn || (usage !== null && usage !== undefined))
 }

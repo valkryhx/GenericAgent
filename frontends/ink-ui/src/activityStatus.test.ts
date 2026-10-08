@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatElapsed, formatRunningStatus, formatTokenCount, pickRunningVerb, RUNNING_VERBS, shouldShowActivityStatus } from './activityStatus.js'
+import { formatCompletedStatus, formatElapsed, formatRunningStatus, formatTokenCount, pickRunningVerb, RUNNING_VERBS, shouldShowActivityStatus } from './activityStatus.js'
 
 test('formatElapsed renders seconds and minutes', () => {
   assert.equal(formatElapsed(0), '0s')
@@ -24,6 +24,25 @@ test('formatRunningStatus renders token usage in k units above one thousand', ()
     formatRunningStatus(40, 'Hyperspacing', { inputTokens: 1200, outputTokens: 17500, totalTokens: 18700 }),
     '✻ Hyperspacing (40s · ↑1.2k ↓17.5k Σ18.7k)',
   )
+})
+
+test('formatCompletedStatus renders duration and local completion date/time', () => {
+  const completedAt = new Date(2026, 9, 5, 13, 41, 0)
+  assert.equal(formatCompletedStatus(131, completedAt), 'Worked for 2m 11s • Oct 5 at 13:41')
+})
+
+test('formatCompletedStatus keeps token usage visible after a turn completes', () => {
+  const completedAt = new Date(2026, 9, 5, 13, 41, 0)
+  assert.equal(
+    formatCompletedStatus(131, completedAt, { inputTokens: 12000, outputTokens: 1000, totalTokens: 13000 }),
+    'Worked for 2m 11s • Oct 5 at 13:41 • ↑12k ↓1k Σ13k',
+  )
+})
+
+test('formatCompletedStatus renders sub-second and hour-long turns in Codex style', () => {
+  const completedAt = new Date(2026, 9, 5, 13, 41, 0)
+  assert.equal(formatCompletedStatus(0, completedAt), 'Worked for <1s • Oct 5 at 13:41')
+  assert.equal(formatCompletedStatus(3661, completedAt), 'Worked for 1h 1m 1s • Oct 5 at 13:41')
 })
 
 test('formatRunningStatus renders cached input tokens when available', () => {
@@ -51,6 +70,7 @@ test('shouldShowActivityStatus keeps final token usage visible after returning i
   assert.equal(shouldShowActivityStatus('running', true, null), true)
   assert.equal(shouldShowActivityStatus('idle', false, { inputTokens: 11, outputTokens: 17, totalTokens: 28 }), true)
   assert.equal(shouldShowActivityStatus('idle', false, null), false)
+  assert.equal(shouldShowActivityStatus('idle', false, null, true), true)
 })
 
 test('pickRunningVerb picks deterministically from the verb list', () => {
