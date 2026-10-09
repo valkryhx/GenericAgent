@@ -15,7 +15,10 @@ export type WorkflowStatusBarSummary = {
 }
 
 const liveStatuses = new Set(['running', 'awaiting_approval'])
-const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'killed', 'interrupted', 'partial'])
+// ``degraded`` is a terminal, partial-delivery status: the run finished but at
+// least one declared contract fell back, so it must stay visible and never be
+// counted as a clean success.
+const terminalStatuses = new Set(['succeeded', 'degraded', 'failed', 'cancelled', 'killed', 'interrupted', 'partial'])
 export function workflowStatusBarFromState(state: AppState): WorkflowStatusBarSummary | null {
   for (let index = state.workflows.length - 1; index >= 0; index--) {
     const run = state.workflows[index]!
@@ -32,7 +35,7 @@ export function workflowStatusBarFromState(state: AppState): WorkflowStatusBarSu
 function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = run.status): WorkflowStatusBarSummary {
   const progressEntries = state.workflowDetails[run.runId]?.progress?.workflowProgress ?? []
   const agents = progressEntries.length > 0 ? progressEntries : progressFromJobs(run.jobs ?? [])
-  const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached').length
+  const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached' || agent.state === 'degraded').length
   const totalAgents = agents.length
   const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
   const summary: WorkflowStatusBarSummary = {
@@ -78,7 +81,14 @@ export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
   if (bar.activeAgent) pieces.push(bar.lastActivity ? `${bar.activeAgent}: ${bar.lastActivity}` : bar.activeAgent)
   if (bar.tokenText) pieces.push(bar.tokenText)
   if (bar.integrationText) pieces.push(bar.integrationText)
-  const icon = bar.status === 'succeeded' ? '✓' : bar.status === 'failed' ? '✗' : '◌'
+  const icon =
+    bar.status === 'succeeded'
+      ? '✓'
+      : bar.status === 'failed' || bar.status === 'killed' || bar.status === 'cancelled'
+        ? '✗'
+        : bar.status === 'degraded' || bar.status === 'partial'
+          ? '!'
+          : '◌'
   return [bar.status === 'running' ? 'Enter view · x stop' : 'Enter view', `› ${icon} ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
 }
 

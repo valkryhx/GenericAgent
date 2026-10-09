@@ -1,4 +1,10 @@
 import sys, os, json, re, time, subprocess
+# The header is inlined into a temporary script that may live in any cwd, so
+# dirname(__file__) cannot locate the repository. code_run passes the project
+# root explicitly; fall back to the historical layout for direct invocation.
+_code_run_root = os.environ.get('GA_CODE_RUN_ROOT')
+if _code_run_root and os.path.isdir(_code_run_root) and _code_run_root not in sys.path:
+    sys.path.insert(0, _code_run_root)
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory'))
 _r = subprocess.run
 def _d(b):

@@ -27,13 +27,14 @@ from workflow_store import WorkflowStore
 
 
 _TERMINAL_STATUSES = frozenset(
-    {"succeeded", "failed", "cancelled", "killed", "cached", "skipped", "stale", "interrupted", "closed", "partial"}
+    {"succeeded", "degraded", "failed", "cancelled", "killed", "cached", "skipped", "stale", "interrupted", "closed", "partial"}
 )
 _RUN_STATUS_MAP = {
     "draft": "pending",
     "awaiting_approval": "queued",
     "running": "running",
     "succeeded": "succeeded",
+    "degraded": "partial",
     "completed": "succeeded",
     "failed": "failed",
     "cancelled": "cancelled",
@@ -45,6 +46,7 @@ _JOB_STATUS_MAP = {
     "queued": "queued",
     "running": "running",
     "succeeded": "succeeded",
+    "degraded": "partial",
     "failed": "failed",
     "cancelled": "cancelled",
     "killed": "killed",

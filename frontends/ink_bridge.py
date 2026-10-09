@@ -43,6 +43,7 @@ EmitFn = Callable[[Event], None]
 AgentFactory = Callable[[], Any]
 
 _WORKFLOW_FINAL_PAYLOAD_MAX_BYTES = 64 * 1024
+_WORKFLOW_HANDOFF_MAX_BYTES = 64 * 1024
 # Product default for /workflow without --timeout. WorkflowRuntime itself still
 # defaults to 10s for unit tests that construct it directly.
 DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 900.0
@@ -213,6 +214,8 @@ class GenericAgentBridge:
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
         self._workflow_threads: dict[str, threading.Thread] = {}
+        self._workflow_handoff_lock = threading.Lock()
+        self._workflow_handed_off: set[str] = set()
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
         self._mcp_watch_lock = threading.Lock()
         self._mcp_watch_thread: threading.Thread | None = None
@@ -710,9 +713,12 @@ class GenericAgentBridge:
             return ""
         if run.status != "running":
             self.emit({"type": "activity", "label": None})
-            self.emit({"type": "status", "status": "idle"})
-            if run.status in {"succeeded", "failed", "cancelled", "killed", "interrupted"}:
+            if run.status in {"succeeded", "degraded", "failed", "cancelled", "killed", "interrupted"}:
                 self.emit({"type": "workflow_final", "runId": run.run_id, "result": self._workflow_final_payload(run)})
+                if not self._queue_workflow_handoff(run):
+                    self.emit({"type": "status", "status": "idle"})
+            else:
+                self.emit({"type": "status", "status": "idle"})
             return run.run_id
         thread = threading.Thread(
             target=self._run_workflow_runtime,
@@ -781,7 +787,7 @@ class GenericAgentBridge:
                 from workflow_models import WorkflowEvent
 
                 source = self.workflow_store.load_run(source_run_id)
-                if source.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                if source.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
                     raise ValueError(f"cannot resume workflow {source_run_id} from {source.status}")
                 resumed = self.workflow_controller.create_draft(session_id=source.session_id, script=source.script)
                 resumed.status = "running"
@@ -899,6 +905,7 @@ class GenericAgentBridge:
             thread.join(timeout=timeout)
 
     def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
+        handoff_queued = False
         try:
             self.emit({"type": "status", "status": "running"})
             self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
@@ -914,10 +921,11 @@ class GenericAgentBridge:
             self.workflow_progress(run_id)
             self._emit_agent_read_model()
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+            handoff_queued = self._queue_workflow_handoff(current)
         except Exception as exc:
             try:
                 current = self.workflow_store.load_run(run_id)
-                if current.status not in {"succeeded", "failed", "killed", "interrupted"}:
+                if current.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
                     from workflow_models import WorkflowEvent
 
                     reason = redact_sensitive_text(str(exc))
@@ -945,12 +953,14 @@ class GenericAgentBridge:
                 self.workflow_progress(run_id)
                 self._emit_agent_read_model()
                 self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
+                handoff_queued = self._queue_workflow_handoff(current)
             except Exception:
                 pass
             self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
         finally:
             self.emit({"type": "activity", "label": None})
-            self.emit({"type": "status", "status": "idle"})
+            if not handoff_queued:
+                self.emit({"type": "status", "status": "idle"})
 
     def _make_workflow_planner(self):
         if self.workflow_planner_factory is not None:
@@ -1131,6 +1141,135 @@ class GenericAgentBridge:
         if not isinstance(payload, dict):
             return None
         return sanitize(payload)
+
+    def _workflow_workspace_ref(self, run, artifact_ref: Any) -> str | None:
+        if not run.artifact_dir or not artifact_ref:
+            return None
+        ref = os.fspath(artifact_ref)
+        if os.path.isabs(ref):
+            return None
+        artifact_dir = os.path.realpath(os.fspath(run.artifact_dir))
+        candidate = os.path.realpath(os.path.join(artifact_dir, ref))
+        workspace_root = os.path.realpath(os.fspath(self.workspace_root))
+        try:
+            if os.path.commonpath([artifact_dir, candidate]) != artifact_dir:
+                return None
+            if os.path.commonpath([workspace_root, candidate]) != workspace_root:
+                return None
+        except ValueError:
+            return None
+        if not os.path.isfile(candidate):
+            return None
+        return os.path.relpath(candidate, workspace_root).replace(os.sep, '/')
+
+    @staticmethod
+    def _handoff_bounded_value(value: Any, max_bytes: int) -> Any:
+        sanitized = sanitize(value)
+        encoded = json.dumps(sanitized, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        if len(encoded) <= max_bytes:
+            return sanitized
+        if isinstance(sanitized, dict):
+            compact = {}
+            for key in ('runId', 'status', 'error', 'summary', 'answer', 'conclusion', 'result', 'text'):
+                if key in sanitized:
+                    compact[key] = GenericAgentBridge._handoff_bounded_value(sanitized[key], max(256, max_bytes // 2))
+            compact['truncated'] = True
+            while len(json.dumps(compact, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > max_bytes:
+                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'truncated'}), None)
+                if removable is None:
+                    break
+                compact.pop(removable)
+            return compact
+        if isinstance(sanitized, list):
+            compact = []
+            for item in sanitized:
+                candidate = compact + [GenericAgentBridge._handoff_bounded_value(item, max(256, max_bytes // 2))]
+                if len(json.dumps(candidate, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > max_bytes - 32:
+                    break
+                compact = candidate
+            return {'items': compact, 'truncated': True}
+        return {'truncated': True, 'preview': encoded[:max(0, max_bytes - 96)].decode('utf-8', errors='ignore')}
+
+    def _workflow_handoff_payload(self, run) -> str:
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        draft = self._workflow_artifact_payload(run, metadata.get('workflowDraftRef'))
+        task_text = str((draft or {}).get('taskText') or '')
+        if len(task_text.encode('utf-8')) > 8192:
+            task_text = task_text.encode('utf-8')[:8000].decode('utf-8', errors='ignore') + ' …[task truncated]'
+
+        intermediate = []
+        for job in run.jobs or []:
+            result_ref = job.result_ref or f'agents/{job.job_id}/result.json'
+            artifact = self._workflow_artifact_payload(run, result_ref)
+            transcript_ref = (job.metadata or {}).get('transcriptRef') if isinstance(job.metadata, dict) else None
+            transcript_ref = transcript_ref or f'agents/{job.job_id}/transcript.jsonl'
+            item = {
+                'jobId': job.job_id,
+                'status': job.status,
+                'resultRef': self._workflow_workspace_ref(run, result_ref),
+                'transcriptRef': self._workflow_workspace_ref(run, transcript_ref),
+            }
+            if artifact and job.status in {'succeeded', 'cached'}:
+                item['result'] = self._handoff_bounded_value(artifact.get('payload', artifact), 8192)
+            intermediate.append(item)
+
+        handoff = {
+            'runId': run.run_id,
+            'status': run.status,
+            'error': redact_sensitive_text(str(run.error)) if run.error else None,
+            'originalTask': task_text,
+            'finalResult': self._handoff_bounded_value(self._workflow_final_payload(run), 28 * 1024),
+            'finalResultRef': self._workflow_workspace_ref(run, run.result_ref),
+            'intermediateResults': intermediate,
+        }
+        while len(json.dumps(handoff, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > _WORKFLOW_HANDOFF_MAX_BYTES - 512:
+            candidate = next((item for item in reversed(intermediate) if 'result' in item), None)
+            if candidate is not None:
+                candidate.pop('result', None)
+                continue
+            if intermediate:
+                intermediate.pop()
+                continue
+            handoff['finalResult'] = self._handoff_bounded_value(handoff['finalResult'], 16 * 1024)
+            handoff['originalTask'] = str(handoff['originalTask'])[:1024] + ' …[task truncated]'
+            break
+        serialized = json.dumps(handoff, ensure_ascii=False, indent=2)
+        return (
+            "The workflow run has finished. Answer the user's original request using the final result and relevant intermediate results below. "
+            "Do not claim success if the workflow status is failed/cancelled. Artifact paths are relative to the GA workspace; read them only if needed. "
+            "Transcript files are references only and are not included here.\n\n"
+            f'<workflow_handoff>\n{serialized}\n</workflow_handoff>'
+        )
+
+    def _queue_workflow_handoff(self, run) -> bool:
+        # Unit/test doubles may not own a live agent loop. In production the
+        # bridge starts a persistent agent thread which can consume this task;
+        # without that consumer, retain the legacy terminal-idle behavior.
+        agent_thread = getattr(self, "_agent_thread", None)
+        if agent_thread is not None and hasattr(agent_thread, "is_alive") and not agent_thread.is_alive():
+            return False
+        run_id = str(run.run_id)
+        with self._workflow_handoff_lock:
+            if run_id in self._workflow_handed_off:
+                return True
+            self._workflow_handed_off.add(run_id)
+        try:
+            prompt = self._workflow_handoff_payload(run)
+            self._task_seq += 1
+            display_queue = self.agent.put_task(prompt, source='workflow_handoff', images=[])
+            self._consume_thread = threading.Thread(
+                target=self._consume_display_queue,
+                args=(self._task_seq, display_queue),
+                daemon=True,
+                name=f'ga-ink-workflow-handoff-{self._task_seq}',
+            )
+            self._consume_thread.start()
+            return True
+        except Exception as exc:
+            with self._workflow_handoff_lock:
+                self._workflow_handed_off.discard(run_id)
+            self.emit({'type': 'error', 'code': 'workflow_handoff_failed', 'message': redact_sensitive_text(str(exc))})
+            return False
 
     def _workflow_final_payload(self, run) -> dict[str, Any]:
         if not run.artifact_dir or not run.result_ref:

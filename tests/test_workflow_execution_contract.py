@@ -83,10 +83,33 @@ class WorkflowExecutionContractTest(unittest.TestCase):
         result = validate_workflow_plan(plan)
         self.assertIn("unsupported_artifact_acceptance_check", {issue["code"] for issue in result["issues"]})
 
-    def test_rejects_missing_artifact_checks(self):
+    def test_host_derives_artifact_exists_for_bare_artifact(self):
+        """A declared artifact needs no model-authored check.
+
+        The host enforces existence deterministically, so the normalizer fills
+        the check in instead of rejecting an otherwise valid plan.
+        """
         plan = executable_plan()
         plan["executionContract"]["artifacts"][0]["requiredChecks"] = []
-        result = validate_workflow_plan(plan)
+        plan["phases"][1]["agents"][0]["acceptanceChecks"] = []
+
+        normalized = _normalize_plan_contract(plan)
+
+        self.assertEqual(
+            ["artifact_exists"],
+            normalized["executionContract"]["artifacts"][0]["requiredChecks"],
+        )
+        self.assertTrue(validate_workflow_plan(normalized)["ok"])
+
+    def test_rejects_optional_artifact_without_any_check(self):
+        plan = executable_plan()
+        artifact = plan["executionContract"]["artifacts"][0]
+        artifact["requiredChecks"] = []
+        artifact["optional"] = True
+        plan["phases"][1]["agents"][0]["acceptanceChecks"] = []
+
+        result = validate_workflow_plan(_normalize_plan_contract(plan))
+
         self.assertIn("missing_artifact_acceptance_check", {issue["code"] for issue in result["issues"]})
 
     def test_rejects_invalid_dependencies(self):

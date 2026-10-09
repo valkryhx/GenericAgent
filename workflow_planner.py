@@ -655,6 +655,13 @@ def _normalize_execution_contract_assignments(plan: dict[str, Any]) -> dict[str,
             continue
         add(writer, "writeScope", path)
         add(writer, "deliverables", path)
+        # The host always enforces existence for a declared, non-optional
+        # artifact. Materialize that check deterministically instead of asking
+        # the model to remember it, so a correct plan is never rejected for
+        # "missing artifact acceptance check" and the audit view matches what
+        # the runtime actually enforces.
+        if not artifact.get("optional") and not artifact.get("requiredChecks"):
+            artifact["requiredChecks"] = ["artifact_exists"]
         checks = {str(item).strip() for item in artifact.get("requiredChecks") or [] if str(item).strip()}
         for check in checks:
             add(writer, "acceptanceChecks", check)
@@ -1219,6 +1226,7 @@ class LLMWorkflowPlanner:
             "orchestrationPolicy": [
                 "根据任务语义和 classificationHint 规划 taskType、phase、agent、dependsOn、parallel-safe groups、schemas、artifacts；taskType 仅为提示，不触发硬门禁。",
                 "任何会写出产物的计划（research 写证据文件、synthesis 写报告、coding 写源码都一样）都必须在 verification.checks 或 executionContract.artifacts[].requiredChecks 中声明至少一个宿主可求值的 required check，优先使用 artifact_exists / artifact_readback 这类机器检查；宿主会在 verification.checks 为空时从执行契约派生。只读的研究、审阅和规划任务不需要伪造验收项。写文件不等于写代码：是否套用 coding 拓扑规则只由 implementation/tests/repair 这些代码产出角色触发，role 本身是可选元数据。",
+                "executionContract.artifacts 里声明的每个产物都会被宿主强制校验是否存在（不依赖你是否写出 artifact_exists），缺失即 run 失败。只有在产物确实是可有可无时才写 optional: true；不要用 optional 掩盖应该产出的交付物。",
                 "verification.level 使用 none/inline/full；full 才需要 independentReview，且应显式声明 review agent 或独立 review capability。",
                 "验收检查项由任务决定，可使用 command、schema、artifact 等受支持 kind；不要把 verification agent、verification_schema 或 python_unittest 当作所有代码任务的固定要求。",
                 "小任务（单步、低风险、无需多 agent 协作）必须 mode=direct，不要为了简单问题创建 workflow。",
@@ -1235,6 +1243,7 @@ class LLMWorkflowPlanner:
                 "Artifact paths are workspace-relative only (for example tmp/report.html). Never emit /tmp, D:\tmp, ~, UNC, or .. traversal paths; the host hard-normalizes and rejects paths outside the launch workspace, so do not treat prompt text as permission.",
                 "执行型计划必须声明 executionContract.requiresExecution、actions、requiredTools 和 artifact acceptance checks，并把每个 action 映射到实际执行它的 agent。",
                 "schemas 的 key 是不透明的 schemaRef 字符串，优先使用 SOURCE_SCHEMA、VERIFICATION_SCHEMA 等逻辑名称；不要把文件路径写入 schemaRef。无论 schemaRef 形状如何，必须保持与 schemas key 完全一致，schema 必须是纯 JSON Schema 数据而不是 JavaScript 代码。",
+                "strictSchema 默认为 true 语义：声明了 schemaRef 的 agent 若 schema 校验失败即视为该 job 失败并阻塞 run。只有确实允许文本降级的 agent 才显式写 schemaPolicy: \"optional\"；此时降级会被宿主记为 degraded（部分交付）终态，而不是成功，所以不要为了省事批量声明 optional。",
                 "requiredTools 表示 agent 可用的能力集合，不要把普通文件写入工具当作必须逐字调用的硬门禁。requiredToolEvidence 只有 mode=required 才阻塞；MCP 来源证据默认 required，file_write/file_patch 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
                 "action id must match the exact same string in the assigned agent.actions array; action ids are stable ids such as search, create_artifact, verify_artifact, never display labels or prose.",
                 "Use canonical tool names exactly: Tavily is mcp__tavily__tavily_search; local file tools are file_read and file_write. requiredTools must be assigned to the agent that actually calls each tool, and the contract list must be the union of those agent declarations.",
@@ -1247,7 +1256,7 @@ class LLMWorkflowPlanner:
             "requiredShape": {
                 "taskType": "research | coding | review | debugging | planning | mixed",
                 "meta": {"name": "...", "description": "..."},
-                "phases": [{"title": "...", "agents": [{"label": "...", "role": "optional metadata; canonical values in codingAgentRoles, required to be canonical only inside code-producing plans", "prompt": "...", "dependsOn": []}]}],
+                "phases": [{"title": "...", "agents": [{"label": "...", "role": "optional metadata; canonical values in codingAgentRoles, required to be canonical only inside code-producing plans", "prompt": "...", "dependsOn": [], "schemaRef": "optional logical schema name", "strictSchema": "boolean, default true", "schemaPolicy": "optional; strict|optional, only meaningful together with schemaRef"}]}],
                 "codingAgentRoles": sorted(CODING_AGENT_ROLES),
                 "schemas": {},
                 "artifacts": [],
@@ -1256,7 +1265,7 @@ class LLMWorkflowPlanner:
                     "actions": [{"id": "...", "agent": "..."}],
                     "requiredTools": ["..."],
                     "requiredToolEvidence": [{"tool": "...", "agent": "...", "minimumCalls": 1}],
-                    "artifacts": [{"path": "...", "writer": "...", "requiredChecks": ["..."]}],
+                    "artifacts": [{"path": "...", "writer": "...", "requiredChecks": ["..."], "optional": "boolean, default false; true exempts this artifact from host existence checking"}],
                 },
                 "constraints": ["no_secret_files", "no_git_commit"],
                 "verification": {"level": "none | inline | full", "checks": [{"id": "...", "kind": "command | schema | artifact", "required": True, "owner": "host | <agent-label>"}], "independentReview": False},
@@ -1408,6 +1417,13 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
                     issues.append({"code": "invalid_schema_ref", "message": f"agent {label} schemaRef must be a non-empty string"})
                 elif schema_ref not in schemas:
                     issues.append({"code": "undefined_schema", "message": f"agent {label} references undefined schema: {schema_ref}"})
+            schema_policy = agent.get("schemaPolicy")
+            if schema_policy is not None:
+                normalized_policy = str(schema_policy).strip().lower()
+                if normalized_policy not in {"strict", "optional"}:
+                    issues.append({"code": "invalid_schema_policy", "message": f"agent {label} schemaPolicy must be one of strict|optional, got: {schema_policy}"})
+                elif not (isinstance(schema_ref, str) and schema_ref.strip()):
+                    issues.append({"code": "schema_policy_without_schema", "message": f"agent {label} declares schemaPolicy={normalized_policy} without schemaRef"})
             dependencies = agent.get("dependsOn") or []
             dependency_graph[label] = [str(item) for item in dependencies if str(item) in label_phase]
             if len(dependencies) != len(set(str(item) for item in dependencies)):
@@ -1508,8 +1524,12 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             if artifact_path not in deliverables:
                 issues.append({"code": "missing_artifact_deliverable", "message": f"writer {writer_label} does not declare artifact deliverable {artifact_path}"})
             required_checks = {str(item) for item in artifact.get("requiredChecks") or []}
-            if not required_checks:
-                issues.append({"code": "missing_artifact_acceptance_check", "message": f"artifact {artifact_path} requires at least one acceptance check"})
+            # A non-optional artifact needs no model-authored check: the host
+            # enforces existence by contract. Only an explicitly optional
+            # artifact without checks is a genuine "nothing is verified here"
+            # contract hole worth surfacing to the planner.
+            if not required_checks and artifact.get("optional"):
+                issues.append({"code": "missing_artifact_acceptance_check", "message": f"optional artifact {artifact_path} declares no acceptance check, so nothing is verified"})
             unsupported_checks = required_checks - ARTIFACT_ACCEPTANCE_CHECKS
             if unsupported_checks:
                 issues.append({"code": "unsupported_artifact_acceptance_check", "message": f"artifact {artifact_path} has non-machine-checkable checks: {', '.join(sorted(unsupported_checks))}"})
@@ -1622,7 +1642,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                     options["schema"] = {"__schema_ref__": agent["schemaRef"]}
                     if agent.get("strictSchema"):
                         options["strictSchema"] = True
-                    else:
+                    elif str(agent.get("schemaPolicy") or "").strip().lower() == "optional":
                         options["fallback"] = str(agent.get("fallback") or "text")
                 lines.append(f"  () => agent(`{_template_string(prompt)}`, {_render_options(options)}),")
             for position, agent in enumerate(agents):
@@ -1657,7 +1677,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 options["schema"] = {"__schema_ref__": agent["schemaRef"]}
                 if agent.get("strictSchema"):
                     options["strictSchema"] = True
-                else:
+                elif str(agent.get("schemaPolicy") or "").strip().lower() == "optional":
                     options["fallback"] = str(agent.get("fallback") or "text")
             lines.append(f"const {var_name} = await agent(`{rendered_prompt}`, {_render_options(options)})")
             phase_vars.append(var_name)

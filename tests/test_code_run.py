@@ -118,6 +118,47 @@ print('suffix=' + ''.join(p.suffixes))
             self.assertIn("alias", result["stdout"])
             self.assertEqual([], list(code_cwd.glob("*.ai.py")))
 
+    def test_workspace_guard_imports_when_code_cwd_is_outside_the_repo(self):
+        """Regression: the inlined code_run header used to resolve the guard via
+        ``dirname(__file__)/../memory``, which broke when the temporary script was
+        written to a cwd outside the repository (e.g. a workflow child running in
+        ``frontends/ink-ui/``). The guard must load from wherever the header lives.
+        """
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            code = (
+                "from pathlib import Path\n"
+                "Path('inside.txt').write_text('ok')\n"
+                "print('guarded_write_ok')\n"
+            )
+
+            result = exhaust_generator(
+                code_run(code, "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd), workspace_root=workspace)
+            )
+
+            self.assertEqual("success", result["status"], result)
+            self.assertIn("guarded_write_ok", result["stdout"])
+            self.assertNotIn("ModuleNotFoundError", result["stdout"])
+            self.assertEqual("ok", (Path(workspace) / "inside.txt").read_text())
+
+    def test_workspace_guard_blocks_writes_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            outside = Path(tmp) / "outside.txt"
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(outside)!r}).write_text('blocked')\n"
+            )
+
+            result = exhaust_generator(
+                code_run(code, "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd), workspace_root=workspace)
+            )
+
+            self.assertEqual("error", result["status"], result)
+            self.assertFalse(outside.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

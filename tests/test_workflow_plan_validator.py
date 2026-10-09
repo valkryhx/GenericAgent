@@ -413,6 +413,48 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
 
         self.assertIn("role: 'verification'", script)
 
+    def test_renderer_does_not_imply_text_fallback_for_plain_schemas(self):
+        """A declared schema is a hard contract by default.
+
+        The renderer used to inject ``fallback: 'text'`` for every agent that
+        declared a schemaRef without strictSchema, which let schema misses be
+        reported as successes. The default must now be fail-closed.
+        """
+        plan = self.valid_plan()
+
+        script = render_workflow_plan(plan)
+
+        self.assertIn("COLLECT_SCHEMA", script)
+        self.assertNotIn("fallback: 'text'", script)
+
+    def test_renderer_honors_explicit_optional_schema_policy(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["schemaPolicy"] = "optional"
+
+        script = render_workflow_plan(plan)
+
+        self.assertIn("fallback: 'text'", script)
+
+    def test_validator_rejects_unknown_schema_policy(self):
+        plan = self.valid_plan()
+        plan["phases"][0]["agents"][0]["schemaPolicy"] = "best_effort"
+
+        result = validate_workflow_plan(plan)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("invalid_schema_policy", [issue["code"] for issue in result["issues"]])
+
+    def test_validator_rejects_schema_policy_without_schema_ref(self):
+        plan = self.valid_plan()
+        agent = plan["phases"][0]["agents"][0]
+        agent.pop("schemaRef")
+        agent["schemaPolicy"] = "optional"
+
+        result = validate_workflow_plan(plan)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("schema_policy_without_schema", [issue["code"] for issue in result["issues"]])
+
     def test_renderer_adds_host_test_gate_for_coding_acceptance_contract(self):
         plan = self.valid_plan()
         plan["taskType"] = "coding"

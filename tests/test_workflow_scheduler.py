@@ -375,6 +375,30 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("succeeded", loaded.jobs[0].status)
         self.assertEqual(job.result_ref, loaded.jobs[0].result_ref)
 
+    def test_degraded_upstream_still_unblocks_dependent_job(self):
+        """A degraded result is usable delivery, not a failure.
+
+        The downstream job must run (the run is already reported degraded),
+        instead of the whole tail of the plan being skipped.
+        """
+        scheduler, store, run = self.make_scheduler(runner=FakeChildAgentRunner(results={
+            "agent_1": {"summary": "plain text"},
+            "agent_2": {"summary": "synthesis"},
+        }))
+        upstream = scheduler.register_agent(
+            prompt="collect",
+            label="collector",
+            options={"schema": {"type": "object", "required": ["sources"]}, "fallback": "text"},
+        )
+        downstream = scheduler.register_agent(prompt="synthesize", label="writer", options={"dependsOn": ["collector"], "role": "synthesis"})
+        downstream.metadata["dependsOn"] = ["collector"]
+
+        scheduler.run_all()
+
+        self.assertEqual("degraded", upstream.status)
+        self.assertEqual("succeeded", downstream.status)
+        self.assertEqual("degraded", store.load_run(run.run_id).status)
+
     def test_schema_fallback_records_workflow_issue_in_scheduler_artifacts(self):
         scheduler, store, run = self.make_scheduler(runner=FakeChildAgentRunner(results={"agent_1": {"summary": "plain text"}}))
         job = scheduler.register_agent(
@@ -386,11 +410,12 @@ class WorkflowSchedulerTest(unittest.TestCase):
         scheduler.run_all()
 
         loaded = store.load_run(run.run_id)
-        self.assertEqual("succeeded", loaded.status)
+        self.assertEqual("degraded", loaded.status)
         loaded_job = loaded.jobs[0]
-        self.assertEqual("succeeded", loaded_job.status)
+        self.assertEqual("degraded", loaded_job.status)
         self.assertTrue(loaded_job.metadata["schemaValidation"]["fallbackApplied"])
         self.assertTrue(loaded_job.metadata["result"]["schemaFallback"])
+        self.assertEqual("degraded", loaded.metadata["executionOutcome"])
         self.assertEqual("schema_validation_failed", loaded.metadata["workflowIssues"][0]["code"])
         events = store.replay_events(run.run_id)
         self.assertIn("workflow_issue", [event.event_type for event in events])

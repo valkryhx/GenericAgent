@@ -355,6 +355,59 @@ return {summary: result.summary}
             runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
             self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
 
+    def test_declared_artifact_is_checked_even_without_explicit_exists_check(self):
+        """Declaring an artifact is itself the delivery contract.
+
+        The host must verify existence on its own instead of relying on the
+        planner remembering to write ``artifact_exists`` into requiredChecks.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_declared_artifact",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": "reports/out.md", "writer": "writer"}],
+                    },
+                },
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertEqual(
+                "missing_artifact: reports/out.md",
+                runtime._evaluate_execution_contract_evidence(run),
+            )
+            (workspace / "reports").mkdir()
+            (workspace / "reports" / "out.md").write_text("ok", encoding="utf-8")
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
+    def test_artifact_can_explicitly_opt_out_of_existence_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            run = store.create_run(WorkflowRun(
+                run_id="wf_optional_artifact",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": "reports/optional.md", "writer": "writer", "optional": True}],
+                    },
+                },
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
+
     def test_required_file_read_evidence_accepts_successful_artifact_code_run_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -1534,9 +1587,10 @@ return { summary: result.summary, fallback: result.schemaFallback }
 
             self.assertEqual({"summary": "plain text only", "fallback": True}, outcome.result)
             loaded = store.load_run("wf_test")
-            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("degraded", loaded.status)
+            self.assertEqual("degraded", loaded.metadata["executionOutcome"])
             job = loaded.jobs[0]
-            self.assertEqual("succeeded", job.status)
+            self.assertEqual("degraded", job.status)
             self.assertTrue(job.metadata["schemaValidation"]["fallbackApplied"])
             self.assertEqual("schema_validation_failed", job.metadata["schemaValidation"]["code"])
             self.assertEqual("text", job.metadata["schemaValidation"]["fallback"])

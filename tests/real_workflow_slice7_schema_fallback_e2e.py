@@ -186,10 +186,12 @@ def main() -> int:
             }
         )
 
-        if loaded.status != "succeeded" or outcome.run.status != "succeeded":
-            summary["issues"].append("runtime_not_succeeded")
-        if not job or job.status != "succeeded":
-            summary["issues"].append("job_not_succeeded")
+        # A declared schema that misses and falls back to text is a partial
+        # delivery, not a clean success: the run/job must terminate degraded.
+        if loaded.status != "degraded" or outcome.run.status != "degraded":
+            summary["issues"].append("runtime_not_degraded")
+        if not job or job.status != "degraded":
+            summary["issues"].append("job_not_degraded")
         if validation.get("code") != "schema_validation_failed":
             summary["issues"].append("missing_schema_validation_failed_code")
         if validation.get("fallback") != "text" or validation.get("fallbackApplied") is not True:

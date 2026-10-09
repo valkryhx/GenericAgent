@@ -3332,5 +3332,184 @@ return { marker: child.summary }
         self.assertEqual("ready", events[0]["type"])
 
 
+    def test_workflow_handoff_includes_results_and_refs_without_transcripts(self):
+        from workflow_models import WorkflowRun
+
+        agent = FakeAgent()
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda event: None, workflow_root=tmp)
+            bridge.workspace_root = Path(tmp)
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    session_id="session_handoff",
+                    script="return {}",
+                    status="succeeded",
+                    metadata={"workflowDraftRef": "workflow-draft.json"},
+                )
+            )
+            draft = WorkflowDraft(
+                task_text="Research and summarize the topic for the user",
+                classification={},
+                plan={},
+                validation={"ok": True},
+                script=run.script,
+            )
+            bridge.workflow_store.write_workflow_draft(run, draft)
+            job = WorkflowJob(job_id="agent_1", status="succeeded", result_ref="agents/agent_1/result.json")
+            run.jobs = [job]
+            bridge.workflow_store.write_agent_result(
+                run,
+                job,
+                AgentResult(job_id="agent_1", payload={"summary": "INTERMEDIATE_RESULT_MARKER"}),
+            )
+            bridge.workflow_store.write_agent_transcript(
+                run,
+                job,
+                [{"role": "assistant", "content": "TRANSCRIPT_BODY_MUST_NOT_BE_INJECTED"}],
+            )
+            bridge.workflow_store.write_final_result(
+                run,
+                {"runId": run.run_id, "status": "succeeded", "result": {"summary": "FINAL_SYNTHESIS_MARKER"}},
+            )
+            bridge.workflow_store.save_run(run)
+
+            handoff = bridge._workflow_handoff_payload(run)
+
+            serialized = json.dumps(handoff, ensure_ascii=False)
+            self.assertIn("Research and summarize the topic for the user", serialized)
+            self.assertIn("FINAL_SYNTHESIS_MARKER", serialized)
+            self.assertIn("INTERMEDIATE_RESULT_MARKER", serialized)
+            self.assertIn("result.json", serialized)
+            self.assertIn("transcript.jsonl", serialized)
+            self.assertNotIn("TRANSCRIPT_BODY_MUST_NOT_BE_INJECTED", serialized)
+
+    def test_workflow_handoff_is_bounded_and_retains_final_result_refs(self):
+        from workflow_models import WorkflowRun
+
+        agent = FakeAgent()
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda event: None, workflow_root=tmp)
+            bridge.workspace_root = Path(tmp)
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    session_id="session_handoff_limit",
+                    script="return {}",
+                    status="succeeded",
+                    metadata={"workflowDraftRef": "workflow-draft.json"},
+                )
+            )
+            draft = WorkflowDraft(
+                task_text="original task",
+                classification={},
+                plan={},
+                validation={"ok": True},
+                script=run.script,
+            )
+            bridge.workflow_store.write_workflow_draft(run, draft)
+            for index in range(8):
+                job = WorkflowJob(job_id=f"agent_{index}", status="succeeded")
+                bridge.workflow_store.write_agent_result(
+                    run,
+                    job,
+                    AgentResult(job_id=job.job_id, payload={"summary": "x" * 20000}),
+                )
+                run.jobs.append(job)
+            bridge.workflow_store.write_final_result(
+                run,
+                {"runId": run.run_id, "status": "succeeded", "result": {"summary": "FINAL_RESULT_MUST_REMAIN"}},
+            )
+            bridge.workflow_store.save_run(run)
+
+            handoff = bridge._workflow_handoff_payload(run)
+
+            encoded = json.dumps(handoff, ensure_ascii=False).encode("utf-8")
+            self.assertLessEqual(len(encoded), 64 * 1024)
+            self.assertIn("FINAL_RESULT_MUST_REMAIN", encoded.decode("utf-8"))
+            self.assertIn("final-result.json", encoded.decode("utf-8"))
+
+    def test_failed_workflow_handoff_returns_failure_context_to_main_agent(self):
+        agent = FakeAgent()
+        events = []
+
+        class FailedRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                run.status = "failed"
+                run.error = "child failed"
+                self.store.write_final_result(run, {"runId": run.run_id, "status": "failed", "error": "child failed"})
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: FailedRuntime(**kwargs),
+            )
+            bridge._agent_thread = type("LiveThread", (), {"is_alive": lambda self: True})()
+            bridge.workspace_root = Path(tmp)
+            run_id = bridge.workflow_draft("Investigate and report the failure")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assertEqual("workflow_handoff", agent.prompts[-1][1])
+            prompt = agent.prompts[-1][0]
+            self.assertIn('"status": "failed"', prompt)
+            self.assertIn("child failed", prompt)
+            self.assertIn("final-result.json", prompt)
+            self.assertFalse(any(event.get("type") == "status" and event.get("status") == "idle" for event in events))
+            agent.queues[-1].put({"done": "Failure explained to user"})
+            deadline = time.time() + 2
+            while time.time() < deadline and not any(event.get("type") == "assistant_done" for event in events):
+                time.sleep(0.01)
+            self.assertTrue(any(event.get("type") == "assistant_done" for event in events))
+
+    def test_workflow_handoff_waits_for_main_agent_reply_before_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_delivery"
+        events = []
+
+        class HandoffRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                self.store.write_final_result(
+                    run,
+                    {"runId": run.run_id, "status": "succeeded", "result": {"summary": "handoff summary"}},
+                )
+                run.status = "succeeded"
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: HandoffRuntime(**kwargs),
+            )
+            # Keep the fake host loop alive so this test exercises the real
+            # handoff path instead of the legacy no-consumer fallback.
+            bridge._agent_thread = type("LiveThread", (), {"is_alive": lambda self: True})()
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            self.assertEqual("workflow_handoff", agent.prompts[-1][1])
+            self.assertFalse(any(event.get("type") == "status" and event.get("status") == "idle" for event in events))
+            self.assertEqual(1, sum(event.get("type") == "workflow_final" for event in events))
+            agent.queues[-1].put({"done": "Main LLM final response"})
+            deadline = time.time() + 2
+            while time.time() < deadline and not any(event.get("type") == "assistant_done" for event in events):
+                time.sleep(0.01)
+
+            assistant_done_index = next(i for i, event in enumerate(events) if event.get("type") == "assistant_done")
+            idle_index = next(i for i, event in enumerate(events) if event.get("type") == "status" and event.get("status") == "idle")
+            self.assertLess(assistant_done_index, idle_index)
+            self.assertEqual("Main LLM final response", events[assistant_done_index]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,13 @@ def normalize_workspace_relative(raw: str | os.PathLike[str], root: Path, *, all
         if candidate.anchor or ".." in candidate.parts:
             raise WorkspacePathError(f"path must stay within workspace: {text}")
         relative = candidate
-    normalized = relative.as_posix().lstrip("./")
+    # Only strip an explicit "./" prefix. Using ``lstrip("./")`` here also
+    # removed the leading dot of a legitimate dotfile artifact such as
+    # ``.report.html``, which made host artifact checks look for the wrong
+    # path even though the child wrote the file correctly.
+    normalized = relative.as_posix()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
     if not normalized or normalized in {".", ".."} or normalized.startswith("../"):
         raise WorkspacePathError(f"path must name a workspace child: {text}")
     return normalized

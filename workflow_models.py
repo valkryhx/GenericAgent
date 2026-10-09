@@ -14,6 +14,7 @@ RUN_STATUSES = frozenset(
         "awaiting_approval",
         "running",
         "succeeded",
+        "degraded",
         "failed",
         "cancelled",
         "killed",
@@ -27,6 +28,7 @@ JOB_STATUSES = frozenset(
         "queued",
         "running",
         "succeeded",
+        "degraded",
         "failed",
         "cancelled",
         "killed",
@@ -41,6 +43,7 @@ def summarize_workflow_jobs(jobs) -> dict[str, int]:
     summary = {
         "total": 0,
         "succeeded": 0,
+        "degraded": 0,
         "failed": 0,
         "cached": 0,
         "stale": 0,
@@ -62,6 +65,16 @@ def summarize_workflow_jobs(jobs) -> dict[str, int]:
     return summary
 
 
+def _success_like_count(summary: dict[str, int]) -> int:
+    """Jobs that delivered a usable result, even if degraded.
+
+    ``degraded`` counts as delivered for the purpose of distinguishing a
+    partial run from a total failure; it never counts as fully succeeded.
+    """
+
+    return summary.get("succeeded", 0) + summary.get("cached", 0) + summary.get("degraded", 0)
+
+
 def project_workflow_execution_outcome(
     raw_status: str,
     summary: dict[str, int],
@@ -69,18 +82,23 @@ def project_workflow_execution_outcome(
 ) -> str | None:
     if acceptance_status in {"failed", "blocked"}:
         return "failed"
-    if raw_status == "failed":
+    if raw_status in {"failed", "cancelled", "killed", "interrupted"}:
         return "failed"
+    degraded = summary.get("degraded", 0)
+    clean_success = summary.get("succeeded", 0) + summary.get("cached", 0)
+    total = summary.get("total", 0)
     if raw_status == "running" and summary.get("running", 0) == 0 and summary.get("total", 0):
-        success_like = summary.get("succeeded", 0) + summary.get("cached", 0)
+        success_like = _success_like_count(summary)
         failure_like = summary.get("failed", 0) + summary.get("cancelled", 0) + summary.get("killed", 0) + summary.get("stale", 0) + summary.get("skipped", 0)
         if failure_like:
             return "partial" if success_like else "failed"
-        if success_like == summary.get("total", 0):
-            return "succeeded"
-    if raw_status in {"succeeded", "completed"}:
-        success_like = summary["succeeded"] + summary["cached"]
-        return "succeeded" if success_like == summary["total"] else "partial"
+        if success_like == total:
+            return "succeeded" if degraded == 0 else "degraded"
+    if raw_status in {"succeeded", "completed", "degraded"}:
+        success_like = _success_like_count(summary)
+        if success_like != total:
+            return "partial"
+        return "succeeded" if clean_success == total else "degraded"
     return None
 
 

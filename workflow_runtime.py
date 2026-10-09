@@ -300,19 +300,21 @@ class WorkflowRuntime:
                         run.metadata = metadata
                         raise RuntimeError(gate_error or verification_error or execution_contract_error or acceptance_error)
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
-                    metadata["integrationStatus"] = "accepted"
+                    degraded = str(run.status or "") == "degraded" or bool(metadata.get("workflowIssues"))
+                    metadata["integrationStatus"] = "degraded" if degraded else "accepted"
                     metadata["integrationIssues"] = []
                     # Non-full runs keep the historic "integration outcome"
-                    # meaning; full runs overwrite this from the audit file.
-                    metadata["finalAuditStatus"] = "passed"
+                    # meaning; full runs overwrite this from the audit file. A
+                    # degraded run never reports a clean pass.
+                    metadata["finalAuditStatus"] = "degraded" if degraded else "passed"
                     run.metadata = metadata
-                    run.status = "succeeded"
+                    run.status = metadata["integrationStatus"] if degraded else "succeeded"
                     run.error = None
                     refresh_workflow_execution_metadata(run)
                     self.store.save_run(run)
                     self.store.write_workflow_progress(run)
                     self._write_final_audit(run)
-                    final_payload = self._final_payload(run, "succeeded", result=result)
+                    final_payload = self._final_payload(run, run.status, result=result)
                     self.store.write_final_result(run, final_payload)
                     self.store.save_run(run)
                     self._append(run, "workflow_finished", {
@@ -957,8 +959,17 @@ class WorkflowRuntime:
             except WorkspacePathError:
                 return f"invalid_artifact_path: {relative_path}"
             checks = {str(item) for item in artifact.get("requiredChecks") or []}
-            if "artifact_exists" in checks and not target.is_file():
-                return f"missing_artifact: {relative_path}"
+            # Every artifact declared in the execution contract is a delivered
+            # product, so existence is checked by the host unconditionally.
+            # The old behavior only checked when the planner happened to write
+            # artifact_exists into requiredChecks, which let a run report
+            # success while its declared artifact was never produced.
+            declares_optional = bool(artifact.get("optional")) or "artifact_optional" in checks
+            if not declares_optional:
+                if "artifact_exists" not in checks:
+                    checks.add("artifact_exists")
+                if not target.is_file():
+                    return f"missing_artifact: {relative_path}"
             if "artifact_readback" in checks:
                 filename = target.name.lower()
                 # Readback may be performed by a synthesis/review child whose
@@ -1073,7 +1084,7 @@ class WorkflowRuntime:
         if rpc_id is None:
             return
         pending_rpc_jobs.pop(rpc_id, None)
-        if job.status == "succeeded":
+        if job.status in {"succeeded", "degraded"}:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": scheduler.downstream_result(job)})
         else:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": redact_sensitive_text(job.error or f"workflow agent failed: {job.job_id}")})
@@ -1102,6 +1113,9 @@ class WorkflowRuntime:
         plan: list[dict] = []
         probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args, cache_args=cache_args)
         for source_job in source_run.jobs:
+            # Only clean deliveries form a reusable prefix. A degraded job is a
+            # partial-fidelity result; replaying it as a "cached success" would
+            # silently propagate a lower-quality prefix into the resumed run.
             if source_job.status not in {"succeeded", "cached"}:
                 break
             source_key = source_job.metadata.get("cacheKey") or {}

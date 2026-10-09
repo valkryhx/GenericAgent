@@ -135,7 +135,7 @@ export function workflowListPanelFromRuns(runs: WorkflowRun[]): WorkflowListPane
 }
 
 export function workflowListRows(panel: WorkflowListPanelState): string[] {
-  const completed = panel.runs.filter(run => run.status === 'succeeded').length
+  const completed = panel.runs.filter(run => run.status === 'succeeded' || run.status === 'degraded').length
   const completedLabel = `${completed} completed`
   return [
     'Dynamic workflows',
@@ -167,6 +167,7 @@ function workflowStatusIcon(status: string): string {
   if (status === 'running') return '◌'
   if (status === 'awaiting_approval') return '◌'
   if (status === 'failed' || status === 'killed' || status === 'cancelled') return '✗'
+  if (status === 'degraded' || status === 'partial') return '!'
   return '·'
 }
 
@@ -229,7 +230,7 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
   const phaseList = Array.from(phases.entries()).map(([title, agents]) => ({
     title,
     agents,
-    completed: agents.filter(agent => agent.status === 'succeeded' || agent.status === 'cached').length,
+    completed: agents.filter(agent => agent.status === 'succeeded' || agent.status === 'cached' || agent.status === 'degraded').length,
     total: agents.length,
   }))
   const total = phaseList.reduce((sum, phase) => sum + phase.total, 0)
@@ -367,6 +368,7 @@ function agentDetailAgentRow(agent: WorkflowOverviewAgent, selected: boolean): s
 
 function workflowStatusText(status: string): string {
   if (status === 'succeeded' || status === 'cached') return 'Completed'
+  if (status === 'degraded' || status === 'partial') return 'Degraded'
   if (status === 'running') return 'Running'
   if (status === 'queued' || status === 'registered') return 'Pending'
   if (status === 'failed') return 'Failed'
@@ -494,7 +496,7 @@ export function workflowPanelRows(panel: WorkflowPanelState): string[] {
   ]
 }
 
-const resumeableWorkflowStatuses = new Set(['failed', 'killed', 'interrupted', 'succeeded'])
+const resumeableWorkflowStatuses = new Set(['failed', 'killed', 'interrupted', 'succeeded', 'degraded'])
 
 export function workflowPanelCommandForKey(
   panel: WorkflowPanelState,

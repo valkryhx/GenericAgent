@@ -67,6 +67,20 @@ class WorkflowController:
                 "verificationContract": run_verification_contract,
             },
         )
+        # A planner that could not produce a model-authored plan silently fell
+        # back to the deterministic template. That plan still runs, but it is a
+        # partial-quality delivery, so the run must terminate as ``degraded``
+        # instead of claiming a clean success the caller cannot distinguish
+        # from a real planned run.
+        if planner_mode == "fallback_deterministic":
+            fallback_reason = str(draft_context.get("fallbackReason") or validation.get("fallbackReason") or "").strip()
+            run.metadata["plannerDegraded"] = True
+            run.metadata["plannerFallbackReason"] = fallback_reason or None
+            run.metadata.setdefault("workflowIssues", []).append({
+                "code": "planner_fallback_deterministic",
+                "message": "planner fell back to the deterministic template; plan was not model-authored",
+                "reason": fallback_reason or None,
+            })
         if isinstance(acceptance_contract, dict):
             acceptance_contract = dict(acceptance_contract)
             # The runtime decides whether an empty unittest gate is "not

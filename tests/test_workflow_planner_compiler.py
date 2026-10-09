@@ -67,7 +67,10 @@ class WorkflowPlannerCompilerTest(unittest.TestCase):
 
             outcome = WorkflowRuntime(
                 store=store,
-                runner=FakeChildAgentRunner(),
+                runner=FakeChildAgentRunner(results={
+                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                    "agent_2": {"summary": "completed agent_2"},
+                }),
                 scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
                 timeout_seconds=5.0,
             ).run(run)

@@ -442,6 +442,9 @@ class AgentScheduler:
                         completed.append(job)
                     if failure_policy == "fail_fast" and job.status == "failed":
                         self._fail_fast(job.error or "child agent failed")
+                elif result.status == "degraded":
+                    self._complete_job(job, result, status="degraded")
+                    completed.append(job)
                 else:
                     self._complete_job(job, result)
                     completed.append(job)
@@ -545,7 +548,10 @@ class AgentScheduler:
     def _dependencies_satisfied(self, job: WorkflowJob) -> bool:
         for dependency in job.metadata.get("dependsOn") or []:
             upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
-            if upstream is None or upstream.status not in {"succeeded", "cached"}:
+            # A degraded upstream delivered a usable, if lower-fidelity,
+            # result; the run is already marked degraded, so downstream work
+            # may still consume it instead of being skipped wholesale.
+            if upstream is None or upstream.status not in {"succeeded", "cached", "degraded"}:
                 return False
         return True
 
@@ -572,12 +578,13 @@ class AgentScheduler:
         if self.run.status != "running" or not self.jobs:
             return
         refresh_workflow_execution_metadata(self.run)
-        if all(job.status in {"succeeded", "cached"} for job in self.jobs):
+        settled = {"succeeded", "cached", "degraded"}
+        if all(job.status in settled for job in self.jobs):
             metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
             metadata.setdefault("integrationStatus", "pending")
             metadata.setdefault("finalAuditStatus", "pending")
             self.run.metadata = metadata
-            self.run.status = "succeeded"
+            self.run.status = "degraded" if any(job.status == "degraded" for job in self.jobs) else "succeeded"
             refresh_workflow_execution_metadata(self.run)
             self.store.write_final_result(
                 self.run,
@@ -601,8 +608,8 @@ class AgentScheduler:
                 },
             )
 
-    def _complete_job(self, job: WorkflowJob, result: AgentResult) -> None:
-        job.status = "succeeded"
+    def _complete_job(self, job: WorkflowJob, result: AgentResult, *, status: str = "succeeded") -> None:
+        job.status = status
         job.error = None
         if result.transcript_events:
             transcript_ref = self.store.write_agent_transcript(self.run, job, result.transcript_events)
@@ -619,7 +626,11 @@ class AgentScheduler:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
         self._record_observed_mutations(job, result)
-        self._append("agent_completed", job, {"resultRef": job.result_ref, "result": self._event_result_summary(result)})
+        self._append(
+            "agent_completed",
+            job,
+            {"resultRef": job.result_ref, "status": job.status, "result": self._event_result_summary(result)},
+        )
 
     @staticmethod
     def _compact_handoff_summary(payload: dict, error: str | None = None) -> str:
@@ -886,6 +897,10 @@ class AgentScheduler:
             payload["schemaFallback"] = True
             payload["schemaValidation"] = copy.deepcopy(validation)
             result.payload = payload
+            # A schema miss that was absorbed by a text fallback is a real
+            # degradation, not a success. Mark the terminal state accordingly
+            # so the run cannot report a clean success.
+            result.status = "degraded"
             return result
         error = f"{SCHEMA_VALIDATION_FAILED}: " + "; ".join(issues)
         result.status = "failed"
@@ -1001,7 +1016,7 @@ class AgentScheduler:
             self.store.append_permission_event(self.run, {**event, "jobId": event.get("jobId") or job.job_id})
 
     def _cancel_job(self, job: WorkflowJob, *, reason: str) -> None:
-        if job.status in {"succeeded", "failed", "cancelled", "cached", "skipped"}:
+        if job.status in {"succeeded", "degraded", "failed", "cancelled", "cached", "skipped"}:
             return
         job.status = "cancelled"
         job.error = reason or None

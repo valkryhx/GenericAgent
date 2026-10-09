@@ -34,6 +34,7 @@ class WorkflowModelsTest(unittest.TestCase):
                 "running",
                 "succeeded",
                 "failed",
+                "degraded",
                 "cancelled",
                 "killed",
                 "interrupted",
@@ -46,6 +47,7 @@ class WorkflowModelsTest(unittest.TestCase):
                 "running",
                 "succeeded",
                 "failed",
+                "degraded",
                 "cancelled",
                 "killed",
                 "cached",
@@ -53,6 +55,27 @@ class WorkflowModelsTest(unittest.TestCase):
                 "stale",
             }.issubset(JOB_STATUSES)
         )
+
+    def test_degraded_jobs_project_to_degraded_outcome(self):
+        jobs = [
+            WorkflowJob(job_id="agent_1", status="succeeded"),
+            WorkflowJob(job_id="agent_2", status="degraded"),
+        ]
+
+        summary = summarize_workflow_jobs(jobs)
+
+        self.assertEqual(1, summary["degraded"])
+        self.assertEqual("degraded", project_workflow_execution_outcome("succeeded", summary))
+
+    def test_degraded_with_a_failure_projects_to_partial(self):
+        jobs = [
+            WorkflowJob(job_id="agent_1", status="degraded"),
+            WorkflowJob(job_id="agent_2", status="failed"),
+        ]
+
+        summary = summarize_workflow_jobs(jobs)
+
+        self.assertEqual("partial", project_workflow_execution_outcome("succeeded", summary))
 
     def test_run_round_trips_to_dict_without_losing_permissions_or_jobs(self):
         run = WorkflowRun(

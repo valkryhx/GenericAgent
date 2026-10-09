@@ -330,6 +330,13 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual("running", run.status)
             self.assertEqual("fallback_deterministic", run.metadata["plannerMode"])
             self.assertEqual("fallback_deterministic", controller.store.replay_events(run.run_id)[0].payload["plannerMode"])
+            # A deterministic fallback is a lower-fidelity delivery and must be
+            # visible to the caller instead of masquerading as a planned run.
+            self.assertTrue(run.metadata["plannerDegraded"])
+            self.assertEqual(
+                ["planner_fallback_deterministic"],
+                [issue["code"] for issue in run.metadata["workflowIssues"]],
+            )
 
     def test_create_planned_run_script_executes_with_fake_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,7 +351,10 @@ class WorkflowControllerTest(unittest.TestCase):
 
             outcome = WorkflowRuntime(
                 store=store,
-                runner=FakeChildAgentRunner(),
+                runner=FakeChildAgentRunner(results={
+                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                    "agent_2": {"summary": "synthesized"},
+                }),
                 scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
                 timeout_seconds=5.0,
             ).run(run)

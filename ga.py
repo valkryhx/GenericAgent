@@ -100,9 +100,14 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         except: pass
 
     try:
+        # The inlined header is written to ``code_cwd`` and may therefore run
+        # outside the repository. Point it at the repo root so its imports
+        # (workflow_workspace_guard) resolve regardless of the child cwd.
         child_env = None
-        if workspace_root:
+        if workspace_root or code_type in ["python", "py"]:
             child_env = os.environ.copy()
+            child_env["GA_CODE_RUN_ROOT"] = script_dir
+        if workspace_root:
             child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

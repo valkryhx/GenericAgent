@@ -163,6 +163,28 @@ test('workflowStatusBarRows formats awaiting approval without stop shortcut', ()
   ])
 })
 
+test('workflowStatusBarRows marks a degraded run as partial, never a clean success', () => {
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [{
+      runId: 'wf_degraded',
+      sessionId: 'session',
+      status: 'degraded',
+      metadata: { workflowName: 'degraded-workflow', integrationStatus: 'degraded', finalAuditStatus: 'degraded' },
+      jobs: [{ jobId: 'agent_1', status: 'degraded', metadata: { label: 'collector' } }],
+    }],
+  }))
+
+  assert.ok(bar)
+  assert.equal(bar.status, 'degraded')
+  assert.equal(bar.completedAgents, 1)
+  const rows = workflowStatusBarRows(bar)
+  assert.equal(rows[0], 'Enter view')
+  assert.match(rows[1], /^› ! degraded-workflow/)
+  assert.match(rows[1], /1\/1 agents done/)
+  assert.match(rows[1], /integration degraded/)
+  assert.match(rows[1], /audit degraded/)
+})
+
 test('workflowStatusBarCommandForKey maps Enter and running-only x controls', () => {
   const running = workflowStatusBarFromState(stateWithWorkflows({
     workflows: [{ runId: 'wf_live', sessionId: 'session', status: 'running', jobs: [] }],
