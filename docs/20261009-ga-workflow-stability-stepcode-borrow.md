@@ -459,12 +459,14 @@ run `wf_300abd40d8e148098f8d7273cdff7635` 终态 `failed`，`agent_1`（source-d
 | `frontends/ink_bridge.py` | 新增 `_workflow_job_artifact_refs()` / `_workflow_job_observed_artifacts()`，把已存在的工作区相对路径放进 handoff 的 `intermediateResults[].artifactRefs`；`_handoff_bounded_value` 压缩时优先保留 `artifactRefs`；handoff 提示词明确"这些是 workspace 相对路径，基准是 GA workspace 根，不是 run 内部目录" |
 | `frontends/ink_bridge.py` | 构造函数新增可选 `workspace_root`（默认行为不变，便于嵌入与测试） |
 
-### 12.3 遗留（本轮未做）
+### 12.3 遗留（已于 §13 解决）
 
 - workspace 仍是**共享的** `temp/`，两个并发 run 的产物会互相覆盖；run 专属目录属于
   另一条改动（需同时调整 handoff 基准目录与用户预期），本轮不动。
 - `_workflow_job_artifact_refs` 只认 `file_write`/`file_patch`；`code_run` 写出的文件
   不在此列，仍需下轮从执行观测扩展。
+
+两条均在下节以「机制替换」的方式解决，而不是继续打补丁。
 
 ### 12.4 验收
 
@@ -475,3 +477,119 @@ run `wf_300abd40d8e148098f8d7273cdff7635` 终态 `failed`，`agent_1`（source-d
 - 真实 E2E（DeepSeek-V4.1-Flash）：`tests/real_workflow_strict_schema_child_e2e.py`
   新增 artifact-handoff 场景，两个子代理各自写出文件后，
   `observedArtifacts=["research_notes.md","synthesis_report.md"]` 且两者都真实落盘。
+
+## 13. run 专属 workspace 与工具无关的产物观测（2026-10-09，第三轮）
+
+用户对 §12 的修复提出两点：其一，run 专属目录可以改；其二，**「只认
+`file_write`/`file_patch`」是错的**——"未来可能会加入新的工具，所以不能限制死板"。
+第二点是设计约束，不是措辞问题：靠枚举工具名判断"是否产生了产物"必然随工具增长而失效。
+
+### 13.1 根因：把「工具名」当成了产物的真值
+
+§12 的 `_record_observed_artifacts()` 遍历 transcript 里 `type == "tool_call"` 的事件，
+只接受 `file_write` / `file_patch`，再读 `args.path`。这有三个必然失败：
+
+1. **`code_run` 漏掉**——生成 DOCX/HTML 的常规路径就是 `code_run + python-docx`，
+   而这些 run 的 `observedArtifacts` 恒为空。
+2. **任何新工具漏掉**——`writeScope`/`deliverables` 之外的写工具，宿主没登记就永远观测不到。
+3. **工具名不等于写入**——同名工具可能写别的路径，也可能什么也不写；真值只在文件系统上。
+
+对照 Step-Code：它的 workflow 契约以**执行后的事实**（journal/evidence/artifact 检查）
+为准，不维护"哪些工具算写工具"这类清单。GA 应当对齐这一层语义。
+
+### 13.2 修复一：产物观测换成文件系统差分（工具无关）
+
+| 位置 | 改动 |
+| --- | --- |
+| `workflow_workspace.py` | 新增 `snapshot_workspace()`（用 `os.scandir` 采集 `{相对路径: (mtime_ns, size)}`）与 `diff_workspace()`（返回新增/修改的相对路径）。跳过 `__pycache__`/`.git` |
+| `workflow_child_agent.py::_run_tool_job` | 子代理执行前 `snapshot_workspace(workspace)`，执行后再次快照，差分写入 `tool_summary["writtenPaths"]` |
+| `workflow_scheduler.py::_record_observed_artifacts` | 不再扫描 `tool_call`、不再匹配任何工具名；直接消费 `writtenPaths`，仍保留 `normalize_workspace_relative` 的越界拒绝 |
+| `workflow_scheduler.py::_record_observed_mutations` | 若没有可识别的写工具事件但 `writtenPaths` 非空，记录 `workspace_write`，使"是否改动过状态"同样来自文件系统证据 |
+| `workflow_scheduler.py` | 记录产物后立即 `write_workflow_progress()`，Ink 面板不必等批次结束才看到产物 |
+
+差分是**构造上**工具无关的：任何让 workspace 文件发生变化的工具——现有、未来、以及
+根本没在宿主登记过的——都会出现在差分里。`file_write`、`file_patch`、`code_run`、
+`web_execute_js` 都不再需要出现在判断逻辑里。
+
+性能是这条改动的实际约束：仓库根 17k 文件，`os.walk` 版本单次快照 1.7s（每个 child
+调用两次），`os.scandir` + DirEntry 缓存降到 0.07s；这也是选择 `scandir` 的原因。
+
+### 13.3 修复二：run 专属 workspace
+
+`<base>/workflow-runs/<runId>/`：
+
+- `workflow_workspace.py` 新增 `run_workspace_path()` / `create_run_workspace()`；`runId`
+  含路径分隔符或 `.`/`..` 一律拒绝，避免目录逃逸。
+- `workflow_controller.create_planned_run()` 在创建 run 后即分配 run 专属目录，写入
+  `run.metadata["workspacePath"]`，同时记录 `workspaceBasePath`（用户可读的基准根，
+  仍然是 `temp/`）。创建失败时降级为共享根并追加 `run_workspace_unavailable` issue，
+  不让 workspace 问题把整个 run 变成"计划被拒"。
+- `frontends/ink_bridge.py`：
+  - `_run_workflow_runtime` 不再无条件用 `workspace_metadata(self.workspace_root)` 覆盖
+    run 的 workspace（这正是并发 run 互相覆盖的入口）；仅在 run 无 workspace 时才分配，
+    并新增 `_assign_run_workspace()` 覆盖 `workflow_draft`/`workflow_resume` 这些不经
+    `create_planned_run` 的入口。
+  - **两个根被显式区分**：`_run_workspace_root()`（产物，run 专属目录）用于
+    `artifactRefs`；`_run_artifact_base_root()`（run 内部 `result.json`/`transcript.jsonl`，
+    位于 `temp/sessions/...`）用于 `resultRef`/`transcriptRef`。混用这两个根是 §12.2
+    "产物找不到"的同类错误。
+  - handoff 直接带上 `workspacePath`（绝对路径）与 `workspaceBasePath`，并在提示词中说明
+    "`artifactRefs`/`finalResultRef` 相对 `workspacePath`"，压缩时两者与 `artifactRefs`
+    一同保留。
+- `workflow_scheduler._cache_key()` 的 `workspacePathHash` 改用 `workspaceBasePath`：
+  run 专属目录是隔离实现细节，用它的哈希会让 resume 永远无法命中缓存前缀。
+
+### 13.4 验收
+
+- `tests/test_workflow_workspace.py` +5：run 目录位置、非法 runId 拒绝、差分检出新增与修改
+  文件、忽略 `__pycache__`、缺失目录返回空快照。
+- `tests/test_workflow_child_agent.py` +2：`code_run` 写出的 `report.json` 出现在
+  `writtenPaths`；工具名叫 `file_read`（宿主登记的非写工具）时写出的文件同样被差分捕获。
+- `tests/test_workflow_scheduler.py` +3：未登记写工具落 `workspace_write`；观测产物不依赖
+  工具名；越界路径被丢弃。
+- `tests/test_workflow_controller.py` +2：同一 base 的两次 planned run 拿到不同 workspace；
+  `run_workspace=False` 保留共享根行为。
+- `tests/test_ink_bridge.py` +2：handoff 按 **run 专属目录** 解析 artifactRefs（base 根下
+  查找会漏掉产物）；两个并发 run 的 workspace 不同。
+- 红→绿：把 `_record_observed_artifacts` 还原成工具名扫描、把 runner 的差分还原为
+  `_build_tool_summary`，新增测试均按预期失败，再恢复后通过。
+
+- 全量：`python -m unittest discover -s tests` **1286 tests OK**（skip 3，193s）；
+  Ink `npx tsx --test src/*.test.ts` **391 pass / 0 fail**。
+
+**排查记录**：全量首轮出现过 1 个 error（`test_subagent_realtime_ipc` 创建命名管道
+WinError 5）。原因是更早一次**被中止**的全量测试进程仍在后台运行并占用了固定的管道名
+`\.\pipe\ga_subagent_run_owner_child`，不是代码缺陷；终止该残留进程后该文件 36 tests OK，
+全量复跑通过。以后遇到同址管道创建被拒，先查是否有残留的 python 测试进程。
+
+**真实模型 E2E**：`tests/real_workflow_strict_schema_child_e2e.py` 的 artifact-handoff 场景
+已改为让 synthesis 子代理**用 `code_run` 写 `synthesis_report.md`**（而不是 `file_write`），
+并新增断言 `synthesisObservedWithoutFileWrite`——即「该子代理 transcript 里没有
+`file_write`，产物仍出现在 `observedArtifacts` 且真实落盘」，这正是工具无关观测的端到端证据。
+运行：`GA_RUN_REAL_WORKFLOW_STRICT_SCHEMA_E2E=1 GA_RUN_REAL_WORKFLOW_ARTIFACT_HANDOFF_E2E=1
+PYTHONIOENCODING=utf-8 python tests/real_workflow_strict_schema_child_e2e.py`（走 `profiles.default`，
+本机当前为 `gpt-6-luna`）。
+
+**真实 E2E 结果（gpt-6-luna，10.5s）**：
+
+```json
+{
+  "passed": true,
+  "runStatus": "succeeded",
+  "toolNamesByJob": {
+    "source-discovery": ["file_write", "no_tool"],
+    "synthesis": ["code_run", "no_tool"]
+  },
+  "observedArtifacts": ["research_notes.md", "synthesis_report.md"],
+  "filesOnDisk": ["research_notes.md", "synthesis_report.md"],
+  "synthesisUsedFileWrite": false,
+  "synthesisObservedWithoutFileWrite": true
+}
+```
+
+synthesis 子代理的 transcript 里**完全没有 `file_write`**，产物却仍被观测到并落盘。旧实现
+（按工具名扫描）下这个 run 的 `observedArtifacts` 必然是空的，这正是本轮替换机制的差异所在。
+
+**已知余项（本轮未做）**：`observedArtifacts` 是 run 级聚合，不含 writer 归属；当两个子代理
+写出同名文件、或需要按 agent 追溯产物来源时无法区分（本轮 E2E 两个文件名不同，未触发）。
+若要支持，应在文件系统差分时同时记录 `jobId`，而不是回到按工具名推断。

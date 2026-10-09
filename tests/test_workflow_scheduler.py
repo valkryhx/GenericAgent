@@ -234,6 +234,75 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual([job.job_id], store.load_run(run.run_id).metadata["observedMutationAgents"])
         self.assertIn("state_mutation_observed", self.event_types(store))
 
+    def test_filesystem_evidence_records_a_mutation_for_an_unlisted_writer_tool(self):
+        """A tool we have not enumerated must still count as a state mutation.
+
+        ``observedMutations`` used to be derived from a fixed tool-name list, so
+        a writer added later -- or ``code_run`` -- silently produced no mutation
+        evidence even though the workspace changed.
+        """
+        scheduler, store, run = self.make_scheduler()
+        job = scheduler.register_agent(prompt="write via a new tool", label="Writer")
+        result = AgentResult(
+            job_id=job.job_id,
+            status="succeeded",
+            payload={"summary": "wrote"},
+            tool_summary={"writtenPaths": ["report.html"]},
+            transcript_events=[
+                {"type": "tool_allowed", "toolName": "some_future_writer", "decision": "allow"},
+            ],
+        )
+
+        scheduler._record_observed_mutations(job, result)
+
+        self.assertEqual(["workspace_write"], job.metadata["observedMutations"])
+        self.assertEqual(["workspace_write"], store.load_run(run.run_id).metadata["observedMutationTools"])
+
+    def test_observed_artifacts_come_from_filesystem_changes_not_tool_names(self):
+        """Artifact observation must not depend on ``file_write``/``file_patch``.
+
+        The runner reports the workspace before/after diff, so a file produced by
+        ``code_run`` (or any future writer) is observed exactly like one produced
+        by ``file_write``.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write the docx", label="Writer")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote"},
+                tool_summary={"writtenPaths": ["reports/summary.docx", "notes.md"]},
+                transcript_events=[
+                    {"type": "tool_allowed", "toolName": "code_run", "decision": "allow"},
+                ],
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+
+            self.assertEqual(["notes.md", "reports/summary.docx"], sorted(job.metadata["observedArtifacts"]))
+            progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(["notes.md", "reports/summary.docx"], sorted(progress["workflowProgress"][0]["observedArtifacts"]))
+
+    def test_observed_artifacts_drop_paths_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write", label="Writer")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote"},
+                tool_summary={"writtenPaths": ["ok.md", r"C:\Windows\system32\drivers\etc\hosts", "../escape.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+
+            self.assertEqual(["ok.md"], job.metadata["observedArtifacts"])
+
     def test_register_agent_rejects_non_dict_options_with_clear_error(self):
         scheduler, _store, _run = self.make_scheduler()
 

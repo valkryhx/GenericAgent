@@ -7,11 +7,15 @@ from unittest.mock import patch
 
 from workflow_workspace import (
     WorkspacePathError,
+    create_run_workspace,
     default_workspace_root,
+    diff_workspace,
     normalize_declared_artifact_path,
     normalize_workspace_relative,
+    run_workspace_path,
     resolve_workspace_child,
     resolve_workspace_root,
+    snapshot_workspace,
     workspace_metadata,
 )
 
@@ -69,6 +73,54 @@ class WorkflowWorkspaceTest(unittest.TestCase):
             metadata = workspace_metadata(Path(tmp))
             self.assertEqual(str(Path(tmp).resolve()), metadata["workspacePath"])
             self.assertEqual("project-temp-workspace-write-v1", metadata["workspacePolicy"])
+
+    def test_run_workspace_is_a_sibling_directory_under_the_base_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            path = run_workspace_path(root, "wf_abc")
+
+            self.assertEqual(root / "workflow-runs" / "wf_abc", path)
+            self.assertFalse(path.exists())
+
+            created = create_run_workspace(root, "wf_abc")
+            self.assertTrue(created.is_dir())
+            self.assertEqual(path, created)
+
+    def test_run_workspace_rejects_path_segments_in_the_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for run_id in ("", "  ", ".", "..", "../escape", "a/b", r"a\b"):
+                with self.subTest(run_id=run_id):
+                    with self.assertRaises(WorkspacePathError):
+                        run_workspace_path(root, run_id)
+
+    def test_snapshot_diff_detects_created_and_modified_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "keep.txt").write_text("keep", encoding="utf-8")
+            (root / "nested").mkdir()
+            (root / "nested" / "old.txt").write_text("old", encoding="utf-8")
+            before = snapshot_workspace(root)
+
+            (root / "nested" / "old.txt").write_text("changed and longer", encoding="utf-8")
+            (root / "new.md").write_text("new", encoding="utf-8")
+
+            self.assertEqual(["nested/old.txt", "new.md"], diff_workspace(before, snapshot_workspace(root)))
+
+    def test_snapshot_ignores_pycache_and_diff_is_empty_without_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.txt").write_text("a", encoding="utf-8")
+            (root / "__pycache__").mkdir()
+            (root / "__pycache__" / "junk.pyc").write_bytes(b"junk")
+            before = snapshot_workspace(root)
+
+            self.assertEqual(["a.txt"], sorted(before))
+            self.assertEqual([], diff_workspace(before, snapshot_workspace(root)))
+
+    def test_snapshot_of_missing_directory_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual({}, snapshot_workspace(Path(tmp) / "does-not-exist"))
 
 
 if __name__ == "__main__":

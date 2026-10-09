@@ -426,6 +426,14 @@ class NativeGPTChildAgentRunner:
             "jobId": job.job_id,
             "capabilities": copy.deepcopy(self.last_capability_snapshot),
         })
+        # Snapshot the workspace before the child runs. Any tool that writes --
+        # file_write, file_patch, code_run, or a tool added later -- changes the
+        # filesystem, so the before/after difference is the artifact ground truth
+        # without hard-coding which tools are "writers".
+        from workflow_workspace import diff_workspace, snapshot_workspace
+
+        workspace_root = self._child_cwd(job)
+        workspace_before = snapshot_workspace(workspace_root)
         try:
             chunks = []
             for chunk in agent_runner_loop(
@@ -448,7 +456,11 @@ class NativeGPTChildAgentRunner:
                 if state.get("handler") is handler:
                     state["handler"] = None
         usage = copy.deepcopy(getattr(client, "last_usage_tokens", None) or getattr(getattr(client, "backend", None), "last_usage_tokens", None) or {})
-        return output, usage, self._build_tool_summary(transcript_events)
+        tool_summary = self._build_tool_summary(transcript_events)
+        written = diff_workspace(workspace_before, snapshot_workspace(workspace_root))
+        if written:
+            tool_summary["writtenPaths"] = written[:64]
+        return output, usage, tool_summary
 
     def _build_handler(self, job, transcript_events: list[dict], profile: str, version: str):
         from ga import GenericAgentHandler

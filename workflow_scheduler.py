@@ -1099,6 +1099,10 @@ class AgentScheduler:
                 continue
             if tool_name not in observed:
                 observed.append(tool_name)
+        # Filesystem evidence outranks the tool allowlist: a writer tool we have
+        # not enumerated yet still mutates state, and code_run can too.
+        if (result.tool_summary or {}).get("writtenPaths") and not observed:
+            observed.append("workspace_write")
         if not observed:
             return
         job.metadata["observedMutations"] = observed
@@ -1118,26 +1122,19 @@ class AgentScheduler:
         The plan's ``artifacts`` entries are semantic labels ("sources",
         "synthesis"), not paths, so a handoff built from them alone tells the
         next reader nothing and the LLM has to guess a location. The child's
-        own ``file_write``/``file_patch`` calls are the ground truth; record
-        them so downstream handoffs carry real, resolvable paths.
+        own filesystem changes are the ground truth. The runner reports those as
+        a before/after workspace diff, which stays correct for ``file_write``,
+        ``code_run``, and any writer tool added later; no tool-name list here.
         """
         metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
         workspace = self.workspace_path or metadata.get("workspacePath")
         if not workspace:
             return
+        observed = (result.tool_summary or {}).get("writtenPaths") or []
         written: list[str] = []
-        for event in result.transcript_events:
-            if event.get("type") != "tool_call":
-                continue
-            tool_name = str(event.get("toolName") or event.get("tool_name") or "")
-            if tool_name not in {"file_write", "file_patch"}:
-                continue
-            args = event.get("args") if isinstance(event.get("args"), dict) else {}
-            raw = str(args.get("path") or "").strip()
-            if not raw:
-                continue
+        for raw in observed:
             try:
-                ref = normalize_workspace_relative(raw, Path(workspace))
+                ref = normalize_workspace_relative(str(raw), Path(workspace))
             except WorkspacePathError:
                 continue
             if ref not in written:
@@ -1146,6 +1143,10 @@ class AgentScheduler:
             return
         job.metadata["observedArtifacts"] = written
         self.store.save_run(self.run)
+        # Publish the progress snapshot immediately: the Ink panel polls this
+        # file, and waiting for the end-of-batch write made a finished artifact
+        # invisible while later jobs were still running.
+        self.store.write_workflow_progress(self.run)
         self._append("artifact_written", job, {"paths": written[:32]})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
@@ -1177,7 +1178,12 @@ class AgentScheduler:
         return {
             "scriptHash": _stable_hash(self.run.script),
             "argsHash": _stable_hash(self.cache_args if self._has_explicit_cache_args else self.args),
-            "workspacePathHash": _stable_hash(metadata.get("workspacePath")),
+            # Each run own workspace lives under a per-run directory, so hashing
+            # the run-local path would invalidate every cached prefix on resume.
+            # The base root is the stable identity of "which workspace family
+            # this run belongs to"; the run directory is an implementation
+            # detail of isolation.
+            "workspacePathHash": _stable_hash(metadata.get("workspaceBasePath") or metadata.get("workspacePath")),
             "callIndex": job.metadata.get("callIndex", 0),
             "promptHash": _stable_hash(job.prompt),
             "optionsHash": _stable_hash(options),

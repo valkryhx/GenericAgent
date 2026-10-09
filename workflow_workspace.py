@@ -41,6 +41,85 @@ def resolve_workspace_root(raw: str | os.PathLike[str] | None = None) -> Path:
     return root
 
 
+RUN_WORKSPACE_DIRNAME = "workflow-runs"
+
+
+def run_workspace_path(base_root: str | os.PathLike[str], run_id: str) -> Path:
+    """Return the per-run workspace path without creating it.
+
+    Two concurrent workflow runs previously shared ``temp/`` and overwrote each
+    other's artifacts. Each run now owns ``<base>/workflow-runs/<run_id>/`` so
+    its deliverables are isolated, still under the gitignored project temp root,
+    and still inspectable by a human after the run.
+    """
+    base = resolve_workspace_root(base_root)
+    run_id = str(run_id or "").strip()
+    if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id:
+        raise WorkspacePathError(f"invalid run id for workspace: {run_id!r}")
+    return (base / RUN_WORKSPACE_DIRNAME / run_id).resolve()
+
+
+def create_run_workspace(base_root: str | os.PathLike[str], run_id: str) -> Path:
+    root = run_workspace_path(base_root, run_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def snapshot_workspace(root: str | os.PathLike[str], *, max_entries: int = 20_000) -> dict[str, tuple[int, int]]:
+    """Map workspace-relative file paths to ``(mtime_ns, size)``.
+
+    Used to detect what a child produced without enumerating tool names: any
+    tool that writes (``file_write``, ``code_run``, or a future one) changes the
+    filesystem, so the before/after difference is the ground truth.
+
+    ``os.scandir`` is used instead of ``os.walk`` because the ancestor
+    directories are rarely huge but the workspace can be a full checkout; the
+    scan runs twice per child job, and ``os.walk`` re-stats every entry through
+    string paths (1.7s on this repository versus 0.07s here).
+    """
+    base = Path(root)
+    if not base.is_dir():
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    pending = [str(base)]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in {"__pycache__", ".git"}:
+                            pending.append(entry.path)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                relative = os.path.relpath(entry.path, base).replace(os.sep, "/")
+                snapshot[relative] = (int(stat.st_mtime_ns), int(stat.st_size))
+                if len(snapshot) >= max_entries:
+                    return snapshot
+    return snapshot
+
+
+def diff_workspace(
+    before: dict[str, tuple[int, int]] | None,
+    after: dict[str, tuple[int, int]] | None,
+) -> list[str]:
+    """Return workspace-relative paths created or modified between snapshots."""
+    if not after:
+        return []
+    if not before:
+        return sorted(after)
+    changed = [relative for relative, signature in after.items() if before.get(relative) != signature]
+    return sorted(changed)
+
+
 def _is_absolute_like(raw: str) -> bool:
     value = str(raw).strip().replace("\\", "/")
     return bool(value.startswith("/") or value.startswith("//") or (len(value) >= 2 and value[1] == ":"))

@@ -1672,7 +1672,84 @@ class InkBridgeTest(unittest.TestCase):
         document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
         refs = document["intermediateResults"][0]["artifactRefs"]
         self.assertEqual(["synthesis_report.md"], refs)
-        self.assertIn("workspace-relative", payload)
+        self.assertEqual(str(workspace_root.resolve()), document["workspacePath"])
+        self.assertIn("workspacePath", payload)
+
+    def test_workflow_handoff_resolves_artifacts_under_the_run_workspace_not_the_base_root(self):
+        """Refs must resolve against the run's own workspace.
+
+        With per-run workspaces, the base root only *contains* the run directory.
+        Resolving a ref against the base root would look one level too high and
+        drop every artifact, which is worse than the label-only handoff it
+        replaced.
+        """
+        agent = FakeAgent()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            run_workspace = base / "workflow-runs" / "wf_isolated"
+            run_workspace.mkdir(parents=True)
+            (run_workspace / "synthesis_report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(base),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_isolated",
+                    session_id="session_isolated",
+                    script="x",
+                    status="succeeded",
+                    metadata={"workspacePath": str(run_workspace), "workspaceBasePath": str(base)},
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={"label": "synthesis", "observedArtifacts": ["synthesis_report.md"]},
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+            loaded = bridge.workflow_store.load_run("wf_isolated")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+        self.assertEqual(str(run_workspace.resolve()), document["workspacePath"])
+        self.assertEqual(str(base.resolve()), document["workspaceBasePath"])
+        self.assertEqual(["synthesis_report.md"], document["intermediateResults"][0]["artifactRefs"])
+
+    def test_concurrent_runs_do_not_share_a_workspace_directory(self):
+        agent = FakeAgent()
+        agent.session_id = "session_parallel"
+        events = []
+        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="并行"))
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            base.mkdir()
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(base),
+                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
+                workflow_planner_factory=lambda: planner,
+            )
+
+            first_id = bridge.workflow_plan("并行一", timeout_seconds=5)
+            second_id = bridge.workflow_plan("并行二", timeout_seconds=5)
+            bridge.wait_for_workflow_idle(first_id, timeout=5)
+            bridge.wait_for_workflow_idle(second_id, timeout=5)
+
+            first = bridge.workflow_store.load_run(first_id)
+            second = bridge.workflow_store.load_run(second_id)
+
+        self.assertNotEqual(first.metadata["workspacePath"], second.metadata["workspacePath"])
+        self.assertEqual(str(base.resolve()), first.metadata["workspaceBasePath"])
 
     def test_workflow_handoff_artifact_refs_survive_size_compaction(self):
         agent = FakeAgent()

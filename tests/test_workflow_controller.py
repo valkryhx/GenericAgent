@@ -363,6 +363,57 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual(["workflow_planned", "workflow_started"], [event.event_type for event in store.replay_events(run.run_id)[:2]])
             self.assertEqual("workflow-draft.json", store.load_run(run.run_id).metadata["workflowDraftRef"])
 
+    def test_each_planned_run_gets_its_own_workspace_under_the_base_root(self):
+        """Concurrent runs must not share a workspace directory.
+
+        Regression: two runs wrote into the same ``temp/`` root, so the second
+        run's artifacts overwrote the first run's, and a handoff could point at
+        a file a different run had produced.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            base.mkdir()
+            controller = WorkflowController(WorkflowStore(root=Path(tmp) / "runs"))
+            planner = WorkflowPlanner()
+
+            first = controller.create_planned_run(
+                session_id="session_test",
+                task_text="调研一",
+                planner=planner,
+                workspace_path=str(base),
+            )
+            second = controller.create_planned_run(
+                session_id="session_test",
+                task_text="调研二",
+                planner=planner,
+                workspace_path=str(base),
+            )
+
+            first_workspace = Path(first.metadata["workspacePath"])
+            second_workspace = Path(second.metadata["workspacePath"])
+            self.assertNotEqual(first_workspace, second_workspace)
+            self.assertEqual(base / "workflow-runs" / first.run_id, first_workspace)
+            self.assertTrue(first_workspace.is_dir())
+            self.assertTrue(second_workspace.is_dir())
+            self.assertEqual(str(base.resolve()), first.metadata["workspaceBasePath"])
+
+    def test_run_workspace_can_be_disabled_for_callers_that_need_the_shared_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            base.mkdir()
+            controller = WorkflowController(WorkflowStore(root=Path(tmp) / "runs"))
+
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text="共享工作区",
+                planner=WorkflowPlanner(),
+                workspace_path=str(base),
+                run_workspace=False,
+            )
+
+            self.assertNotIn("workspacePath", run.metadata)
+            self.assertNotIn("workflow-runs", {path.name for path in base.iterdir()})
+
 
 if __name__ == "__main__":
     unittest.main()

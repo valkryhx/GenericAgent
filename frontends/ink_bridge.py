@@ -925,8 +925,17 @@ class GenericAgentBridge:
             watcher.start()
             with backend_output_redirect():
                 run = self.workflow_store.load_run(run_id)
-                run.metadata.update(workspace_metadata(self.workspace_root))
-                self.workflow_store.save_run(run)
+                # The controller already assigned this run its own workspace
+                # (``workflow-runs/<runId>/``). Overwriting it here would point
+                # every run back at the shared root, which is exactly the
+                # cross-run overwrite the per-run directory prevents. Only fill
+                # in a default when the run has no workspace of its own.
+                if not (isinstance(run.metadata, dict) and run.metadata.get("workspacePath")):
+                    if resume_from_run_id is None and self._assign_run_workspace(run):
+                        self.workflow_store.save_run(run)
+                    else:
+                        run.metadata.update(workspace_metadata(self.workspace_root))
+                        self.workflow_store.save_run(run)
                 runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
                 runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
                 current = self.workflow_store.load_run(run_id)
@@ -1191,6 +1200,55 @@ class GenericAgentBridge:
             return None
         return sanitize(payload)
 
+    def _run_workspace_root(self, run) -> str:
+        """Return the workspace this run's artifacts are rooted at.
+
+        Every run owns ``<base>/workflow-runs/<runId>/`` so concurrent runs
+        cannot overwrite each other. Handoff refs must therefore be resolved
+        against the run's own workspace, not the shared GA workspace root; the
+        base path stays in ``workspaceBasePath`` for human/again-relative
+        reporting.
+        """
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        candidate = metadata.get("workspacePath")
+        if isinstance(candidate, str) and candidate.strip():
+            return os.path.realpath(os.fspath(candidate.strip()))
+        return os.path.realpath(os.fspath(self.workspace_root))
+
+    def _run_artifact_base_root(self, run) -> str:
+        """Return the root that run-internal refs (result/transcript) resolve under.
+
+        The run's internal artifact directory lives under the GA workspace base
+        (``temp/sessions/<session>/workflows/<run>/``), not under the run's own
+        ``workflow-runs/<runId>/`` output directory. Those are two different
+        roots, and conflating them was what made the handoff unreadable.
+        """
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        candidate = metadata.get("workspaceBasePath")
+        if isinstance(candidate, str) and candidate.strip():
+            return os.path.realpath(os.fspath(candidate.strip()))
+        return os.path.realpath(os.fspath(self.workspace_root))
+
+    def _assign_run_workspace(self, run) -> bool:
+        """Give an unassigned run its own workspace directory. Returns success.
+
+        Draft and resumed runs bypass ``create_planned_run``, which is where the
+        planned path assigns the per-run workspace. Assigning it here keeps one
+        rule for every entry point: a run's deliverables never share a directory
+        with another run's.
+        """
+        from workflow_workspace import create_run_workspace, workspace_metadata
+
+        try:
+            directory = create_run_workspace(self.workspace_root, run.run_id)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+        metadata.update(workspace_metadata(directory))
+        metadata["workspaceBasePath"] = str(resolve_workspace_root(self.workspace_root))
+        run.metadata = metadata
+        return True
+
     def _workflow_workspace_ref(self, run, artifact_ref: Any) -> str | None:
         if not run.artifact_dir or not artifact_ref:
             return None
@@ -1199,7 +1257,7 @@ class GenericAgentBridge:
             return None
         artifact_dir = os.path.realpath(os.fspath(run.artifact_dir))
         candidate = os.path.realpath(os.path.join(artifact_dir, ref))
-        workspace_root = os.path.realpath(os.fspath(self.workspace_root))
+        workspace_root = self._run_artifact_base_root(run)
         try:
             if os.path.commonpath([artifact_dir, candidate]) != artifact_dir:
                 return None
@@ -1215,13 +1273,14 @@ class GenericAgentBridge:
         """Return workspace-relative files a job actually produced.
 
         Reads the scheduler's observed-artifact record (ground truth from the
-        child's own ``file_write`` calls) and only keeps paths that exist inside
-        the GA workspace, so the value is safe to hand to the next LLM request.
+        child's filesystem changes, whatever tool made them) and only keeps
+        paths that exist inside the run's workspace, so the value is safe to
+        hand to the next LLM request.
         """
         candidates = self._workflow_job_observed_artifacts(run, job)
         if not candidates:
             return []
-        workspace_root = os.path.realpath(os.fspath(self.workspace_root))
+        workspace_root = self._run_workspace_root(run)
         resolved: list[str] = []
         for candidate in candidates:
             ref = candidate.replace('\\', '/').strip()
@@ -1270,12 +1329,12 @@ class GenericAgentBridge:
             return sanitized
         if isinstance(sanitized, dict):
             compact = {}
-            for key in ('runId', 'status', 'error', 'artifactRefs', 'summary', 'answer', 'conclusion', 'result', 'text'):
+            for key in ('runId', 'status', 'error', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'summary', 'answer', 'conclusion', 'result', 'text'):
                 if key in sanitized:
                     compact[key] = GenericAgentBridge._handoff_bounded_value(sanitized[key], max(256, max_bytes // 2))
             compact['truncated'] = True
             while len(json.dumps(compact, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > max_bytes:
-                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'artifactRefs', 'truncated'}), None)
+                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'truncated'}), None)
                 if removable is None:
                     break
                 compact.pop(removable)
@@ -1319,6 +1378,9 @@ class GenericAgentBridge:
                 item['result'] = self._handoff_bounded_value(artifact.get('payload', artifact), 8192)
             intermediate.append(item)
 
+        run_metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        run_workspace = self._run_workspace_root(run)
+        base_workspace = run_metadata.get("workspaceBasePath")
         handoff = {
             'runId': run.run_id,
             'status': run.status,
@@ -1327,6 +1389,12 @@ class GenericAgentBridge:
             'finalResult': self._handoff_bounded_value(self._workflow_final_payload(run), 28 * 1024),
             'finalResultRef': self._workflow_workspace_ref(run, run.result_ref),
             'intermediateResults': intermediate,
+            # Concrete absolute root for this run's deliverables. Every
+            # ``artifactRefs``/``finalResultRef`` entry is relative to it, so the
+            # GA agent never has to infer the location from the run's internal
+            # artifact directory.
+            'workspacePath': run_workspace,
+            'workspaceBasePath': str(base_workspace) if base_workspace else run_workspace,
         }
         while len(json.dumps(handoff, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > _WORKFLOW_HANDOFF_MAX_BYTES - 512:
             candidate = next((item for item in reversed(intermediate) if 'result' in item), None)
@@ -1343,8 +1411,9 @@ class GenericAgentBridge:
         return (
             "The workflow run has finished. Answer the user's original request using the final result and relevant intermediate results below. "
             "Do not claim success if the workflow status is failed/cancelled. "
-            "Intermediate result `artifactRefs` are workspace-relative paths of files the child agents actually wrote; "
-            "resolve them under the GA workspace root, not under the run's internal directory. Read them only if needed. "
+            "Intermediate result `artifactRefs` and `finalResultRef` are paths relative to `workspacePath` above, "
+            "which is this run's own directory under `workspaceBasePath`; resolve them under `workspacePath`, "
+            "never under the run's internal artifact directory. Read them only if needed. "
             "Transcript files are references only and are not included here.\n\n"
             f'<workflow_handoff>\n{serialized}\n</workflow_handoff>'
         )

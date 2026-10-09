@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from workflow_models import WorkflowEvent, WorkflowRun
 from workflow_store import WorkflowStore
 from workflow_verification import normalize_verification_contract
@@ -21,6 +23,7 @@ class WorkflowController:
         context: dict | None = None,
         auto_approve: bool = True,
         workspace_path: str | None = None,
+        run_workspace: bool = True,
     ) -> WorkflowRun:
         draft = planner.plan(task_text, context or {})
         if workspace_path:
@@ -67,6 +70,24 @@ class WorkflowController:
                 "verificationContract": run_verification_contract,
             },
         )
+        # Two concurrent runs used to share one workspace directory, so a second
+        # run could overwrite or delete the first run's deliverables. Each run now
+        # owns ``<base>/workflow-runs/<runId>/``; the base stays in run metadata so
+        # handoff refs remain resolvable from the GA workspace root, and the
+        # planner keeps emitting workspace-relative paths either way.
+        if run_workspace and workspace_path:
+            from workflow_workspace import create_run_workspace, workspace_metadata
+
+            try:
+                run_workspace_dir = create_run_workspace(workspace_path, run.run_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                run.metadata.setdefault("workflowIssues", []).append({
+                    "code": "run_workspace_unavailable",
+                    "message": f"per-run workspace could not be created; falling back to the shared workspace: {exc}",
+                })
+            else:
+                run.metadata.update(workspace_metadata(run_workspace_dir))
+                run.metadata["workspaceBasePath"] = str(Path(workspace_path).expanduser().resolve())
         # A planner that could not produce a model-authored plan silently fell
         # back to the deterministic template. That plan still runs, but it is a
         # partial-quality delivery, so the run must terminate as ``degraded``

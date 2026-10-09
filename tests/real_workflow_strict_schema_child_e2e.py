@@ -86,9 +86,11 @@ Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials.`, 
   deliverables: ['research_notes.md']
 })
 phase('Synthesis')
-const report = await agent(`Write a short workspace-relative report using file_write.
-Path: synthesis_report.md
-Content: "# Synthesis report\nDELIVERED\n"
+const report = await agent(`Write a short workspace-relative report using code_run (not file_write).
+Run a small Python snippet that writes the file 'synthesis_report.md' with exactly the content:
+"# Synthesis report\nDELIVERED\n"
+Use pathlib.Path('synthesis_report.md').write_text(..., encoding='utf-8') so the host observes a
+filesystem change rather than a file_write tool call.
 Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials.`, {
   label: 'synthesis',
   dependsOn: ['source-discovery'],
@@ -120,12 +122,23 @@ def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str
         return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     loaded = store.load_run("wf_artifact_handoff_e2e")
     handoff_refs: list[str] = []
+    tool_names_by_label: dict[str, list[str]] = {}
     for job in loaded.jobs:
         observed = (job.metadata or {}).get("observedArtifacts") or []
         handoff_refs.extend(str(ref) for ref in observed)
+        events = store.read_agent_transcript_events(loaded, (job.metadata or {}).get("transcriptRef"))
+        tool_names_by_label[str((job.metadata or {}).get("label") or job.job_id)] = sorted(
+            {
+                str(event.get("toolName") or event.get("tool_name") or "")
+                for event in events
+                if event.get("type") == "tool_call"
+            }
+            - {""}
+        )
     return {
         "runStatus": loaded.status,
         "observedArtifacts": sanitize(handoff_refs),
+        "toolNamesByJob": sanitize(tool_names_by_label),
         "filesOnDisk": sorted(
             name for name in ("research_notes.md", "synthesis_report.md") if (workspace / name).is_file()
         ),
@@ -208,6 +221,14 @@ def main() -> int:
                 and handoff.get("runStatus") == "succeeded"
                 and "synthesis_report.md" in (handoff.get("filesOnDisk") or [])
                 and "synthesis_report.md" in (handoff.get("observedArtifacts") or [])
+            )
+            # The whole point of the filesystem diff: the synthesis child must be
+            # observed even though it wrote through code_run, not file_write.
+            synthesis_tools = (handoff.get("toolNamesByJob") or {}).get("synthesis") or []
+            summary["synthesisUsedFileWrite"] = "file_write" in synthesis_tools
+            summary["synthesisObservedWithoutFileWrite"] = bool(
+                "synthesis_report.md" in (handoff.get("observedArtifacts") or [])
+                and "file_write" not in synthesis_tools
             )
     except Exception as exc:  # pragma: no cover - diagnostic path
         summary["issues"].append(f"{type(exc).__name__}: {str(exc)[:400]}")

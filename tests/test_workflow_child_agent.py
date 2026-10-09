@@ -830,6 +830,114 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertTrue(any(event.get("type") == "tool_denied" and event.get("toolName") == "file_write" for event in result.transcript_events))
             self.assertTrue(any(event.get("type") == "tool_result" and event.get("data", {}).get("permission", {}).get("action") == "deny" for event in result.transcript_events))
 
+    def test_child_tool_summary_reports_files_written_by_code_run(self):
+        """The runner must report artifacts from the filesystem, not tool names.
+
+        ``observedArtifacts`` used to be rebuilt downstream by scanning
+        transcript events for ``file_write``/``file_patch``, so a file created by
+        ``code_run`` -- the normal path for DOCX/HTML generation -- was never
+        observed and never reached the handoff. The runner now diffs the
+        workspace, which is tool-agnostic by construction.
+        """
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            script = (
+                "from pathlib import Path\n"
+                "Path('report.json').write_text('{\"ok\": true}', encoding='utf-8')\n"
+                "print('written')\n"
+            )
+            client = StubToolClient([
+                StubToolResponse("<summary>write via code_run</summary>", [
+                    StubToolCall("code_run", {"type": "python", "code": script}, id="tool_code"),
+                ]),
+                StubToolResponse("<summary>done</summary>code_run complete"),
+            ])
+            tools = [
+                {"type": "function", "function": {"name": "code_run", "parameters": {"type": "object", "properties": {}}}},
+            ]
+            job = WorkflowJob(
+                job_id="agent_code_run_writer",
+                prompt="write a report with code_run",
+                metadata={
+                    "runId": "wf_test",
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                    "workspacePath": str(workspace),
+                },
+            )
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            self.assertTrue((workspace / "report.json").is_file(), "code_run should have created the file")
+            self.assertIn("report.json", result.tool_summary.get("writtenPaths") or [])
+            self.assertNotIn("file_write", result.tool_summary.get("allowedTools") or [])
+
+    def test_child_tool_summary_detects_a_write_from_a_non_writer_tool_name(self):
+        """Observation must key off the filesystem, not a tool-name allowlist.
+
+        The recorded tool name here is ``file_read``, which the host does not
+        classify as a writer. The workspace diff still reports the new file,
+        which is exactly the shape a future writer tool has before anyone
+        teaches the host about it.
+        """
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            (workspace / "seed.txt").write_text("seed", encoding="utf-8")
+
+            client = StubToolClient([
+                StubToolResponse("<summary>read and produce</summary>", [
+                    StubToolCall("file_read", {"path": "seed.txt", "show_linenos": False}, id="tool_read"),
+                ]),
+                StubToolResponse("<summary>done</summary>non-writer tool complete"),
+            ])
+            job = WorkflowJob(
+                job_id="agent_future_writer",
+                prompt="produce a file through a tool the host calls read-only",
+                metadata={
+                    "runId": "wf_test",
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                    "workspacePath": str(workspace),
+                },
+            )
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client)
+            original_build_handler = runner._build_handler
+
+            def build_handler_with_future_tool(job_arg, transcript_events, profile, version):
+                handler = original_build_handler(job_arg, transcript_events, profile, version)
+                inner = handler.tool_before_callback
+
+                def before(tool_name, args, response):
+                    if tool_name == "file_read":
+                        (workspace / "from_future_tool.txt").write_text("payload", encoding="utf-8")
+                    return inner(tool_name, args, response)
+
+                handler.tool_before_callback = before
+                return handler
+
+            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]), \
+                 mock.patch.object(runner, "_build_handler", side_effect=build_handler_with_future_tool):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            self.assertIn("from_future_tool.txt", result.tool_summary.get("writtenPaths") or [])
+            self.assertIn("file_read", {event.get("toolName") for event in result.transcript_events if event.get("type") == "tool_call"})
+            self.assertNotIn("file_write", {event.get("toolName") for event in result.transcript_events if event.get("type") == "tool_call"})
+
 
 if __name__ == "__main__":
     unittest.main()
