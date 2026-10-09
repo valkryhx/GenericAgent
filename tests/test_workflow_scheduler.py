@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from workflow_models import AgentResult, WorkflowRun
-from workflow_scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig
+from workflow_scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig, normalize_retry_policy
 from workflow_store import WorkflowStore
 
 
@@ -456,6 +456,144 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("succeeded", loaded.jobs[0].status)
         self.assertTrue(loaded.jobs[0].metadata["result"]["verificationPassed"])
         self.assertTrue(loaded.jobs[0].metadata["schemaValidation"]["ok"])
+
+    def test_schema_failure_feeds_issues_into_the_next_attempt_metadata(self):
+        """A retried child must be told which fields the host rejected.
+
+        Regression: the scheduler re-queued the identical prompt, so the retry
+        reproduced the identical schema failure.
+        """
+        class RecordingRunner:
+            def __init__(self):
+                self.polls = {}
+                self.feedback_by_attempt = []
+
+            def start(self, job):
+                self.polls.setdefault(job.job_id, 0)
+
+            def poll(self, job):
+                attempt = self.polls.get(job.job_id, 0)
+                self.polls[job.job_id] = attempt + 1
+                self.feedback_by_attempt.append(job.metadata.get("retryFeedback"))
+                if attempt == 0:
+                    return AgentResult(job_id=job.job_id, payload={"summary": "prose"})
+                return AgentResult(job_id=job.job_id, payload={"sources": ["S1"], "claims": ["C1"]})
+
+            def cancel(self, job):
+                pass
+
+        runner = RecordingRunner()
+        scheduler, _store, _run = self.make_scheduler(runner=runner)
+        scheduler.register_agent(
+            prompt="collect sources",
+            label="collector",
+            options={
+                "schema": {"type": "object", "required": ["sources", "claims"]},
+                "retryPolicy": {"maxAttempts": 3, "retryableErrors": ["schema_validation_failed"], "backoffMs": 0},
+            },
+        )
+
+        scheduler.run_all()
+
+        self.assertIsNone(runner.feedback_by_attempt[0])
+        retry_feedback = runner.feedback_by_attempt[1]
+        self.assertIsInstance(retry_feedback, dict)
+        self.assertIn("missing required field: sources", retry_feedback["issues"])
+        self.assertIn("missing required field: claims", retry_feedback["issues"])
+
+    def test_downstream_result_exposes_validated_schema_fields_to_the_script(self):
+        """The script must receive the structured value it asked the agent for.
+
+        Regression: the RPC boundary only ever exposed ``summary``/``text``, so a
+        schema-validated answer reached the workflow script as prose (the
+        ``Array.isArray(result.sources)`` probes all read ``-1``).
+        """
+        scheduler, store, run = self.make_scheduler(
+            runner=FakeChildAgentRunner(
+                results={
+                    "agent_1": {
+                        "sources": [{"id": "S1"}],
+                        "claims": [{"id": "C1"}],
+                        "summary": "collected",
+                        "text": "long raw transcript text",
+                    }
+                }
+            )
+        )
+        job = scheduler.register_agent(
+            prompt="collect sources",
+            label="collector",
+            options={
+                "schema": {
+                    "type": "object",
+                    "required": ["sources", "claims"],
+                    "properties": {"sources": {"type": "array"}, "claims": {"type": "array"}},
+                }
+            },
+        )
+        scheduler.run_all()
+
+        downstream = scheduler.downstream_result(store.load_run(run.run_id).jobs[0])
+
+        self.assertEqual([{"id": "S1"}], downstream["sources"])
+        self.assertEqual([{"id": "C1"}], downstream["claims"])
+        self.assertEqual("collected", downstream["summary"])
+        self.assertNotIn("text", downstream)
+        self.assertTrue(downstream["schemaValidation"]["ok"])
+
+    def test_downstream_result_hides_schema_fields_when_validation_failed(self):
+        scheduler, store, run = self.make_scheduler(
+            runner=FakeChildAgentRunner(results={"agent_1": {"summary": "prose only"}})
+        )
+        job = scheduler.register_agent(
+            prompt="collect sources",
+            label="collector",
+            options={
+                "schema": {"type": "object", "required": ["sources"]},
+                "fallback": "text",
+            },
+        )
+        scheduler.run_all()
+
+        downstream = scheduler.downstream_result(store.load_run(run.run_id).jobs[0])
+
+        self.assertNotIn("sources", downstream)
+        self.assertTrue(downstream["schemaFallback"])
+
+    def test_schema_repair_receives_original_assignment_and_schema(self):
+        """The repair packet must be a real retry, not a blind regeneration."""
+        scheduler, store, run = self.make_scheduler(
+            runner=FakeChildAgentRunner(results={"agent_2": {"sources": ["S1"]}})
+        )
+        upstream = scheduler.register_agent(
+            prompt="collect sources for the quarterly report",
+            label="collector",
+            options={
+                "schema": {"type": "object", "required": ["sources"]},
+                "retryPolicy": {"maxAttempts": 1, "retryableErrors": [], "repairRole": "repair"},
+            },
+        )
+        upstream.status = "failed"
+        upstream.error = "schema_validation_failed"
+        upstream.metadata["schemaValidation"] = {
+            "ok": False,
+            "code": "schema_validation_failed",
+            "issues": ["missing required field: sources"],
+        }
+        scheduler.jobs = [upstream]
+
+        scheduled = scheduler._schedule_repair(
+            upstream,
+            "schema_validation_failed: missing required field: sources",
+            normalize_retry_policy(upstream.metadata["retryPolicy"]),
+        )
+
+        self.assertFalse(scheduled)
+        repair_job = scheduler.jobs[-1]
+        self.assertEqual("repair", repair_job.metadata["label"])
+        self.assertIn("collect sources for the quarterly report", repair_job.prompt)
+        self.assertEqual({"type": "object", "required": ["sources"]}, repair_job.metadata["options"]["schema"])
+        self.assertEqual(["missing required field: sources"], repair_job.metadata["retryFeedback"]["issues"])
 
     def test_concurrency_limit_only_starts_configured_number_of_jobs_per_tick(self):
         scheduler, _store, _ = self.make_scheduler(max_concurrent=3, runner=FakeChildAgentRunner(delay_ticks=1))

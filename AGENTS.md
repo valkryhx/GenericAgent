@@ -84,6 +84,16 @@ Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI�
 
 **重要方向性判断**：Step-Code 的 workflow 契约里没有 `taskType`（research/coding/review）这一概念，校验与门禁由计划显式声明的 schema、toolProfile、ACL 和 budget 决定。GA 目前用 `taskType` 分支推导硬门禁（如 coding → `python_unittest` + strict verification schema），这是研究型/混合型任务被错误套上代码型约束的根源。后续优化 GA workflow 时，应把门禁来源从"任务类型"迁移到"计划显式声明的检查项"，任务类型降级为提示信息而非门禁开关。
 
+### 结构化输出契约（workflow schema 子代理）
+
+声明了 `schemaRef` 的 agent 必须得到三件事，缺一个就会让整条 run 因 `schema_validation_failed` 失败：
+
+1. `workflow_child_agent.py::_structured_output_contract()` 追加的 `<workflow-structured-output>` 输出契约（对齐 Step-Code `agent-runner.ts::buildAgentPrompt`，32 KiB 截断）。只把 schema 放在 `options` dict 里不算契约，模型不会知道自己的回答会被机器校验。
+2. `agent_loop.py::_clean_content()` 不得压缩 JSON / `json` 代码块；该函数只服务于人类可读的终端输出，不能作用于机器校验的产物。
+3. `workflow_scheduler.py`：重试必须通过 `retryFeedback` 带上一次校验 issues（`_schema_retry_feedback`），repair 必须携带原 prompt + schema；`downstream_result()` 必须把通过校验的 schema 字段暴露给脚本（Step-Code 语义是 `agent()` 直接返回校验后的值）。
+
+真实回归证据见 `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §11 与 `tests/real_workflow_strict_schema_child_e2e.py`。
+
 ## 文档命名约定
 
 新增测试记录、故障复盘、验收报告和技术调研文档时，文件名统一使用 `YYYYMMDD-xxxx.md` 格式，例如 `20260930-gpt6-luna-generic-agent-capability-evaluation.md`。日期使用 Asia/Shanghai 当前日期，`xxxx` 使用简洁、可检索的英文小写短语。

@@ -909,7 +909,12 @@ class WorkflowPlanner:
                         "agents": [
                             {
                                 "label": "source-discovery",
-                                "prompt": f"任务：{task_text}\n收集公开来源、关键 claims、风险和后续验证建议，返回结构化摘要。",
+                                "prompt": (
+                                    f"任务：{task_text}\n"
+                                    "收集公开来源、关键 claims、风险和后续验证建议；"
+                                    "按宿主声明的 JSON Schema 返回 sources、claims、risks 三个字段，"
+                                    "不要只给自然语言摘要。"
+                                ),
                                 "schemaRef": "SOURCE_SCHEMA",
                                 "dependsOn": [],
                             }
@@ -930,6 +935,12 @@ class WorkflowPlanner:
                     "SOURCE_SCHEMA": {
                         "type": "object",
                         "required": ["sources", "claims", "risks"],
+                        "properties": {
+                            "sources": {"type": "array", "items": {"type": "object"}},
+                            "claims": {"type": "array", "items": {"type": "object"}},
+                            "risks": {"type": "array"},
+                        },
+                        "additionalProperties": True,
                     }
                 },
                 "artifacts": ["sources", "synthesis"],
@@ -1243,6 +1254,8 @@ class LLMWorkflowPlanner:
                 "Artifact paths are workspace-relative only (for example tmp/report.html). Never emit /tmp, D:\tmp, ~, UNC, or .. traversal paths; the host hard-normalizes and rejects paths outside the launch workspace, so do not treat prompt text as permission.",
                 "执行型计划必须声明 executionContract.requiresExecution、actions、requiredTools 和 artifact acceptance checks，并把每个 action 映射到实际执行它的 agent。",
                 "schemas 的 key 是不透明的 schemaRef 字符串，优先使用 SOURCE_SCHEMA、VERIFICATION_SCHEMA 等逻辑名称；不要把文件路径写入 schemaRef。无论 schemaRef 形状如何，必须保持与 schemas key 完全一致，schema 必须是纯 JSON Schema 数据而不是 JavaScript 代码。",
+                "每个 schemaRef 的 schema 必须完整到子代理无需猜测：声明 type、properties（每个必须出现的字段都要有 type，数组要给 items 或至少 type=array）以及 required。只写 required 而不写 properties 会让子代理返回自然语言并按 schema 失败阻塞整条 run；不要依赖子代理自觉输出 JSON。",
+                "声明了 schemaRef 的 agent 的 prompt 必须显式要求按该 schema 输出 JSON 字段，不要只写「返回结构化摘要」这类自然语言指令；宿主会把 schema 作为硬性输出契约校验。",
                 "strictSchema 默认为 true 语义：声明了 schemaRef 的 agent 若 schema 校验失败即视为该 job 失败并阻塞 run。只有确实允许文本降级的 agent 才显式写 schemaPolicy: \"optional\"；此时降级会被宿主记为 degraded（部分交付）终态，而不是成功，所以不要为了省事批量声明 optional。",
                 "requiredTools 表示 agent 可用的能力集合，不要把普通文件写入工具当作必须逐字调用的硬门禁。requiredToolEvidence 只有 mode=required 才阻塞；MCP 来源证据默认 required，file_write/file_patch 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
                 "action id must match the exact same string in the assigned agent.actions array; action ids are stable ids such as search, create_artifact, verify_artifact, never display labels or prose.",

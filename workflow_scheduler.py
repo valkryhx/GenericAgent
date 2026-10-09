@@ -759,6 +759,10 @@ class AgentScheduler:
 
         Durable result.json and transcript files retain full audit data, but the
         RPC boundary must not put a child transcript into the next LLM request.
+        A schema-constrained job additionally exposes its validated structured
+        value, because that value *is* the deliverable the script asked for
+        (Step-Code returns the validated value straight from ``agent()``); the
+        raw ``text`` transcript field is always dropped.
         """
         handoff = job.metadata.get("handoff") if isinstance(job.metadata, dict) else None
         if not isinstance(handoff, dict):
@@ -778,7 +782,30 @@ class AgentScheduler:
             for key in ("verificationPassed", "schemaFallback", "schemaValidation", "statusCode", "category", "providerAnomaly"):
                 if key in payload:
                     result[key] = sanitize(copy.deepcopy(payload[key]))
+            result.update(self._validated_structured_fields(job, payload))
+        validation = job.metadata.get("schemaValidation") if isinstance(job.metadata, dict) else None
+        if isinstance(validation, dict) and "schemaValidation" not in result:
+            result["schemaValidation"] = sanitize(copy.deepcopy(validation))
         return result
+
+    def _validated_structured_fields(self, job: WorkflowJob, payload: dict) -> dict:
+        """Expose declared schema fields to the script once validation passed."""
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else None
+        schema = (options or {}).get("schema") if isinstance(options, dict) else None
+        if not isinstance(schema, dict) or not schema:
+            return {}
+        validation = job.metadata.get("schemaValidation") if isinstance(job.metadata, dict) else None
+        if isinstance(validation, dict) and validation.get("ok") is not True:
+            return {}
+        declared = schema.get("properties")
+        names = list(declared.keys()) if isinstance(declared, dict) and declared else list(schema.get("required") or [])
+        exposed: dict = {}
+        for name in names:
+            key = str(name)
+            if key in {"text", "summary"} or key not in payload:
+                continue
+            exposed[key] = sanitize(copy.deepcopy(payload[key]))
+        return exposed
 
     def _schedule_retry(self, job: WorkflowJob, error: str, *, result: AgentResult | None = None) -> bool:
         policy = normalize_retry_policy(job.metadata.get("retryPolicy"))
@@ -789,9 +816,14 @@ class AgentScheduler:
         retryable = any(pattern and pattern in text for pattern in policy["retryableErrors"])
         if not retryable or policy["attempts"] >= policy["maxAttempts"]:
             return self._schedule_repair(job, error, policy)
+        feedback = self._schema_retry_feedback(job, result)
         policy["lastError"] = redact_sensitive_text(error)
         policy["retryNotBefore"] = time.time() + (policy["backoffMs"] / 1000.0)
         job.metadata["retryPolicy"] = policy
+        if feedback:
+            job.metadata["retryFeedback"] = feedback
+        else:
+            job.metadata.pop("retryFeedback", None)
         job.status = "queued"
         job.error = None
         self._append(
@@ -807,6 +839,31 @@ class AgentScheduler:
         )
         return True
 
+    @staticmethod
+    def _schema_retry_feedback(job: WorkflowJob, result: AgentResult | None) -> dict | None:
+        """Carry the previous schema rejection into the retried child prompt.
+
+        Re-running the identical prompt just reproduces the identical failure.
+        Step-Code appends ``<workflow-retry>`` with ``lastErrors`` for the same
+        reason; a retry must be told what was wrong.
+        """
+        validation = job.metadata.get("schemaValidation") if isinstance(job.metadata, dict) else None
+        issues = validation.get("issues") if isinstance(validation, dict) else None
+        if not isinstance(issues, list) or not issues:
+            payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+            nested = payload.get("schemaValidation") if isinstance(payload.get("schemaValidation"), dict) else {}
+            issues = nested.get("issues")
+        if not isinstance(issues, list):
+            return None
+        cleaned = [str(item).strip()[:300] for item in issues if str(item).strip()]
+        if not cleaned:
+            return None
+        policy = normalize_retry_policy(job.metadata.get("retryPolicy"))
+        return {
+            "attempt": int(policy.get("attempts") or 0) + 1,
+            "issues": cleaned[:12],
+        }
+
     def _schedule_repair(self, job: WorkflowJob, error: str, policy: dict) -> bool:
         repair_role = str(policy.get("repairRole") or "").strip()
         if not repair_role:
@@ -819,10 +876,18 @@ class AgentScheduler:
         self._sync_workspace_metadata()
         call_index = len(self.jobs)
         repair_policy = normalize_retry_policy({"maxAttempts": 1})
+        failed_options = job.metadata.get("options") if isinstance(job.metadata.get("options"), dict) else {}
+        validation = job.metadata.get("schemaValidation") if isinstance(job.metadata.get("schemaValidation"), dict) else {}
+        issues = [str(item).strip() for item in (validation.get("issues") or []) if str(item).strip()]
         metadata = {
             "callIndex": call_index,
             "label": repair_role,
-            "options": {"phase": job.phase, "role": repair_role, "repairOf": job.job_id},
+            "options": {
+                "phase": job.phase,
+                "role": repair_role,
+                "repairOf": job.job_id,
+                "schema": copy.deepcopy(failed_options.get("schema")),
+            },
             "runId": self.run.run_id,
             "permissionProfile": self.run.permission_profile,
             "permissionPolicyVersion": self.run.permission_policy_version,
@@ -832,12 +897,20 @@ class AgentScheduler:
             "repairRole": repair_role,
             "repairOf": job.job_id,
         }
+        if not metadata["options"]["schema"]:
+            metadata["options"].pop("schema", None)
+        elif issues:
+            metadata["retryFeedback"] = {"attempt": 1, "issues": issues[:12]}
         workspace_path = self.workspace_path
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         prompt = (
-            f"Repair the failed upstream child {job.job_id}. Failure: {redact_sensitive_text(error)[:1_000]}. "
-            "Make the smallest safe repair and summarise what changed."
+            f"The upstream workflow step {job.job_id} was rejected before this repair. "
+            f"Failure: {redact_sensitive_text(error)[:1_000]}.\n"
+            "Complete the original assignment and produce the required output. Schema and "
+            "workspace rules are enforced by the host; an identical failing answer is not a repair.\n\n"
+            "Original assignment:\n"
+            f"{(job.prompt or '')[:4_000]}"
         )
         repair_job = WorkflowJob(
             job_id=f"agent_{call_index + 1}",

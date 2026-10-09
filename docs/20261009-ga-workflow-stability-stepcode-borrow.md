@@ -367,3 +367,51 @@ symlink 祖先，并解析 shell 重定向/`mv`/`cp`/`tee`/`of=` 目标。
 1. P3-10 第 3 点（`expand_file_refs` 包含校验）—— 最小、可立即验证、堵住读旁路；
 2. P3-10 第 1、2、4 点（宿主侧 ACL 纯函数 + dispatch 前置校验）；
 3. P2-8（声明产物登记 + 收口内容校验）。
+
+## 11. 结构化输出契约修复（2026-10-09，真实 GA ink 复现）
+
+### 11.1 复现
+
+用户在 GA ink 中输入 `/workflow 使用 workflow 来调研 openai 这次解决了哪些比较知名的数学猜想`。
+run `wf_300abd40d8e148098f8d7273cdff7635` 终态 `failed`，`agent_1`（source-discovery）
+错误为 `schema_validation_failed: missing required field: sources; ... claims; ... risks`。
+该 agent 实际做了 5 次 MCP 检索，输出丰富，只是**格式**不是宿主要求的 JSON。
+
+### 11.2 根因（三个独立缺陷叠在一起）
+
+1. **子代理从未被告知输出契约**。`workflow_child_agent.py::_build_prompt` 只把
+   `options`（含 `schema`）当作一个普通 dict 打印，没有任何一句告诉模型「你的回答会被
+   JSON Schema 机器校验」。模型合理地回了自然语言 + Markdown 表格。
+   对照 Step-Code `agent-runner.ts::buildAgentPrompt`：它显式追加
+   `<workflow-structured-output>Return exactly one JSON value ...`。
+2. **显示压缩器销毁了正确答案**。transcript 里模型**确实**给出了完整的 fenced JSON，
+   但 `agent_loop.py::_clean_content` 会把超过 6 行的代码块压成 `... (27 lines)`，
+   于是即便格式正确也会被判为无效。该函数本是给人看终端输出的，不该作用于机器校验的产物。
+3. **重试是盲重试**。`_schedule_retry` 把同一 prompt 重新入队，不带任何上一次的校验错误，
+   等于重复同一次失败；`_schedule_repair` 生成的修复包既不带原任务也不带 schema。
+
+另确认此前怀疑的「中文乱码」是**误报**：transcript/plan 落盘字节是正确的 UTF-8，
+只是 PowerShell cp936 终端渲染造成的假象。
+
+### 11.3 修复
+
+| 位置 | 改动 |
+| --- | --- |
+| `workflow_child_agent.py` | 新增 `_structured_output_contract()`，有 schema 时追加与 Step-Code 逐字对齐的 `<workflow-structured-output>` 块（32 KiB 截断） |
+| `workflow_child_agent.py` | 新增 `_retry_feedback_block()`，把上次 `issues` 以 `<workflow-retry>` 回传 |
+| `workflow_child_agent.py` | `_run_job` 改走 `_build_success_payload()`：schema 任务把解析出的 JSON 提升到 payload 根，而非只塞 `summary`/`text` |
+| `agent_loop.py` | `_clean_content` 不再压缩 JSON / `json` 代码块（机器产物不可截断） |
+| `workflow_scheduler.py` | `_schema_retry_feedback()` 把校验 issues 写入下次 attempt 的 `retryFeedback` |
+| `workflow_scheduler.py` | `_schedule_repair()` 携带原任务 prompt、schema 与校验反馈，修复包不再是盲目重生成 |
+| `workflow_scheduler.py` | `downstream_result()` 暴露已通过校验的 schema 字段，让脚本拿到结构化值（Step-Code 语义） |
+| `workflow_planner.py` | 确定性 fallback 的 `SOURCE_SCHEMA` 补 `properties`/`items`；prompt 与 schema 自洽；提示词新增「schema 必须完整、prompt 必须显式要求 JSON」 |
+
+### 11.4 验收
+
+- 单元：`tests/test_workflow_child_agent.py` +6、`tests/test_workflow_scheduler.py` +4。
+- 全量 Python：`python -m unittest discover -s tests` → **1264 tests OK**（skip 3）。
+- Ink：`npx tsx --test src/*.test.ts` → **391 pass / 0 fail**。
+- 真实 E2E（DeepSeek-V4.1-Flash，`profiles.default`）：新增
+  `tests/real_workflow_strict_schema_child_e2e.py`，严格 schema 研究子代理
+  `status=succeeded`、`schemaValidation.ok=true`、脚本侧
+  `{sourceCount: 3, claimCount: 2, riskCount: 1}`、`workflowIssues=[]`，耗时约 6.6s。

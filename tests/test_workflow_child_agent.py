@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -246,6 +247,157 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertIn("artifacts/research.json", prompt)
         self.assertIn("resultRef: agents/agent_1/result.json", prompt)
         self.assertNotIn("x" * 1000, prompt)
+
+    def test_child_prompt_declares_structured_output_contract_for_schema_jobs(self):
+        """A schema job must tell the child that its answer is machine-validated JSON.
+
+        Regression: the child prompt only embedded ``options`` as an opaque dict,
+        so the model answered in prose and the host schema check could never pass.
+        Step-Code appends an explicit ``<workflow-structured-output>`` block; GA
+        must carry the same contract.
+        """
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="collect sources",
+            metadata={
+                "runId": "wf_test",
+                "label": "source-discovery",
+                "options": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["sources", "claims", "risks"],
+                        "properties": {"sources": {"type": "array"}},
+                    }
+                },
+            },
+        )
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertIn("<workflow-structured-output>", prompt)
+        self.assertIn("</workflow-structured-output>", prompt)
+        self.assertIn("Return exactly one JSON value", prompt)
+        self.assertIn('"sources"', prompt)
+        self.assertIn('"claims"', prompt)
+        self.assertIn('"risks"', prompt)
+        self.assertIn("Do not wrap it in Markdown", prompt)
+
+    def test_child_prompt_omits_structured_output_contract_without_schema(self):
+        job = WorkflowJob(job_id="agent_1", prompt="just summarize", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertNotIn("<workflow-structured-output>", prompt)
+
+    def test_child_prompt_carries_previous_schema_failure_feedback_on_retry(self):
+        """A retry that repeats the identical prompt just fails the same way."""
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="collect sources",
+            metadata={
+                "runId": "wf_test",
+                "options": {"schema": {"type": "object", "required": ["sources"]}},
+                "retryFeedback": {
+                    "attempt": 2,
+                    "issues": ["missing required field: sources", "missing required field: claims"],
+                },
+            },
+        )
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertIn("<workflow-retry", prompt)
+        self.assertIn("missing required field: sources", prompt)
+        self.assertIn("missing required field: claims", prompt)
+
+    def test_native_runner_parses_schema_fenced_json_answer_into_payload(self):
+        """The host validates ``payload``; a JSON answer must land there, not in prose."""
+        answer = "\n".join(
+            [
+                "<summary>collected sources</summary>",
+                "Here is the structured result:",
+                "```json",
+                "{",
+                '  "sources": [{"id": "S1", "url": "https://example.com/a"}],',
+                '  "claims": [{"id": "C1", "text": "landed"}],',
+                '  "risks": [{"id": "R1", "text": "unverified"}]',
+                "}",
+                "```",
+            ]
+        )
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="collect sources",
+            metadata={
+                "runId": "wf_test",
+                "options": {"schema": {"type": "object", "required": ["sources", "claims", "risks"]}},
+            },
+        )
+        runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession(chunks=(answer,)))
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertIsInstance(result.payload, dict)
+        self.assertEqual([{"id": "S1", "url": "https://example.com/a"}], result.payload["sources"])
+        self.assertEqual([{"id": "C1", "text": "landed"}], result.payload["claims"])
+        self.assertEqual([{"id": "R1", "text": "unverified"}], result.payload["risks"])
+        assistant_events = [event for event in result.transcript_events if event.get("type") == "assistant"]
+        self.assertEqual(answer, assistant_events[0]["text"])
+
+    def test_native_runner_keeps_prose_payload_when_answer_is_not_json(self):
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="collect sources",
+            metadata={"runId": "wf_test", "options": {"schema": {"type": "object", "required": ["sources"]}}},
+        )
+        runner = NativeGPTChildAgentRunner(
+            session_factory=lambda config_name: StubSession(chunks=("plain prose, no json here",))
+        )
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual("plain prose, no json here", result.payload["summary"])
+        self.assertEqual("plain prose, no json here", result.payload["text"])
+
+    def test_native_runner_preserves_long_structured_json_answer(self):
+        """Display compaction must never truncate a machine-validated answer.
+
+        Regression: ``agent_runner_loop`` shrank any fenced block longer than six
+        lines to ``... (N lines)``, which silently destroyed a valid JSON answer.
+        """
+        answer = "```json\n" + json.dumps(
+            {
+                "sources": [{"id": f"S{index}", "url": f"https://example.com/{index}"} for index in range(12)],
+                "claims": [{"id": "C1", "text": "x" * 200}],
+                "risks": ["unverified"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n```"
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="collect sources",
+            metadata={
+                "runId": "wf_test",
+                "options": {"schema": {"type": "object", "required": ["sources", "claims", "risks"]}},
+            },
+        )
+        runner = NativeGPTChildAgentRunner(session_factory=lambda config_name: StubSession(chunks=(answer,)))
+
+        runner.start(job)
+        result = self.wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual(12, len(result.payload["sources"]))
+        assistant_events = [event for event in result.transcript_events if event.get("type") == "assistant"]
+        self.assertNotIn("lines)", assistant_events[0]["text"])
 
     def test_child_prompt_and_transcript_carry_workflow_role(self):
         created = []

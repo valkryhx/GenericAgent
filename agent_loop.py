@@ -251,6 +251,18 @@ def _clean_content(text):
         lang = lines[0].replace('```','').strip()
         body = [l for l in lines[1:-1] if l.strip()]
         if len(body) <= 6: return m.group(0)
+        # Never shrink a machine-readable block: a JSON answer is validated by the
+        # host, so a "N lines" preview silently destroys a valid result.
+        if lang.lower() in ('json', 'json5'):
+            return m.group(0)
+        body_text = '\n'.join(body).lstrip()
+        if body_text[:1] in ('{', '[', '"'):
+            try:
+                json.loads(body_text)
+            except Exception:
+                pass
+            else:
+                return m.group(0)
         preview = '\n'.join(body[:5])
         return f'```{lang}\n{preview}\n  ... ({len(body)} lines)\n```'
     text = re.sub(r'```[\s\S]*?```', _shrink_code, text)

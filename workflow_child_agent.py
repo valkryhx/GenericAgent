@@ -107,6 +107,110 @@ def _build_capability_snapshot(tools: list[dict], mcp_discovery: dict) -> dict:
     }
 
 
+def _strip_code_fence(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _json_answer_candidates(text: str):
+    """Yield progressively looser slices of a child answer worth parsing as JSON."""
+    raw = str(text or "")
+    segments = [raw]
+    marker = "\nTurn "
+    last = raw.rfind(marker)
+    if last >= 0:
+        # Tool-loop output prefixes every turn; the final answer is the last one.
+        segments.insert(0, raw[last:])
+    for segment in segments:
+        fenced = _strip_code_fence(segment)
+        if fenced:
+            yield fenced
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = segment.find(opener)
+            end = segment.rfind(closer)
+            if 0 <= start < end:
+                yield segment[start:end + 1]
+
+
+def parse_json_answer(text: str):
+    """Return the JSON value a schema-constrained child produced, else ``None``.
+
+    The host validates ``payload``, so an answer that *is* JSON must be lifted out
+    of prose/fences before validation; otherwise a correct answer is reported as a
+    schema failure and the run fails closed.
+    """
+    for candidate in _json_answer_candidates(text):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return None
+
+
+def _declared_schema(options: dict | None):
+    schema = (options or {}).get("schema") if isinstance(options, dict) else None
+    return schema if isinstance(schema, dict) and schema else None
+
+
+def _structured_output_contract(options: dict | None) -> str:
+    """Explicit machine-readable output contract for a schema-constrained job.
+
+    Embedding ``options`` as an opaque dict is not enough: the model never learns
+    that its answer is validated. Step-Code appends the identical block, so keep
+    the wording and the 32 KiB bound aligned with
+    ``features/workflow/agent-runner.ts::buildAgentPrompt``.
+    """
+    schema = _declared_schema(options)
+    if schema is None:
+        return ""
+    try:
+        serialized = json.dumps(schema, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+    return "\n".join([
+        "",
+        "<workflow-structured-output>",
+        "Return exactly one JSON value matching this JSON Schema. Do not wrap it in Markdown fences or add commentary.",
+        serialized[:32_000],
+        "</workflow-structured-output>",
+    ])
+
+
+def _retry_feedback_block(metadata: dict | None) -> str:
+    """Tell a retried child why its previous answer was rejected.
+
+    Without the previous validation issues a retry is a blind re-roll that
+    reproduces the same failure.
+    """
+    feedback = (metadata or {}).get("retryFeedback") if isinstance(metadata, dict) else None
+    if not isinstance(feedback, dict):
+        return ""
+    issues = [str(item).strip() for item in (feedback.get("issues") or []) if str(item).strip()]
+    if not issues:
+        return ""
+    attempt = str(feedback.get("attempt") or "").strip()
+    attribute = f' attempt="{int(attempt)}"' if attempt.isdigit() else ""
+    return "\n".join([
+        "",
+        f"<workflow-retry{attribute}>",
+        "Previous output failed schema validation: " + "; ".join(issues[:12]),
+        "Return the corrected JSON value now, with no prose and no Markdown fences.",
+        "</workflow-retry>",
+    ])
+
+
 class NativeGPTChildAgentRunner:
     """Real workflow child agent.
 
@@ -269,7 +373,7 @@ class NativeGPTChildAgentRunner:
             transcript_events.append({"type": "assistant", "text": answer})
             if usage:
                 transcript_events.append({"type": "token_usage", "tokenUsage": usage})
-            payload = {"summary": answer.strip(), "text": answer}
+            payload = self._build_success_payload(job, answer)
             result = AgentResult(
                 job_id=job.job_id,
                 status="succeeded",
@@ -541,4 +645,31 @@ class NativeGPTChildAgentRunner:
             "Task:",
             job.prompt,
         ])
+        contract = _structured_output_contract(options)
+        if contract:
+            lines.append(contract)
+        retry_feedback = _retry_feedback_block(job.metadata)
+        if retry_feedback:
+            lines.append(retry_feedback)
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_success_payload(job, answer: str) -> dict:
+        """Shape the child payload the host validates.
+
+        A schema-constrained job must expose its JSON answer at the payload root,
+        because that is exactly what ``_apply_schema_contract`` checks. Prose
+        answers keep the historic ``{"summary", "text"}`` shape.
+        """
+        text = str(answer or "").strip()
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        if _declared_schema(options):
+            parsed = parse_json_answer(answer)
+            if isinstance(parsed, dict):
+                payload = dict(parsed)
+                payload.setdefault("summary", text[:2_000])
+                payload.setdefault("text", answer)
+                return payload
+            if isinstance(parsed, list):
+                return {"result": parsed, "summary": text[:2_000], "text": answer}
+        return {"summary": text, "text": answer}
