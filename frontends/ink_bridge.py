@@ -183,6 +183,7 @@ class GenericAgentBridge:
         agent_factory: AgentFactory = default_agent_factory,
         emit: EmitFn | None = None,
         workflow_root: str | os.PathLike[str] | None = None,
+        workspace_root: str | os.PathLike[str] | None = None,
         workflow_runtime_factory: Callable[..., Any] | None = None,
         workflow_planner_factory: Callable[[], Any] | None = None,
         agent_control: Any | None = None,
@@ -192,7 +193,7 @@ class GenericAgentBridge:
         # the repository root for a normal ``ga`` launch, so a generated report
         # appeared next to agentmain.py. The canonical root is the project's
         # gitignored temp/ directory.
-        self.workspace_root = resolve_workspace_root(default_workspace_root())
+        self.workspace_root = resolve_workspace_root(workspace_root or default_workspace_root())
         with backend_output_redirect():
             self.agent = self.agent_factory()
             self.agent.inc_out = True
@@ -906,9 +907,22 @@ class GenericAgentBridge:
 
     def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
         handoff_queued = False
+        watch_stop = threading.Event()
+        watcher = None
         try:
             self.emit({"type": "status", "status": "running"})
             self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
+            # Progress is durable on disk, so poll it while the runtime blocks.
+            # Without this the Ink panel sits at "0/0 agents done" for the whole
+            # run and only updates once the runtime returns.
+            self.workflow_progress(run_id)
+            watcher = threading.Thread(
+                target=self._watch_workflow_progress,
+                args=(run_id, watch_stop),
+                daemon=True,
+                name=f"ga-ink-workflow-progress-{run_id}",
+            )
+            watcher.start()
             with backend_output_redirect():
                 run = self.workflow_store.load_run(run_id)
                 run.metadata.update(workspace_metadata(self.workspace_root))
@@ -916,6 +930,7 @@ class GenericAgentBridge:
                 runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
                 runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
                 current = self.workflow_store.load_run(run_id)
+            watch_stop.set()
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
             self.workflow_progress(run_id)
@@ -923,6 +938,7 @@ class GenericAgentBridge:
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
             handoff_queued = self._queue_workflow_handoff(current)
         except Exception as exc:
+            watch_stop.set()
             try:
                 current = self.workflow_store.load_run(run_id)
                 if current.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
@@ -958,9 +974,42 @@ class GenericAgentBridge:
                 pass
             self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
         finally:
+            watch_stop.set()
             self.emit({"type": "activity", "label": None})
             if not handoff_queued:
                 self.emit({"type": "status", "status": "idle"})
+
+    def _watch_workflow_progress(self, run_id: str, stop: threading.Event, *, interval: float = 0.25) -> None:
+        """Publish workflow-progress snapshots until the run settles.
+
+        ``workflow_progress`` reads a durable file, so polling is safe from a
+        background thread; events are already deduplicated by sequence for the
+        event stream and progress is a full snapshot, so repeats are harmless.
+        """
+        last_serialized: str | None = None
+        while not stop.wait(interval):
+            try:
+                with backend_output_redirect():
+                    run = self.workflow_store.load_run(run_id)
+                    progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+            except Exception:
+                continue
+            if progress is None:
+                continue
+            try:
+                serialized = json.dumps(progress, ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                continue
+            if serialized == last_serialized:
+                continue
+            last_serialized = serialized
+            try:
+                self._emit_agent_read_model()
+                self.emit({"type": "workflow_progress", "progress": progress})
+            except Exception:
+                continue
+            if str(progress.get("status") or "") in {"succeeded", "degraded", "failed", "cancelled", "killed", "interrupted"}:
+                return
 
     def _make_workflow_planner(self):
         if self.workflow_planner_factory is not None:
@@ -1162,6 +1211,57 @@ class GenericAgentBridge:
             return None
         return os.path.relpath(candidate, workspace_root).replace(os.sep, '/')
 
+    def _workflow_job_artifact_refs(self, run, job) -> list[str]:
+        """Return workspace-relative files a job actually produced.
+
+        Reads the scheduler's observed-artifact record (ground truth from the
+        child's own ``file_write`` calls) and only keeps paths that exist inside
+        the GA workspace, so the value is safe to hand to the next LLM request.
+        """
+        candidates = self._workflow_job_observed_artifacts(run, job)
+        if not candidates:
+            return []
+        workspace_root = os.path.realpath(os.fspath(self.workspace_root))
+        resolved: list[str] = []
+        for candidate in candidates:
+            ref = candidate.replace('\\', '/').strip()
+            if not ref or os.path.isabs(ref) or ref.startswith('../') or '/../' in ref:
+                continue
+            target = os.path.realpath(os.path.join(workspace_root, ref))
+            try:
+                if os.path.commonpath([workspace_root, target]) != workspace_root:
+                    continue
+            except ValueError:
+                continue
+            if not os.path.isfile(target):
+                continue
+            relative = os.path.relpath(target, workspace_root).replace(os.sep, '/')
+            if relative not in resolved:
+                resolved.append(relative)
+        return resolved[:32]
+
+    def _workflow_job_observed_artifacts(self, run, job) -> list[str]:
+        """Observed artifact paths from the job or its persisted progress record.
+
+        The live ``WorkflowJob`` carries them, but reloaded/older runs only have
+        them in ``workflow-progress.json``, so fall back to that snapshot.
+        """
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        observed = [str(ref) for ref in (metadata.get('observedArtifacts') or []) if str(ref)]
+        if observed:
+            return observed
+        progress = self._workflow_artifact_payload(run, 'workflow-progress.json')
+        if not isinstance(progress, dict):
+            return []
+        job_id = getattr(job, 'job_id', None)
+        for entry in progress.get('workflowProgress') or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get('jobId') != job_id and entry.get('agentId') != job_id:
+                continue
+            return [str(ref) for ref in (entry.get('observedArtifacts') or []) if str(ref)]
+        return []
+
     @staticmethod
     def _handoff_bounded_value(value: Any, max_bytes: int) -> Any:
         sanitized = sanitize(value)
@@ -1170,12 +1270,12 @@ class GenericAgentBridge:
             return sanitized
         if isinstance(sanitized, dict):
             compact = {}
-            for key in ('runId', 'status', 'error', 'summary', 'answer', 'conclusion', 'result', 'text'):
+            for key in ('runId', 'status', 'error', 'artifactRefs', 'summary', 'answer', 'conclusion', 'result', 'text'):
                 if key in sanitized:
                     compact[key] = GenericAgentBridge._handoff_bounded_value(sanitized[key], max(256, max_bytes // 2))
             compact['truncated'] = True
             while len(json.dumps(compact, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > max_bytes:
-                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'truncated'}), None)
+                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'artifactRefs', 'truncated'}), None)
                 if removable is None:
                     break
                 compact.pop(removable)
@@ -1209,6 +1309,12 @@ class GenericAgentBridge:
                 'resultRef': self._workflow_workspace_ref(run, result_ref),
                 'transcriptRef': self._workflow_workspace_ref(run, transcript_ref),
             }
+            # Files the child actually wrote, as workspace-relative paths. The
+            # handoff otherwise carries only logical labels ("synthesis"), so the
+            # GA agent has to guess a location and can read the wrong directory.
+            artifacts = self._workflow_job_artifact_refs(run, job)
+            if artifacts:
+                item['artifactRefs'] = artifacts
             if artifact and job.status in {'succeeded', 'cached'}:
                 item['result'] = self._handoff_bounded_value(artifact.get('payload', artifact), 8192)
             intermediate.append(item)
@@ -1236,7 +1342,9 @@ class GenericAgentBridge:
         serialized = json.dumps(handoff, ensure_ascii=False, indent=2)
         return (
             "The workflow run has finished. Answer the user's original request using the final result and relevant intermediate results below. "
-            "Do not claim success if the workflow status is failed/cancelled. Artifact paths are relative to the GA workspace; read them only if needed. "
+            "Do not claim success if the workflow status is failed/cancelled. "
+            "Intermediate result `artifactRefs` are workspace-relative paths of files the child agents actually wrote; "
+            "resolve them under the GA workspace root, not under the run's internal directory. Read them only if needed. "
             "Transcript files are references only and are not included here.\n\n"
             f'<workflow_handoff>\n{serialized}\n</workflow_handoff>'
         )

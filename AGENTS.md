@@ -94,6 +94,15 @@ Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI�
 
 真实回归证据见 `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §11 与 `tests/real_workflow_strict_schema_child_e2e.py`。
 
+### Ink 工作流实时进度与产物引用
+
+两个反复踩到的坑，改 workflow UI/handoff 前先确认：
+
+1. **实时进度**：`frontends/ink_bridge.py::_run_workflow_runtime` 必须边跑边推 `workflow_progress`（`_watch_workflow_progress()` 轮询 durable 的 `workflow-progress.json`）。只在 runtime 返回后推一次，UI 会全程停在 `0/0 agents done`。
+2. **产物引用**：计划里的 `artifacts`/`deliverables` 是语义标签，不是路径。真实路径来自子代理自己的 `file_write`/`file_patch` 调用（`workflow_scheduler._record_observed_artifacts()` → `job.metadata["observedArtifacts"]` → `workflow-progress.json` → handoff `intermediateResults[].artifactRefs`）。handoff 里必须说明这些是 **workspace 相对路径**，基准是 GA workspace 根（默认 `temp/`），而不是 run 的内部 artifact 目录。不要把"计划标签"当路径交给 LLM 去猜。
+
+证据见 `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §12。
+
 ## 文档命名约定
 
 新增测试记录、故障复盘、验收报告和技术调研文档时，文件名统一使用 `YYYYMMDD-xxxx.md` 格式，例如 `20260930-gpt6-luna-generic-agent-capability-evaluation.md`。日期使用 Asia/Shanghai 当前日期，`xxxx` 使用简洁、可检索的英文小写短语。

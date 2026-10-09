@@ -459,6 +459,12 @@ class WorkflowStore:
             "schemaValidation": copy.deepcopy(job.metadata.get("schemaValidation") or {}),
             "handoff": copy.deepcopy(job.metadata.get("handoff") or {}),
             "retryPolicy": copy.deepcopy(job.metadata.get("retryPolicy") or {}),
+            # Ground truth of files the child actually wrote, so the UI and the
+            # Ink handoff can carry resolvable workspace paths instead of the
+            # plan's semantic labels ("synthesis").
+            "observedArtifacts": [
+                str(ref) for ref in (job.metadata.get("observedArtifacts") or []) if str(ref)
+            ],
         }
         return progress
 

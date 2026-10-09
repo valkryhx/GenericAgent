@@ -12,7 +12,7 @@ from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore
-from workflow_workspace import resolve_workspace_child, WorkspacePathError
+from workflow_workspace import normalize_workspace_relative, resolve_workspace_child, WorkspacePathError
 from subagent_state import atomic_write_json
 
 
@@ -626,6 +626,7 @@ class AgentScheduler:
             job.metadata["toolSummary"] = result.tool_summary
         self._append_permission_events_from_result(job, result)
         self._record_observed_mutations(job, result)
+        self._record_observed_artifacts(job, result)
         self._append(
             "agent_completed",
             job,
@@ -689,7 +690,12 @@ class AgentScheduler:
             blocking = []
         options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
         declared = options.get("deliverables") if isinstance(options, dict) else []
+        # Real paths first: payload/observed writes are resolvable, whereas the
+        # plan's semantic labels ("sources", "synthesis") are not paths at all.
         artifact_refs = self._artifact_refs_from_payload(payload)
+        for ref in self._observed_artifact_refs(job, payload):
+            if ref not in artifact_refs:
+                artifact_refs.append(ref)
         artifact_refs.extend(ref for ref in self._artifact_refs_from_payload({"deliverables": declared}) if ref not in artifact_refs)
         handoff = {
             "status": result.status,
@@ -706,6 +712,30 @@ class AgentScheduler:
         if handoff_ref:
             handoff["handoffRef"] = handoff_ref
         return handoff
+
+    def _observed_artifact_refs(self, job: WorkflowJob, payload: dict) -> list[str]:
+        """Return only observed/declared files that exist inside the workspace."""
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
+        if not isinstance(workspace, str) or not workspace:
+            return []
+        candidates = [str(ref) for ref in (metadata.get("observedArtifacts") or []) if str(ref)]
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        for key in ("deliverables", "writeScope"):
+            raw = (options or {}).get(key) or []
+            if isinstance(raw, str):
+                raw = [raw]
+            candidates.extend(str(item) for item in raw if str(item).strip())
+        resolved: list[str] = []
+        for candidate in candidates:
+            try:
+                ref = normalize_workspace_relative(candidate, Path(workspace))
+                target = resolve_workspace_child(ref, Path(workspace))
+            except (WorkspacePathError, OSError, ValueError):
+                continue
+            if target.is_file() and ref not in resolved:
+                resolved.append(ref)
+        return resolved[:32]
 
     def _write_handoff_artifact(self, job: WorkflowJob, result: AgentResult, handoff: dict) -> str | None:
         """Persist detailed child output in the workspace, never in the next prompt."""
@@ -1081,6 +1111,42 @@ class AgentScheduler:
         self.run.metadata = metadata
         self.store.save_run(self.run)
         self._append("state_mutation_observed", job, {"toolNames": observed})
+
+    def _record_observed_artifacts(self, job: WorkflowJob, result: AgentResult) -> None:
+        """Record the workspace-relative files a child actually wrote.
+
+        The plan's ``artifacts`` entries are semantic labels ("sources",
+        "synthesis"), not paths, so a handoff built from them alone tells the
+        next reader nothing and the LLM has to guess a location. The child's
+        own ``file_write``/``file_patch`` calls are the ground truth; record
+        them so downstream handoffs carry real, resolvable paths.
+        """
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
+        workspace = self.workspace_path or metadata.get("workspacePath")
+        if not workspace:
+            return
+        written: list[str] = []
+        for event in result.transcript_events:
+            if event.get("type") != "tool_call":
+                continue
+            tool_name = str(event.get("toolName") or event.get("tool_name") or "")
+            if tool_name not in {"file_write", "file_patch"}:
+                continue
+            args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            raw = str(args.get("path") or "").strip()
+            if not raw:
+                continue
+            try:
+                ref = normalize_workspace_relative(raw, Path(workspace))
+            except WorkspacePathError:
+                continue
+            if ref not in written:
+                written.append(ref)
+        if not written:
+            return
+        job.metadata["observedArtifacts"] = written
+        self.store.save_run(self.run)
+        self._append("artifact_written", job, {"paths": written[:32]})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
         for event in result.transcript_events:

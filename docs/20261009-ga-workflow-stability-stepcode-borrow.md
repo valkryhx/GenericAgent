@@ -415,3 +415,63 @@ run `wf_300abd40d8e148098f8d7273cdff7635` 终态 `failed`，`agent_1`（source-d
   `tests/real_workflow_strict_schema_child_e2e.py`，严格 schema 研究子代理
   `status=succeeded`、`schemaValidation.ok=true`、脚本侧
   `{sourceCount: 3, claimCount: 2, riskCount: 1}`、`workflowIssues=[]`，耗时约 6.6s。
+
+## 12. Ink 工作流实时进度与产物引用修复（2026-10-09，第二轮真实 ink 复现）
+
+用户第二轮 GA ink 测试暴露两个新问题（run `wf_007bc8f88b5d4d35a25e333f415dddc5`，
+`temp/sessions/session_309145fe0fed4a9096c426f8da8a3e14/`）。
+
+### 12.1 问题一：UI 全程停在 `0/0 agents done`
+
+**现象**：`/workflow ...` 后状态栏一直显示 `research 0/0 agents done`，直到整个 run
+结束才一次性跳到终态，中途没有任何进度提示。
+
+**根因**：`frontends/ink_bridge.py::_run_workflow_runtime` 在 runtime 返回前只发
+`status=running` + `activity` 标签，唯一一次 `workflow_progress` 推送在 `runtime.run()`
+返回之后。UI 因此只能拿到 run 刚创建时的空快照（0 个 agent）。
+
+**修复**：新增 `_watch_workflow_progress()` 后台线程（0.25s 轮询），从
+`workflow-progress.json`（durable 快照）读取并在内容变化时推送 `workflow_progress`；
+进入 runtime 前先推一次初始快照，runtime 结束后 `stop` 该线程。
+
+### 12.2 问题二：产物"不在预期位置"
+
+**投稿现象**：GA 代理去读
+`sessions/<sid>/workflows/<wf>/synthesis_report.md`，然后报"报告不在预期路径"。
+
+**真实情况**：文件**写对了**——`<workspace>/synthesis_report.md`（11238 字节，即
+`temp/synthesis_report.md`）。错的不是产物，是**引用语义**：
+
+1. 计划里 `artifacts: ["sources", "synthesis"]` 是**语义标签**，不是路径；
+   `_artifact_refs_from_payload` 会丢弃没有斜杠/后缀的名字，导致 handoff
+   `artifactRefs` 为空数组。
+2. handoff 里既没有真实路径也没有说明基准目录，LLM 只能靠猜，猜到了 run 的内部
+   目录（`artifact_dir` 与 workspace 是两个不同根）。
+3. `workflow-progress.json` 也从未携带真实产物路径，UI/handoff 都拿不到依据。
+
+**修复**（观测代替猜测，对齐 Step-Code "由宿主确定性记录"的思路）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `workflow_scheduler.py` | 新增 `_record_observed_artifacts()`：从子代理 **实际** 的 `file_write`/`file_patch` 工具调用里记录 workspace-relative 路径，落到 `job.metadata["observedArtifacts"]`，并发 `artifact_written` 事件 |
+| `workflow_scheduler.py` | `_build_handoff()` 用 `_observed_artifact_refs()` 把**存在且在工作区内**的真实文件并入 `artifactRefs`（拒绝 `..`、绝对路径、不存在的文件） |
+| `workflow_store.py` | `_build_job_progress()` 把 `observedArtifacts` 写进 `workflow-progress.json` 快照 |
+| `frontends/ink_bridge.py` | 新增 `_workflow_job_artifact_refs()` / `_workflow_job_observed_artifacts()`，把已存在的工作区相对路径放进 handoff 的 `intermediateResults[].artifactRefs`；`_handoff_bounded_value` 压缩时优先保留 `artifactRefs`；handoff 提示词明确"这些是 workspace 相对路径，基准是 GA workspace 根，不是 run 内部目录" |
+| `frontends/ink_bridge.py` | 构造函数新增可选 `workspace_root`（默认行为不变，便于嵌入与测试） |
+
+### 12.3 遗留（本轮未做）
+
+- workspace 仍是**共享的** `temp/`，两个并发 run 的产物会互相覆盖；run 专属目录属于
+  另一条改动（需同时调整 handoff 基准目录与用户预期），本轮不动。
+- `_workflow_job_artifact_refs` 只认 `file_write`/`file_patch`；`code_run` 写出的文件
+  不在此列，仍需下轮从执行观测扩展。
+
+### 12.4 验收
+
+- 单元：`tests/test_ink_bridge.py` +3（进度流式、handoff 携带真实路径、压缩后仍保留），
+  `tests/test_workflow_scheduler.py` +3（观测产物、丢弃不存在、拒绝越界）。
+- 全量 Python：**1272 tests OK**（skip 3）。
+- Ink：**391 pass / 0 fail**。
+- 真实 E2E（DeepSeek-V4.1-Flash）：`tests/real_workflow_strict_schema_child_e2e.py`
+  新增 artifact-handoff 场景，两个子代理各自写出文件后，
+  `observedArtifacts=["research_notes.md","synthesis_report.md"]` 且两者都真实落盘。

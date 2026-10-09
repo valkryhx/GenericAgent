@@ -76,6 +76,61 @@ return {
 }
 """
 
+ARTIFACT_HANDOFF_SCRIPT = r"""
+phase('Source Discovery')
+const research = await agent(`Write a short workspace-relative research note using file_write.
+Path: research_notes.md
+Content: "# Research notes\n- point one\n- point two\n"
+Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials.`, {
+  label: 'source-discovery',
+  deliverables: ['research_notes.md']
+})
+phase('Synthesis')
+const report = await agent(`Write a short workspace-relative report using file_write.
+Path: synthesis_report.md
+Content: "# Synthesis report\nDELIVERED\n"
+Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials.`, {
+  label: 'synthesis',
+  dependsOn: ['source-discovery'],
+  deliverables: ['synthesis_report.md']
+})
+return { notesRef: research.resultRef, reportRef: report.resultRef }
+"""
+
+
+def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str, Any]:
+    """A child-written file must appear as a resolvable workspace artifactRef."""
+    run = store.create_run(
+        WorkflowRun(
+            run_id="wf_artifact_handoff_e2e",
+            session_id="workflow_artifact_handoff_e2e",
+            script=ARTIFACT_HANDOFF_SCRIPT,
+            status="running",
+        )
+    )
+    runner = NativeGPTChildAgentRunner(profile_name=PROFILE, max_tokens=1500, max_turns=6)
+    try:
+        WorkflowRuntime(
+            store=store,
+            runner=runner,
+            scheduler_config=SchedulerConfig(max_concurrent=1, max_total=4),
+            timeout_seconds=420.0,
+        ).run(run, args={"workspacePath": str(workspace)})
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    loaded = store.load_run("wf_artifact_handoff_e2e")
+    handoff_refs: list[str] = []
+    for job in loaded.jobs:
+        observed = (job.metadata or {}).get("observedArtifacts") or []
+        handoff_refs.extend(str(ref) for ref in observed)
+    return {
+        "runStatus": loaded.status,
+        "observedArtifacts": sanitize(handoff_refs),
+        "filesOnDisk": sorted(
+            name for name in ("research_notes.md", "synthesis_report.md") if (workspace / name).is_file()
+        ),
+    }
+
 
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="ga_workflow_strict_schema_e2e_"))
@@ -145,6 +200,15 @@ def main() -> int:
             and all(job["schemaValidation"] is True for job in jobs)
             and bool(jobs)
         )
+        if os.environ.get("GA_RUN_REAL_WORKFLOW_ARTIFACT_HANDOFF_E2E") == "1":
+            summary["artifactHandoff"] = run_artifact_handoff_case(store, workspace)
+            handoff = summary["artifactHandoff"]
+            summary["passed"] = bool(
+                summary["passed"]
+                and handoff.get("runStatus") == "succeeded"
+                and "synthesis_report.md" in (handoff.get("filesOnDisk") or [])
+                and "synthesis_report.md" in (handoff.get("observedArtifacts") or [])
+            )
     except Exception as exc:  # pragma: no cover - diagnostic path
         summary["issues"].append(f"{type(exc).__name__}: {str(exc)[:400]}")
     print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))

@@ -560,6 +560,65 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertNotIn("sources", downstream)
         self.assertTrue(downstream["schemaFallback"])
 
+    def test_handoff_carries_the_file_a_child_actually_wrote(self):
+        """The next reader needs a resolvable path, not a plan label.
+
+        Regression: the plan's ``artifacts: ["synthesis"]`` is a semantic name,
+        so the handoff ``artifactRefs`` was empty and the GA agent guessed the
+        run's internal directory instead of reading the file the child wrote at
+        the workspace root.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "synthesis_report.md").write_text("# report\n", encoding="utf-8")
+            scheduler, store, run = self.make_scheduler(
+                runner=FakeChildAgentRunner(results={"agent_1": {"summary": "written"}}),
+                run_kwargs={"metadata": {"workspacePath": str(workspace)}},
+            )
+            job = scheduler.register_agent(
+                prompt="write the report",
+                label="synthesis",
+                options={"deliverables": ["reports/synthesis.md"]},
+            )
+            scheduler.run_all()
+            scheduler.jobs[0].metadata["observedArtifacts"] = ["synthesis_report.md"]
+            result = AgentResult(job_id="agent_1", payload={"summary": "written"})
+
+            handoff = scheduler._build_handoff(scheduler.jobs[0], result)
+
+            self.assertIn("synthesis_report.md", handoff["artifactRefs"])
+
+    def test_handoff_ignores_observed_paths_that_do_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            scheduler, store, run = self.make_scheduler(
+                runner=FakeChildAgentRunner(),
+                run_kwargs={"metadata": {"workspacePath": str(workspace)}},
+            )
+            job = scheduler.register_agent(prompt="write", label="writer")
+            job.metadata["observedArtifacts"] = ["never_written.md"]
+
+            handoff = scheduler._build_handoff(job, AgentResult(job_id="agent_1", payload={"summary": "x"}))
+
+            self.assertNotIn("never_written.md", handoff["artifactRefs"])
+
+    def test_handoff_rejects_observed_paths_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            scheduler, store, run = self.make_scheduler(
+                runner=FakeChildAgentRunner(),
+                run_kwargs={"metadata": {"workspacePath": str(workspace)}},
+            )
+            job = scheduler.register_agent(prompt="write", label="writer")
+            job.metadata["observedArtifacts"] = ["../escape.md", "C:/Windows/system32/drivers/etc/hosts"]
+
+            handoff = scheduler._build_handoff(job, AgentResult(job_id="agent_1", payload={"summary": "x"}))
+
+            self.assertEqual([], handoff["artifactRefs"])
+
     def test_schema_repair_receives_original_assignment_and_schema(self):
         """The repair packet must be a real retry, not a blind regeneration."""
         scheduler, store, run = self.make_scheduler(

@@ -27,7 +27,7 @@ from ink_bridge import (  # noqa: E402
     run_jsonl_loop,
 )
 from workflow_child_agent import AgentResult, FakeChildAgentRunner  # noqa: E402
-from workflow_models import WorkflowJob  # noqa: E402
+from workflow_models import WorkflowJob, WorkflowRun  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
@@ -171,6 +171,38 @@ class PlannedRunFakeRuntime:
                 metadata={"label": "planner"},
             )
         )
+        run.status = "succeeded"
+        self.store.write_final_result(run, payload)
+        self.store.save_run(run)
+        self.store.write_workflow_progress(run)
+        return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
+
+
+class SlowProgressFakeRuntime(PlannedRunFakeRuntime):
+    """Writes progress snapshots over time, then settles like the real runtime."""
+
+    def __init__(self, *, store, timeout_seconds=10.0, steps=8, delay=0.3):
+        super().__init__(store=store, timeout_seconds=timeout_seconds)
+        self.steps = steps
+        self.delay = delay
+
+    def run(self, run, *, args=None, resume_from_run_id=None):
+        from workflow_models import WorkflowEvent
+
+        self.__class__.started_run_ids.append(run.run_id)
+        for index in range(1, self.steps + 1):
+            time.sleep(self.delay)
+            job = WorkflowJob(
+                job_id=f"agent_{index}",
+                prompt=f"step {index}",
+                status="succeeded",
+                phase="Work",
+                metadata={"label": f"worker-{index}"},
+            )
+            run.jobs.append(job)
+            self.store.save_run(run)
+            self.store.write_workflow_progress(run)
+        payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True}}
         run.status = "succeeded"
         self.store.write_final_result(run, payload)
         self.store.save_run(run)
@@ -1557,6 +1589,134 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual([run_id], PlannedRunFakeRuntime.started_run_ids)
             self.assertEqual(float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS), PlannedRunFakeRuntime.last_timeout_seconds)
             self.assertEqual(900.0, PlannedRunFakeRuntime.last_timeout_seconds)
+
+    def test_workflow_plan_streams_progress_while_the_runtime_is_still_running(self):
+        """The Ink panel must not sit at "0/0 agents done" until the run ends.
+
+        Regression: ``_run_workflow_runtime`` only emitted an activity label and
+        a single progress snapshot after the runtime returned, so the workflow
+        status bar showed no agents and no movement for the whole run.
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        SlowProgressFakeRuntime.started_run_ids = []
+        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="流式进度"))
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: SlowProgressFakeRuntime(**kwargs),
+                workflow_planner_factory=lambda: planner,
+            )
+
+            run_id = bridge.workflow_plan("流式进度", timeout_seconds=10)
+            bridge.wait_for_workflow_idle(run_id, timeout=10)
+
+        progress_events = [
+            event["progress"] for event in events
+            if event["type"] == "workflow_progress" and event["progress"]["status"] == "running"
+        ]
+        # At least one running-state snapshot must arrive before the final
+        # succeeded snapshot, and agent counts must grow while the run is live.
+        self.assertGreaterEqual(len(progress_events), 2)
+        counts = [len(progress.get("workflowProgress") or []) for progress in progress_events]
+        self.assertGreater(max(counts), min(counts))
+        self.assertGreaterEqual(max(counts), 2)
+
+    def test_workflow_handoff_carries_workspace_relative_artifact_paths(self):
+        """The handoff must hand the GA agent real paths, not plan labels.
+
+        Regression: the handoff listed only logical artifact names, so the agent
+        guessed ``sessions/<sid>/workflows/<wf>/synthesis_report.md`` while the
+        child had correctly written ``<workspace>/synthesis_report.md``.
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_handoff"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            (workspace_root / "synthesis_report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_handoff",
+                    session_id="session_handoff",
+                    script="x",
+                    status="succeeded",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={
+                                "label": "synthesis",
+                                "observedArtifacts": ["synthesis_report.md", "missing.md", "../escape.md"],
+                            },
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+            loaded = bridge.workflow_store.load_run("wf_handoff")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+        refs = document["intermediateResults"][0]["artifactRefs"]
+        self.assertEqual(["synthesis_report.md"], refs)
+        self.assertIn("workspace-relative", payload)
+
+    def test_workflow_handoff_artifact_refs_survive_size_compaction(self):
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_big"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            (workspace_root / "synthesis_report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_handoff_big",
+                    session_id="session_handoff_big",
+                    script="x",
+                    status="succeeded",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={
+                                "label": "synthesis",
+                                "observedArtifacts": ["synthesis_report.md"],
+                            },
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(
+                run,
+                {"runId": run.run_id, "status": "succeeded", "summary": "x" * 60_000},
+            )
+            loaded = bridge.workflow_store.load_run("wf_handoff_big")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        self.assertIn("synthesis_report.md", payload)
+        self.assertLessEqual(len(payload.encode("utf-8")), 64 * 1024)
 
     def test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false(self):
         agent = FakeAgent()
