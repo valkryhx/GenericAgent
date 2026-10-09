@@ -248,6 +248,39 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertIn("resultRef: agents/agent_1/result.json", prompt)
         self.assertNotIn("x" * 1000, prompt)
 
+    def test_child_prompt_says_which_job_wrote_each_upstream_artifact(self):
+        """The dependent child must know whose output each ref is.
+
+        Regression: the child saw ``artifactRefs`` only, so it could not tell a
+        research artifact from another stage's overwrite of the same path.
+        """
+        job = WorkflowJob(
+            job_id="agent_2",
+            prompt="write the final report",
+            metadata={
+                "runId": "wf_test",
+                "label": "Writer",
+                "dependsOn": ["Researcher"],
+                "dependencyHandoff": [
+                    {
+                        "label": "Researcher",
+                        "status": "succeeded",
+                        "summary": "short research conclusion",
+                        "resultRef": "agents/agent_1/result.json",
+                        "artifactRefs": ["artifacts/research.json"],
+                        "artifactOwners": {"artifacts/research.json": ["Researcher"]},
+                        "transcriptRef": "agents/agent_1/transcript.jsonl",
+                    }
+                ],
+            },
+        )
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertIn("artifactOwners (which job wrote each ref)", prompt)
+        self.assertIn("artifacts/research.json <- Researcher", prompt)
+
     def test_child_prompt_declares_structured_output_contract_for_schema_jobs(self):
         """A schema job must tell the child that its answer is machine-validated JSON.
 

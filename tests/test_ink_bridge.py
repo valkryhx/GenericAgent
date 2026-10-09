@@ -31,6 +31,7 @@ from workflow_models import WorkflowJob, WorkflowRun  # noqa: E402
 from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
+from workflow_store import build_artifact_ownership_index  # noqa: E402
 from agent_runtime_models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
 
 
@@ -1674,6 +1675,242 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(["synthesis_report.md"], refs)
         self.assertEqual(str(workspace_root.resolve()), document["workspacePath"])
         self.assertIn("workspacePath", payload)
+
+    def test_workflow_handoff_names_the_job_that_wrote_each_artifact(self):
+        """Ownership must reach the agent, so it can judge whose data it reads.
+
+        Regression: ``artifactRefs`` said a file existed but never which job
+        wrote it, so a synthesis reader could not tell research output from its
+        own output.
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_owners"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            (workspace_root / "report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_owners",
+                    session_id="session_handoff_owners",
+                    script="x",
+                    status="succeeded",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={
+                                "label": "synthesis",
+                                "observedArtifacts": [{"path": "report.md", "writer": "synthesis"}],
+                            },
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+            loaded = bridge.workflow_store.load_run("wf_owners")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+        self.assertEqual({"report.md": ["synthesis"]}, document["intermediateResults"][0]["artifactOwners"])
+        self.assertIn("artifactOwners", payload)
+
+    def test_workflow_handoff_surfaces_a_path_written_by_several_jobs(self):
+        """A collision must be visible, since the later write destroyed the earlier one."""
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_collision"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            (workspace_root / "report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_collision",
+                    session_id="session_handoff_collision",
+                    script="x",
+                    status="succeeded",
+                    metadata={"artifactCollisions": {"report.md": ["research", "synthesis"]}},
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={
+                                "label": "synthesis",
+                                "observedArtifacts": [
+                                    {"path": "report.md", "writer": "research"},
+                                    {"path": "report.md", "writer": "synthesis"},
+                                ],
+                            },
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+            loaded = bridge.workflow_store.load_run("wf_collision")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+        self.assertEqual({"report.md": ["research", "synthesis"]}, document["intermediateResults"][0]["artifactOwners"])
+        self.assertEqual({"report.md": ["research", "synthesis"]}, document["artifactCollisions"])
+        self.assertIn("artifactCollisions", payload)
+
+    def test_workflow_handoff_keeps_ownership_when_the_payload_is_compacted(self):
+        """Ownership must not be the field that gets dropped to fit the budget."""
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_owners_big"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            (workspace_root / "synthesis_report.md").write_text("# report\n", encoding="utf-8")
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_owners_big",
+                    session_id="session_handoff_owners_big",
+                    script="x",
+                    status="succeeded",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_2",
+                            prompt="write the report",
+                            status="succeeded",
+                            metadata={
+                                "label": "synthesis",
+                                "observedArtifacts": [{"path": "synthesis_report.md", "writer": "synthesis"}],
+                            },
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(
+                run,
+                {"runId": run.run_id, "status": "succeeded", "summary": "x" * 60_000},
+            )
+            loaded = bridge.workflow_store.load_run("wf_owners_big")
+
+            payload = bridge._workflow_handoff_payload(loaded)
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+        self.assertLessEqual(len(payload.encode("utf-8")), 64 * 1024)
+        self.assertEqual(
+            {"synthesis_report.md": ["synthesis"]},
+            document["intermediateResults"][0]["artifactOwners"],
+        )
+
+    def test_workflow_handoff_exposes_run_level_ownership_after_a_real_write(self):
+        """Ownership must reach the handoff through the persisted run index.
+
+        Regression: ownership lived only on each job's in-process ``handoff``
+        dict, which a stage running in a child process never keeps, so the
+        handoff a downstream agent reads carried no ownership at all.
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_handoff_index"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_index",
+                    session_id="session_handoff_index",
+                    script="x",
+                    status="succeeded",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_1",
+                            prompt="research",
+                            status="succeeded",
+                            metadata={"label": "research"},
+                        )
+                    ],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+
+            # Simulate the diff-time record a child would have produced.
+            loaded = bridge.workflow_store.load_run("wf_index")
+            loaded.jobs[0].metadata["observedArtifacts"] = [{"path": "notes.md", "writer": "research"}]
+            metadata = dict(loaded.metadata or {})
+            metadata["artifactOwnership"] = build_artifact_ownership_index(loaded)
+            loaded.metadata = metadata
+            bridge.workflow_store.save_run(loaded)
+            bridge.workflow_store.write_workflow_progress(loaded)
+
+            payload = bridge._workflow_handoff_payload(bridge.workflow_store.load_run("wf_index"))
+
+        document = json.loads(payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0])
+
+        self.assertEqual({"notes.md": ["research"]}, document["artifactOwnership"])
+        self.assertIn("artifactOwnership", payload)
+
+    def test_workflow_progress_exposes_the_run_level_ownership_index(self):
+        agent = FakeAgent()
+        agent.session_id = "session_progress_owners"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_progress_owners",
+                    session_id="session_progress_owners",
+                    script="x",
+                    status="running",
+                    jobs=[
+                        WorkflowJob(
+                            job_id="agent_1",
+                            prompt="research",
+                            status="succeeded",
+                            metadata={
+                                "label": "research",
+                                "observedArtifacts": [{"path": "notes.md", "writer": "research"}],
+                            },
+                        )
+                    ],
+                )
+            )
+            ref = bridge.workflow_store.write_workflow_progress(run)
+            document = json.loads(
+                (bridge.workflow_store._run_dir(run) / ref).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual({"notes.md": ["research"]}, document["artifactOwnership"])
 
     def test_workflow_handoff_resolves_artifacts_under_the_run_workspace_not_the_base_root(self):
         """Refs must resolve against the run's own workspace.

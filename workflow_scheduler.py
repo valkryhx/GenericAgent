@@ -11,7 +11,7 @@ from pathlib import Path
 from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
-from workflow_store import WorkflowStore
+from workflow_store import WorkflowStore, build_artifact_ownership_index
 from workflow_workspace import (
     WorkspacePathError,
     normalize_workspace_relative,
@@ -712,12 +712,36 @@ class AgentScheduler:
             # the next LLM request; workspace artifactRefs are the only read path.
             "resultRef": job.result_ref,
             "artifactRefs": artifact_refs,
+            # Ownership of the files this job wrote. A downstream reader can judge
+            # whose data it is reading, and a path claimed by another job is
+            # visible rather than silently attributed to whoever wrote last.
+            "artifactOwners": self._artifact_owners_for(job, artifact_refs),
             "transcriptRef": result.transcript_ref,
         }
         handoff_ref = self._write_handoff_artifact(job, result, handoff)
         if handoff_ref:
             handoff["handoffRef"] = handoff_ref
         return handoff
+
+    def _artifact_owners_for(self, job: WorkflowJob, refs: list[str]) -> dict[str, list[str]]:
+        """Map each artifact path to the job(s) that wrote it, run-wide.
+
+        ``artifactRefs`` alone says what exists; the reader still cannot tell
+        whether ``report.md`` came from the research stage or the synthesis
+        stage, nor that two jobs both wrote it. Ownership is already recorded at
+        diff time, so this only unions it across the run -- no tool-name
+        inference and no new bookkeeping.
+        """
+        owners: dict[str, list[str]] = {}
+        for item in self.run.jobs:
+            metadata = item.metadata if isinstance(item.metadata, dict) else {}
+            for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
+                writer = entry.get("writer") or item.job_id
+                bucket = owners.setdefault(entry["path"], [])
+                if writer not in bucket:
+                    bucket.append(writer)
+        return {ref: owners[ref] for ref in refs if ref in owners}
+
 
     def _observed_artifact_refs(self, job: WorkflowJob, payload: dict) -> list[str]:
         """Return only observed/declared files that exist inside the workspace."""
@@ -785,6 +809,8 @@ class AgentScheduler:
                 "blockingIssues": sanitize(copy.deepcopy(raw.get("blockingIssues") or []))[:8],
                 "resultRef": raw.get("resultRef") or upstream.result_ref,
                 "artifactRefs": [str(ref) for ref in (raw.get("artifactRefs") or []) if str(ref)][:32],
+                "artifactOwners": sanitize(copy.deepcopy(raw.get("artifactOwners") or {}))
+                if isinstance(raw.get("artifactOwners"), dict) else {},
                 "handoffRef": raw.get("handoffRef"),
                 "transcriptRef": raw.get("transcriptRef") or upstream.metadata.get("transcriptRef"),
             })
@@ -809,6 +835,8 @@ class AgentScheduler:
             "resultRef": handoff.get("resultRef") or job.result_ref,
             "handoffRef": handoff.get("handoffRef"),
             "artifactRefs": list(handoff.get("artifactRefs") or []),
+            "artifactOwners": sanitize(copy.deepcopy(handoff.get("artifactOwners") or {}))
+            if isinstance(handoff.get("artifactOwners"), dict) else {},
             "transcriptRef": handoff.get("transcriptRef") or job.metadata.get("transcriptRef"),
             "evidence": sanitize(copy.deepcopy(handoff.get("evidence") or []))[:8],
             "blockingIssues": sanitize(copy.deepcopy(handoff.get("blockingIssues") or []))[:8],
@@ -1161,6 +1189,14 @@ class AgentScheduler:
             entry for ref, entry in merged.items() if ref not in set(written)
         ]
         self._record_artifact_collisions(job)
+        # Persist the run-level ``path -> writers`` index. Jobs that run in a
+        # child process keep no in-process handoff dict, so consumers read this
+        # from run metadata instead of re-deriving ownership themselves.
+        run_metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
+        ownership = build_artifact_ownership_index(self.run)
+        if ownership:
+            run_metadata["artifactOwnership"] = ownership
+        self.run.metadata = run_metadata
         self.store.save_run(self.run)
         # Publish the progress snapshot immediately: the Ink panel polls this
         # file, and waiting for the end-of-batch write made a finished artifact

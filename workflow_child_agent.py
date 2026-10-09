@@ -645,6 +645,13 @@ class NativeGPTChildAgentRunner:
                     lines.append(f"  resultRef: {item['resultRef']}")
                 if item.get("artifactRefs"):
                     lines.append(f"  artifactRefs: {', '.join(str(ref) for ref in item['artifactRefs'])}")
+                owners = item.get("artifactOwners")
+                if isinstance(owners, dict) and owners:
+                    rendered = "; ".join(
+                        f"{ref} <- {', '.join(str(w) for w in writers)}" if isinstance(writers, (list, tuple)) and writers else f"{ref} <- unknown"
+                        for ref, writers in owners.items()
+                    )
+                    lines.append(f"  artifactOwners (which job wrote each ref): {rendered}")
                 if item.get("handoffRef"):
                     lines.append(f"  handoffRef: {item['handoffRef']}")
                 if item.get("blockingIssues"):

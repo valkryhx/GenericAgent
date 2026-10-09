@@ -633,3 +633,84 @@ synthesis 子代理的 transcript 里**完全没有 `file_write`**，产物却�
   `observedArtifactOwners = {"research_notes.md": ["source-discovery"], "synthesis_report.md": ["synthesis"]}`，
   同时 `toolNamesByJob.synthesis = ["code_run","no_tool"]`（无 `file_write`）——归属与工具无关观测
   在同一次真实运行里同时成立。
+
+## 15. 归属进入 handoff（2026-10-09，第五轮）
+
+§14 把 writer 记在了 job 上，但**消费者看不到**：归属只存在于 `job.metadata["observedArtifacts"]`，
+而下游 agent 读的是 handoff。这一轮的修复就是把归属搬到消费面，并修掉了暴露出的一个真实缺口。
+
+### 15.1 为什么归属必须在 handoff 里
+
+`artifactRefs` 只回答"有什么文件"。综合阶段的 agent 拿到 `report.md` 时，
+**无法判断这份内容是研究的原始产出，还是某个阶段覆盖后的结果**——这正是它判断可信度、
+决定"是否需要自己重新取证"的依据。§13 的回归里，综合 agent 就曾因为无法回溯而上报了
+"上游 artifactRefs 为空"的缺陷。
+
+所以 handoff 需要三件东西：
+
+1. `intermediateResults[].artifactOwners`：每个 ref 由哪个 job 写（区别于"这个 job 自己写了什么"）；
+2. handoff 顶层 `artifactOwnership`：run 级 `path -> writer(s)` 索引；
+3. 顶层 `artifactCollisions`：同一路径被多个 job 写过。
+
+### 15.2 真实 E2E 暴露的缺口：子进程阶段没有 handoff dict
+
+第一版只在 `_build_handoff()` 里算归属，真实运行立刻打脸：`handoffArtifactOwners = {}`。
+
+根因是 **handoff 的落盘方式不一致**：
+
+| 执行路径 | handoff 落点 |
+| --- | --- |
+| in-process scheduler（`_run_job`） | `job.metadata["handoff"]`（`workflow_scheduler.py:624`） |
+| subprocess child（`agentmain.py --workflow-job`） | `workflow-handoffs/<job>.json`（`workflow_scheduler.py:770`） |
+
+子进程里的子代理**不持有 run 对象**，它的 handoff 只写成一个文件，run 的 state 里没有
+`job.metadata["handoff"]`。于是"从各 job 的 handoff 里汇总归属"这条路，在 GA 实际用的
+child 模型下**永远拿不到数据**——`artifactOwners` 对真实运行等于装饰品。
+
+**修法**：归属不依赖 handoff 的存在。`workflow_store.build_artifact_ownership_index(run)`
+从各 job 的 `observedArtifacts`（差分时记录的 writer）汇总出 run 级索引，
+`_record_observed_artifacts()` 每次记录写入后把它持久化进 `run.metadata["artifactOwnership"]`，
+并随进度快照发布。这样三类消费者都拿得到同一份事实：
+
+- 进度文件 `workflow-progress.json` → Ink 面板；
+- run metadata → bridge 构造 handoff；
+- handoff → 下游 agent。
+
+**注意这不是"第二个真相"**：writer 只在差分那一刻记录一次，索引只是把已有记录做并集，
+不重新推断工具名，也不新增记账。原先的 in-process 路径仍然正常（`intermediateResults[].artifactOwners`
+照旧填充），两条路走的是同一份数据。
+
+### 15.3 冲突只报告，不 fail
+
+`artifactCollisions` 是 run 级事实，不是错误。后写者有意覆盖前写者是合法设计，
+GA 没有依据替用户判定对错；错误地 fail 一个 run 比暴露一个警告更贵。但 handoff 提示词里
+明确写出语义——**该路径被多个 job 写过、最后写入者胜出，不要假设每个 job 的产物都还在**——
+否则下游会把覆盖后的文件当成上游阶段的原始产出。
+
+### 15.4 压缩白名单
+
+handoff 超预算时会按 key 裁剪。`artifactOwners` 与 `artifactRefs`、`workspacePath` 一样
+进白名单：归属被裁掉，下游就又回到"拿到一个路径但不知道是谁写的"，
+这正是这轮要解决的问题。用例 `test_workflow_handoff_keeps_ownership_when_the_payload_is_compacted`
+在 64 KiB 预算下断言归属仍在。
+
+### 15.5 验收
+
+- `tests/test_workflow_scheduler.py` +6：handoff 带归属、归属透传进 `downstream_result`、
+  依赖 handoff 把归属交给下一个 child、同名多 writer 可见、无产物时不伪造归属、
+  记录写入即持久化 run 级索引。
+- `tests/test_ink_bridge.py` +5：`intermediateResults[].artifactOwners` 正确、
+  多人写同一路径时顶层 `artifactCollisions` 出现、压缩后归属仍在、
+  run 级索引进 handoff、索引进进度快照。
+- `tests/test_workflow_child_agent.py` +1：child prompt 出现
+  `artifactOwners (which job wrote each ref)` 与 `ref <- job`。
+- 红→绿：分别临时移除 handoff 归属、run 级 handoff 暴露、run metadata 持久化，
+  对应用例按预期失败，恢复后通过。
+- 全量：`python -m unittest discover -s tests` **1306 tests OK**（skip 3，173s）；
+  Ink **391 pass / 0 fail**。
+- 真实 E2E（gpt-6-luna，8.0s，`passed: true`，`issues: []`）三层同时成立：
+  - `observedArtifactOwners = {"research_notes.md": ["source-discovery"], "synthesis_report.md": ["synthesis"]}`（job 层）
+  - `persistedArtifactOwnership` 同上（run 级持久化）
+  - `handoffOwnership` 同上（handoff 层，`handoffExposesOwnership: true`）
+  - `toolNamesByJob.synthesis = ["code_run","no_tool"]`、`synthesisUsedFileWrite: false`：
+    归属与"工具无关的文件系统差分"在同一次真实运行里同时成立。

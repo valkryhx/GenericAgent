@@ -381,6 +381,132 @@ class WorkflowSchedulerTest(unittest.TestCase):
             self.assertNotIn("artifactCollisions", loaded.metadata or {})
             self.assertNotIn("artifact_collision", self.event_types(store))
 
+    def test_recording_a_write_persists_the_run_level_ownership_index(self):
+        """The run index must exist for consumers that never see a job handoff.
+
+        A child runs in its own process and keeps no in-process ``handoff``
+        dict, so ownership has to be readable from run metadata/progress.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write it", label="Research")
+            (workspace / "notes.md").write_text("# notes", encoding="utf-8")
+            result = AgentResult(
+                job_id=job.job_id, status="succeeded", payload={"summary": "wrote"},
+                tool_summary={"writtenPaths": ["notes.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+
+            reloaded = scheduler.store.load_run(run.run_id)
+            self.assertEqual({"notes.md": ["Research"]}, (reloaded.metadata or {}).get("artifactOwnership"))
+
+    def test_handoff_names_the_job_that_wrote_each_artifact(self):
+        """A downstream reader must be able to tell whose output it is reading."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write it", label="Synthesis")
+            (workspace / "report.md").write_text("# report", encoding="utf-8")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote the report"},
+                tool_summary={"writtenPaths": ["report.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+            handoff = scheduler._build_handoff(job, result)
+
+            self.assertEqual(["report.md"], handoff["artifactRefs"])
+            self.assertEqual({"report.md": ["Synthesis"]}, handoff["artifactOwners"])
+
+    def test_handoff_ownership_survives_into_the_downstream_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write it", label="Research")
+            (workspace / "notes.md").write_text("# notes", encoding="utf-8")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote notes"},
+                tool_summary={"writtenPaths": ["notes.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+            job.metadata["handoff"] = scheduler._build_handoff(job, result)
+            downstream = scheduler.downstream_result(job)
+
+            self.assertEqual(["notes.md"], downstream["artifactRefs"])
+            self.assertEqual({"notes.md": ["Research"]}, downstream["artifactOwners"])
+
+    def test_dependency_handoff_carries_ownership_to_the_next_child(self):
+        """The dependent child must see who produced each upstream ref."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            upstream = scheduler.register_agent(prompt="research", label="Research")
+            downstream = scheduler.register_agent(prompt="synthesize", label="Synthesis", options={"dependsOn": ["Research"]})
+
+            (workspace / "notes.md").write_text("# notes", encoding="utf-8")
+            result = AgentResult(
+                job_id=upstream.job_id,
+                status="succeeded",
+                payload={"summary": "researched"},
+                tool_summary={"writtenPaths": ["notes.md"]},
+            )
+            scheduler._record_observed_artifacts(upstream, result)
+            upstream.metadata["handoff"] = scheduler._build_handoff(upstream, result)
+            upstream.status = "succeeded"
+
+            handoff = scheduler._build_dependency_handoff(downstream)
+
+            self.assertEqual(1, len(handoff))
+            self.assertEqual(["notes.md"], handoff[0]["artifactRefs"])
+            self.assertEqual({"notes.md": ["Research"]}, handoff[0]["artifactOwners"])
+
+    def test_handoff_reports_when_another_job_also_wrote_the_same_ref(self):
+        """Ownership is run-wide, so an overwritten artifact is visible."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="research", label="Research")
+            second = scheduler.register_agent(prompt="synthesize", label="Synthesis")
+
+            (workspace / "report.md").write_text("research version", encoding="utf-8")
+            first_result = AgentResult(
+                job_id=first.job_id, status="succeeded", payload={"summary": "a"},
+                tool_summary={"writtenPaths": ["report.md"]},
+            )
+            scheduler._record_observed_artifacts(first, first_result)
+            (workspace / "report.md").write_text("synthesis version", encoding="utf-8")
+            second_result = AgentResult(
+                job_id=second.job_id, status="succeeded", payload={"summary": "b"},
+                tool_summary={"writtenPaths": ["report.md"]},
+            )
+            scheduler._record_observed_artifacts(second, second_result)
+
+            handoff = scheduler._build_handoff(second, second_result)
+
+            self.assertEqual({"report.md": ["Research", "Synthesis"]}, handoff["artifactOwners"])
+
+    def test_handoff_omits_ownership_when_no_artifact_was_observed(self):
+        scheduler, _store, _run = self.make_scheduler()
+        job = scheduler.register_agent(prompt="think", label="Thinker")
+        result = AgentResult(job_id=job.job_id, status="succeeded", payload={"summary": "thought"})
+
+        handoff = scheduler._build_handoff(job, result)
+
+        self.assertEqual([], handoff["artifactRefs"])
+        self.assertEqual({}, handoff["artifactOwners"])
+
     def test_observed_artifacts_drop_paths_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

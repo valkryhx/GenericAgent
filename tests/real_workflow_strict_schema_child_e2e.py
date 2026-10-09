@@ -142,10 +142,60 @@ def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str
             }
             - {""}
         )
+    # The handoff is what a downstream agent actually reads, so ownership has to
+    # be visible there and not only on the job metadata.
+    # In this E2E every stage runs in a child process, so the persisted run-level
+    # ``artifactOwnership`` index is the layer that must carry the mapping (a
+    # child keeps no in-process handoff dict). Per-job metadata is asserted
+    # separately above.
+    # The persisted progress record is the run-level ownership index; it must
+    # exist even for stages that ran in a child process and kept no handoff dict.
+    progress_owners: dict[str, list[str]] = {}
+    progress_path = store._run_dir(loaded) / "workflow-progress.json"
+    if progress_path.is_file():
+        progress_document = json.loads(progress_path.read_text(encoding="utf-8"))
+        recorded = progress_document.get("artifactOwnership")
+        if isinstance(recorded, dict):
+            progress_owners = {
+                str(ref): [str(writer) for writer in writers]
+                for ref, writers in recorded.items()
+                if isinstance(writers, (list, tuple))
+            }
+    # The bridge handoff is what the GA agent actually consumes, so ownership
+    # must be visible there too.
+    handoff_document = {}
+    try:
+        from frontends.ink_bridge import GenericAgentBridge
+
+        # ``GenericAgentBridge`` builds its agent eagerly, so hand it an inert
+        # stub: this check only needs the pure payload builder.
+        class _InertAgent:
+            inc_out = False
+            verbose = False
+            session_id = "workflow_artifact_handoff_e2e"
+
+        bridge = GenericAgentBridge(
+            agent_factory=lambda: _InertAgent(),
+            emit=lambda event: None,
+            workspace_root=str(workspace),
+        )
+        payload = bridge._workflow_handoff_payload(store.load_run("wf_artifact_handoff_e2e"))
+        handoff_document = json.loads(
+            payload.split("<workflow_handoff>", 1)[1].split("</workflow_handoff>", 1)[0]
+        )
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        handoff_document = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     return {
         "runStatus": loaded.status,
         "observedArtifacts": sanitize(handoff_refs),
+        "handoffOwnership": sanitize(handoff_document.get("artifactOwnership") or {}),
+        "handoffIntermediateOwners": sanitize(
+            (handoff_document.get("intermediateResults") or [{}])[0].get("artifactOwners") or {}
+            if handoff_document.get("intermediateResults") else {}
+        ),
+
         "observedArtifactOwners": sanitize(owners_by_path),
+        "persistedArtifactOwnership": sanitize(progress_owners),
         "toolNamesByJob": sanitize(tool_names_by_label),
         "filesOnDisk": sorted(
             name for name in ("research_notes.md", "synthesis_report.md") if (workspace / name).is_file()
@@ -247,6 +297,20 @@ def main() -> int:
                 and owners.get("synthesis_report.md") == ["synthesis"]
             )
             summary["passed"] = bool(summary["passed"] and summary["ownershipRecorded"])
+            # Ownership must be readable run-wide by any consumer, including
+            # stages that ran in a child process and kept no local handoff.
+            persisted = handoff.get("persistedArtifactOwnership") or {}
+            summary["persistedOwnershipRecorded"] = bool(
+                persisted.get("synthesis_report.md") == ["synthesis"]
+                and persisted.get("research_notes.md") == ["source-discovery"]
+            )
+            # The handoff must expose the same index at the top level, so a
+            # downstream agent reads ownership from one place.
+            summary["handoffExposesOwnership"] = bool(
+                (handoff.get("handoffOwnership") or {}).get("synthesis_report.md") == ["synthesis"]
+            )
+            summary["passed"] = bool(summary["passed"] and summary["handoffExposesOwnership"])
+            summary["passed"] = bool(summary["passed"] and summary["persistedOwnershipRecorded"])
     except Exception as exc:  # pragma: no cover - diagnostic path
         summary["issues"].append(f"{type(exc).__name__}: {str(exc)[:400]}")
     print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))

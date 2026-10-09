@@ -37,6 +37,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
 
 
+def build_artifact_ownership_index(run: WorkflowRun) -> dict[str, list[str]]:
+    """Run-level ``path -> writers`` index derived from diff-time ownership.
+
+    A downstream reader needs to know which job produced a file even when the
+    producing stage kept no in-process handoff dict (a child process does not).
+    It never re-infers a writer from a tool name: the writer is recorded once,
+    at workspace-diff time, and this only unions it across the run.
+    """
+    index: dict[str, list[str]] = {}
+    for job in getattr(run, "jobs", None) or []:
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
+            writer = entry.get("writer") or getattr(job, "job_id", "") or ""
+            if not writer:
+                continue
+            bucket = index.setdefault(entry["path"], [])
+            if writer not in bucket:
+                bucket.append(writer)
+    return index
+
+
 class WorkflowStore:
     def __init__(self, root: str | Path | None = None):
         self.root = Path(root) if root is not None else DEFAULT_ROOT
@@ -412,6 +433,11 @@ class WorkflowStore:
         for key in ("integrationStatus", "integrationIssues", "finalAuditStatus"):
             if key in metadata:
                 progress[key] = copy.deepcopy(metadata[key])
+        if "artifactCollisions" in metadata:
+            progress["artifactCollisions"] = copy.deepcopy(metadata["artifactCollisions"])
+        ownership = build_artifact_ownership_index(run)
+        if ownership:
+            progress["artifactOwnership"] = ownership
         self._write_json(self._run_dir(run) / progress_ref, sanitize(progress))
         return progress_ref
 

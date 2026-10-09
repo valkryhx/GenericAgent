@@ -23,11 +23,13 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from sensitive_redaction import sanitize, redact_sensitive_text
+from workflow_store import build_artifact_ownership_index
 from workflow_workspace import (
     default_workspace_root,
     observed_artifact_paths,
     resolve_workspace_root,
     workspace_metadata,
+    workspace_writes_with_writer,
 )
 
 
@@ -1304,6 +1306,33 @@ class GenericAgentBridge:
                 resolved.append(relative)
         return resolved[:32]
 
+    def _workflow_job_artifact_owners(self, run, refs: list[str]) -> dict[str, list[str]]:
+        """Map each artifact ref to the job(s) that wrote it, read run-wide.
+
+        Ownership is recorded at diff time on the job; rebuilding it here only
+        unions what already exists, so it stays correct for any writer tool and
+        is not a second source of truth. The persisted run-level index carries
+        the same information for jobs that ran in a child process and therefore
+        kept no local ``handoff`` dict.
+        """
+        owners: dict[str, list[str]] = {}
+        recorded = (run.metadata or {}).get("artifactOwnership")
+        if isinstance(recorded, dict):
+            for ref, writers in recorded.items():
+                if isinstance(writers, (list, tuple)):
+                    owners[str(ref)] = [str(writer) for writer in writers]
+        for job in run.jobs or []:
+            metadata = job.metadata if isinstance(job.metadata, dict) else {}
+            for entry in workspace_writes_with_writer(metadata.get('observedArtifacts')):
+                writer = entry.get('writer') or str(getattr(job, 'job_id', '') or '')
+                if not writer:
+                    continue
+                bucket = owners.setdefault(entry['path'], [])
+                if writer not in bucket:
+                    bucket.append(writer)
+        return {ref: owners[ref] for ref in refs if ref in owners}
+
+
     def _workflow_job_observed_artifacts(self, run, job) -> list[str]:
         """Observed artifact paths from the job or its persisted progress record.
 
@@ -1334,12 +1363,12 @@ class GenericAgentBridge:
             return sanitized
         if isinstance(sanitized, dict):
             compact = {}
-            for key in ('runId', 'status', 'error', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'summary', 'answer', 'conclusion', 'result', 'text'):
+            for key in ('runId', 'status', 'error', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'artifactOwners', 'summary', 'answer', 'conclusion', 'result', 'text'):
                 if key in sanitized:
                     compact[key] = GenericAgentBridge._handoff_bounded_value(sanitized[key], max(256, max_bytes // 2))
             compact['truncated'] = True
             while len(json.dumps(compact, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > max_bytes:
-                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'truncated'}), None)
+                removable = next((key for key in reversed(list(compact)) if key not in {'runId', 'status', 'workspacePath', 'workspaceBasePath', 'artifactRefs', 'artifactOwners', 'truncated'}), None)
                 if removable is None:
                     break
                 compact.pop(removable)
@@ -1379,6 +1408,12 @@ class GenericAgentBridge:
             artifacts = self._workflow_job_artifact_refs(run, job)
             if artifacts:
                 item['artifactRefs'] = artifacts
+                # Which job wrote each ref. Without it a downstream reader sees
+                # ``report.md`` but cannot tell whether it is research output or
+                # synthesis output -- or that both jobs wrote the same path.
+                owners = self._workflow_job_artifact_owners(run, artifacts)
+                if owners:
+                    item['artifactOwners'] = owners
             if artifact and job.status in {'succeeded', 'cached'}:
                 item['result'] = self._handoff_bounded_value(artifact.get('payload', artifact), 8192)
             intermediate.append(item)
@@ -1386,6 +1421,7 @@ class GenericAgentBridge:
         run_metadata = run.metadata if isinstance(run.metadata, dict) else {}
         run_workspace = self._run_workspace_root(run)
         base_workspace = run_metadata.get("workspaceBasePath")
+        collisions = run_metadata.get("artifactCollisions")
         handoff = {
             'runId': run.run_id,
             'status': run.status,
@@ -1401,6 +1437,19 @@ class GenericAgentBridge:
             'workspacePath': run_workspace,
             'workspaceBasePath': str(base_workspace) if base_workspace else run_workspace,
         }
+        if isinstance(collisions, dict) and collisions:
+            # Two jobs wrote the same path, so the later write won. The reader
+            # must know the file may not represent the earlier job's output.
+            handoff['artifactCollisions'] = sanitize(copy.deepcopy(collisions))
+        # Run-level ownership, always derived here as well: a stage that ran in a
+        # child process keeps no local handoff dict, and runs recorded before the
+        # index existed have no ``artifactOwnership`` in metadata either. Both
+        # sources are the same diff-time writer record, so a union is safe.
+        ownership = build_artifact_ownership_index(run)
+        if not ownership and isinstance(run_metadata.get("artifactOwnership"), dict):
+            ownership = run_metadata["artifactOwnership"]
+        if ownership:
+            handoff['artifactOwnership'] = sanitize(copy.deepcopy(ownership))
         while len(json.dumps(handoff, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > _WORKFLOW_HANDOFF_MAX_BYTES - 512:
             candidate = next((item for item in reversed(intermediate) if 'result' in item), None)
             if candidate is not None:
@@ -1419,6 +1468,10 @@ class GenericAgentBridge:
             "Intermediate result `artifactRefs` and `finalResultRef` are paths relative to `workspacePath` above, "
             "which is this run's own directory under `workspaceBasePath`; resolve them under `workspacePath`, "
             "never under the run's internal artifact directory. Read them only if needed. "
+            "`artifactOwners` says which job wrote each ref, so prefer reading a ref when you need that stage's own output; "
+            "`artifactOwnership` is the same run-wide `path -> writer(s)` index and also covers stages that ran in a child process. "
+            "If `artifactCollisions` lists a path, more than one job wrote it and the last write won: "
+            "treat that file as possibly not reflecting the earlier writer, and do not assume every job's output survived. "
             "Transcript files are references only and are not included here.\n\n"
             f'<workflow_handoff>\n{serialized}\n</workflow_handoff>'
         )
