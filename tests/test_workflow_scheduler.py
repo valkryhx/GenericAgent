@@ -137,6 +137,26 @@ class PermissionEventsRunner:
         pass
 
 
+class HandoffProbeRunner:
+    """Records what the run workspace held at the moment a job started."""
+
+    def __init__(self):
+        self.workspace_at_start: dict[str, list[str]] = {}
+
+    def start(self, job) -> None:
+        workspace = Path(job.metadata["workspacePath"])
+        self.workspace_at_start[job.job_id] = sorted(
+            path.relative_to(workspace).as_posix()
+            for path in workspace.rglob("*.json")
+        )
+
+    def poll(self, job):
+        return AgentResult(job_id=job.job_id, status="succeeded", payload={"summary": f"done {job.job_id}"})
+
+    def cancel(self, job) -> None:
+        return None
+
+
 class WorkflowSchedulerTest(unittest.TestCase):
     def make_scheduler(self, *, max_concurrent=4, max_total=1000, runner=None, run_kwargs=None):
         tmp = tempfile.TemporaryDirectory()
@@ -1173,6 +1193,91 @@ class WorkflowSchedulerTest(unittest.TestCase):
         downstream = scheduler.downstream_result(store.load_run(run.run_id).jobs[1])
         self.assertNotIn("x" * 10_000, json.dumps(downstream, ensure_ascii=False))
 
+    def test_compact_handoff_summary_keeps_a_structured_answer_parseable(self):
+        """Regression: a fixed character cut left the handoff as half a JSON object.
+
+        The dependent child then read ``sources[0]`` as if it were the whole
+        upstream source list and reported the rest as unrecoverable.
+        """
+        structured = json.dumps(
+            {
+                "sources": [{"id": f"S{i}", "url": f"https://example.com/{i}", "notes": "n" * 200} for i in range(20)],
+                "claims": [{"id": f"C{i}", "text": "t" * 200} for i in range(20)],
+            },
+            ensure_ascii=False,
+        )
+
+        summary = AgentScheduler._compact_handoff_summary({"summary": structured, "resultRef": "agents/agent_1/result.json"}, None)
+
+        self.assertLessEqual(len(summary), 2_000)
+        parsed = json.loads(summary)
+        self.assertTrue(parsed["_truncated"])
+        self.assertIn("agents/agent_1/result.json", parsed["_note"])
+        self.assertTrue(parsed["sources"])
+
+    def test_dependency_handoff_materialises_the_upstream_result_for_the_child(self):
+        """A child cannot read ``resultRef``; the host must copy it into the workspace.
+
+        Regression (run ``wf_d1790ea5023946e082b973d9d550de39``): the synthesis
+        child looked for ``agents/agent_1/result.json`` under its own workspace
+        (the run's internal artifact directory is outside its path limit), failed,
+        and reported the upstream sources as lost. The handoff must carry a
+        workspace-relative copy the child can actually open.
+        """
+        runner = LabelAwareRunner(
+            results_by_label={
+                "Researcher": {"summary": "bounded conclusion", "sources": [{"id": "S1"}]},
+                "Writer": {"summary": "written"},
+            }
+        )
+        scheduler, store, run = self.make_scheduler(runner=runner, max_concurrent=1)
+        workspace = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(workspace, ignore_errors=True))
+        scheduler.args = {"workspacePath": str(workspace)}
+        scheduler._sync_workspace_metadata()
+        scheduler.register_agent(prompt="research", label="Researcher")
+        scheduler.register_agent(
+            prompt="write",
+            label="Writer",
+            options={"dependsOn": ["Researcher"]},
+        )
+
+        scheduler.run_all()
+
+        writer = store.load_run(run.run_id).jobs[1]
+        handoff = writer.metadata.get("dependencyHandoff")[0]
+        ref = handoff["upstreamResultPath"]
+        self.assertEqual("workflow-handoffs/upstream-agent_1.json", ref)
+        copy_path = workspace / ref
+        self.assertTrue(copy_path.is_file())
+        upstream = json.loads((Path(run.artifact_dir) / "agents/agent_1/result.json").read_text(encoding="utf-8"))
+        materialised = json.loads(copy_path.read_text(encoding="utf-8"))
+        self.assertEqual(upstream["payload"], materialised["payload"])
+
+    def test_upstream_result_copy_exists_before_the_dependent_child_starts(self):
+        """The copy must precede ``start`` so the child's workspace diff ignores it.
+
+        Artifact observation is a before/after workspace diff, so a file written
+        before the child starts is never attributed to the downstream job.
+        """
+        runner = HandoffProbeRunner()
+        scheduler, store, run = self.make_scheduler(runner=runner, max_concurrent=1)
+        workspace = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(workspace, ignore_errors=True))
+        scheduler.args = {"workspacePath": str(workspace)}
+        scheduler._sync_workspace_metadata()
+        scheduler.register_agent(prompt="research", label="Researcher")
+        scheduler.register_agent(
+            prompt="write",
+            label="Writer",
+            options={"dependsOn": ["Researcher"]},
+        )
+
+        scheduler.run_all()
+
+        seen = runner.workspace_at_start["agent_2"]
+        self.assertIn("workflow-handoffs/upstream-agent_1.json", seen)
+        self.assertNotIn("workflow-handoffs/upstream-agent_2.json", seen)
     def test_total_agents_cap_rejects_excess_job_and_records_event(self):
         scheduler, store, _ = self.make_scheduler(max_total=2)
         scheduler.register_agent(prompt="one")

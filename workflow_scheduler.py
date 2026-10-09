@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
+from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner, bounded_structured_summary
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore, build_artifact_ownership_index
 from workflow_workspace import (
@@ -649,7 +649,12 @@ class AgentScheduler:
         if last >= 0:
             text = text[last:].lstrip('\n ')
         rows = [line for line in text.splitlines() if not line.lstrip().startswith(("🔨", "Tool call:", "tool_call:"))]
-        return redact_sensitive_text('\n'.join(rows).strip())[:2_000]
+        cleaned = redact_sensitive_text('\n'.join(rows).strip())
+        # Bounding is structure-aware: a structured answer is projected into a
+        # valid, smaller JSON value instead of being cut mid-object. A fixed
+        # character cut is what made a synthesis child read half of
+        # ``sources[0]`` and then report the upstream sources as unrecoverable.
+        return bounded_structured_summary(cleaned, ref=payload.get("resultRef"))
 
     @staticmethod
     def _artifact_refs_from_payload(payload: dict) -> list[str]:
@@ -808,6 +813,7 @@ class AgentScheduler:
                 "evidence": sanitize(copy.deepcopy(raw.get("evidence") or []))[:8],
                 "blockingIssues": sanitize(copy.deepcopy(raw.get("blockingIssues") or []))[:8],
                 "resultRef": raw.get("resultRef") or upstream.result_ref,
+                "upstreamResultPath": self._materialize_upstream_result(upstream),
                 "artifactRefs": [str(ref) for ref in (raw.get("artifactRefs") or []) if str(ref)][:32],
                 "artifactOwners": sanitize(copy.deepcopy(raw.get("artifactOwners") or {}))
                 if isinstance(raw.get("artifactOwners"), dict) else {},
@@ -815,6 +821,39 @@ class AgentScheduler:
                 "transcriptRef": raw.get("transcriptRef") or upstream.metadata.get("transcriptRef"),
             })
         return handoffs
+
+    def _materialize_upstream_result(self, upstream: WorkflowJob) -> str | None:
+        """Copy an upstream job's durable result into the run workspace.
+
+        ``resultRef`` lives in the run's internal artifact directory, and a
+        workflow child runs under a path limit that only exposes its workspace,
+        so a dependent child can never open it. Advertising a ref the child
+        cannot read is how the synthesis stage concluded the upstream sources
+        were "gone". The host therefore writes a readable copy next to the
+        other control-plane files and hands the child that workspace-relative
+        path.
+
+        The copy happens before the child starts, so the child's own
+        before/after workspace diff never attributes it to the downstream job.
+        """
+        ref = upstream.result_ref
+        artifact_dir = getattr(self.run, "artifact_dir", None)
+        workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
+        if not ref or not artifact_dir or not workspace:
+            return None
+        source = Path(artifact_dir) / ref
+        try:
+            if not source.is_file():
+                return None
+            payload = json.loads(source.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return None
+        target_ref = f"workflow-handoffs/upstream-{upstream.job_id}.json"
+        try:
+            atomic_write_json(resolve_workspace_child(target_ref, Path(workspace)), sanitize(payload))
+        except (WorkspacePathError, OSError, TypeError, ValueError):
+            return None
+        return target_ref
 
     def downstream_result(self, job: WorkflowJob) -> dict:
         """Return the bounded value exposed to the workflow script/next child.

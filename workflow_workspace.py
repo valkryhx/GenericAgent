@@ -59,6 +59,15 @@ def run_workspace_path(base_root: str | os.PathLike[str], run_id: str) -> Path:
     return (base / RUN_WORKSPACE_DIRNAME / run_id).resolve()
 
 
+# Directories the host owns inside a run workspace. Their contents are
+# control-plane state, never a child deliverable, so they are excluded from the
+# before/after diff. The host writes handoff envelopes and upstream-result copies
+# into ``workflow-handoffs/`` while other children may still be running, and
+# attributing those writes to whichever child happened to be active would be a
+# false artifact record.
+HOST_OWNED_WORKSPACE_DIRS = frozenset({"__pycache__", ".git", "workflow-handoffs"})
+
+
 def create_run_workspace(base_root: str | os.PathLike[str], run_id: str) -> Path:
     root = run_workspace_path(base_root, run_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -92,7 +101,7 @@ def snapshot_workspace(root: str | os.PathLike[str], *, max_entries: int = 20_00
             for entry in entries:
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        if entry.name not in {"__pycache__", ".git"}:
+                        if entry.name not in HOST_OWNED_WORKSPACE_DIRS:
                             pending.append(entry.path)
                         continue
                     if not entry.is_file(follow_symlinks=False):

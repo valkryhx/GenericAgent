@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from workflow_child_agent import NativeGPTChildAgentRunner
+from workflow_child_agent import NativeGPTChildAgentRunner, bounded_structured_summary
 from workflow_models import WorkflowJob
 
 
@@ -247,6 +247,90 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertIn("artifacts/research.json", prompt)
         self.assertIn("resultRef: agents/agent_1/result.json", prompt)
         self.assertNotIn("x" * 1000, prompt)
+
+    def test_child_prompt_explains_which_root_each_dependency_ref_uses(self):
+        """Regression: the child read ``resultRef`` as workspace-relative.
+
+        Run ``wf_d1790ea5023946e082b973d9d550de39``: the synthesis child looked
+        for ``agents/agent_1/result.json`` inside its own workspace, did not find
+        it (the file lives in the run's internal artifact directory), and reported
+        the upstream sources as unrecoverable. The prompt must say which root each
+        ref resolves under, and point at the readable host copy.
+        """
+        job = WorkflowJob(
+            job_id="agent_2",
+            prompt="write the final report",
+            metadata={
+                "runId": "wf_test",
+                "label": "Writer",
+                "dependsOn": ["Researcher"],
+                "dependencyHandoff": [
+                    {
+                        "label": "Researcher",
+                        "status": "succeeded",
+                        "summary": "short research conclusion",
+                        "resultRef": "agents/agent_1/result.json",
+                        "upstreamResultPath": "workflow-handoffs/upstream-agent_1.json",
+                        "artifactRefs": ["artifacts/research.json"],
+                        "transcriptRef": "agents/agent_1/transcript.jsonl",
+                    }
+                ],
+            },
+        )
+        runner = NativeGPTChildAgentRunner()
+
+        prompt = runner._build_prompt(job)
+
+        self.assertIn("upstreamResultPath", prompt)
+        self.assertIn("workflow-handoffs/upstream-agent_1.json", prompt)
+        self.assertIn("Path bases:", prompt)
+        self.assertIn("do not try to open them", prompt)
+
+    def test_bounded_summary_keeps_a_long_structured_answer_parseable(self):
+        """Regression: a 2000-character cut left the handoff as half a JSON object.
+
+        The synthesis child then read ``sources[0]`` as if it were the whole
+        upstream source list. A structured summary must stay valid JSON and state
+        where the full value lives.
+        """
+        answer = json.dumps(
+            {
+                "sources": [{"id": f"S{i}", "url": f"https://example.com/{i}", "notes": "n" * 120} for i in range(20)],
+                "claims": [{"id": f"C{i}", "text": "t" * 120} for i in range(20)],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        summary = bounded_structured_summary(answer, ref="agents/agent_1/result.json")
+
+        self.assertLessEqual(len(summary), 2_000)
+        parsed = json.loads(summary)
+        self.assertTrue(parsed["_truncated"])
+        self.assertIn("agents/agent_1/result.json", parsed["_note"])
+        self.assertTrue(parsed["sources"])
+
+    def test_bounded_summary_marks_a_truncated_prose_answer(self):
+        text = chr(10).join(f"line {index} of a long prose answer" for index in range(400))
+
+        summary = bounded_structured_summary(text)
+
+        self.assertLessEqual(len(summary), 2_000)
+        self.assertIn("truncated by the host", summary)
+        self.assertIn("line 0 of a long prose answer", summary)
+    def test_bounded_summary_flags_an_already_truncated_fragment(self):
+        """A fragment left by an earlier fixed cut must not pass as complete data.
+
+        Run ``wf_d1790ea5...`` stored exactly this shape: 2000 characters of JSON
+        that stop inside ``sources[0]``. Bounded again at handoff time it stayed a
+        silent 516-character fragment.
+        """
+        fragment = '{"sources": [{"id": "S1", "url": "https://example.com/1", "notes": "unfinished'
+
+        summary = bounded_structured_summary(fragment, ref="agents/agent_1/result.json")
+
+        self.assertIn("truncated by the host", summary)
+        self.assertIn("agents/agent_1/result.json", summary)
 
     def test_child_prompt_says_which_job_wrote_each_upstream_artifact(self):
         """The dependent child must know whose output each ref is.

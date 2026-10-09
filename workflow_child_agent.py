@@ -159,6 +159,150 @@ def parse_json_answer(text: str):
     return None
 
 
+def _split_structured_payload(text: str) -> tuple[str, object | None]:
+    """Return ``(prose_prefix, parsed_value)`` when ``text`` carries JSON.
+
+    The prefix is whatever prose precedes the JSON value, so a bounded summary
+    can keep the child's own headline without re-inlining the whole object.
+    """
+    raw = str(text or "")
+    # Prose may contain braces of its own, so try each opening bracket in turn
+    # (bounded) instead of assuming the first one starts the payload.
+    starts = [index for index, char in enumerate(raw) if char in "{["][:64]
+    for start in starts:
+        value = parse_json_answer(raw[start:])
+        if value is not None:
+            return raw[:start], value
+    value = parse_json_answer(raw)
+    if value is not None:
+        return "", value
+    return raw, None
+
+
+HANDOFF_SUMMARY_LIMIT = 2_000
+
+
+def _compact_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _project_structured_value(value, budget: int, marker: str):
+    """Shrink ``value`` into a *valid* JSON projection of at most ``budget`` bytes.
+
+    Whole members are kept and the truncation is stated in-band, so a reader can
+    never mistake the tail of a JSON object for the real payload.
+    """
+
+    def size(item) -> int:
+        return len(_compact_json(item).encode("utf-8"))
+
+    if size(value) <= budget:
+        return value
+    note = {"_truncated": True, "_note": marker}
+    if isinstance(value, dict):
+        projected: dict = {}
+        for key, child in value.items():
+            remaining = budget - size(projected) - size(note) - len(str(key)) - 8
+            if remaining < 64:
+                break
+            projected[str(key)] = _project_structured_value(child, remaining, marker)
+            if size(projected) + size(note) > budget:
+                projected.pop(str(key), None)
+                break
+        projected.update(note)
+        return projected
+    if isinstance(value, list):
+        items: list = []
+        for child in value:
+            remaining = budget - size(items) - size(note) - 8
+            if remaining < 64:
+                break
+            candidate = _project_structured_value(child, remaining, marker)
+            if size(items + [candidate]) + size(note) > budget:
+                break
+            items.append(candidate)
+        items.append(note)
+        return items
+    if isinstance(value, str):
+        return value[: max(0, budget - 24)].rstrip() + " …"
+    return value
+
+
+def _looks_like_a_cut_off_payload(text: str) -> bool:
+    """True when ``text`` carries unbalanced brackets, i.e. a truncated JSON value.
+
+    A fragment that survived an earlier fixed-length cut still *looks* like data
+    to a reader, which is how the reported run ended up treating half of
+    ``sources[0]`` as the upstream source list. Flagging it costs nothing and
+    stops the fragment from passing as a complete answer.
+    """
+    if "{" not in text and "[" not in text:
+        return False
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+    return depth != 0
+
+
+def _truncation_marker(ref: str | None) -> str:
+    """Say that a summary was bounded *and* where the complete value lives."""
+    if ref:
+        return f"truncated by the host; full value: {ref}"
+    return "truncated by the host; full value: this job's result.json"
+
+
+def bounded_structured_summary(text, limit: int = HANDOFF_SUMMARY_LIMIT, *, ref: str | None = None) -> str:
+    """Bound ``text`` without ever handing on a half-parsed JSON fragment.
+
+    Regression (run ``wf_d1790ea5023946e082b973d9d550de39``): a research child
+    answered with a large ``{"sources": [...], "claims": [...]}`` object, and both
+    the child payload and the handoff cut it at a fixed character count. The
+    synthesis child then received JSON that stopped in the middle of
+    ``sources[0]`` and reported the upstream sources as unrecoverable. A summary
+    that is structured must stay parseable: keep a bounded projection and say
+    where the full value lives.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    marker = _truncation_marker(ref)
+    if len(raw) <= limit:
+        if parse_json_answer(raw) is None and _looks_like_a_cut_off_payload(raw):
+            return f"{raw}\n…[{marker}]"
+        return raw
+    prefix, structured = _split_structured_payload(raw)
+    if structured is not None:
+        budget = max(64, limit - len(marker) - 16)
+        rendered = _compact_json(_project_structured_value(structured, budget, marker))
+        head = "\n".join(
+            line for line in prefix.splitlines() if not line.strip().startswith("```")
+        ).strip()
+        if head and len(head) + len(rendered) + 1 <= limit:
+            return f"{head}\n{rendered}"
+        if len(rendered) <= limit:
+            return rendered
+    cut = raw[: max(0, limit - len(marker) - 4)]
+    newline = cut.rfind("\n")
+    if newline >= limit // 2:
+        cut = cut[:newline]
+    return f"{cut.rstrip()}\n…[{marker}]"
+
+
 def _declared_schema(options: dict | None):
     schema = (options or {}).get("schema") if isinstance(options, dict) else None
     return schema if isinstance(schema, dict) and schema else None
@@ -641,6 +785,8 @@ class NativeGPTChildAgentRunner:
                 lines.append(f"- label: {item.get('label') or ''}")
                 lines.append(f"  status: {item.get('status') or ''}")
                 lines.append(f"  summary: {item.get('summary') or ''}")
+                if item.get("upstreamResultPath"):
+                    lines.append(f"  upstreamResultPath (readable copy of that job's result): {item['upstreamResultPath']}")
                 if item.get("resultRef"):
                     lines.append(f"  resultRef: {item['resultRef']}")
                 if item.get("artifactRefs"):
@@ -657,7 +803,10 @@ class NativeGPTChildAgentRunner:
                 if item.get("blockingIssues"):
                     lines.append(f"  blockingIssues: {item['blockingIssues']}")
             lines.extend([
-                "Read detailed information only from workspace-relative artifactRefs or handoffRef when needed; transcriptRef is audit-only.",
+                "Path bases: `artifactRefs`, `handoffRef` and `upstreamResultPath` are relative to your workspacePath and you may read them. "
+                "`resultRef` and `transcriptRef` are the run's internal audit refs under the run artifact directory, which your workspace "
+                "limit does not expose: do not try to open them, and never report them as missing upstream data. When a summary is not "
+                "enough, read `upstreamResultPath` -- it is the host's copy of that job's durable result.json.",
             ])
         lines.extend([
             "",
@@ -682,13 +831,14 @@ class NativeGPTChildAgentRunner:
         """
         text = str(answer or "").strip()
         options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        ref = getattr(job, "result_ref", None)
         if _declared_schema(options):
             parsed = parse_json_answer(answer)
             if isinstance(parsed, dict):
                 payload = dict(parsed)
-                payload.setdefault("summary", text[:2_000])
+                payload.setdefault("summary", bounded_structured_summary(text, ref=ref))
                 payload.setdefault("text", answer)
                 return payload
             if isinstance(parsed, list):
-                return {"result": parsed, "summary": text[:2_000], "text": answer}
+                return {"result": parsed, "summary": bounded_structured_summary(text, ref=ref), "text": answer}
         return {"summary": text, "text": answer}

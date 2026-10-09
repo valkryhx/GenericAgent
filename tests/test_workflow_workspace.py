@@ -121,6 +121,24 @@ class WorkflowWorkspaceTest(unittest.TestCase):
             self.assertEqual(["a.txt"], sorted(before))
             self.assertEqual([], diff_workspace(before, snapshot_workspace(root)))
 
+    def test_snapshot_ignores_host_owned_handoff_directory(self):
+        """Control-plane writes must never be reported as a child artifact.
+
+        The host materialises upstream results into ``workflow-handoffs/`` while
+        other children can still be running; a diff that counted them would
+        attribute the host's write to whichever child finished next.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "report.md").write_text("deliverable", encoding="utf-8")
+            before = snapshot_workspace(root)
+
+            (root / "workflow-handoffs").mkdir()
+            (root / "workflow-handoffs" / "upstream-agent_1.json").write_text("{}", encoding="utf-8")
+
+            self.assertEqual([], diff_workspace(before, snapshot_workspace(root)))
+            self.assertEqual(["report.md"], sorted(snapshot_workspace(root)))
+
     def test_snapshot_of_missing_directory_is_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual({}, snapshot_workspace(Path(tmp) / "does-not-exist"))

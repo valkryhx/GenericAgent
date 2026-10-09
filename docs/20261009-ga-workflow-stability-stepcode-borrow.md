@@ -786,3 +786,129 @@ seq 13 agent_completed        succeeded
 - 线上数据复算：把 `wf_6e481417f6e344cc80249b7f50fd3418` 的 `state.json` 按新判据重算，
   `workflowIssues` 从 `[schema_validation_failed]` 变为 `[]`，run 判定从 `degraded` 变为 `succeeded`。
 - 全量：`python -m unittest discover -s tests` **1313 tests OK**（skip 3，195s）。
+
+## 17. handoff 摘要被截断成半截 JSON + 上游 result 下游读不到（2026-10-09，第七轮）
+
+### 17.1 现象
+
+真实 run `wf_d1790ea5023946e082b973d9d550de39`（`/workflow 使用 workflow 来调研 openai 2026年7月后
+解决了哪些比较知名的数学猜想`）状态是 **succeeded**，但它自己的综合报告 §4 主动上报了两条上游数据
+完整性问题：
+
+1. `workflow-handoffs/agent_1.json` 的 `summary` 字段**在 JSON 中间被截断**（`sources` 数组只露出 S1 的
+   前半段）；
+2. 它指向的 `resultRef = agents/agent_1/result.json` "在工作区中不存在"，导致完整来源列表（S2…Sn）
+   不可恢复，交叉验证矩阵残缺。
+
+### 17.2 排查结论：一条是真 bug，一条是误判
+
+**第 2 条不是文件被清理。** `temp/sessions/session_932c715590b54a48ac92e9b2220c0510/workflows/
+wf_d1790ea5023946e082b973d9d550de39/agents/agent_1/result.json` **46492 字节，完整存在**。
+
+真正的原因是两个根（`e2e53c1` 引入）只对宿主可见，对 child 不可见：
+
+| 根 | 位置 | 谁按它解析 |
+| --- | --- | --- |
+| `workspacePath` | `<base>/workflow-runs/<runId>/` | `artifactRefs` / `handoffRef` |
+| run 内部 artifact 目录 | `temp/sessions/<session>/workflows/<runId>/` | `resultRef` / `transcriptRef` |
+
+`workflow_child_agent._build_prompt()` 只说 "Read detailed information only from workspace-relative
+artifactRefs or handoffRef"，从未说明 `resultRef` 不是 workspace 相对路径。综合 child 于是去自己的
+workspace 里找 `agents/agent_1/result.json`，找不到，就把它写成"上游数据不可恢复"。
+
+而且**它本来也不可能找到**：child 的工具调用受 `workflow_path_acl` 限制，只能读写自己的
+`workspacePath`。run 内部 artifact 目录在它的可见范围之外——这正是 `e2e53c1` 刻意的隔离。所以
+"把 `resultRef` 交给 child 去读"这条路本身是错的，不是路径写错。
+
+**第 1 条是真 bug，而且有两层。**
+
+- 第一层在 child 侧：`workflow_child_agent._build_success_payload()` 对 schema job 执行
+  `payload.setdefault("summary", text[:2_000])`。agent_1 的答案是一个 19070 字符的 JSON 对象，
+  `text[:2000]` 恰好切在 `sources[0]` 中间。落盘的 `result.json.payload.summary` 就是 2000 字符的
+  半截 JSON。
+- 第二层在 scheduler 侧：`_compact_handoff_summary()` 的 `[:2_000]` 对已经是半截 JSON 的文本再切一刀，
+  写进 `workflow-handoffs/agent_1.json` 的 `summary` 变成 516 字符的残片。
+
+下游看到的是一个"看起来像 JSON"的片段，于是把它当成上游真实数据——这比"什么都没有"更糟：它不会
+报错，只会静默丢数据。
+
+### 17.3 修复一：摘要截断改成结构感知，绝不再切出半截 JSON
+
+新增 `workflow_child_agent.bounded_structured_summary(text, limit, ref=...)`，两个调用点共用一份实现：
+
+- `workflow_child_agent._build_success_payload()`（child 落盘 `result.json` 时）
+- `workflow_scheduler._compact_handoff_summary()`（写 handoff 时，改为委托给它）
+
+行为：
+
+1. 超限文本先尝试解析成 JSON；解析成功就**投影成一个更小的、仍然合法的 JSON 值**
+   （`_project_structured_value`：整个成员保留，装不下就停，并补上 `_truncated` / `_note`）。
+   例：agent_1 的 19070 字符答案 → 1567 字符（子代理自己的标题行 + 一个完整合法的 JSON 投影，
+   `parse_json_answer` 可提取，保留 5 条 `sources`，`_note` 写明完整值在 `agents/agent_1/result.json`）。
+2. 解析不出来（真正的散文）就按**行边界**截断，并显式追加 `…[truncated by the host; full value: <ref>]`。
+3. 未超限的文本原样返回（短散文行为不变），**除非**它括号不配平——`_looks_like_a_cut_off_payload()`
+   会认出"先前某次定长截断留下的 JSON 残片"并补上同样的显式标记。线上那条 516 字符的 handoff
+   summary 正是这种残片，此前它会静默通过。
+
+`_note` 直接写明完整值在哪里，读者不用猜。
+
+### 17.4 修复二：让 `resultRef` 真的可读，并把两个根写进 child prompt
+
+两条一起做，缺一条都还是靠猜：
+
+1. **宿主落盘可读副本。** `workflow_scheduler._materialize_upstream_result()` 在依赖 job **启动之前**，
+   把上游的 `result.json` 复制成 run workspace 内的 `workflow-handoffs/upstream-<jobId>.json`，并通过
+   handoff 的新字段 `upstreamResultPath` 交给下游。child 想深挖时 `file_read` 这个 workspace 相对路径
+   即可，不需要放宽 ACL。
+2. **prompt 显式区分两个根。** 依赖 handoff 段落新增：
+
+   ```
+   upstreamResultPath (readable copy of that job's result): workflow-handoffs/upstream-agent_1.json
+   resultRef: agents/agent_1/result.json
+   ```
+
+   并追加契约句：`artifactRefs` / `handoffRef` / `upstreamResultPath` 相对 `workspacePath`、可读；
+   `resultRef` / `transcriptRef` 是 run 内部审计引用、**不在你的可见范围内**，不要去打开，也不要把它
+   报成"上游数据丢失"。
+
+这同时满足了综合报告给的两条建议里合理的那部分：**不提高内联上限**（那会把中间产物重新塞回下一个 LLM
+请求，违背既定设计），而是"短摘要 + 可读引用"，让下游按需读文件。
+
+### 17.5 顺带修掉：宿主控制面写入不再算 child 产物
+
+落盘副本引入了一个新风险：`workflow-handoffs/` 现在既在 job 启动前写（副本），也在 job 结束后写
+（handoff envelope）。如果某个同波次的兄弟 job 还在跑，它的 before/after 差分就会把宿主的写入记成
+"这个 child 写了文件"——一个假产物归属。
+
+`workflow_workspace.snapshot_workspace()` 的目录跳过集合从 `{"__pycache__", ".git"}` 扩为
+`HOST_OWNED_WORKSPACE_DIRS = {"__pycache__", ".git", "workflow-handoffs"}`。理由：该目录是宿主控制面，
+**永远不是 child 交付物**。这条同时修掉了此前 handoff envelope 可能被记到并发 job 头上的老问题。
+
+### 17.6 不变量
+
+- `result.json` 从来不会被清理，也不需要清理；"上游丢了"要先怀疑引用基准，而不是清理逻辑。
+- 结构化摘要必须保持合法 JSON：宁可少放成员并显式标注，也不许切出半截对象。
+- child 只能读 `workspacePath` 内的路径。要让它读到宿主侧数据，唯一正确做法是宿主把数据放进工作区，
+  不是放宽 ACL、也不是让模型去猜绝对路径。
+- `workflow-handoffs/` 属于宿主控制面，永远不出现在 `observedArtifacts` 里。
+
+### 17.7 验收
+
+- `tests/test_workflow_child_agent.py` +4：超限结构化答案截断后仍是合法 JSON 且带 `_note`；超限散文
+  截断带显式标记；已被截断的残片也被标记；child prompt 同时出现 `upstreamResultPath` 与两个根的说明。
+- `tests/test_workflow_scheduler.py` +2：`_compact_handoff_summary` 对 20 条 sources 的 payload 仍产出
+  合法 JSON；依赖 handoff 落盘 `workflow-handoffs/upstream-agent_1.json` 且内容与上游 `result.json` 的
+  `payload` 一致。
+- `tests/test_workflow_scheduler.py` +1（顺序）：用探针 runner 记录 job 启动瞬间的工作区快照，断言 Writer
+  启动时副本已存在、且没有 agent_2 自己的副本——证明复制发生在 child 的 before 快照之前。
+- `tests/test_workflow_workspace.py` +1：`workflow-handoffs/` 下的新增文件不出现在差分里。
+- 红→绿：临时把 `bounded_structured_summary` 退回 `raw[:limit]`、关掉残片检测、去掉 prompt 两个根说明、
+  去掉 `upstreamResultPath` 渲染与字段、把 `workflow-handoffs` 从跳过集合拿掉，7 个新用例全部失败；
+  恢复后全绿。
+- 线上数据复算（用真实 `wf_d1790ea5...` 的 `agents/agent_1/result.json` 重放依赖 handoff）：
+  旧实现落盘的 `payload.summary` 是 2000 字符、`json.loads` 失败的残片；新实现产出 1567 字符、可提取
+  完整合法 JSON（5 条 sources）的摘要。handoff 里 `upstreamResultPath =
+  workflow-handoffs/upstream-agent_1.json`，从子代理工作区可读，内容与上游 `result.json.payload` 完全一致。
+  旧版 516 字符残片经过新实现也会被补上显式截断标记。
+- 全量：`python -m unittest discover -s tests` **1320 tests OK**（skip 3，194s）；Ink UI
+  `npx tsx --test src/*.test.ts` **391 pass / 0 fail**。
