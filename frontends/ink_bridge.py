@@ -23,7 +23,12 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from sensitive_redaction import sanitize, redact_sensitive_text
-from workflow_workspace import default_workspace_root, resolve_workspace_root, workspace_metadata
+from workflow_workspace import (
+    default_workspace_root,
+    observed_artifact_paths,
+    resolve_workspace_root,
+    workspace_metadata,
+)
 
 
 def _configure_protocol_stdio() -> None:
@@ -1306,7 +1311,7 @@ class GenericAgentBridge:
         them in ``workflow-progress.json``, so fall back to that snapshot.
         """
         metadata = job.metadata if isinstance(job.metadata, dict) else {}
-        observed = [str(ref) for ref in (metadata.get('observedArtifacts') or []) if str(ref)]
+        observed = observed_artifact_paths(metadata.get('observedArtifacts'))
         if observed:
             return observed
         progress = self._workflow_artifact_payload(run, 'workflow-progress.json')
@@ -1318,7 +1323,7 @@ class GenericAgentBridge:
                 continue
             if entry.get('jobId') != job_id and entry.get('agentId') != job_id:
                 continue
-            return [str(ref) for ref in (entry.get('observedArtifacts') or []) if str(ref)]
+            return observed_artifact_paths(entry.get('observedArtifacts'))
         return []
 
     @staticmethod

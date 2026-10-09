@@ -31,6 +31,8 @@ def copy_token_usage(value) -> dict:
     return copy.deepcopy(value) if isinstance(value, dict) else {}
 
 
+from workflow_workspace import workspace_writes_with_writer
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
 
@@ -463,7 +465,8 @@ class WorkflowStore:
             # Ink handoff can carry resolvable workspace paths instead of the
             # plan's semantic labels ("synthesis").
             "observedArtifacts": [
-                str(ref) for ref in (job.metadata.get("observedArtifacts") or []) if str(ref)
+                {"path": entry["path"], "writer": entry["writer"]}
+                for entry in workspace_writes_with_writer(job.metadata.get("observedArtifacts"))
             ],
         }
         return progress

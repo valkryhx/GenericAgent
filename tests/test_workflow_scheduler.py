@@ -282,9 +282,104 @@ class WorkflowSchedulerTest(unittest.TestCase):
 
             scheduler._record_observed_artifacts(job, result)
 
-            self.assertEqual(["notes.md", "reports/summary.docx"], sorted(job.metadata["observedArtifacts"]))
+            self.assertEqual(
+                ["notes.md", "reports/summary.docx"],
+                sorted(entry["path"] for entry in job.metadata["observedArtifacts"]),
+            )
             progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
-            self.assertEqual(["notes.md", "reports/summary.docx"], sorted(progress["workflowProgress"][0]["observedArtifacts"]))
+            self.assertEqual(
+                ["notes.md", "reports/summary.docx"],
+                sorted(entry["path"] for entry in progress["workflowProgress"][0]["observedArtifacts"]),
+            )
+
+    def test_observed_artifacts_record_the_writing_job(self):
+        """Each artifact must name the job that wrote it.
+
+        Without ownership the handoff can only hand over an opaque path; when two
+        children write the same filename there is no way to tell which content is
+        in the file or who to blame for overwriting whom.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write the report", label="Synthesis")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote"},
+                tool_summary={"writtenPaths": ["report.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+
+            self.assertEqual([{"path": "report.md", "writer": "Synthesis"}], job.metadata["observedArtifacts"])
+            progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [{"path": "report.md", "writer": "Synthesis"}],
+                progress["workflowProgress"][0]["observedArtifacts"],
+            )
+
+    def test_owner_falls_back_to_the_job_id_when_no_label_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, _store, _run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            job = scheduler.register_agent(prompt="write")
+            result = AgentResult(
+                job_id=job.job_id,
+                status="succeeded",
+                payload={"summary": "wrote"},
+                tool_summary={"writtenPaths": ["report.md"]},
+            )
+
+            scheduler._record_observed_artifacts(job, result)
+
+            self.assertEqual([{"path": "report.md", "writer": job.job_id}], job.metadata["observedArtifacts"])
+
+    def test_a_path_written_by_two_jobs_is_recorded_as_a_collision(self):
+        """A silent overwrite must become a visible, recorded fact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="research", label="Research")
+            second = scheduler.register_agent(prompt="synthesize", label="Synthesis")
+
+            scheduler._record_observed_artifacts(first, AgentResult(
+                job_id=first.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+            ))
+            scheduler._record_observed_artifacts(second, AgentResult(
+                job_id=second.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+            ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual({"report.md": ["Research", "Synthesis"]}, loaded.metadata["artifactCollisions"])
+            codes = [issue["code"] for issue in loaded.metadata["workflowIssues"]]
+            self.assertIn("artifact_path_collision", codes)
+            self.assertIn("artifact_collision", self.event_types(store))
+            # Ownership is per job, so both jobs still name themselves the writer.
+            self.assertEqual([{"path": "report.md", "writer": "Research"}], first.metadata["observedArtifacts"])
+            self.assertEqual([{"path": "report.md", "writer": "Synthesis"}], second.metadata["observedArtifacts"])
+
+    def test_no_collision_is_recorded_when_each_job_writes_its_own_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="research", label="Research")
+            second = scheduler.register_agent(prompt="synthesize", label="Synthesis")
+
+            scheduler._record_observed_artifacts(first, AgentResult(
+                job_id=first.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["notes.md"]},
+            ))
+            scheduler._record_observed_artifacts(second, AgentResult(
+                job_id=second.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+            ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertNotIn("artifactCollisions", loaded.metadata or {})
+            self.assertNotIn("artifact_collision", self.event_types(store))
 
     def test_observed_artifacts_drop_paths_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,7 +396,7 @@ class WorkflowSchedulerTest(unittest.TestCase):
 
             scheduler._record_observed_artifacts(job, result)
 
-            self.assertEqual(["ok.md"], job.metadata["observedArtifacts"])
+            self.assertEqual([{"path": "ok.md", "writer": "Writer"}], job.metadata["observedArtifacts"])
 
     def test_register_agent_rejects_non_dict_options_with_clear_error(self):
         scheduler, _store, _run = self.make_scheduler()

@@ -590,6 +590,46 @@ PYTHONIOENCODING=utf-8 python tests/real_workflow_strict_schema_child_e2e.py`（
 synthesis 子代理的 transcript 里**完全没有 `file_write`**，产物却仍被观测到并落盘。旧实现
 （按工具名扫描）下这个 run 的 `observedArtifacts` 必然是空的，这正是本轮替换机制的差异所在。
 
-**已知余项（本轮未做）**：`observedArtifacts` 是 run 级聚合，不含 writer 归属；当两个子代理
-写出同名文件、或需要按 agent 追溯产物来源时无法区分（本轮 E2E 两个文件名不同，未触发）。
-若要支持，应在文件系统差分时同时记录 `jobId`，而不是回到按工具名推断。
+## 14. 产物归属与同名冲突（2026-10-09，第四轮）
+
+§13 记了一条余项：`observedArtifacts` 只有路径，没有 writer。它在两种情况下会真的咬人：
+
+1. 两个子代理写**同名文件**——第二个静默覆盖第一个，谁写的、文件里现在是谁的内容，都查不到；
+2. 下游需要**按 agent 追溯**产物来源（审计、重跑单个 agent、handoff 里说明"这份数据来自哪个角色"）。
+
+### 14.1 实现：归属在差分时记录，不在事后推断
+
+关键约束是"不能退回到按工具名推断"。写路径与写者这两件事，**只有差分那一刻同时知道**，
+所以归属就在那里落盘：
+
+| 位置 | 改动 |
+| --- | --- |
+| `workflow_workspace.py` | 新增 `workspace_writes_with_writer()`（归一化为 `[{"path","writer"}]`）、`observed_artifact_paths()`、`observed_artifact_owners()` |
+| `workflow_scheduler.py::_record_observed_artifacts` | 写差分结果时同时写 `writer`（`label`，缺省回落 `jobId`），并与该 job 已有记录合并 |
+| `workflow_scheduler.py::_record_artifact_collisions` | 全 run 扫描各 job 的归属记录；同一路径多于一个 writer 时记 `artifactCollisions` 到 run metadata、追加 `artifact_path_collision` issue 和 `artifact_collision` 事件 |
+| `workflow_store.py` | 进度快照输出 `observedArtifacts: [{path, writer}]` |
+| `frontends/ink_bridge.py` | 两处消费者改用 `observed_artifact_paths()`，handoff 仍是纯路径列表（下游拿到的语义不变） |
+
+**向后兼容是刻意的**：`workspace_writes_with_writer()` 同时接受裸字符串和 `{path, writer}`
+两种形态，所以历史 run 的 state 仍能加载，旧调用点（含测试里直接塞 `["x.md"]` 的用法）不必全部改写。
+
+**冲突不阻塞 run**：同名覆盖本身可能是合法设计（后写者有意覆盖），GA 没有依据替用户判定对错，
+所以它记成 run 级事实（issue + 事件 + metadata）而不是抛错——错误地 fail 一个 run 比暴露一个
+警告更贵。
+
+### 14.2 验收
+
+- `tests/test_workflow_workspace.py` +4：裸路径归一化（含空值过滤）、`{path,writer}` 保留 writer、
+  同名多 writer 映射、新旧混合形态同时可读。
+- `tests/test_workflow_scheduler.py` +4：产物带 writer、无 label 时回落 `jobId`、同名冲突被记录
+  （issue + 事件 + metadata + 各 job 仍各自持有自己的归属）、不同名时**不**产生冲突记录。
+- 既有两个用例改为按新契约断言（`observedArtifacts` 现在是 `[{path, writer}]`）。
+- 红→绿：临时移除归属记录逻辑，两个新用例按预期失败，恢复后通过。
+- 相关套件：`tests.test_workflow_workspace`/`scheduler`/`controller`/`child_agent`/`store`
+  共 138 tests OK；`tests.test_ink_bridge` 106 tests OK。
+- 全量：`python -m unittest discover -s tests` **1294 tests OK**（skip 3，201s）；
+  Ink **391 pass / 0 fail**。
+- 真实 E2E（gpt-6-luna，8.1s）：`ownershipRecorded: true`，
+  `observedArtifactOwners = {"research_notes.md": ["source-discovery"], "synthesis_report.md": ["synthesis"]}`，
+  同时 `toolNamesByJob.synthesis = ["code_run","no_tool"]`（无 `file_write`）——归属与工具无关观测
+  在同一次真实运行里同时成立。

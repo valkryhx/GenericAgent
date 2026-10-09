@@ -34,7 +34,8 @@ from workflow_models import WorkflowRun  # noqa: E402
 from workflow_child_agent import NativeGPTChildAgentRunner  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
-from workflow_store import WorkflowStore  # noqa: E402
+from workflow_store import WorkflowStore
+from workflow_workspace import workspace_writes_with_writer  # noqa: E402
 
 PROFILE = os.environ.get("GA_WORKFLOW_LLM_PROFILE") or "default"
 OPT_IN = os.environ.get("GA_RUN_REAL_WORKFLOW_STRICT_SCHEMA_E2E") == "1"
@@ -122,10 +123,16 @@ def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str
         return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     loaded = store.load_run("wf_artifact_handoff_e2e")
     handoff_refs: list[str] = []
+    owners_by_path: dict[str, list[str]] = {}
     tool_names_by_label: dict[str, list[str]] = {}
     for job in loaded.jobs:
-        observed = (job.metadata or {}).get("observedArtifacts") or []
-        handoff_refs.extend(str(ref) for ref in observed)
+        observed = workspace_writes_with_writer((job.metadata or {}).get("observedArtifacts"))
+        for entry in observed:
+            handoff_refs.append(entry["path"])
+            if entry["writer"]:
+                owners_by_path.setdefault(entry["path"], [])
+                if entry["writer"] not in owners_by_path[entry["path"]]:
+                    owners_by_path[entry["path"]].append(entry["writer"])
         events = store.read_agent_transcript_events(loaded, (job.metadata or {}).get("transcriptRef"))
         tool_names_by_label[str((job.metadata or {}).get("label") or job.job_id)] = sorted(
             {
@@ -138,6 +145,7 @@ def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str
     return {
         "runStatus": loaded.status,
         "observedArtifacts": sanitize(handoff_refs),
+        "observedArtifactOwners": sanitize(owners_by_path),
         "toolNamesByJob": sanitize(tool_names_by_label),
         "filesOnDisk": sorted(
             name for name in ("research_notes.md", "synthesis_report.md") if (workspace / name).is_file()
@@ -230,6 +238,15 @@ def main() -> int:
                 "synthesis_report.md" in (handoff.get("observedArtifacts") or [])
                 and "file_write" not in synthesis_tools
             )
+            # Ownership must come from the diff at write time, so each artifact
+            # names the job that produced it.
+            owners = handoff.get("observedArtifactOwners") or {}
+            summary["observedArtifactOwners"] = owners
+            summary["ownershipRecorded"] = bool(
+                owners.get("research_notes.md") == ["source-discovery"]
+                and owners.get("synthesis_report.md") == ["synthesis"]
+            )
+            summary["passed"] = bool(summary["passed"] and summary["ownershipRecorded"])
     except Exception as exc:  # pragma: no cover - diagnostic path
         summary["issues"].append(f"{type(exc).__name__}: {str(exc)[:400]}")
     print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))

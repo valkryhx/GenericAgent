@@ -8,6 +8,9 @@ from unittest.mock import patch
 from workflow_workspace import (
     WorkspacePathError,
     create_run_workspace,
+    observed_artifact_owners,
+    observed_artifact_paths,
+    workspace_writes_with_writer,
     default_workspace_root,
     diff_workspace,
     normalize_declared_artifact_path,
@@ -122,6 +125,57 @@ class WorkflowWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual({}, snapshot_workspace(Path(tmp) / "does-not-exist"))
 
+
+
+class ObservedArtifactShapeTest(unittest.TestCase):
+    """``observedArtifacts`` carries ownership, and both shapes keep loading.
+
+    The path alone answers "what did the run produce"; the writer answers "which
+    job produced it", which matters when two children write the same name. The
+    writer is recorded at diff time, never re-derived from tool names.
+    """
+
+    def test_bare_paths_still_load_as_entries_without_a_writer(self):
+        entries = workspace_writes_with_writer(["a.md", "  ", None, "b/c.md"])
+
+        self.assertEqual(
+            [{"path": "a.md", "writer": ""}, {"path": "b/c.md", "writer": ""}],
+            entries,
+        )
+        self.assertEqual(["a.md", "b/c.md"], observed_artifact_paths(entries))
+
+    def test_dict_entries_keep_their_writer_and_drop_empty_paths(self):
+        entries = workspace_writes_with_writer([
+            {"path": "a.md", "writer": "synthesis"},
+            {"path": "", "writer": "ignored"},
+            {"path": "b.md"},
+        ])
+
+        self.assertEqual(
+            [{"path": "a.md", "writer": "synthesis"}, {"path": "b.md", "writer": ""}],
+            entries,
+        )
+        self.assertEqual(["a.md", "b.md"], observed_artifact_paths(entries))
+
+    def test_owners_map_lists_every_writer_for_a_shared_path(self):
+        owners = observed_artifact_owners([
+            {"path": "report.md", "writer": "research"},
+            {"path": "report.md", "writer": "synthesis"},
+            {"path": "research_notes.md", "writer": "research"},
+            {"path": "orphan.md", "writer": ""},
+        ])
+
+        self.assertEqual(
+            {"report.md": ["research", "synthesis"], "research_notes.md": ["research"]},
+            owners,
+        )
+        self.assertNotIn("orphan.md", owners)
+
+    def test_mixed_legacy_and_owner_entries_are_both_understood(self):
+        entries = workspace_writes_with_writer(["legacy.md", {"path": "new.md", "writer": "job_2"}])
+
+        self.assertEqual(["legacy.md", "new.md"], observed_artifact_paths(entries))
+        self.assertEqual({"new.md": ["job_2"]}, observed_artifact_owners(entries))
 
 if __name__ == "__main__":
     unittest.main()

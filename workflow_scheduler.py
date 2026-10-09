@@ -12,7 +12,13 @@ from sensitive_redaction import redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore
-from workflow_workspace import normalize_workspace_relative, resolve_workspace_child, WorkspacePathError
+from workflow_workspace import (
+    WorkspacePathError,
+    normalize_workspace_relative,
+    observed_artifact_paths,
+    resolve_workspace_child,
+    workspace_writes_with_writer,
+)
 from subagent_state import atomic_write_json
 
 
@@ -719,7 +725,7 @@ class AgentScheduler:
         workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
         if not isinstance(workspace, str) or not workspace:
             return []
-        candidates = [str(ref) for ref in (metadata.get("observedArtifacts") or []) if str(ref)]
+        candidates = observed_artifact_paths(metadata.get("observedArtifacts"))
         options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
         for key in ("deliverables", "writeScope"):
             raw = (options or {}).get(key) or []
@@ -1141,13 +1147,61 @@ class AgentScheduler:
                 written.append(ref)
         if not written:
             return
-        job.metadata["observedArtifacts"] = written
+        # Record which job wrote each path. The diff is the only place that
+        # knows both facts at once; deriving the owner later would mean reading
+        # tool names again, which is the enumeration this design removed.
+        writer = str(job.metadata.get("label") or job.job_id)
+        existing = workspace_writes_with_writer(job.metadata.get("observedArtifacts"))
+        merged = {entry["path"]: entry for entry in existing}
+        for ref in written:
+            entry = merged.setdefault(ref, {"path": ref, "writer": writer})
+            if not entry.get("writer"):
+                entry["writer"] = writer
+        job.metadata["observedArtifacts"] = [merged[ref] for ref in written if ref in merged] + [
+            entry for ref, entry in merged.items() if ref not in set(written)
+        ]
+        self._record_artifact_collisions(job)
         self.store.save_run(self.run)
         # Publish the progress snapshot immediately: the Ink panel polls this
         # file, and waiting for the end-of-batch write made a finished artifact
         # invisible while later jobs were still running.
         self.store.write_workflow_progress(self.run)
         self._append("artifact_written", job, {"paths": written[:32]})
+
+    def _record_artifact_collisions(self, job: WorkflowJob) -> None:
+        """Flag paths written by more than one job in this run.
+
+        Two children writing ``report.md`` means the second silently overwrote
+        the first; without per-path ownership the handoff could only hand over
+        one opaque path. The run stays runnable, but the collision is recorded so
+        it is visible instead of being discovered from file contents later.
+        """
+        owners: dict[str, list[str]] = {}
+        for item in self.run.jobs:
+            metadata = item.metadata if isinstance(item.metadata, dict) else {}
+            for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
+                writer = entry.get("writer") or item.job_id
+                bucket = owners.setdefault(entry["path"], [])
+                if writer not in bucket:
+                    bucket.append(writer)
+        collisions = {path: writers for path, writers in owners.items() if len(writers) > 1}
+        if not collisions:
+            return
+        metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
+        issues = list(metadata.get("workflowIssues") or [])
+        for path, writers in sorted(collisions.items()):
+            issue = {
+                "code": "artifact_path_collision",
+                "message": f"{path} was written by multiple jobs: {', '.join(writers)}",
+                "path": path,
+                "writers": writers,
+            }
+            if not any(isinstance(item, dict) and item.get("code") == issue["code"] and item.get("path") == path for item in issues):
+                issues.append(issue)
+        metadata["workflowIssues"] = issues
+        metadata["artifactCollisions"] = {path: writers for path, writers in sorted(collisions.items())}
+        self.run.metadata = metadata
+        self._append("artifact_collision", job, {"collisions": metadata["artifactCollisions"]})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
         for event in result.transcript_events:

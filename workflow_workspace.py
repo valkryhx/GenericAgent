@@ -120,6 +120,51 @@ def diff_workspace(
     return sorted(changed)
 
 
+
+def workspace_writes_with_writer(entries) -> list[dict[str, str]]:
+    """Normalize observed-write entries to ``[{"path", "writer"}]``.
+
+    ``observedArtifacts`` started as a bare list of workspace-relative paths.
+    That is enough to hand a file to the next agent, but not to answer "which
+    job produced this file" when two children write the same path. The writer is
+    recorded at the same moment as the diff -- the only place that knows the job
+    -- instead of being inferred later from tool names, which is exactly the
+    enumeration this module was changed to avoid.
+
+    Accepts both shapes so old run state keeps loading: bare strings become
+    entries with an empty writer, and dict entries keep their ``path``/``writer``.
+    """
+    normalized: list[dict[str, str]] = []
+    for entry in entries or []:
+        if isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            normalized.append({"path": path, "writer": str(entry.get("writer") or "").strip()})
+            continue
+        path = str(entry or "").strip()
+        if path:
+            normalized.append({"path": path, "writer": ""})
+    return normalized
+
+
+def observed_artifact_paths(entries) -> list[str]:
+    """Return just the paths from an observed-artifact list (either shape)."""
+    return [entry["path"] for entry in workspace_writes_with_writer(entries)]
+
+
+def observed_artifact_owners(entries) -> dict[str, list[str]]:
+    """Map a path to the writer labels that produced it, for collision reporting."""
+    owners: dict[str, list[str]] = {}
+    for entry in workspace_writes_with_writer(entries):
+        writer = entry["writer"]
+        if not writer:
+            continue
+        bucket = owners.setdefault(entry["path"], [])
+        if writer not in bucket:
+            bucket.append(writer)
+    return owners
+
 def _is_absolute_like(raw: str) -> bool:
     value = str(raw).strip().replace("\\", "/")
     return bool(value.startswith("/") or value.startswith("//") or (len(value) >= 2 and value[1] == ":"))
