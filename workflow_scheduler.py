@@ -1017,6 +1017,12 @@ class AgentScheduler:
                 "fallback": None,
                 "fallbackApplied": False,
             }
+            # A retry (or a repair) satisfied the contract, so the earlier
+            # rejection is resolved. Leaving it in ``workflowIssues`` made the
+            # runtime degrade a run whose every job ended ``succeeded``, because
+            # degradation is decided by "any outstanding issue" -- the record is
+            # history, not an open problem.
+            self._clear_schema_issue(job)
             return result
         fallback = str(options.get("fallback") or "").strip().lower()
         fallback_applied = fallback == "text"
@@ -1047,6 +1053,35 @@ class AgentScheduler:
             "schemaValidation": copy.deepcopy(validation),
         }
         return result
+
+    def _clear_schema_issue(self, job: WorkflowJob) -> None:
+        """Drop this job's resolved ``schema_validation_failed`` record.
+
+        Only issues for this job are removed, and only the schema code, so a
+        different job's failure or an unrelated run-level issue is untouched. The
+        retry history itself stays in ``retryPolicy.lastError`` and the
+        ``agent_retry_scheduled`` journal event, which are not degradation gates.
+        """
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else None
+        if metadata is None:
+            return
+        existing = metadata.get("workflowIssues")
+        if not isinstance(existing, list):
+            return
+        remaining = [
+            issue
+            for issue in existing
+            if not (
+                isinstance(issue, dict)
+                and issue.get("code") == SCHEMA_VALIDATION_FAILED
+                and issue.get("jobId") == job.job_id
+            )
+        ]
+        if len(remaining) == len(existing):
+            return
+        metadata["workflowIssues"] = remaining
+        self.run.metadata = metadata
+        self._append("workflow_issue_resolved", job, {"code": SCHEMA_VALIDATION_FAILED})
 
     def _record_workflow_issue(self, job: WorkflowJob, validation: dict) -> None:
         issue = {

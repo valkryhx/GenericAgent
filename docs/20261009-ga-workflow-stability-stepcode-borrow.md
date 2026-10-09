@@ -714,3 +714,75 @@ handoff 超预算时会按 key 裁剪。`artifactOwners` 与 `artifactRefs`、`w
   - `handoffOwnership` 同上（handoff 层，`handoffExposesOwnership: true`）
   - `toolNamesByJob.synthesis = ["code_run","no_tool"]`、`synthesisUsedFileWrite: false`：
     归属与"工具无关的文件系统差分"在同一次真实运行里同时成立。
+
+## 16. 重试成功的 schema 失败仍把 run 判成 degraded（2026-10-09，第六轮）
+
+真实 Ink 运行 `wf_6e481417f6e344cc80249b7f50fd3418`（`/workflow 使用 workflow 来调研 openai 这次解决了哪些比较知名的数学猜想`）
+报告 `degraded`，但 UI 里两个子任务都是 succeeded，用户看到的却是"工作流降级"。这不是任务质量问题，
+是**降级判据把已经解决的历史记录当成了未解决问题**。
+
+### 16.1 证据链
+
+run 的最终状态自相矛盾：
+
+| 字段 | 值 |
+| --- | --- |
+| `childSummary` | `{total: 2, succeeded: 2, degraded: 0, failed: 0}` |
+| `jobs[].status` | `agent_1: succeeded`（`schemaValidation.ok = true`）、`agent_2: succeeded` |
+| `workflowIssues` | `[{code: schema_validation_failed, jobId: agent_1, issues: [missing sources/claims/risks]}]` |
+| `run.status` | `degraded` |
+
+journal 还原了过程：
+
+```
+seq 5  agent_started          agent_1 第 1 次
+seq 6  workflow_issue         schema_validation_failed
+seq 7  agent_retry_scheduled  attempt 1 -> 2
+seq 8  agent_started          agent_1 第 2 次
+seq 13 agent_completed        succeeded
+```
+
+`agent_1.metadata.retryPolicy` 是 `{attempts: 2, maxAttempts: 2, lastError: "schema_validation_failed: ..."}`——
+即第 1 次答成 prose，宿主带上 `retryFeedback` 重试，第 2 次返回了合法 JSON，**契约最终满足了**。
+
+### 16.2 根因：issue 是"曾经失败"，降级判据却把它当"仍然失败"
+
+两处代码各自都合理，组合起来是错的：
+
+1. `workflow_scheduler._apply_schema_contract()` 校验失败时调 `_record_workflow_issue()`，把
+   `schema_validation_failed` **append** 进 `run.metadata["workflowIssues"]`；
+2. 重试成功后走的是 `if not issues:` 分支，只把 `job.metadata["schemaValidation"]` 写成
+   `{ok: True}`，**从不回收第 1 次 append 的那条**；
+3. `workflow_runtime.py` 收口时 `degraded = str(run.status) == "degraded" or bool(metadata.get("workflowIssues"))`——
+   只要列表非空就降级。
+
+于是"重试成功"这条完全正常的路径，被记成了永久降级。列表语义实际是"历史事件"，判据却当它是
+"未解决门禁"。
+
+### 16.3 修复：契约满足时回收本 job 的 schema issue
+
+`_apply_schema_contract()` 的 `if not issues:` 分支新增 `_clear_schema_issue(job)`：
+
+- 只移除 `code == schema_validation_failed` **且** `jobId == job.job_id` 的条目，
+  别的 job 的失败、以及 run 级其他 issue 一律不动；
+- 清掉时补发一条 `workflow_issue_resolved` 事件，保留可观测性；
+- 重试历史本身不丢——`retryPolicy.lastError` 和 `agent_retry_scheduled` 事件仍在，它们不是降级门禁。
+
+**边界是刻意划的**：只有 schema 最终通过才回收。
+
+- `fallback: text` 路径在 `_apply_schema_contract` 里 `return` 得比成功分支早，issue 保留，
+  run 仍按真实降级处理（既有用例 `test_schema_fallback_records_workflow_issue_in_scheduler_artifacts` 未变）；
+- 每次尝试都失败 → job `failed`，issue 保留（新增用例
+  `test_schema_issue_survives_when_every_attempt_fails` 守住这一点）。
+
+### 16.4 验收
+
+- `tests/test_workflow_scheduler.py` +2：重试成功 → `workflowIssues == []`、`run.status == succeeded`、
+  `executionOutcome == succeeded`；每轮都失败 → issue 保留。
+- `tests/test_workflow_runtime.py` +1：runtime 层完整复刻线上场景（首答 prose → 重试返回 JSON），
+  断言 `succeeded` / `accepted` / `workflowIssues == []`，并检查落盘的 `workflow-progress.json`。
+- 红→绿：临时移除 `_clear_schema_issue(job)` 调用，两个新用例按预期失败（`[] != [schema_validation_failed]`），
+  恢复后通过。
+- 线上数据复算：把 `wf_6e481417f6e344cc80249b7f50fd3418` 的 `state.json` 按新判据重算，
+  `workflowIssues` 从 `[schema_validation_failed]` 变为 `[]`，run 判定从 `degraded` 变为 `succeeded`。
+- 全量：`python -m unittest discover -s tests` **1313 tests OK**（skip 3，195s）。

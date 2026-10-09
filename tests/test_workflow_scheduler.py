@@ -791,6 +791,74 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertIn("missing required field: sources", retry_feedback["issues"])
         self.assertIn("missing required field: claims", retry_feedback["issues"])
 
+    def test_schema_issue_is_cleared_when_a_retry_succeeds(self):
+        """A recovered schema miss must not leave the run degraded.
+
+        Regression: ``_record_workflow_issue`` appended the first attempt's
+        ``schema_validation_failed`` to ``run.metadata["workflowIssues"]`` and
+        nothing removed it when the retry passed. The runtime degrades a run
+        whenever ``workflowIssues`` is non-empty, so a run whose every job ended
+        ``succeeded`` was reported as ``degraded`` -- the Ink UI then told the
+        user the workflow "降级" for a clean delivery.
+        """
+
+        class RetryThenSucceedRunner:
+            def __init__(self):
+                self.polls = {}
+
+            def start(self, job):
+                self.polls.setdefault(job.job_id, 0)
+
+            def poll(self, job):
+                attempt = self.polls.get(job.job_id, 0)
+                self.polls[job.job_id] = attempt + 1
+                if attempt == 0:
+                    return AgentResult(job_id=job.job_id, payload={"summary": "prose, not JSON"})
+                return AgentResult(
+                    job_id=job.job_id,
+                    payload={"sources": ["S1"], "claims": ["C1"], "risks": ["R1"]},
+                )
+
+            def cancel(self, job):
+                pass
+
+        scheduler, store, run = self.make_scheduler(runner=RetryThenSucceedRunner())
+        scheduler.register_agent(
+            prompt="collect sources",
+            label="source-discovery",
+            options={
+                "schema": {"type": "object", "required": ["sources", "claims", "risks"]},
+                "retryPolicy": {"maxAttempts": 2, "retryableErrors": ["schema_validation_failed"], "backoffMs": 0},
+            },
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("succeeded", loaded.jobs[0].status)
+        self.assertTrue(loaded.jobs[0].metadata["schemaValidation"]["ok"])
+        self.assertEqual([], loaded.metadata.get("workflowIssues") or [])
+        self.assertEqual("succeeded", loaded.status)
+        self.assertEqual("succeeded", loaded.metadata.get("executionOutcome"))
+
+    def test_schema_issue_survives_when_every_attempt_fails(self):
+        """Clearing a recovered issue must not hide a genuinely failed job."""
+        scheduler, store, run = self.make_scheduler(
+            runner=FakeChildAgentRunner(results={"agent_1": {"summary": "still prose"}})
+        )
+        scheduler.register_agent(
+            prompt="collect sources",
+            label="source-discovery",
+            options={"schema": {"type": "object", "required": ["sources"]}},
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("failed", loaded.jobs[0].status)
+        codes = [issue["code"] for issue in loaded.metadata.get("workflowIssues") or []]
+        self.assertIn("schema_validation_failed", codes)
+
     def test_downstream_result_exposes_validated_schema_fields_to_the_script(self):
         """The script must receive the structured value it asked the agent for.
 

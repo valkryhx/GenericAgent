@@ -1669,6 +1669,64 @@ return { summary: result.summary, fallback: result.schemaFallback }
             self.assertEqual(issues, progress["workflowIssues"])
             self.assertEqual(job.metadata["schemaValidation"], progress["workflowProgress"][0]["schemaValidation"])
 
+    def test_runtime_run_recovers_when_a_schema_retry_succeeds(self):
+        """A recovered schema miss must leave the run ``succeeded``.
+
+        Regression (real Ink run ``wf_6e481417f6e344cc80249b7f50fd3418``): the
+        source-discovery child answered in prose, the host retried, the retry
+        returned valid JSON, and both jobs ended ``succeeded`` -- yet the run was
+        reported ``degraded``. The first attempt's ``schema_validation_failed``
+        stayed in ``workflowIssues``, and the runtime degrades on any outstanding
+        issue, so a clean delivery was surfaced to the user as "降级".
+        """
+
+        class RetryThenSucceedRunner:
+            def __init__(self):
+                self.polls = {}
+
+            def start(self, job):
+                self.polls.setdefault(job.job_id, 0)
+
+            def poll(self, job):
+                attempt = self.polls.get(job.job_id, 0)
+                self.polls[job.job_id] = attempt + 1
+                if attempt == 0:
+                    return AgentResult(job_id=job.job_id, payload={"summary": "prose"})
+                return AgentResult(job_id=job.job_id, payload={"sources": ["S1"]})
+
+            def cancel(self, job):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('collect sources', {
+  label: 'source-discovery',
+  schema: {
+    type: 'object',
+    required: ['sources'],
+    properties: { sources: { type: 'array' } }
+  },
+  retryPolicy: { maxAttempts: 2, retryableErrors: ['schema_validation_failed'], backoffMs: 0 }
+})
+return { count: result.sources.length }
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=RetryThenSucceedRunner())
+
+            outcome = runtime.run(run)
+
+            self.assertEqual({"count": 1}, outcome.result)
+            loaded = store.load_run("wf_test")
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("succeeded", loaded.jobs[0].status)
+            self.assertTrue(loaded.jobs[0].metadata["schemaValidation"]["ok"])
+            self.assertEqual([], loaded.metadata.get("workflowIssues") or [])
+            self.assertEqual("succeeded", loaded.metadata.get("executionOutcome"))
+            self.assertEqual("accepted", loaded.metadata.get("integrationStatus"))
+            progress = json.loads((Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            self.assertEqual([], progress["workflowIssues"])
+
     def test_runtime_agent_schema_failure_without_fallback_fails_with_schema_issue(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
