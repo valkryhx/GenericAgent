@@ -708,6 +708,7 @@ class AgentScheduler:
             if ref not in artifact_refs:
                 artifact_refs.append(ref)
         artifact_refs.extend(ref for ref in self._artifact_refs_from_payload({"deliverables": declared}) if ref not in artifact_refs)
+        readable = self._materialize_result_copy(job)
         handoff = {
             "status": result.status,
             "summary": self._compact_handoff_summary(payload, error),
@@ -716,6 +717,11 @@ class AgentScheduler:
             # These are logical refs for audit/recovery. They are not expanded into
             # the next LLM request; workspace artifactRefs are the only read path.
             "resultRef": job.result_ref,
+            # A workspace-relative, readable copy of the durable result. Readers
+            # that only know ``workspacePath`` can open this; ``resultRef`` alone
+            # is unresolvable for them.
+            "readableResultRef": readable[0] if readable else None,
+            "resultPath": readable[1] if readable else None,
             "artifactRefs": artifact_refs,
             # Ownership of the files this job wrote. A downstream reader can judge
             # whose data it is reading, and a path claimed by another job is
@@ -780,14 +786,26 @@ class AgentScheduler:
         ref = f"workflow-handoffs/{job.job_id}.json"
         try:
             target = resolve_workspace_child(ref, Path(workspace))
+            artifact_dir = getattr(self.run, "artifact_dir", None)
             envelope = {
                 "version": 1,
                 "jobId": job.job_id,
                 "label": job.metadata.get("label"),
                 "status": result.status,
                 "summary": handoff.get("summary"),
-                "resultRef": handoff.get("resultRef"),
+                # Refs use two different roots, and this file is read directly by
+                # the GA agent after the run. State both bases so nobody resolves
+                # ``resultRef`` under the run workspace and concludes the durable
+                # result is gone: ``artifactRefs`` are relative to
+                # ``workspacePath``; ``resultRef``/``transcriptRef`` are
+                # run-internal and relative to ``runArtifactDir``.
+                "workspacePath": str(workspace),
+                "runArtifactDir": str(artifact_dir) if artifact_dir else None,
+                "resultRef": handoff.get("readableResultRef") or handoff.get("resultRef"),
+                "resultPath": handoff.get("resultPath") or _absolute_under(artifact_dir, handoff.get("resultRef")),
+                "runInternalResultRef": handoff.get("resultRef"),
                 "transcriptRef": handoff.get("transcriptRef"),
+                "transcriptPath": _absolute_under(artifact_dir, handoff.get("transcriptRef")),
                 "artifactRefs": handoff.get("artifactRefs") or [],
                 # Detailed research belongs in declared workspace artifacts. Keep
                 # this control-plane file bounded; never mirror payload.text here.
@@ -796,6 +814,37 @@ class AgentScheduler:
             return ref
         except (WorkspacePathError, OSError, TypeError, ValueError):
             return None
+
+    def _materialize_result_copy(self, job: WorkflowJob) -> tuple[str, str] | None:
+        """Copy a job's durable result into the run workspace.
+
+        ``resultRef`` is relative to the run's *internal* artifact directory, not
+        to the run workspace. A reader that joins it onto ``workspacePath``
+        therefore builds a real, well-formed path that does not exist -- which is
+        exactly how a correct run reported its durable result as missing. The
+        copy lands in ``workflow-handoffs/``, the host-owned directory child
+        diffs ignore, so writing it while other children still run cannot be
+        misattributed to whichever child finishes next.
+
+        Returns ``(workspace_relative_ref, absolute_path)`` or ``None``.
+        """
+
+        ref = job.result_ref
+        artifact_dir = getattr(self.run, "artifact_dir", None)
+        workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
+        if not ref or not artifact_dir or not workspace:
+            return None
+        source = Path(artifact_dir) / ref
+        if not source.is_file():
+            return None
+        target_ref = f"workflow-handoffs/result-{job.job_id}.json"
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8", errors="replace"))
+            target = resolve_workspace_child(target_ref, Path(workspace))
+            atomic_write_json(target, sanitize(payload))
+        except (WorkspacePathError, OSError, ValueError, TypeError):
+            return None
+        return target_ref, str(target)
 
     def _build_dependency_handoff(self, job: WorkflowJob) -> list[dict]:
         handoffs: list[dict] = []
@@ -1140,6 +1189,54 @@ class AgentScheduler:
         self.run.metadata = metadata
         self._append("workflow_issue", job, issue)
 
+    def record_capability_degradation(self, *, unavailable, missing_tools, job=None) -> None:
+        """Record a missing capability as a *visible degradation*, not a failure.
+
+        A disconnected MCP server is an environment fact, not a model mistake.
+        Step-Code simply never constructs the tool; Codex emits an
+        ``McpStartupUpdate`` with a reason and keeps the servers that did start.
+        Recording it in ``workflowIssues`` makes the terminal state ``degraded``
+        so the run can never report a clean pass while a declared capability was
+        absent.
+        """
+
+        unavailable = [str(item) for item in (unavailable or []) if str(item)]
+        missing_tools = [str(item) for item in (missing_tools or []) if str(item)]
+        if not unavailable and not missing_tools:
+            return
+        metadata = self.run.metadata if isinstance(self.run.metadata, dict) else {}
+        issues = list(metadata.get("workflowIssues") or [])
+        parts = []
+        if unavailable:
+            parts.append("capabilities without a connected tool: " + ", ".join(unavailable))
+        if missing_tools:
+            parts.append("declared tools not present in the environment: " + ", ".join(missing_tools))
+        issue = {
+            "code": "capability_unavailable",
+            "message": "; ".join(parts),
+            "unavailableCapabilities": sorted(set(unavailable)),
+            "missingTools": sorted(set(missing_tools)),
+        }
+        duplicate = any(
+            isinstance(item, dict)
+            and item.get("code") == "capability_unavailable"
+            and item.get("unavailableCapabilities") == issue["unavailableCapabilities"]
+            and item.get("missingTools") == issue["missingTools"]
+            for item in issues
+        )
+        if not duplicate:
+            issues.append(issue)
+        metadata["workflowIssues"] = issues
+        metadata["unavailableCapabilities"] = sorted(
+            {*(metadata.get("unavailableCapabilities") or []), *unavailable}
+        )
+        if missing_tools:
+            metadata["missingRequiredTools"] = sorted(
+                {*(metadata.get("missingRequiredTools") or []), *missing_tools}
+            )
+        self.run.metadata = metadata
+        self._append("capability_unavailable", job, issue)
+
     def _event_result_summary(self, result: AgentResult) -> dict:
         summary = {
             "jobId": result.job_id,
@@ -1369,6 +1466,18 @@ class AgentScheduler:
                 payload=payload or {},
             ),
         )
+
+
+def _absolute_under(base: str | None, ref: Any) -> str | None:
+    """Resolve a run-internal ref against the run's artifact directory.
+
+    The ref alone is ambiguous -- it is relative to the run record, not to the
+    run workspace -- so callers get the fully resolved path instead of a value
+    they have to join onto a guessed root.
+    """
+    if not base or not ref:
+        return None
+    return str(Path(base) / str(ref))
 
 def _stable_hash(value) -> str:
     data = json.dumps(_hashable_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))

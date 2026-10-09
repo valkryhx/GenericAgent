@@ -1190,6 +1190,19 @@ class WorkflowSchedulerTest(unittest.TestCase):
         persisted = json.loads(handoff_path.read_text(encoding="utf-8"))
         self.assertEqual("bounded conclusion", persisted["summary"])
         self.assertNotIn("payload", persisted)
+        # ``resultRef`` is run-internal (artifact dir relative) while
+        # ``artifactRefs`` are workspace relative. The file must say so, or a
+        # reader resolves ``resultRef`` under the workspace and reports the
+        # durable result as missing.
+        self.assertEqual(str(workspace), persisted["workspacePath"])
+        self.assertEqual(str(scheduler.run.artifact_dir), persisted["runArtifactDir"])
+        # The reader-facing ref is the host's readable copy inside the run
+        # workspace, so joining it onto ``workspacePath`` finds a real file; the
+        # run-internal ref survives under an explicit name.
+        self.assertEqual("workflow-handoffs/result-agent_1.json", persisted["resultRef"])
+        self.assertEqual("agents/agent_1/result.json", persisted["runInternalResultRef"])
+        self.assertEqual(str(workspace / persisted["resultRef"]), persisted["resultPath"])
+        self.assertTrue(Path(persisted["resultPath"]).is_file())
         downstream = scheduler.downstream_result(store.load_run(run.run_id).jobs[1])
         self.assertNotIn("x" * 10_000, json.dumps(downstream, ensure_ascii=False))
 

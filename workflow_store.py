@@ -417,6 +417,15 @@ class WorkflowStore:
             "runId": run.run_id,
             "sessionId": run.session_id,
             "status": run.status,
+            # Two roots, stated explicitly so no reader has to guess. Per-job
+            # ``resultRef``/``transcriptRef`` are run-internal and resolve under
+            # ``runArtifactDir``; ``observedArtifacts``/``artifactRefs`` are
+            # workspace relative and resolve under ``workspacePath``. Joining a
+            # ``resultRef`` onto ``workspacePath`` is what made the durable
+            # result look missing to the GA agent.
+            "runArtifactDir": str(run.artifact_dir) if run.artifact_dir else None,
+            "workspacePath": metadata.get("workspacePath"),
+            "workspaceBasePath": metadata.get("workspaceBasePath"),
             "workflowIssues": copy.deepcopy((run.metadata or {}).get("workflowIssues") or []),
             "workflowProgress": [self._build_job_progress(run, job, index) for index, job in enumerate(run.jobs, start=1)],
         }
@@ -458,6 +467,25 @@ class WorkflowStore:
         denied_tools = list(tool_summary.get("deniedTools") or self._extract_permission_tools(transcript_events, "tool_denied"))
         skill_load_events = self._extract_skill_load_events(transcript_events)
         payload = result.payload if result else {}
+
+        def _absolute(ref):
+            if not ref or not run.artifact_dir:
+                return None
+            return str(Path(run.artifact_dir) / ref)
+
+        handoff = copy.deepcopy(job.metadata.get("handoff") or {}) if isinstance(job.metadata, dict) else {}
+        if not isinstance(handoff, dict):
+            handoff = {}
+        readable_ref = handoff.get("readableResultRef")
+        readable_path = handoff.get("resultPath")
+        if readable_ref:
+            # ``resultRef`` alone is relative to the run's internal artifact
+            # directory, so a reader that only knows the run workspace joins it
+            # onto the wrong root and finds nothing. Publish the host's readable
+            # copy and keep the internal ref under an explicit name.
+            handoff["runInternalResultRef"] = job.result_ref
+            handoff["resultRef"] = readable_ref
+
         progress = {
             "type": "workflow_agent",
             "index": index,
@@ -467,8 +495,15 @@ class WorkflowStore:
             "phase": job.phase,
             "phaseTitle": job.phase,
             "state": job.status,
-            "resultRef": job.result_ref,
+            # ``resultRef``/``transcriptRef`` are run-internal refs; the absolute
+            # ``*Path`` beside each one is the fully resolved location, so a
+            # reader never has to join a ref onto the wrong root and conclude the
+            # file is missing.
+            "resultRef": readable_ref or job.result_ref,
+            "resultPath": readable_path or _absolute(job.result_ref),
+            "runInternalResultRef": job.result_ref,
             "transcriptRef": transcript_ref,
+            "transcriptPath": _absolute(transcript_ref),
             "lastToolName": tool_calls[-1] if tool_calls else None,
             "lastToolSummary": self._last_tool_summary(transcript_events),
             "toolCalls": tool_calls,
@@ -485,7 +520,7 @@ class WorkflowStore:
             "resultPreview": self._preview(payload.get("summary") if isinstance(payload, dict) and payload.get("summary") is not None else payload),
             "error": job.error,
             "schemaValidation": copy.deepcopy(job.metadata.get("schemaValidation") or {}),
-            "handoff": copy.deepcopy(job.metadata.get("handoff") or {}),
+            "handoff": handoff,
             "retryPolicy": copy.deepcopy(job.metadata.get("retryPolicy") or {}),
             # Ground truth of files the child actually wrote, so the UI and the
             # Ink handoff can carry resolvable workspace paths instead of the

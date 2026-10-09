@@ -11,6 +11,13 @@ from typing import Protocol
 
 from sensitive_redaction import sanitize, redact_sensitive_text
 from workflow_models import AgentResult, DEFAULT_PERMISSION_PROFILE, DEFAULT_PERMISSION_POLICY_VERSION
+from workflow_tool_profiles import (
+    capability_coverage,
+    effective_tool_profile,
+    filter_schema_for_denied,
+    filter_schema_for_profile,
+    unavailable_capabilities,
+)
 
 
 class ChildAgentRunner(Protocol):
@@ -27,11 +34,15 @@ class FakeChildAgentRunner:
         results: dict[str, dict] | None = None,
         fail_job_ids: set[str] | None = None,
         cancellable: bool = True,
+        tool_calls: dict[str, list[str]] | None = None,
     ):
         self.delay_ticks = max(0, int(delay_ticks))
         self.results = copy.deepcopy(results or {})
         self.fail_job_ids = set(fail_job_ids or set())
         self.cancellable = bool(cancellable)
+        # Optional transcript tool calls, so tests can exercise capability
+        # evidence without a real tool-using child.
+        self.tool_calls = {str(key): [str(name) for name in (value or [])] for key, value in (tool_calls or {}).items()}
         self._remaining: dict[str, int] = {}
         self.cancelled_job_ids: set[str] = set()
 
@@ -53,7 +64,11 @@ class FakeChildAgentRunner:
         if job.job_id in self.fail_job_ids:
             raise RuntimeError(f"fake child agent failed: {job.job_id}")
         payload = copy.deepcopy(self.results.get(job.job_id, {"summary": f"completed {job.job_id}"}))
-        return AgentResult(job_id=job.job_id, payload=payload)
+        events = [
+            {"type": "tool_call", "toolName": name, "args": {}}
+            for name in self.tool_calls.get(job.job_id, [])
+        ]
+        return AgentResult(job_id=job.job_id, payload=payload, transcript_events=events)
 
 
 def _tool_name(tool: dict) -> str | None:
@@ -394,6 +409,7 @@ class NativeGPTChildAgentRunner:
         self.max_turns = int(max_turns)
         self.last_capability_snapshot: dict = {}
         self._run_capability_schemas: dict[str, tuple[list[dict], dict]] = {}
+        self.last_job_tool_profile: str = ""
         self.last_llm_binding: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -568,6 +584,7 @@ class NativeGPTChildAgentRunner:
             "type": "capability_snapshot",
             "runId": job.metadata.get("runId"),
             "jobId": job.job_id,
+            "toolProfile": self.last_job_tool_profile,
             "capabilities": copy.deepcopy(self.last_capability_snapshot),
         })
         # Snapshot the workspace before the child runs. Any tool that writes --
@@ -645,7 +662,23 @@ class NativeGPTChildAgentRunner:
     def clear_run_capabilities(self, run_id: str) -> None:
         self._run_capability_schemas.pop(str(run_id or ""), None)
 
-    def prepare_run_capabilities(self, run_id: str, required_tools: list[str]) -> dict:
+    def prepare_run_capabilities(
+        self,
+        run_id: str,
+        required_tools: list[str] | None = None,
+        capabilities: list[str] | None = None,
+    ) -> dict:
+        """Resolve the run's capability snapshot *without* failing the run.
+
+        Step-Code and Codex both treat an unavailable MCP server as a status the
+        model can work around, not a fatal error: Codex emits
+        ``McpStartupUpdateEvent`` with a reason, Step-Code simply never hands the
+        child a tool it could not construct. Raising here turned one degraded
+        search server into a dead run, and the child had no idea why -- so it
+        fell back to hand-rolled scraping. Report coverage instead; the runtime
+        decides whether the run is merely degraded.
+        """
+
         run_id = str(run_id or "")
         if not run_id:
             raise ValueError("workflow capability preflight requires a run id")
@@ -656,18 +689,34 @@ class NativeGPTChildAgentRunner:
             self._run_capability_schemas[run_id] = (copy.deepcopy(schemas), snapshot)
         else:
             schemas, snapshot = cached
-        available = {_tool_name(tool) for tool in schemas}
-        missing = sorted({str(name) for name in required_tools or [] if str(name) and str(name) not in available})
-        if missing:
-            raise RuntimeError("capability_unavailable: required workflow tools are missing: " + ", ".join(missing))
+        tool_names = sorted({name for name in (_tool_name(tool) for tool in schemas or []) if name})
+        available = set(tool_names)
+        missing_tools = sorted({str(name) for name in required_tools or [] if str(name) and str(name) not in available})
+        coverage = capability_coverage(tool_names)
+        unavailable = unavailable_capabilities(tool_names)
+        snapshot = dict(snapshot or {})
+        # One run keeps one environment snapshot: later packets accumulate what
+        # the plan declared instead of replacing it, so the run-level report is
+        # the union of every agent's declaration rather than whichever agent
+        # happened to register last.
+        previous = snapshot.get("capabilityReport") if isinstance(snapshot.get("capabilityReport"), dict) else {}
+        declared_tools = sorted({*(str(item) for item in (previous.get("requiredTools") or [])), *(str(item) for item in required_tools or [])})
+        declared_capabilities = sorted({*(str(item) for item in (previous.get("declaredCapabilities") or [])), *(str(item) for item in capabilities or [])})
+        snapshot["toolNames"] = tool_names
+        snapshot["capabilityCoverage"] = coverage
+        snapshot["unavailableCapabilities"] = unavailable
+        snapshot["capabilityReport"] = {
+            "requiredTools": declared_tools,
+            "missingTools": sorted({*(str(item) for item in (previous.get("missingTools") or [])), *missing_tools}),
+            "declaredCapabilities": declared_capabilities,
+            "capabilityCoverage": coverage,
+            "unavailableCapabilities": unavailable,
+        }
+        self._run_capability_schemas[run_id] = (copy.deepcopy(schemas), copy.deepcopy(snapshot))
+        self.last_capability_snapshot = copy.deepcopy(snapshot)
         return copy.deepcopy(snapshot)
 
-    def _load_tools_schema(self, job=None):
-        run_id = str((getattr(job, "metadata", {}) or {}).get("runId") or "") if job is not None else ""
-        if run_id and run_id in self._run_capability_schemas:
-            schemas, snapshot = self._run_capability_schemas[run_id]
-            self.last_capability_snapshot = copy.deepcopy(snapshot)
-            return copy.deepcopy(schemas)
+    def _discover_tools_schema(self) -> list[dict]:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tools_schema.json"), "r", encoding="utf-8") as f:
             tools = json.load(f)
         if os.name != "nt":
@@ -698,23 +747,58 @@ class NativeGPTChildAgentRunner:
         self.last_capability_snapshot = _build_capability_snapshot(tools, mcp_discovery)
         return copy.deepcopy(tools)
 
+    def _load_tools_schema(self, job=None):
+        """Return the tool schema one job may see.
+
+        The run keeps one unfiltered discovery snapshot (so every child in a run
+        sees the same environment); each job then gets the schema narrowed by its
+        host-owned tool profile. With no job this returns the unfiltered set,
+        which is what the capability preflight reports on.
+        """
+
+        metadata = (getattr(job, "metadata", {}) or {}) if job is not None else {}
+        run_id = str(metadata.get("runId") or "")
+        cached = self._run_capability_schemas.get(run_id) if run_id else None
+        if cached is not None:
+            tools = copy.deepcopy(cached[0])
+            self.last_capability_snapshot = copy.deepcopy(cached[1])
+        else:
+            tools = self._discover_tools_schema()
+            if run_id:
+                self._run_capability_schemas[run_id] = (copy.deepcopy(tools), copy.deepcopy(self.last_capability_snapshot))
+        if job is None:
+            return tools
+        profile_name, denied = effective_tool_profile(metadata.get("options") or {})
+        self.last_job_tool_profile = profile_name
+        return filter_schema_for_denied(tools, denied)
+
     def _build_system_prompt(self) -> str:
-        base = self.system_prompt or "You are a workflow child agent. Complete only this assigned job and return a concise result."
+        """Compose the child prompt the same way the root agent does.
+
+        Identity and general capability guidance come from the shared base
+        prompt (`assets/sys_prompt.txt`); project facts come from GA_AGENTS.md.
+        A child used to get only a one-line identity plus the project doc, so
+        every operating rule had to be duplicated into GA_AGENTS.md to reach it.
+        """
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        identity = self.system_prompt or "You are a workflow child agent. Complete only this assigned job and return a concise result."
         try:
-            from ga_agents_runtime import build_ga_project_instructions
-            project_prompt = build_ga_project_instructions(os.path.dirname(os.path.abspath(__file__)), os.getcwd())
+            from ga_agents_runtime import build_ga_project_instructions, load_base_system_prompt
+            base_prompt = load_base_system_prompt(script_dir, "_en" if os.environ.get("GA_LANG") == "en" else "")
+            project_prompt = build_ga_project_instructions(script_dir, os.getcwd())
         except Exception:
+            base_prompt = ""
             project_prompt = ""
         try:
             from skills_runtime import build_skill_prompt
             skill_prompt = build_skill_prompt()
         except Exception:
             skill_prompt = ""
-        prompt = base
-        if project_prompt:
-            prompt += "\n" + project_prompt
-        if skill_prompt:
-            prompt += "\n" + skill_prompt
+        prompt = identity
+        for extra in (base_prompt, project_prompt, skill_prompt):
+            if extra:
+                prompt += chr(10) + extra
         return prompt
 
     def _build_tool_summary(self, transcript_events: list[dict]) -> dict:
@@ -754,6 +838,7 @@ class NativeGPTChildAgentRunner:
         options = sanitize(copy.deepcopy(job.metadata.get("options") or {}))
         permission_profile = self._permission_profile(job)
         permission_policy_version = self._permission_policy_version(job)
+        tool_profile, _denied = effective_tool_profile(options)
         role = options.get("role") or ""
         role_instructions = {
             "tests": "Write or run tests before implementation. Report the exact command, exit code, and observed RED/GREEN evidence; do not claim a test ran unless it did.",
@@ -773,9 +858,19 @@ class NativeGPTChildAgentRunner:
             f"options: {options}",
             f"permissionProfile: {permission_profile}",
             f"permissionPolicyVersion: {permission_policy_version}",
+            f"toolProfile: {tool_profile}",
             f"workspacePath: {self._child_cwd(job)}",
             "workspacePolicy: project-temp-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
+            "toolBoundary: the host already removed every tool outside this profile from your tool list; "
+            "work with what you have instead of trying to reconstruct a missing tool by hand.",
         ]
+        unavailable = list((self.last_capability_snapshot or {}).get("unavailableCapabilities") or [])
+        if unavailable:
+            lines.append(
+                "unavailableCapabilities: " + ", ".join(str(item) for item in unavailable)
+                + " (no tool in that class is connected in this environment; use an available alternative "
+                "or report the gap explicitly -- do not fabricate results and do not fall back to ad-hoc scraping)."
+            )
         if dependency_handoff:
             lines.extend([
                 "",

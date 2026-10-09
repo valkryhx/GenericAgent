@@ -26,6 +26,45 @@ class _RejectingPlanner:
         )
 
 
+class _CapabilityAwareFakeRunner(FakeChildAgentRunner):
+    """Fake child runner plus the capability preflight hook the real runner has.
+
+    Regression guard for the real-run failure ``'str' object has no attribute
+    'job_id'``: the runtime emitted the capability-snapshot event through
+    ``AgentScheduler._append(event_type, job, payload)`` with the run object
+    passed as ``event_type`` and the event name passed as ``job``. That only
+    fires when the runner implements ``prepare_run_capabilities``; the plain
+    fake never did, so the whole suite stayed green while every real run that
+    declared a capability died before the first child started.
+    """
+
+    def __init__(self, *, missing_tools=None, unavailable=None, **kwargs):
+        super().__init__(**kwargs)
+        self.capability_calls: list[dict] = []
+        self._missing_tools = list(missing_tools or [])
+        self._unavailable = list(unavailable or [])
+
+    def prepare_run_capabilities(self, run_id, required_tools=None, capabilities=None):
+        self.capability_calls.append(
+            {
+                "runId": run_id,
+                "requiredTools": list(required_tools or []),
+                "capabilities": list(capabilities or []),
+            }
+        )
+        present = [name for name in ("file_read", "mcp__tavily__tavily_search") if name not in self._missing_tools]
+        return {
+            "toolNames": present,
+            "unavailableCapabilities": list(self._unavailable),
+            "capabilityReport": {
+                "requiredTools": list(required_tools or []),
+                "missingTools": list(self._missing_tools),
+                "declaredCapabilities": list(capabilities or []),
+                "unavailableCapabilities": list(self._unavailable),
+            },
+        }
+
+
 class WorkflowControllerTest(unittest.TestCase):
     def test_create_planned_run_persists_explicit_verification_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -430,10 +469,16 @@ class WorkflowControllerTest(unittest.TestCase):
 
             outcome = WorkflowRuntime(
                 store=store,
-                runner=FakeChildAgentRunner(results={
-                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
-                    "agent_2": {"summary": "synthesized"},
-                }),
+                runner=FakeChildAgentRunner(
+                    results={
+                        "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                        "agent_2": {"summary": "synthesized"},
+                    },
+                    # The deterministic research plan declares a web_search
+                    # capability requirement, so the fake child must actually
+                    # report a search call for the contract to be satisfied.
+                    tool_calls={"agent_1": ["mcp__tavily__tavily_search"]},
+                ),
                 scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
                 timeout_seconds=5.0,
             ).run(run)
@@ -441,6 +486,139 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual("succeeded", outcome.run.status)
             self.assertEqual(["workflow_planned", "workflow_started"], [event.event_type for event in store.replay_events(run.run_id)[:2]])
             self.assertEqual("workflow-draft.json", store.load_run(run.run_id).metadata["workflowDraftRef"])
+
+
+    def test_declared_capabilities_emit_snapshot_without_failing_the_run(self):
+        """A runner with capability preflight must not break the run.
+
+        The snapshot event goes through ``AgentScheduler._append`` whose first
+        positional argument is the event type, not the run. Passing the run
+        first made ``job`` a string and crashed on ``job.job_id``.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            controller = WorkflowController(store)
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text="调研 Claude Code dynamic workflow",
+                planner=WorkflowPlanner(),
+            )
+            runner = _CapabilityAwareFakeRunner(
+                results={
+                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                    "agent_2": {"summary": "synthesized"},
+                },
+                tool_calls={"agent_1": ["mcp__tavily__tavily_search"]},
+            )
+
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
+                timeout_seconds=5.0,
+            ).run(run)
+
+            self.assertTrue(runner.capability_calls, "capability preflight was never invoked")
+            self.assertEqual("succeeded", outcome.run.status)
+            snapshot_events = [
+                event for event in store.replay_events(run.run_id) if event.event_type == "workflow_capability_snapshot"
+            ]
+            self.assertEqual(1, len(snapshot_events))
+            self.assertIsNone(snapshot_events[0].job_id)
+
+
+    def test_missing_capability_degrades_the_run_instead_of_failing_it(self):
+        """A disconnected search server is an environment fact, not a dead run.
+
+        The capability preflight records a visible ``capability_unavailable``
+        issue, the execution-contract evidence check treats the absent
+        capability as explained, and the terminal state is ``degraded`` so the
+        run can never report a clean pass.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            controller = WorkflowController(store)
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text="调研 Claude Code dynamic workflow",
+                planner=WorkflowPlanner(),
+            )
+            runner = _CapabilityAwareFakeRunner(
+                results={
+                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                    "agent_2": {"summary": "synthesized"},
+                },
+                missing_tools=["mcp__tavily__tavily_search"],
+                unavailable=["web_search"],
+            )
+
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
+                timeout_seconds=5.0,
+            ).run(run)
+
+            self.assertEqual("degraded", outcome.run.status)
+            codes = [issue.get("code") for issue in (outcome.run.metadata or {}).get("workflowIssues") or []]
+            self.assertIn("capability_unavailable", codes)
+
+
+    def test_every_published_result_ref_resolves_under_the_run_workspace(self):
+        """A ref handed to a reader must open under the root the reader knows.
+
+        Regression (run ``wf_92ad839265dc48f3ac56e5cb86f6e780``): the GA agent
+        joined ``workspacePath`` with the bare ``resultRef:
+        agents/agent_1/result.json``, got a well-formed path that does not exist,
+        and reported the durable result as missing. ``resultRef`` is relative to
+        the run's internal artifact directory, so every reader-facing surface now
+        publishes the host's workspace-relative copy instead.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            base.mkdir()
+            store = WorkflowStore(root=Path(tmp) / "runs")
+            controller = WorkflowController(store)
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text="调研 Claude Code dynamic workflow",
+                planner=WorkflowPlanner(),
+                workspace_path=str(base),
+            )
+            runner = _CapabilityAwareFakeRunner(
+                results={
+                    "agent_1": {"sources": [], "claims": [], "risks": [], "summary": "collected"},
+                    "agent_2": {"summary": "synthesized"},
+                },
+                tool_calls={"agent_1": ["mcp__tavily__tavily_search"]},
+            )
+
+            outcome = WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2, max_total=3),
+                timeout_seconds=5.0,
+            ).run(run)
+
+            self.assertEqual("succeeded", outcome.run.status)
+            loaded = store.load_run(run.run_id)
+            workspace = Path(loaded.metadata["workspacePath"])
+            store.write_workflow_progress(loaded)
+            progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            item = progress["workflowProgress"][0]
+
+            # The exact join the GA agent performed now lands on a real file.
+            self.assertEqual("workflow-handoffs/result-agent_1.json", item["resultRef"])
+            self.assertTrue((workspace / item["resultRef"]).is_file())
+            self.assertTrue(Path(item["resultPath"]).is_file())
+            self.assertEqual("agents/agent_1/result.json", item["runInternalResultRef"])
+            # Nothing publishes the bare run-internal ref any more, including the
+            # nested handoff copy that carried the trap.
+            self.assertEqual(item["resultRef"], item["handoff"]["resultRef"])
+            self.assertFalse((workspace / "agents/agent_1/result.json").is_file())
 
     def test_each_planned_run_gets_its_own_workspace_under_the_base_root(self):
         """Concurrent runs must not share a workspace directory.

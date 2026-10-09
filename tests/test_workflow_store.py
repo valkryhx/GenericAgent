@@ -427,6 +427,51 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertNotIn("verbose transcript must stay out", serialized)
             self.assertNotIn("skill body must not be in progress", serialized)
 
+    def test_workflow_progress_states_the_base_of_each_ref_kind(self):
+        """Refs must carry their root instead of leaving it to be inferred.
+
+        Regression: ``workflow-progress.json`` listed ``resultRef:
+        agents/agent_1/result.json`` next to the run workspace, so the GA agent
+        joined the two, looked in ``workflow-runs/<runId>/agents/...`` and
+        reported the durable result as missing.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run_workspace = Path(tmp) / "workflow-runs" / "wf_bases"
+            run_workspace.mkdir(parents=True)
+            run = WorkflowRun(
+                run_id="wf_bases",
+                session_id="session_test",
+                script="",
+                status="succeeded",
+                metadata={"workspacePath": str(run_workspace), "workspaceBasePath": str(tmp)},
+                jobs=[WorkflowJob(job_id="agent_1", prompt="research", status="succeeded", metadata={"label": "research"})],
+            )
+            run = store.create_run(run)
+            store.write_agent_result(run, run.jobs[0], AgentResult(job_id="agent_1", payload={"summary": "research done"}))
+
+            progress_ref = store.write_workflow_progress(run)
+
+            data = json.loads((Path(run.artifact_dir) / progress_ref).read_text(encoding="utf-8"))
+            self.assertEqual(str(run.artifact_dir), data["runArtifactDir"])
+            self.assertEqual(str(run_workspace), data["workspacePath"])
+            self.assertEqual(str(tmp), data["workspaceBasePath"])
+            item = data["workflowProgress"][0]
+            self.assertEqual("agents/agent_1/result.json", item["resultRef"])
+            # The ref is run-internal: it exists under runArtifactDir and never
+            # under the run workspace.
+            self.assertFalse((run_workspace / item["resultRef"]).exists())
+            self.assertTrue((Path(data["runArtifactDir"]) / item["resultRef"]).is_file())
+            # The absolute path removes the join entirely: the reader is handed
+            # the real location instead of a ref it must attach to a root.
+            self.assertEqual(str(Path(run.artifact_dir) / item["resultRef"]), item["resultPath"])
+            self.assertTrue(Path(item["resultPath"]).is_file())
+            # No transcript was written, so the absolute transcript path is
+            # absent rather than a path to a file that does not exist.
+            self.assertIsNone(item["transcriptRef"])
+            self.assertIsNone(item["transcriptPath"])
+
     def test_write_workflow_progress_records_failed_agent_without_result_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

@@ -134,6 +134,58 @@ GA workflow activation, explicit execution contracts, host MCP/tool preflight, r
 
 Workflow terminal states are three-valued, not "failed vs succeeded": `completed`, `degraded` (a declared optional contract fell back; core delivery still usable), and `failed` (schema/artifact/path/budget/execution contracts not met). The Step-Code comparison, root causes, and P0–P3 implementation record live in `docs/20261009-ga-workflow-stability-stepcode-borrow.md`. Read it before touching schema fallback, artifact acceptance, planner fallback, or run status projection. Invariants to preserve: a declared schema is fail-closed unless the plan writes `schemaPolicy: "optional"`; a declared non-optional `executionContract.artifacts[]` entry is existence-checked by the host regardless of `requiredChecks`; a text-schema fallback or deterministic planner fallback terminates the job/run as `degraded` and never as accepted/passed; `failurePolicy=continue` affects scheduling only, never final acceptance. `workflowIssues` is a gate of *unresolved* problems, not a history log: `workflow_scheduler._apply_schema_contract()` must call `_clear_schema_issue(job)` when the schema finally validates, otherwise a retry that recovered leaves a stale `schema_validation_failed` and `workflow_runtime` degrades a run whose every job ended `succeeded` (real case: `wf_6e481417f6e344cc80249b7f50fd3418`). Only that job's schema issue is cleared — a `fallback: text` degradation and a job that failed every attempt keep theirs. See §16 of `docs/20261009-ga-workflow-stability-stepcode-borrow.md`. Real E2E: `GA_RUN_REAL_WORKFLOW_DEGRADED_E2E=1 python tests/real_workflow_degraded_semantics_e2e.py` (uses `profiles.default`, currently cc-deepseek-v4.1-flash-chat).
 
+## Runtime prompt layers: base prompt vs GA_AGENTS.md
+
+GA splits its runtime prompt the way Codex splits `gpt-5.2-codex_prompt.md` from `AGENTS.md`:
+
+- `assets/sys_prompt.txt` (+ `sys_prompt_en.txt` for `GA_LANG=en`) is the **base prompt**: identity,
+  capability framing, working style, verification discipline, general tool/search/path rules, and
+  communication style. It applies to every workspace.
+- `GA_AGENTS.md` / `GA_AGENTS.override.md` is the **project layer**: workspace paths, project map, test
+  commands, safety, layering semantics. `ga_agents_runtime.build_ga_project_instructions()` injects it as
+  `[GA_PROJECT_INSTRUCTIONS]`.
+- `ga_agents_runtime.load_base_system_prompt()` is the single reader for the base file. Both
+  `agentmain.get_system_prompt()` (root agent) and `NativeGPTChildAgentRunner._build_system_prompt()`
+  (workflow child) go through it, so the two cannot drift.
+
+Do not re-add general working-style or tool-discipline sections to `GA_AGENTS.md`: they belong in the
+base prompt so that runs in *other* workspaces (which have no GA_AGENTS.md) still get them. Regression
+coverage lives in `tests/test_ga_agents_runtime.py::RepoPromptLayersTest`.
+
+## Workflow tool boundary: host-owned profiles, never model-declared tool names
+
+A workflow child's tool boundary is decided by the **host**, not by the plan. The plan declares a
+named `toolProfile` (a closed set: `planner` = read-only + search, `research` = + write, `authoring` =
+everything, `verify` = read-only + execute, `*` = unrestricted) and/or capability classes
+(`web_search`, `web_fetch`, `file_read`, `file_write`, `execute`). `workflow_tool_profiles.py` resolves
+that to the child's actual tool schema and to a dispatch-time gate. When a plan names no profile, the
+host derives one from the declared role, exactly like `resolve_job_permission_profile` derives the
+`verify` permission profile for evidence roles.
+
+Rules that must not regress:
+
+1. **Never let the model name a concrete tool.** `requiredTools`/`requiredToolEvidence` are parsed only
+   for backward compatibility with older saved plans; deterministic plans and the planner prompt must
+   use `capabilities` + `requiredCapabilityEvidence`. Guessing `mcp__tavily__tavily_search` from the
+   substring "tavily" in the task text is exactly the bug this replaces.
+2. **Profiles are subtraction only.** They restrict which *classes* of tool a child may use; they never
+   require the model to call a specific tool. This mirrors Step-Code's `WORKFLOW_TOOL_PROFILES` and
+   Codex's `ToolPolicy.allowed_tools` ("a startup ceiling on tool selection ... only restricts tools").
+3. **Orchestration tools are always denied to workflow children** (`spawn_agent`, `wait_agent`, ...).
+   They used to leak in through `assets/tools_schema.json`; the profile filter is now the single gate.
+4. **A missing capability degrades, it never kills the run and never passes silently.** MCP discovery
+   failures are reported in the capability snapshot (`capabilityCoverage` / `unavailableCapabilities`),
+   surfaced to the child prompt, and recorded as a `capability_unavailable` workflow issue so the run
+   terminates `degraded`. Codex emits `McpStartupUpdateEvent` with a reason and keeps the servers that
+   did start; Step-Code simply never constructs the missing tool. GA's old
+   `raise RuntimeError("capability_unavailable: ...")` fail-fast turned one dead search server into a
+   10-minute scraping loop.
+5. **Capability classes are predicates, not name lists.** `tool_capabilities()` classifies by behaviour
+   so a tool added later lands in the right class; the same lesson as the artifact-observation fix.
+
+Evidence: `docs/20261009-workflow-tool-profile-capability-boundary.md`. Regression tests:
+`tests/test_workflow_capability_preflight.py`, `tests/test_workflow_planner_execution_intent.py`.
+
 ## Workflow artifact observation and run workspaces
 
 Workflow artifact observation is **filesystem-based, never tool-name-based**. `workflow_child_agent` snapshots the child workspace before and after each job (`workflow_workspace.snapshot_workspace`/`diff_workspace`) and reports `tool_summary["writtenPaths"]`; the scheduler turns that into `observedArtifacts`/`observedMutations`. Do not reintroduce `file_write`/`file_patch` allowlists — `code_run` (the normal DOCX/HTML path) and any future writer tool are covered by the diff by construction. Comparison logic for "did this job produce something" belongs in `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §13.
@@ -144,6 +196,8 @@ Ownership travels with the handoff, never as a tool-name inference. `workspace_w
 
 
 Every planned/draft/resumed run owns an isolated output workspace at `<base>/workflow-runs/<runId>/`. Two roots must not be confused: `workspacePath` (run-local, where `artifactRefs` resolve) and `workspaceBasePath` (the shared base, where run-internal `resultRef`/`transcriptRef` under `temp/sessions/...` resolve). The Ink bridge resolves artifacts via `_run_workspace_root()` and run-internal refs via `_run_artifact_base_root()`; mixing them makes a correct artifact look missing. `_cache_key()["workspacePathHash"]` hashes the base root so resume still hits cached prefixes.
+
+Every ref published to a reader must open under a root that reader is told about. `resultRef`/`transcriptRef` are relative to the run's internal artifact directory, so the host materialises each job's durable result into the run workspace at `workflow-handoffs/result-<jobId>.json` (`workflow_scheduler._materialize_result_copy`) and every reader-facing surface publishes that workspace-relative copy as `resultRef`, with `resultPath` absolute and `runInternalResultRef` kept for audit: `workflow-progress.json`, the workspace handoff file `workflow-handoffs/<job>.json`, and the post-run handoff in `frontends/ink_bridge.py`. `workflow-handoffs/` is in `HOST_OWNED_WORKSPACE_DIRS`, so writing it while other children run cannot be misattributed to a child diff. A reader that joins the bare internal ref onto `workspacePath` builds a real path that does not exist; that is not a Windows path-separator problem, and it is what made a correct run report its durable result as missing (run `wf_92ad839265dc48f3ac56e5cb86f6e780`). This is not a Windows path-separator issue: a bare `resultRef: agents/agent_1/result.json` joined onto `workspacePath` yields a real, well-formed path that simply does not exist, which is how a correct run reported its durable result as missing.
 
 Path policy is host-side and deterministic. `workflow_path_acl.check_tool_call(workspace_root, tool_name, args)` is the single source of truth for "may this path be read/written/executed"; `GenericAgentHandler.dispatch` calls it before any workflow child tool executes and returns a `path_acl` error on violation. Capability (permission profile) decides *whether* a tool may be used; the ACL decides *which paths* it may touch. Declared artifacts are additionally integrity-checked at run close: a non-optional artifact that is empty (`empty_artifact`) or shrank below the largest size the host observed a child write (`artifact_altered_after_write`) fails the run, which is what the 2026-10-09 cleanup-probe failure required. Keep `expand_file_refs(..., workspace_root=...)` containment when touching `file_write`/`file_patch`.
 

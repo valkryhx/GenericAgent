@@ -1284,6 +1284,26 @@ class GenericAgentBridge:
             return None
         return os.path.relpath(candidate, workspace_root).replace(os.sep, '/')
 
+    def _workflow_job_readable_result_ref(self, run, job) -> str | None:
+        """Return the host's workspace-relative copy of a job's durable result.
+
+        ``resultRef`` is relative to the run's internal artifact directory. A
+        reader that only knows the run workspace joins it onto the wrong root and
+        concludes the result is missing, so the handoff publishes the copy the
+        host materialised under ``workflow-handoffs/`` instead.
+        """
+        ref = f"workflow-handoffs/result-{job.job_id}.json"
+        workspace = self._run_workspace_root(run)
+        if os.path.isfile(os.path.join(workspace, *ref.split('/'))):
+            return ref
+        return None
+
+    def _workflow_job_readable_result_path(self, run, job) -> str | None:
+        ref = self._workflow_job_readable_result_ref(run, job)
+        if not ref:
+            return None
+        return os.path.join(self._run_workspace_root(run), *ref.split('/'))
+
     def _workflow_job_artifact_refs(self, run, job) -> list[str]:
         """Return workspace-relative files a job actually produced.
 
@@ -1407,9 +1427,12 @@ class GenericAgentBridge:
             item = {
                 'jobId': job.job_id,
                 'status': job.status,
-                'resultRef': self._workflow_workspace_ref(run, result_ref),
+                'resultRef': self._workflow_job_readable_result_ref(run, job) or self._workflow_workspace_ref(run, result_ref),
                 'transcriptRef': self._workflow_workspace_ref(run, transcript_ref),
             }
+            readable_path = self._workflow_job_readable_result_path(run, job)
+            if readable_path:
+                item['resultPath'] = readable_path
             # Files the child actually wrote, as workspace-relative paths. The
             # handoff otherwise carries only logical labels ("synthesis"), so the
             # GA agent has to guess a location and can read the wrong directory.
@@ -1473,9 +1496,10 @@ class GenericAgentBridge:
         return (
             "The workflow run has finished. Answer the user's original request using the final result and relevant intermediate results below. "
             "Do not claim success if the workflow status is failed/cancelled. "
-            "Intermediate result `artifactRefs` and `finalResultRef` are paths relative to `workspacePath` above, "
-            "which is this run's own directory under `workspaceBasePath`; resolve them under `workspacePath`, "
-            "never under the run's internal artifact directory. Read them only if needed. "
+            "Path bases are explicit and they differ: `finalResultRef` and every `artifactRefs` entry are relative "
+            "to `workspacePath` above (this run's own directory under `workspaceBasePath`); "
+            "`intermediateResults[].resultRef` and `intermediateResults[].transcriptRef` are run-internal and "
+            "relative to `workspaceBasePath`, never to `workspacePath`. Read them only if needed. "
             "`artifactOwners` says which job wrote each ref, so prefer reading a ref when you need that stage's own output; "
             "`artifactOwnership` is the same run-wide `path -> writer(s)` index and also covers stages that ran in a child process. "
             "If `artifactCollisions` lists a path, more than one job wrote it and the last write won: "

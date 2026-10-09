@@ -112,5 +112,83 @@ class GaAgentsRuntimeTest(unittest.TestCase):
             self.assertNotIn("outside rules", rendered)
 
 
+class RepoPromptLayersTest(unittest.TestCase):
+    """GA splits its prompt the way Codex does: base prompt vs project doc.
+
+    `assets/sys_prompt.txt` carries identity + general capability guidance and
+    applies to every workspace; `GA_AGENTS.md` carries this workspace's project
+    knowledge. These assertions pin the split so guidance cannot silently drift
+    out of both layers again.
+    """
+
+    def setUp(self):
+        root = Path(__file__).resolve().parent.parent
+        self.base = (root / "assets" / "sys_prompt.txt").read_text(encoding="utf-8")
+        self.base_en = (root / "assets" / "sys_prompt_en.txt").read_text(encoding="utf-8")
+        self.doc = (root / DEFAULT_GA_AGENTS_FILENAME).read_text(encoding="utf-8")
+
+    def test_base_prompt_carries_identity_and_general_guidance(self):
+        for heading in (
+            "# 身份",
+            "# 能力与边界",
+            "# 怎么工作",
+            "# 验证纪律",
+            "# 工具使用",
+            "# 沟通与交付",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.base)
+
+    def test_base_prompt_pins_the_hard_lessons(self):
+        for expected in (
+            "不要用 code_run 手写 HTTP 抓取",
+            "read_agent_result",
+            "update_working_checkpoint",
+            "没跑成或跑不动的验证要在汇报里明说",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.base)
+
+    def test_english_base_prompt_stays_in_sync(self):
+        for heading in ("# Identity", "# How you work", "# Verification discipline", "# Tool usage"):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.base_en)
+        self.assertIn("read_agent_result", self.base_en)
+
+    def test_project_doc_stays_the_project_layer(self):
+        for heading in (
+            "## 路径与工作区",
+            "## 子代理与 workflow",
+            "## 工具速查（GA 实现细节）",
+            "## 测试",
+            "## 安全",
+            "## 本仓库项目地图（GenericAgent）",
+            "## GA_AGENTS.md 分层语义",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.doc)
+        # The general working-style section belongs to the base prompt now.
+        self.assertNotIn("## 怎么工作", self.doc)
+        self.assertNotIn("## 检索与信息获取", self.doc)
+
+    def test_project_doc_fits_the_default_injection_budget(self):
+        from ga_agents_runtime import DEFAULT_PROJECT_DOC_MAX_BYTES
+
+        self.assertLessEqual(len(self.doc.encode("utf-8")), DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_project_doc_does_not_claim_the_external_agents_md_name(self):
+        # The file must stay GA-only; AGENTS.md is Codex's repo guidance and is
+        # never read by the runtime.
+        self.assertIn("避免与给外部 agent", self.doc)
+
+    def test_workflow_child_prompt_includes_both_layers(self):
+        from workflow_child_agent import NativeGPTChildAgentRunner
+
+        prompt = NativeGPTChildAgentRunner()._build_system_prompt()
+        self.assertIn("You are a workflow child agent", prompt)
+        self.assertIn("# 能力与边界", prompt)
+        self.assertIn("GA_PROJECT_INSTRUCTIONS", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

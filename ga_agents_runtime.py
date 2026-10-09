@@ -6,6 +6,7 @@ from pathlib import Path
 DEFAULT_GA_AGENTS_FILENAME = "GA_AGENTS.md"
 LOCAL_GA_AGENTS_FILENAME = "GA_AGENTS.override.md"
 DEFAULT_PROJECT_DOC_MAX_BYTES = 20000
+DEFAULT_BASE_PROMPT_TEMPLATE = "sys_prompt{suffix}.txt"
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,20 @@ def load_ga_project_instructions(workspace_root=None, current_dir=None, max_byte
     return GaProjectInstructions(docs=tuple(docs), max_bytes=budget, truncated=truncated_any)
 
 
+def load_base_system_prompt(script_dir=None, lang_suffix: str = "") -> str:
+    """Read the shared base prompt (identity + general capability guidance).
+
+    This is the layer Codex keeps in its own system prompt file: identity,
+    working style, verification discipline, tool and path rules. Project-specific
+    facts stay in ``GA_AGENTS.md``. Both the root agent and workflow children go
+    through here so the two cannot drift apart.
+    """
+
+    root = Path(script_dir) if script_dir else Path(__file__).resolve().parent
+    path = root / "assets" / DEFAULT_BASE_PROMPT_TEMPLATE.format(suffix=lang_suffix or "")
+    return path.read_text(encoding="utf-8")
+
+
 def build_ga_project_instructions(workspace_root=None, current_dir=None, max_bytes=None) -> str:
     loaded = load_ga_project_instructions(workspace_root, current_dir, max_bytes)
     if not loaded.docs:
@@ -147,12 +162,14 @@ def build_ga_project_instructions(workspace_root=None, current_dir=None, max_byt
 
 
 __all__ = [
+    "DEFAULT_BASE_PROMPT_TEMPLATE",
     "DEFAULT_GA_AGENTS_FILENAME",
     "LOCAL_GA_AGENTS_FILENAME",
     "DEFAULT_PROJECT_DOC_MAX_BYTES",
     "LoadedGaAgentsDoc",
     "GaProjectInstructions",
     "discover_ga_agents_paths",
+    "load_base_system_prompt",
     "load_ga_project_instructions",
     "build_ga_project_instructions",
 ]

@@ -26,6 +26,7 @@ from workflow_workspace import (
     workspace_metadata,
 )
 from workflow_check_adapters import run_check
+from workflow_tool_profiles import CAPABILITY_CLASSES, tool_has_capability
 from workflow_verification import validate_verification_contract
 
 
@@ -427,21 +428,41 @@ class WorkflowRuntime:
             raise TypeError("agent option label must be a string")
         prompt = str(params.get("prompt") or "")
         required_tools = options.get("requiredTools") or []
-        if required_tools and hasattr(self.runner, "prepare_run_capabilities"):
-            try:
-                snapshot = self.runner.prepare_run_capabilities(scheduler.run.run_id, required_tools)
-            except Exception as exc:
-                self._append(scheduler.run, "workflow_capability_preflight_failed", {
-                    "requiredTools": [str(name) for name in required_tools],
-                    "error": redact_sensitive_text(str(exc)),
-                })
-                raise
+        declared_capabilities = options.get("capabilities") or []
+        if (required_tools or declared_capabilities) and hasattr(self.runner, "prepare_run_capabilities"):
+            # Fail-soft, like Codex's MCP startup events and Step-Code's missing
+            # tool construction: report coverage and let the model work with
+            # what is connected. The run degrades visibly instead of dying, and
+            # it never passes silently.
+            snapshot = self.runner.prepare_run_capabilities(
+                scheduler.run.run_id,
+                required_tools,
+                capabilities=declared_capabilities,
+            )
             metadata = dict(scheduler.run.metadata) if isinstance(scheduler.run.metadata, dict) else {}
+            unavailable = [str(item) for item in (snapshot.get("unavailableCapabilities") or [])]
+            report = snapshot.get("capabilityReport") if isinstance(snapshot.get("capabilityReport"), dict) else {}
+            missing_tools = [str(item) for item in (report.get("missingTools") or [])]
             if not metadata.get("capabilitySnapshot"):
                 metadata["capabilitySnapshot"] = sanitize(snapshot)
-                scheduler.run.metadata = metadata
-                scheduler.store.save_run(scheduler.run)
-                scheduler._append("workflow_capability_snapshot", payload=sanitize(snapshot))
+            if unavailable:
+                metadata["unavailableCapabilities"] = sorted(
+                    {*(metadata.get("unavailableCapabilities") or []), *unavailable}
+                )
+            if missing_tools:
+                metadata["missingRequiredTools"] = sorted(
+                    {*(metadata.get("missingRequiredTools") or []), *missing_tools}
+                )
+            scheduler.run.metadata = metadata
+            scheduler.store.save_run(scheduler.run)
+            scheduler._append("workflow_capability_snapshot", payload=sanitize(snapshot))
+            declared = {str(item) for item in declared_capabilities}
+            degraded = sorted((set(unavailable) & declared) if declared else set())
+            if degraded or missing_tools:
+                scheduler.record_capability_degradation(
+                    unavailable=degraded or unavailable,
+                    missing_tools=missing_tools,
+                )
         call_index = len(scheduler.jobs)
         cached = self._match_cached_agent(resume_plan, call_index=call_index, prompt=prompt, options=options, scheduler=scheduler)
         if cached is not None:
@@ -900,6 +921,9 @@ class WorkflowRuntime:
                     pending = False
             return count
 
+        missing_tools = {str(item) for item in (metadata.get("missingRequiredTools") or []) if str(item)}
+        absent_capabilities = {str(item) for item in (metadata.get("unavailableCapabilities") or []) if str(item)}
+
         for evidence in contract.get("requiredToolEvidence") or []:
             if not isinstance(evidence, dict):
                 continue
@@ -915,8 +939,48 @@ class WorkflowRuntime:
                 calls += code_run_readback_count(events)
             observed = calls >= minimum_calls
             evidence_report.append({"tool": tool, "agent": label, "mode": mode, "requiredCalls": minimum_calls, "observedCalls": calls, "satisfied": observed})
-            if not observed and mode == "required":
-                return f"missing_required_tool_evidence: {tool} expected at least {minimum_calls} call(s) from {label}"
+            if observed or mode != "required":
+                continue
+            if tool in missing_tools:
+                # The environment never had this tool. The preflight already
+                # recorded it as a degradation; blaming the child would be wrong.
+                evidence_report[-1]["reason"] = "capability_unavailable"
+                continue
+            return f"missing_required_tool_evidence: {tool} expected at least {minimum_calls} call(s) from {label}"
+
+        for evidence in contract.get("requiredCapabilityEvidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            capability = str(evidence.get("capability") or "").strip()
+            label = str(evidence.get("agent") or "")
+            mode = str(evidence.get("mode") or "").strip().lower() or "required"
+            minimum_calls = max(1, int(evidence.get("minimumCalls") or 1))
+            if capability not in CAPABILITY_CLASSES:
+                return f"invalid_required_capability_evidence: unknown capability {capability or '<missing>'}"
+            events = events_for(label)
+            calls = sum(
+                1
+                for event in events
+                if event.get("type") == "tool_call" and tool_has_capability(event.get("toolName"), capability)
+            )
+            if capability == "file_read" and calls < minimum_calls:
+                calls += code_run_readback_count(events)
+            observed = calls >= minimum_calls
+            entry = {
+                "capability": capability,
+                "agent": label,
+                "mode": mode,
+                "requiredCalls": minimum_calls,
+                "observedCalls": calls,
+                "satisfied": observed,
+            }
+            evidence_report.append(entry)
+            if observed or mode != "required":
+                continue
+            if capability in absent_capabilities:
+                entry["reason"] = "capability_unavailable"
+                continue
+            return f"missing_required_capability_evidence: {capability} expected at least {minimum_calls} call(s) from {label}"
 
         metadata["executionToolEvidence"] = evidence_report
         run.metadata = metadata

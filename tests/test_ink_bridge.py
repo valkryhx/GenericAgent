@@ -2004,6 +2004,46 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(str(base.resolve()), document["workspaceBasePath"])
         self.assertEqual(["synthesis_report.md"], document["intermediateResults"][0]["artifactRefs"])
 
+    def test_workflow_handoff_prompt_binds_each_ref_to_its_own_base(self):
+        """Both roots must be named, never inferred.
+
+        Regression: the prompt told the agent that every ref resolves under
+        ``workspacePath``. The GA agent then resolved the run-internal
+        ``intermediateResults[].resultRef`` (base-relative) under the run
+        workspace, found nothing, and reported the upstream results as missing.
+        """
+
+        agent = FakeAgent()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "temp"
+            run_workspace = base / "workflow-runs" / "wf_bases"
+            run_workspace.mkdir(parents=True)
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=lambda event: None,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(base),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_bases",
+                    session_id="session_bases",
+                    script="x",
+                    status="succeeded",
+                    metadata={"workspacePath": str(run_workspace), "workspaceBasePath": str(base)},
+                    jobs=[WorkflowJob(job_id="agent_1", prompt="research", status="succeeded", metadata={"label": "source-discovery"})],
+                )
+            )
+            run.result_ref = "final-result.json"
+            bridge.workflow_store.write_final_result(run, {"runId": run.run_id, "status": "succeeded"})
+            payload = bridge._workflow_handoff_payload(bridge.workflow_store.load_run("wf_bases"))
+
+        instruction = payload.split("<workflow_handoff>", 1)[0]
+        self.assertIn("relative to `workspacePath`", instruction)
+        self.assertIn("relative to `workspaceBasePath`", instruction)
+        self.assertIn("resultRef", instruction)
+        self.assertIn("transcriptRef", instruction)
+
     def test_concurrent_runs_do_not_share_a_workspace_directory(self):
         agent = FakeAgent()
         agent.session_id = "session_parallel"

@@ -15,7 +15,12 @@ class WorkflowPlannerExecutionIntentTest(unittest.TestCase):
         labels = [agent['label'] for phase in phases for agent in phase['agents']]
         self.assertEqual(['research', 'implementation', 'verification'], roles)
         self.assertEqual(['research-sources', 'write-html', 'verify-html'], labels)
-        self.assertIn('mcp__tavily__tavily_search', phases[0]['agents'][0]['requiredTools'])
+        research_agent = phases[0]['agents'][0]
+        self.assertEqual('research', research_agent['toolProfile'])
+        self.assertIn('web_search', research_agent['capabilities'])
+        # The host owns the profile list: the plan must never guess a concrete tool name.
+        self.assertNotIn('requiredTools', research_agent)
+        self.assertNotIn('mcp__tavily__tavily_search', str(draft.plan))
         self.assertTrue(phases[1]['agents'][0]['writeScope'])
         self.assertTrue(draft.plan['verification']['checks'])
         self.assertNotIn('python_unittest', str(draft.plan['verification']))

@@ -70,7 +70,7 @@ try:
 except Exception:  # 压缩核心导入失败时降级：/compact 报不可用，不影响主流程
     compact_agent_context = None
     replace_log_with_compact_history = None
-from ga_agents_runtime import build_ga_project_instructions
+from ga_agents_runtime import build_ga_project_instructions, load_base_system_prompt
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 from subagent_prompts import build_agent_role_usage_hint
 
@@ -443,7 +443,7 @@ if not os.path.exists(cdp_cfg):
     except Exception as e: print(f'[WARN] CDP config init failed: {e} — advanced web features (tmwebdriver) will be unavailable.')
 
 def get_system_prompt(agent=None):
-    with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f: prompt = f.read()
+    prompt = load_base_system_prompt(script_dir, lang_suffix)
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
     prompt += build_ga_project_instructions(script_dir, os.getcwd())
     if not bool(getattr(agent, 'task_dir', None)):

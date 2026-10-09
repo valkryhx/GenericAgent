@@ -13,6 +13,7 @@ from typing import Any
 from workflow_policy import normalize_delegation_policy
 from workflow_activation import resolve_workflow_activation
 from workflow_verification import normalize_verification_contract
+from workflow_tool_profiles import CAPABILITY_CLASSES, is_known_tool_profile
 
 
 CODING_AGENT_ROLES = frozenset(
@@ -419,6 +420,20 @@ def _normalize_workflow_execution_contract(plan: dict[str, Any]) -> dict[str, An
             evidence["mode"] = mode
             normalized_evidence.append(evidence)
         execution_contract["requiredToolEvidence"] = normalized_evidence
+        normalized_capability_evidence = []
+        for raw_capability in execution_contract.get("requiredCapabilityEvidence") or []:
+            if not isinstance(raw_capability, dict):
+                normalized_capability_evidence.append(raw_capability)
+                continue
+            entry = copy.deepcopy(raw_capability)
+            capability = str(entry.get("capability") or "").strip()
+            entry_mode = str(entry.get("mode") or "").strip().lower()
+            if not entry_mode:
+                entry_mode = "preferred" if capability in {"file_write", "file_read"} else "required"
+            entry["mode"] = entry_mode
+            normalized_capability_evidence.append(entry)
+        if normalized_capability_evidence:
+            execution_contract["requiredCapabilityEvidence"] = normalized_capability_evidence
         for artifact in execution_contract.get("artifacts") or []:
             if not isinstance(artifact, dict):
                 continue
@@ -646,6 +661,14 @@ def _normalize_execution_contract_assignments(plan: dict[str, Any]) -> dict[str,
             if tool in required_tools and agent:
                 add(agent, "requiredTools", tool)
 
+    for item in contract.get("requiredCapabilityEvidence") or []:
+        if not isinstance(item, dict):
+            continue
+        capability = str(item.get("capability") or "").strip()
+        agent = agents_by_label.get(str(item.get("agent") or "").strip())
+        if capability and agent:
+            add(agent, "capabilities", capability)
+
     for artifact in contract.get("artifacts") or []:
         if not isinstance(artifact, dict):
             continue
@@ -842,7 +865,9 @@ class WorkflowPlanner:
             artifact_path = "artifacts/overview.html" if html_output else "artifacts/summary.md"
             research_artifact_path = "artifacts/research-sources.json"
             artifact_kind = "HTML" if html_output else "Markdown"
-            search_tool = "mcp__tavily__tavily_search" if "tavily" in task_text.lower() else "web_scan"
+            # No tool-name guessing: the plan declares a host-owned tool
+            # profile plus capability classes, and the host resolves them
+            # against the tools that are actually connected in this run.
             return {
                 "taskType": "mixed",
                 "meta": {"name": "dynamic-workflow-research-artifact", "description": "Research, create the requested artifact, and verify it"},
@@ -850,20 +875,24 @@ class WorkflowPlanner:
                     {"title": "Research", "agents": [{
                         "label": "research-sources", "role": "research",
                         "prompt": f"Research the user's request using the required search capability. Task: {task_text}. Return a concise conclusion and write detailed sources/facts/uncertainty as JSON to {research_artifact_path} using file_write, then read it back with file_read. Do not create the final artifact.",
-                        "actions": ["research", "persist_research"], "requiredTools": [search_tool, "file_write", "file_read"], "writeScope": [research_artifact_path], "deliverables": [research_artifact_path],
-                        "acceptanceChecks": ["required_tool_evidence", "artifact_exists", "artifact_readback"], "dependsOn": [],
+                        "actions": ["research", "persist_research"], "toolProfile": "research",
+                        "capabilities": ["web_search", "file_write", "file_read"],
+                        "writeScope": [research_artifact_path], "deliverables": [research_artifact_path],
+                        "acceptanceChecks": ["required_capability_evidence", "artifact_exists", "artifact_readback"], "dependsOn": [],
                     }]},
                     {"title": "Create Artifact", "agents": [{
                         "label": "write-html", "role": "implementation",
                         "prompt": f"Using the research result, create a self-contained {artifact_kind} artifact at {artifact_path}. Use file_write, then read it back with file_read. Task: {task_text}",
-                        "actions": ["create_artifact"], "requiredTools": ["file_write", "file_read"], "writeScope": [artifact_path],
+                        "actions": ["create_artifact"], "toolProfile": "authoring",
+                        "capabilities": ["file_write", "file_read"], "writeScope": [artifact_path],
                         "deliverables": [artifact_path], "acceptanceChecks": ["artifact_exists", "artifact_readback"],
                         "dependsOn": ["research-sources"],
                     }]},
                     {"title": "Verify Artifact", "agents": [{
                         "label": "verify-html", "role": "verification",
                         "prompt": f"Independently inspect {artifact_path}; verify it exists, is non-empty, and has valid {artifact_kind} structure. Return verificationPassed, checks, and blockingIssues. Do not modify the artifact.",
-                        "actions": ["verify_artifact"], "requiredTools": ["file_read"], "schemaRef": "VERIFICATION_SCHEMA", "strictSchema": True,
+                        "actions": ["verify_artifact"], "toolProfile": "verify",
+                        "capabilities": ["file_read"], "schemaRef": "VERIFICATION_SCHEMA", "strictSchema": True,
                         "deliverables": ["artifact_verification"], "acceptanceChecks": ["artifact_structure"],
                         "dependsOn": ["write-html"],
                     }]},
@@ -878,8 +907,11 @@ class WorkflowPlanner:
                         {"id": "create_artifact", "agent": "write-html"},
                         {"id": "verify_artifact", "agent": "verify-html"},
                     ],
-                    "requiredTools": [search_tool, "file_write", "file_read"],
-                    "requiredToolEvidence": [{"tool": search_tool, "agent": "research-sources", "minimumCalls": 1}],
+                    "capabilities": ["web_search", "file_write", "file_read"],
+                    "requiredCapabilityEvidence": [
+                        {"capability": "web_search", "agent": "research-sources", "minimumCalls": 1, "mode": "required"},
+                        {"capability": "file_write", "agent": "research-sources", "minimumCalls": 1, "mode": "preferred"},
+                    ],
                     "artifacts": [{
                         "path": research_artifact_path,
                         "writer": "research-sources",
@@ -915,6 +947,9 @@ class WorkflowPlanner:
                                     "按宿主声明的 JSON Schema 返回 sources、claims、risks 三个字段，"
                                     "不要只给自然语言摘要。"
                                 ),
+                                "actions": ["research"],
+                                "toolProfile": "research",
+                                "capabilities": ["web_search", "file_read"],
                                 "schemaRef": "SOURCE_SCHEMA",
                                 "dependsOn": [],
                             }
@@ -926,11 +961,24 @@ class WorkflowPlanner:
                             {
                                 "label": "synthesis",
                                 "prompt": "基于上游 Source Discovery 结果写中文综合报告，标注不确定性和建议。",
+                                "actions": ["synthesis"],
+                                "toolProfile": "planner",
                                 "dependsOn": ["source-discovery"],
                             }
                         ],
                     },
                 ],
+                "executionContract": {
+                    "requiresExecution": True,
+                    "actions": [
+                        {"id": "research", "agent": "source-discovery"},
+                        {"id": "synthesis", "agent": "synthesis"},
+                    ],
+                    "capabilities": ["web_search"],
+                    "requiredCapabilityEvidence": [
+                        {"capability": "web_search", "agent": "source-discovery", "minimumCalls": 1, "mode": "required"},
+                    ],
+                },
                 "schemas": {
                     "SOURCE_SCHEMA": {
                         "type": "object",
@@ -1252,15 +1300,15 @@ class LLMWorkflowPlanner:
                 "phases 必须至少包含一个 phase；每个 phase 必须至少包含一个 agent。",
                 "When the user asks to perform work, produce executable action packets; 不要只返回计划。",
                 "Artifact paths are workspace-relative only (for example tmp/report.html). Never emit /tmp, D:\tmp, ~, UNC, or .. traversal paths; the host hard-normalizes and rejects paths outside the launch workspace, so do not treat prompt text as permission.",
-                "执行型计划必须声明 executionContract.requiresExecution、actions、requiredTools 和 artifact acceptance checks，并把每个 action 映射到实际执行它的 agent。",
+                "执行型计划必须声明 executionContract.requiresExecution、actions、capabilities 和 artifact acceptance checks，并把每个 action 映射到实际执行它的 agent。",
                 "schemas 的 key 是不透明的 schemaRef 字符串，优先使用 SOURCE_SCHEMA、VERIFICATION_SCHEMA 等逻辑名称；不要把文件路径写入 schemaRef。无论 schemaRef 形状如何，必须保持与 schemas key 完全一致，schema 必须是纯 JSON Schema 数据而不是 JavaScript 代码。",
                 "每个 schemaRef 的 schema 必须完整到子代理无需猜测：声明 type、properties（每个必须出现的字段都要有 type，数组要给 items 或至少 type=array）以及 required。只写 required 而不写 properties 会让子代理返回自然语言并按 schema 失败阻塞整条 run；不要依赖子代理自觉输出 JSON。",
                 "声明了 schemaRef 的 agent 的 prompt 必须显式要求按该 schema 输出 JSON 字段，不要只写「返回结构化摘要」这类自然语言指令；宿主会把 schema 作为硬性输出契约校验。",
                 "strictSchema 默认为 true 语义：声明了 schemaRef 的 agent 若 schema 校验失败即视为该 job 失败并阻塞 run。只有确实允许文本降级的 agent 才显式写 schemaPolicy: \"optional\"；此时降级会被宿主记为 degraded（部分交付）终态，而不是成功，所以不要为了省事批量声明 optional。",
-                "requiredTools 表示 agent 可用的能力集合，不要把普通文件写入工具当作必须逐字调用的硬门禁。requiredToolEvidence 只有 mode=required 才阻塞；MCP 来源证据默认 required，file_write/file_patch 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
+                "工具边界由宿主拥有，你不要猜测或指定具体工具名。每个 agent 用 toolProfile 声明档位（planner=只读+检索、research=只读+检索+落盘、authoring=全部、verify=只读+执行、*=不限制；不写时宿主按 role 推导），用 capabilities 声明需要的能力类别（web_search、web_fetch、file_read、file_write、execute）。宿主会把档位解析成该 agent 实际可用的工具集合，并拒绝档位外的调用；能力在环境里不存在时 run 记 degraded，而不是失败。requiredCapabilityEvidence 只有 mode=required 才阻塞；web_search 默认 required，file_write/file_read 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
                 "action id must match the exact same string in the assigned agent.actions array; action ids are stable ids such as search, create_artifact, verify_artifact, never display labels or prose.",
-                "Use canonical tool names exactly: Tavily is mcp__tavily__tavily_search; local file tools are file_read and file_write. requiredTools must be assigned to the agent that actually calls each tool, and the contract list must be the union of those agent declarations.",
-                "acceptanceChecks and executionContract.artifacts[].requiredChecks must use machine-checkable ids only: artifact_exists, artifact_readback, artifact_structure, required_tool_evidence, source_count, schema_valid, command_exit_zero, no_secret_pattern. Never put natural-language sentences in check arrays. Host artifact requiredChecks must match the writer checks; independent structure checks belong to the verifier agent.",
+                "Never write a concrete tool name (mcp__*, file_write, code_run, ...) in requiredTools or in a prompt as an instruction. Declare the profile and the capability classes instead; the host resolves them against the tools that are actually connected. requiredTools/requiredToolEvidence are accepted only for backward compatibility with older plans.",
+                "acceptanceChecks and executionContract.artifacts[].requiredChecks must use machine-checkable ids only: artifact_exists, artifact_readback, artifact_structure, required_capability_evidence, required_tool_evidence, source_count, schema_valid, command_exit_zero, no_secret_pattern. Never put natural-language sentences in check arrays. Host artifact requiredChecks must match the writer checks; independent structure checks belong to the verifier agent.",
                 "parallel is a phase barrier for independent work; pipeline expresses ordered dependencies without pretending all work is independent.",
                 "Schema validation retries, retry counts, token/time budgets and max agents must be bounded; report terminal success/failure and blocking issues explicitly.",
                 "Host preflights MCP/tool requirements and passes a capability snapshot; child agents must not probe local configuration or rediscover credentials.",
@@ -1269,15 +1317,15 @@ class LLMWorkflowPlanner:
             "requiredShape": {
                 "taskType": "research | coding | review | debugging | planning | mixed",
                 "meta": {"name": "...", "description": "..."},
-                "phases": [{"title": "...", "agents": [{"label": "...", "role": "optional metadata; canonical values in codingAgentRoles, required to be canonical only inside code-producing plans", "prompt": "...", "dependsOn": [], "schemaRef": "optional logical schema name", "strictSchema": "boolean, default true", "schemaPolicy": "optional; strict|optional, only meaningful together with schemaRef"}]}],
+                "phases": [{"title": "...", "agents": [{"label": "...", "role": "optional metadata; canonical values in codingAgentRoles, required to be canonical only inside code-producing plans", "prompt": "...", "toolProfile": "planner | research | authoring | verify | * (optional; host derives it from role when omitted)", "capabilities": ["web_search | web_fetch | file_read | file_write | execute (optional)"], "dependsOn": [], "schemaRef": "optional logical schema name", "strictSchema": "boolean, default true", "schemaPolicy": "optional; strict|optional, only meaningful together with schemaRef"}]}],
                 "codingAgentRoles": sorted(CODING_AGENT_ROLES),
                 "schemas": {},
                 "artifacts": [],
                 "executionContract": {
                     "requiresExecution": "boolean",
                     "actions": [{"id": "...", "agent": "..."}],
-                    "requiredTools": ["..."],
-                    "requiredToolEvidence": [{"tool": "...", "agent": "...", "minimumCalls": 1}],
+                    "capabilities": ["web_search | web_fetch | file_read | file_write | execute"],
+                    "requiredCapabilityEvidence": [{"capability": "...", "agent": "...", "minimumCalls": 1, "mode": "required | preferred"}],
                     "artifacts": [{"path": "...", "writer": "...", "requiredChecks": ["..."], "optional": "boolean, default false; true exempts this artifact from host existence checking"}],
                 },
                 "constraints": ["no_secret_files", "no_git_commit"],
@@ -1291,7 +1339,7 @@ class LLMWorkflowPlanner:
                 "repairRules": [
                     "Fix every listed issue in the JSON fields named by the validator; do not merely rewrite prompts or explain the issue.",
                     "Keep action ids identical between executionContract.actions and the assigned agent.actions.",
-                    "Use only canonical tool ids and machine-checkable acceptance ids from orchestrationPolicy.",
+                    "Use only capability classes and machine-checkable acceptance ids from orchestrationPolicy; never invent concrete tool names.",
                     "Preserve valid phases and dependencies; return a complete replacement WorkflowPlan JSON object.",
                 ],
             }
@@ -1424,6 +1472,23 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             # stays legal; a misspelled one does not.
             if is_coding and role and role not in CODING_AGENT_ROLES:
                 issues.append({"code": "invalid_coding_role", "message": f"coding agent {label} has non-canonical role: {role}"})
+            declared_profile = agent.get("toolProfile")
+            if declared_profile is not None and not is_known_tool_profile(declared_profile):
+                issues.append({
+                    "code": "unknown_tool_profile",
+                    "message": f"agent {label} declares unknown toolProfile {declared_profile!r}; the host owns the profile list",
+                })
+            declared_capabilities = agent.get("capabilities")
+            if declared_capabilities is not None:
+                if not isinstance(declared_capabilities, list):
+                    issues.append({"code": "invalid_capability_list", "message": f"agent {label} capabilities must be a list"})
+                else:
+                    for capability in declared_capabilities:
+                        if str(capability) not in CAPABILITY_CLASSES:
+                            issues.append({
+                                "code": "unknown_capability",
+                                "message": f"agent {label} declares unknown capability {capability!r}; known: {', '.join(CAPABILITY_CLASSES)}",
+                            })
             schema_ref = agent.get("schemaRef")
             if schema_ref is not None:
                 if not isinstance(schema_ref, str) or not schema_ref.strip():
@@ -1467,6 +1532,7 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
             if str(agent.get("role") or "").strip().lower() in actionable_roles
             or agent.get("actions")
             or agent.get("requiredTools")
+            or agent.get("capabilities")
             or agent.get("writeScope")
         ]
         if not actionable_agents:
@@ -1519,6 +1585,27 @@ def validate_workflow_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 issues.append({"code": "invalid_tool_evidence_contract", "message": f"unsupported tool evidence mode: {mode or '<missing>'}"})
             if not tool or tool not in declared_tools or not agent or tool not in {str(item) for item in (agent.get("requiredTools") or [])} or minimum_calls < 1:
                 issues.append({"code": "invalid_tool_evidence_contract", "message": f"tool evidence must bind a required tool to its executing agent: {tool or '<missing>'}"})
+
+        for capability_evidence in execution_contract.get("requiredCapabilityEvidence") or []:
+            if not isinstance(capability_evidence, dict):
+                issues.append({"code": "invalid_capability_evidence_contract", "message": "capability evidence contract must be an object"})
+                continue
+            capability = str(capability_evidence.get("capability") or "")
+            agent_label = str(capability_evidence.get("agent") or "")
+            mode = str(capability_evidence.get("mode") or "required").strip().lower()
+            agent = agents_by_label.get(agent_label)
+            declared = {str(item) for item in (agent.get("capabilities") or [])} if agent else set()
+            try:
+                minimum_calls = int(capability_evidence.get("minimumCalls", 1))
+            except (TypeError, ValueError):
+                minimum_calls = 0
+            if mode not in {"required", "preferred", "informational"}:
+                issues.append({"code": "invalid_capability_evidence_contract", "message": f"unsupported capability evidence mode: {mode or '<missing>'}"})
+            if capability not in CAPABILITY_CLASSES or not agent or capability not in declared or minimum_calls < 1:
+                issues.append({
+                    "code": "invalid_capability_evidence_contract",
+                    "message": f"capability evidence must bind a declared capability to its executing agent: {capability or '<missing>'}",
+                })
 
         for artifact in execution_contract.get("artifacts") or []:
             if not isinstance(artifact, dict):
@@ -1644,7 +1731,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 label = str(agent.get("label") or "agent")
                 prompt = str(agent.get("prompt") or "")
                 options = {"label": label, "phase": title}
-                for key in ("actions", "requiredTools", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
+                for key in ("actions", "requiredTools", "capabilities", "toolProfile", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
                     if agent.get(key):
                         options[key] = agent[key]
                 if agent.get("role"):
@@ -1677,7 +1764,7 @@ def render_workflow_plan(plan: dict[str, Any]) -> str:
                 # injects a bounded dependency handoff (summary + logical refs).
                 rendered_prompt += '\n\n依赖结果由宿主以 bounded dependency handoff 提供；请根据摘要和产物路径按需读取，不要期待完整 transcript。'
             options = {"label": label, "phase": title}
-            for key in ("actions", "requiredTools", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
+            for key in ("actions", "requiredTools", "capabilities", "toolProfile", "writeScope", "deliverables", "acceptanceChecks", "capabilityProfile"):
                 if agent.get(key):
                     options[key] = agent[key]
             if agent.get("role"):
