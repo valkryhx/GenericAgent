@@ -408,6 +408,68 @@ return {summary: result.summary}
 
             self.assertIsNone(runtime._evaluate_execution_contract_evidence(run))
 
+    def test_empty_declared_artifact_is_rejected(self):
+        """A declared deliverable that exists but is empty is not a delivery."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            blank = workspace / "report.md"
+            blank.write_text("", encoding="utf-8")
+            run = store.create_run(WorkflowRun(
+                run_id="wf_empty_artifact",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": "report.md", "writer": "writer"}],
+                    },
+                },
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            self.assertEqual("empty_artifact: report.md", runtime._evaluate_execution_contract_evidence(run))
+
+    def test_declared_artifact_overwritten_after_write_is_rejected(self):
+        """The 2026-10-09 cleanup-probe failure must be a contract failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp, "workspace")
+            workspace.mkdir()
+            report = workspace / "report.md"
+            run = store.create_run(WorkflowRun(
+                run_id="wf_altered_artifact",
+                session_id="session_test",
+                script="",
+                metadata={
+                    "workspacePath": str(workspace),
+                    "executionContract": {
+                        "requiresExecution": True,
+                        "artifacts": [{"path": "report.md", "writer": "writer"}],
+                    },
+                },
+            ))
+            writer = WorkflowJob(job_id="agent_1", prompt="write", metadata={"label": "writer"})
+            writer.metadata["transcriptRef"] = store.write_agent_transcript(run, writer, [
+                {"type": "tool_call", "toolName": "file_write", "args": {"path": "report.md"}},
+                {"type": "tool_result", "toolName": "file_write", "data": {"status": "success", "writed_bytes": 4096}},
+            ])
+            run.jobs.append(writer)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            # Delivered at 4096 bytes, then a later cleanup probe collapsed it.
+            report.write_text("# title only\n", encoding="utf-8")
+            self.assertEqual(
+                "artifact_altered_after_write: report.md (was 4096 bytes, now 14)",
+                runtime._evaluate_declared_artifact_integrity(run),
+            )
+
+            # Intact final artifact passes.
+            report.write_text("x" * 4096, encoding="utf-8")
+            self.assertIsNone(runtime._evaluate_declared_artifact_integrity(run))
+
     def test_required_file_read_evidence_accepts_successful_artifact_code_run_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

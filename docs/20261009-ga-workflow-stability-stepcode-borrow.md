@@ -1,6 +1,6 @@
 # GA Workflow 稳定性改造方案（对照 Step-Code）
 
-> 状态：P0/P1 已实施，P2 部分实施（第 8 条欠账见 §10），P3 待执行
+> 状态：P0/P1 已实施，P2 已实施，P3-10/P3-12 已实施；P3-11 增强项遗留见 §10.5
 > 日期：2026-10-09
 > 关联实现参考：`D:\git_codes\Step-Code`（`packages/coding-agent/src/features/workflow/`）
 > 关联既有文档：`docs/20261002-ga-workflow-autonomous-activation-hardening-reference.md`、`docs/20261002-工作流执行契约语义化验收改造实施方案.md`
@@ -180,11 +180,11 @@ Step-Code **有**降级处理，但边界清晰：降级只作用于「部分可
 ### P2 — 产物与路径确定性
 7. `workflow_runtime.py`：对 `executionContract.artifacts` 一律执行
    `artifact_exists`（除非声明 `optional:true`），不依赖 `requiredChecks` 是否书写。
-8. 清理临时探针不得写入声明的产物路径；增加宿主侧路径冲突检查。
+8. 清理临时探针不得写入声明的产物路径；增加宿主侧路径冲突检查。**已完成**，见 §10.2。
 9. `plannerMode=fallback_deterministic` 时 run 标 `degraded` 并记录 `fallbackReason`。
 
 ### P3 — 对齐 Step-Code 的可借鉴机制
-10. 路径 ACL 前移到宿主确定性校验（读/写/执行 + 重定向解析）。**未完成**，见 §10.3。
+10. 路径 ACL 前移到宿主确定性校验（读/写/执行 + 重定向解析）。**已完成**，见 §10.3。
 11. 进度快照语义对齐：`onUpdate` 携带完整不可变快照。**基本满足**，见 §10.1。
 12. resume 缓存只接受 `completed`（`degraded` 不算成功前缀）。**已完成**，见 §10.1。
 
@@ -267,7 +267,7 @@ P2 的第 7、9 条已实施，第 8 条**未实施**。逐项状态与证据如
 
 ### 10.2 未完成：P2-8 清理探针覆盖声明产物
 
-**状态：未实施。**
+**状态：已实施（2026-10-09 第二轮）。**
 
 方案要求「清理临时探针不得写入声明的产物路径；增加宿主侧路径冲突检查」。
 当前 `workflow_scheduler.py` / `workflow_runtime.py` / `workflow_store.py` 中
@@ -284,9 +284,23 @@ P2 的第 7、9 条已实施，第 8 条**未实施**。逐项状态与证据如
 「声明产物在 run 收口时内容非空且规模未异常塌缩」的宿主判定，并把塌缩记为
 `degraded` 或 `failed` 而不是成功。
 
+实施结果（确定性规则，不做比例猜测）：
+
+- `workflow_runtime.py::_evaluate_execution_contract_evidence`：非 optional 声明产物
+  存在但**大小为 0** 时报 `empty_artifact: <path>`。
+- `workflow_runtime.py::_evaluate_declared_artifact_integrity`：把每个
+  `file_write`/`file_patch` 的 tool_call 与其 success 结果配对，记录宿主实际观测到的
+  最大 `writed_bytes`；run 收口时若产物小于该观测值，报
+  `artifact_altered_after_write: <path> (was N bytes, now M)`，即「交付后被改写」。
+  这正是 2026-10-09 的清理探针把报告正文改成占位内容的形态。
+- 两者都接入 `run()` 的终态门禁，失败即 run `failed`（`integrationStatus=rejected`）。
+- 测试：`tests/test_workflow_runtime.py` 新增 `test_empty_declared_artifact_is_rejected`
+  与 `test_declared_artifact_overwritten_after_write_is_rejected`。
+
 ### 10.3 未完成：P3-10 路径 ACL 前移
 
-**状态：未实施。** GA 现在的路径约束分散在子代理进程内 guard、`_get_abs_path`、
+**状态：已实施（2026-10-09 第二轮）。** GA 现在的路径约束由单一宿主侧函数统一判定。
+（以下保留实施前的缺口分析作为背景。）GA 原先的路径约束分散在子代理进程内 guard、`_get_abs_path`、
 以及权限 profile 的提示词里，没有 Step-Code 那种宿主侧统一前置校验。
 
 对照 Step-Code：`features/workflow/tool-profile.ts` 的纯函数
@@ -320,6 +334,33 @@ symlink 祖先，并解析 shell 重定向/`mv`/`cp`/`tee`/`of=` 目标。
 3. `expand_file_refs` 增加 workspace 包含校验（最小修复，可立即堵住缺口一）；
 4. 明确 ACL 与权限 profile 的职责边界：profile 判「能不能用这个工具」，ACL 判
    「这个路径能不能碰」。
+
+实施结果：
+
+- 新增 `workflow_path_acl.py`：纯函数 `check_tool_call(workspace_root, tool_name, args)`
+  与 `check_path_access`，对标 Step-Code `tool-profile.ts`。包含 workspace 规范化
+  （解析已存在祖先的 symlink，防 symlink 逃逸）、读/写/执行分类、`{{file:}}` 引用
+  校验、shell 重定向 / `mv` / `cp` / `tee` / `of=` 目标解析。
+- `ga.py::GenericAgentHandler.dispatch`：在**工具执行之前**统一调用
+  `_check_workspace_path_access`；被拒时返回带 `path_acl` 详情的工具错误，并发出
+  `tool_denied` / `path_acl_violation` 权限事件。仅对设了 `workspace_root` 的
+  workflow 子代理生效，主会话不受影响；职责边界是 profile 管「工具能不能用」、
+  ACL 管「路径能不能碰」。
+- `ga.py::expand_file_refs` 增加 `workspace_root` 参数并做包含校验；
+  `file_write`/`file_patch` 传入该参数，堵住 `{{file:../x}}` 读旁路。
+- 测试：`tests/test_workflow_path_acl.py`（12 例，含 symlink 逃逸、shell 重定向、
+  `{{file:}}` 引用、无 workspace 时保持放行）与 `tests/test_code_run.py` 的
+  `ExpandFileRefsWorkspaceTest`。
+- 真实 E2E：`tests/real_workflow_degraded_semantics_e2e.py` 新增 pathAcl 场景，
+  DeepSeek-V4.1-Flash 子代理尝试 `file_read` 工作区外文件时被宿主拒绝
+  （`deniedCount=1`，`leakedSecret=false`）。
+
+### 10.5 遗留（本轮未做）
+
+- P3-11 的「向 child 侧也下发完整不可变进度快照」仍属增强项，未做；宿主→UI 方向
+  已是完整快照。
+- `code_run` 的 Python 分支仍复用 `workflow_workspace_guard`（in-process guard）作为
+  第二层防护；ACL 已在其之前拦掉越界参数，但两者尚未合并成单一层。
 
 ### 10.4 建议实施顺序
 

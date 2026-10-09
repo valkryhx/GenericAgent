@@ -14,6 +14,50 @@ from ga import code_run  # noqa: E402
 import ga  # noqa: E402
 
 
+class ExpandFileRefsWorkspaceTest(unittest.TestCase):
+    """{{file:...}} references must not read outside the workspace."""
+
+    def test_reference_inside_workspace_still_expands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp, "ws")
+            workspace.mkdir()
+            (workspace / "inside.txt").write_text("INSIDE\n", encoding="utf-8")
+
+            self.assertEqual(
+                "INSIDE\n",
+                ga.expand_file_refs("{{file:inside.txt:1:1}}", base_dir=str(workspace), workspace_root=str(workspace)),
+            )
+
+    def test_reference_outside_workspace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp, "ws")
+            workspace.mkdir()
+            (Path(tmp) / "secret.txt").write_text("TOP_SECRET\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                ga.expand_file_refs("{{file:../secret.txt:1:1}}", base_dir=str(workspace), workspace_root=str(workspace))
+
+    def test_absolute_reference_outside_workspace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp, "ws")
+            workspace.mkdir()
+            secret = Path(tmp) / "secret.txt"
+            secret.write_text("TOP_SECRET\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                ga.expand_file_refs(f"{{{{file:{secret}:1:1}}}}", base_dir=str(workspace), workspace_root=str(workspace))
+
+    def test_reference_without_workspace_root_keeps_legacy_behavior(self):
+        # The main session (no workflow workspace) must not regress.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "plain.txt").write_text("PLAIN\n", encoding="utf-8")
+
+            self.assertEqual(
+                "PLAIN\n",
+                ga.expand_file_refs("{{file:plain.txt:1:1}}", base_dir=tmp),
+            )
+
+
 def exhaust_generator(gen):
     try:
         while True:

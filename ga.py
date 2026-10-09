@@ -231,14 +231,31 @@ def web_execute_js(script, switch_tab_id=None, no_monitor=False):
         return result
     except Exception as e: return {"status": "error", "msg": format_error(e)}
 
-def expand_file_refs(text, base_dir=None):
+def expand_file_refs(text, base_dir=None, workspace_root=None):
     """展开文本中的 {{file:路径:起始行:结束行}} 引用为实际文件内容。
     可与普通文本混排。展开失败抛 ValueError。
-    base_dir: 相对路径的基准目录，默认为进程 cwd"""
+    base_dir: 相对路径的基准目录，默认为进程 cwd
+    workspace_root: 提供时，引用文件必须落在该 workspace 内；否则拒绝展开。
+        file_write/file_patch 在 workflow 子代理里用它，防止 {{file:../x}} 读出
+        workspace 之外的文件。"""
+    workspace = None
+    if workspace_root:
+        from workflow_workspace import WorkspacePathError, resolve_workspace_child
+        workspace = Path(workspace_root)
     pattern = r'\{\{file:(.+?):(\d+):(\d+)\}\}'
     def replacer(match):
         path, start, end = match.group(1), int(match.group(2)), int(match.group(3))
-        path = os.path.abspath(os.path.join(base_dir or '.', path))
+        candidate = os.path.abspath(os.path.join(base_dir or '.', path))
+        if workspace is not None:
+            try:
+                # Canonical containment check resolves symlinks and rejects
+                # absolute/traversal paths outside the workspace.
+                relative = os.path.relpath(candidate, str(workspace))
+                path = str(resolve_workspace_child(relative, workspace))
+            except (WorkspacePathError, ValueError) as exc:
+                raise ValueError(f"引用文件越界（必须在 workspace 内）: {candidate}") from exc
+        else:
+            path = candidate
         if not os.path.isfile(path): raise ValueError(f"引用文件不存在: {path}")
         with open(path, 'r', encoding='utf-8') as f: lines = f.readlines()
         if start < 1 or end > len(lines) or start > end: raise ValueError(f"行号越界: {path} 共{len(lines)}行, 请求{start}-{end}")
@@ -430,7 +447,51 @@ class GenericAgentHandler(BaseHandler):
             ret = yield from self._dispatch_mcp_tool(tool_name, args, response)
             _ = yield from try_call_generator(self.tool_after_callback, tool_name, args, response, ret)
             return ret
+        decision = self._check_workspace_path_access(tool_name, args or {})
+        if decision is not None and not decision.allowed:
+            yield f"[PathACL] deny: {tool_name} ({decision.reason})\n"
+            ret = StepOutcome({"status": "error", "path_acl": decision.to_dict()}, next_prompt="\n")
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
         return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+
+    def _check_workspace_path_access(self, tool_name, args):
+        """Host-side path ACL, evaluated before the tool executes.
+
+        Capability (permission profile) decides *whether* a tool may be used;
+        this decides *which paths* it may touch. It runs for every workflow
+        child (``workspace_root`` set) regardless of permission profile, because
+        read_only and verify profiles can still pass arguments that escape the
+        workspace.
+        """
+
+        if not self.workspace_root:
+            return None
+        from workflow_path_acl import check_tool_call
+
+        decision = check_tool_call(self.workspace_root, tool_name, args or {})
+        if not decision.allowed:
+            callback = getattr(self, 'workflow_permission_event_callback', None)
+            if callback:
+                from workflow_permissions import PermissionDecision, build_permission_event
+
+                event = build_permission_event(
+                    'tool_denied',
+                    context=getattr(self, 'workflow_permission_context', {}) or {},
+                    tool_name=str(tool_name or ''),
+                    decision=PermissionDecision(
+                        action='deny',
+                        reason='path_acl_violation',
+                        profile=getattr(getattr(self, 'workflow_permission_policy', None), 'profile', '') or '',
+                        tool_name=str(tool_name or ''),
+                        details=decision.to_dict(),
+                    ),
+                )
+                try:
+                    callback(event)
+                except Exception:
+                    pass
+        return decision
 
     def _check_workflow_permission(self, tool_name, args):
         policy = self.workflow_permission_policy
@@ -572,7 +633,7 @@ class GenericAgentHandler(BaseHandler):
         yield f"[Action] Patching file: {path}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")
-        try: new_content = expand_file_refs(new_content, base_dir=self.cwd)
+        try: new_content = expand_file_refs(new_content, base_dir=self.cwd, workspace_root=self.workspace_root)
         except ValueError as e:
             yield f"[Status] ❌ 引用展开失败: {e}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
@@ -601,7 +662,7 @@ class GenericAgentHandler(BaseHandler):
             yield f"[Status] ❌ 失败: 未在回复中找到<file_content>代码块内容\n"
             return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
-            new_content = expand_file_refs(content, base_dir=self.cwd)
+            new_content = expand_file_refs(content, base_dir=self.cwd, workspace_root=self.workspace_root)
             if mode == "prepend":
                 old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
                 open(path, 'w', encoding="utf-8").write(new_content + old)

@@ -289,16 +289,17 @@ class WorkflowRuntime:
                     gate_error = self._test_gate_failure_reason()
                     verification_error = self._explicit_verification_failure_reason(result)
                     execution_contract_error = self._evaluate_execution_contract_evidence(run)
+                    artifact_integrity_error = self._evaluate_declared_artifact_integrity(run)
                     acceptance_error = self._evaluate_acceptance(run, result, args=runtime_args)
-                    if gate_error or verification_error or execution_contract_error or acceptance_error:
+                    if gate_error or verification_error or execution_contract_error or artifact_integrity_error or acceptance_error:
                         metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                         metadata["integrationStatus"] = "rejected"
                         metadata["integrationIssues"] = [
-                            item for item in (gate_error, verification_error, execution_contract_error, acceptance_error) if item
+                            item for item in (gate_error, verification_error, execution_contract_error, artifact_integrity_error, acceptance_error) if item
                         ]
                         metadata["finalAuditStatus"] = "failed"
                         run.metadata = metadata
-                        raise RuntimeError(gate_error or verification_error or execution_contract_error or acceptance_error)
+                        raise RuntimeError(gate_error or verification_error or execution_contract_error or artifact_integrity_error or acceptance_error)
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                     degraded = str(run.status or "") == "degraded" or bool(metadata.get("workflowIssues"))
                     metadata["integrationStatus"] = "degraded" if degraded else "accepted"
@@ -970,6 +971,11 @@ class WorkflowRuntime:
                     checks.add("artifact_exists")
                 if not target.is_file():
                     return f"missing_artifact: {relative_path}"
+                # A declared deliverable that exists but is empty is not a
+                # delivery. The 2026-10-09 failure destroyed the report body and
+                # left a placeholder behind; existence alone did not notice.
+                if target.stat().st_size == 0:
+                    return f"empty_artifact: {relative_path}"
             if "artifact_readback" in checks:
                 filename = target.name.lower()
                 # Readback may be performed by a synthesis/review child whose
@@ -996,6 +1002,90 @@ class WorkflowRuntime:
                 code_read = code_run_readback_count(all_job_events or reader_events) > 0
                 if not direct_read and not code_read:
                     return f"missing_artifact_readback_evidence: {relative_path}"
+        return None
+
+    def _declared_artifact_paths(self, run) -> list[str]:
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        contract = metadata.get("executionContract")
+        if not isinstance(contract, dict):
+            return []
+        paths: list[str] = []
+        for artifact in contract.get("artifacts") or []:
+            if not isinstance(artifact, dict) or artifact.get("optional"):
+                continue
+            raw = str(artifact.get("path") or "").strip().replace("\\", "/")
+            if raw and raw not in paths:
+                paths.append(raw)
+        return paths
+
+    def _evaluate_declared_artifact_integrity(self, run) -> str | None:
+        """Reject a declared artifact that was overwritten after a successful write.
+
+        Reproduces the 2026-10-09 failure deterministically: the writer produced
+        the report, a later job rewrote the same path with a placeholder, and
+        the deliverable was destroyed while existence and readback stayed green.
+        Here the host pairs each ``file_write``/``file_patch`` tool call with its
+        result and records the largest size it ever observed for a declared
+        artifact; if the final on-disk file is smaller than that, the artifact
+        was altered after delivery and the contract fails.
+        """
+
+        declared = self._declared_artifact_paths(run)
+        if not declared:
+            return None
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        workspace_raw = metadata.get("workspacePath")
+        if not workspace_raw:
+            return None
+        try:
+            workspace = resolve_workspace_root(workspace_raw)
+        except WorkspacePathError:
+            return None
+
+        observed_max: dict[str, int] = {}
+        for job in run.jobs:
+            events = self.store.read_agent_transcript_events(run, (job.metadata or {}).get("transcriptRef"))
+            pending_path: str | None = None
+            for event in events:
+                tool_name = str(event.get("toolName") or "")
+                if event.get("type") == "tool_call" and tool_name in {"file_write", "file_patch"}:
+                    pending_path = self._declared_match(str((event.get("args") or {}).get("path") or ""), declared)
+                    continue
+                if event.get("type") != "tool_result" or tool_name not in {"file_write", "file_patch"}:
+                    continue
+                data = event.get("data")
+                written = data.get("writed_bytes") if isinstance(data, dict) else None
+                if (
+                    pending_path
+                    and isinstance(data, dict)
+                    and str(data.get("status") or "") == "success"
+                    and isinstance(written, int)
+                ):
+                    observed_max[pending_path] = max(observed_max.get(pending_path, 0), written)
+                pending_path = None
+
+        for relative_path in declared:
+            try:
+                target = resolve_workspace_child(relative_path, workspace)
+            except WorkspacePathError:
+                return f"invalid_artifact_path: {relative_path}"
+            if not target.is_file():
+                return f"missing_artifact: {relative_path}"
+            observed = observed_max.get(relative_path)
+            if observed and observed > 0:
+                actual = target.stat().st_size
+                if actual < observed:
+                    return f"artifact_altered_after_write: {relative_path} (was {observed} bytes, now {actual})"
+        return None
+
+    @staticmethod
+    def _declared_match(raw_path: str, declared: list[str]) -> str | None:
+        normalized = str(raw_path or "").strip().replace("\\", "/")
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        for declared_path in declared:
+            if normalized == declared_path or normalized.endswith("/" + declared_path):
+                return declared_path
         return None
 
     def _evaluate_verification_contract(self, run, result, raw_contract, metadata, *, args=None):
