@@ -860,6 +860,14 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 run = self.workflow_store.load_run(str(run_id or ""))
                 progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+                if progress is None:
+                    # A run created before the first job runs has no snapshot yet
+                    # (or was written by an older build). Publish one from the
+                    # run itself rather than reporting a failure for a healthy
+                    # run: the caller asked for progress, and the run *is* the
+                    # source of truth for it.
+                    self.workflow_store.write_workflow_progress(run)
+                    progress = self._workflow_artifact_payload(run, "workflow-progress.json")
             if progress is None:
                 self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
                 return

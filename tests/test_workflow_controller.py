@@ -12,6 +12,20 @@ from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore
 
 
+class _RejectingPlanner:
+    """Planner whose draft fails validation, so the run is rejected."""
+
+    def plan(self, _task_text, _context):
+        return WorkflowDraft(
+            task_text="坏计划",
+            context={},
+            classification={"taskType": "research"},
+            plan={"taskType": "research", "phases": []},
+            validation={"ok": False, "issues": [{"code": "empty", "message": "no phases"}]},
+            script="",
+        )
+
+
 class WorkflowControllerTest(unittest.TestCase):
     def test_create_planned_run_persists_explicit_verification_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +225,71 @@ class WorkflowControllerTest(unittest.TestCase):
             )
             self.assertIn("## Mode\nworkflow", (artifact_dir / "plan.md").read_text(encoding="utf-8"))
             self.assertIn("Parent critical path", (artifact_dir / "orchestration.md").read_text(encoding="utf-8"))
+
+    def test_create_planned_run_publishes_a_progress_snapshot_immediately(self):
+        """A planned run must have progress before its first job runs.
+
+        Regression: ``workflow-progress.json`` was written only once the runtime
+        started executing jobs, so asking for progress on a freshly planned run
+        produced "workflow progress is not available" even though the run was
+        healthy -- the Ink UI showed a spurious error straight after a
+        ``/workflow`` plan.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = WorkflowController(WorkflowStore(root=tmp))
+            draft = WorkflowPlanner().plan("调研一个技术方案")
+
+            class FixedPlanner:
+                def plan(self, _task_text, _context):
+                    return draft
+
+            run = controller.create_planned_run(
+                session_id="session_progress_publish",
+                task_text="调研一个技术方案",
+                planner=FixedPlanner(),
+            )
+
+            progress_ref = "workflow-progress.json"
+            progress_path = Path(run.artifact_dir) / progress_ref
+            self.assertTrue(progress_path.is_file())
+            document = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(run.run_id, document["runId"])
+            self.assertEqual("running", document["status"])
+
+    def test_every_status_transition_refreshes_the_progress_snapshot(self):
+        """The snapshot must not go stale while the run waits for approval."""
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = WorkflowController(WorkflowStore(root=tmp))
+            run = controller.create_planned_run(
+                session_id="session_progress_states",
+                task_text="调研 workflow planner control plane",
+                planner=WorkflowPlanner(),
+                auto_approve=False,
+            )
+            progress_path = Path(run.artifact_dir) / "workflow-progress.json"
+
+            def snapshot_status() -> str:
+                return json.loads(progress_path.read_text(encoding="utf-8"))["status"]
+
+            self.assertEqual("awaiting_approval", snapshot_status())
+            controller.approve(run.run_id)
+            self.assertEqual("running", snapshot_status())
+            controller.stop(run.run_id, reason="test stop")
+            self.assertEqual("killed", snapshot_status())
+
+    def test_rejected_plan_still_publishes_a_progress_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = WorkflowController(WorkflowStore(root=tmp))
+            run = controller.create_planned_run(
+                session_id="session_progress_rejected",
+                task_text="坏计划",
+                planner=_RejectingPlanner(),
+            )
+
+            document = json.loads(
+                (Path(run.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("failed", document["status"])
 
     def test_create_planned_run_can_request_approval_when_auto_approve_false(self):
         with tempfile.TemporaryDirectory() as tmp:

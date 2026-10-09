@@ -125,7 +125,7 @@ class WorkflowController:
         run.metadata["workflowDraftRef"] = draft_ref
         contract_refs = self.store.write_workflow_contract_artifacts(run, draft)
         run.metadata["workflowContractRefs"] = contract_refs
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(
             run,
             "workflow_planned",
@@ -139,11 +139,11 @@ class WorkflowController:
         )
         if is_valid and auto_approve and not approval_required:
             run.status = "running"
-            self.store.save_run(run)
+            self._save_and_publish(run)
             self._append(run, "workflow_started")
         elif is_valid:
             run.status = "awaiting_approval"
-            self.store.save_run(run)
+            self._save_and_publish(run)
             self._append(
                 run,
                 "workflow_approval_requested",
@@ -152,7 +152,7 @@ class WorkflowController:
         else:
             run.status = "failed"
             run.error = "workflow_plan_rejected"
-            self.store.save_run(run)
+            self._save_and_publish(run)
             self._append(
                 run,
                 "workflow_plan_rejected",
@@ -166,11 +166,26 @@ class WorkflowController:
             )
         return run
 
+    def _save_and_publish(self, run: WorkflowRun) -> WorkflowRun:
+        """Persist the run *and* its progress snapshot.
+
+        ``workflow-progress.json`` used to appear only once the runtime started
+        executing jobs. Every status transition before that (planned, awaiting
+        approval, rejected, approved, denied, cancelled, stopped) therefore had
+        no snapshot, and a reader asking for progress got "workflow progress is
+        not available" for a run that was perfectly healthy. A planned run now
+        publishes a snapshot the moment it exists, so the UI reflects the plan
+        instead of reporting a spurious failure.
+        """
+        self.store.save_run(run)
+        self.store.write_workflow_progress(run)
+        return run
+
     def request_approval(self, run_id: str) -> WorkflowRun:
         run = self.store.load_run(run_id)
         self._require_status(run, {"draft"}, "request approval")
         run.status = "awaiting_approval"
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(run, "workflow_approval_requested")
         return run
 
@@ -178,7 +193,7 @@ class WorkflowController:
         run = self.store.load_run(run_id)
         self._require_status(run, {"awaiting_approval"}, "approve")
         run.status = "running"
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(run, "workflow_started")
         return run
 
@@ -187,7 +202,7 @@ class WorkflowController:
         self._require_status(run, {"awaiting_approval"}, "deny")
         run.status = "cancelled"
         run.error = reason or None
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(run, "workflow_denied", payload={"reason": reason or ""})
         return run
 
@@ -196,7 +211,7 @@ class WorkflowController:
         self._require_status(run, {"draft", "awaiting_approval", "running", "interrupted"}, "cancel")
         run.status = "cancelled"
         run.error = reason or None
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(run, "workflow_cancelled", payload={"reason": reason or ""})
         return run
 
@@ -205,7 +220,7 @@ class WorkflowController:
         self._require_status(run, {"running", "interrupted"}, "stop")
         run.status = "killed"
         run.error = reason or None
-        self.store.save_run(run)
+        self._save_and_publish(run)
         self._append(run, "workflow_killed", payload={"reason": reason or ""})
         return run
 

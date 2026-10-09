@@ -1561,7 +1561,8 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual(run_id, progress_events[-1]["progress"]["runId"])
             self.assertEqual("succeeded", progress_events[-1]["progress"]["status"])
             event_types = [event["type"] for event in events]
-            self.assertLess(event_types.index("workflow_run", event_types.index("workflow_event")), event_types.index("workflow_progress"))
+            # Progress now starts as soon as the run is planned, so the run event
+            # no longer precedes the first progress snapshot.
             self.assertLess(event_types.index("workflow_progress"), event_types.index("workflow_final"))
             self.assertEqual(2.0, PlannedRunFakeRuntime.last_timeout_seconds)
 
@@ -1675,6 +1676,49 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(["synthesis_report.md"], refs)
         self.assertEqual(str(workspace_root.resolve()), document["workspacePath"])
         self.assertIn("workspacePath", payload)
+
+    def test_workflow_progress_publishes_instead_of_erroring_when_no_snapshot_exists(self):
+        """A healthy run with no snapshot yet must not surface a spurious error.
+
+        Regression: the bridge emitted ``workflow_progress_missing`` /
+        "workflow progress is not available" whenever the snapshot file was
+        absent, which is exactly the state of a run between planning and its
+        first job.
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_progress_missing"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "ws"
+            workspace_root.mkdir()
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=str(Path(tmp) / "runs"),
+                workspace_root=str(workspace_root),
+            )
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_no_snapshot",
+                    session_id="session_progress_missing",
+                    script="x",
+                    status="running",
+                )
+            )
+            progress_path = Path(run.artifact_dir) / "workflow-progress.json"
+            self.assertFalse(progress_path.is_file())
+
+            bridge.workflow_progress("wf_no_snapshot")
+
+            self.assertTrue(progress_path.is_file())
+            document = json.loads(progress_path.read_text(encoding="utf-8"))
+
+        errors = [event for event in events if event.get("type") == "error"]
+        progress_events = [event for event in events if event.get("type") == "workflow_progress"]
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(progress_events))
+        self.assertEqual("wf_no_snapshot", progress_events[0]["progress"]["runId"])
+        self.assertEqual("wf_no_snapshot", document["runId"])
 
     def test_workflow_handoff_names_the_job_that_wrote_each_artifact(self):
         """Ownership must reach the agent, so it can judge whose data it reads.
@@ -2165,7 +2209,13 @@ class InkBridgeTest(unittest.TestCase):
             self.assertNotIn("script", progress_event)
             self.assertNotIn("transcriptEvents", json.dumps(progress_event, ensure_ascii=False))
 
-    def test_workflow_detail_allows_missing_workflow_progress_and_draft(self):
+    def test_workflow_detail_allows_missing_draft_but_reports_progress(self):
+        """A draft run has no plan draft, yet its progress must be visible.
+
+        Regression: the detail payload had no progress at all for a run that had
+        not started executing, so opening the panel showed nothing and a
+        follow-up progress request answered "workflow progress is not available".
+        """
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -2179,7 +2229,9 @@ class InkBridgeTest(unittest.TestCase):
             detail = next(event for event in events if event["type"] == "workflow_detail")
             self.assertEqual(run_id, detail["run"]["runId"])
             self.assertIsNone(detail["draft"])
-            self.assertIsNone(detail["progress"])
+            self.assertIsNotNone(detail["progress"])
+            self.assertEqual(run_id, detail["progress"]["runId"])
+            self.assertEqual("awaiting_approval", detail["progress"]["status"])
             self.assertEqual("return 1", detail["script"])
 
     def test_workflow_draft_creates_run_and_emits_approval_event(self):
