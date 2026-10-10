@@ -1576,7 +1576,15 @@ class InkBridgeTest(unittest.TestCase):
             bridge.wait_for_workflow_idle(run_id, timeout=2)
 
             self.assertTrue(run_id.startswith("wf_"))
-            self.assertEqual([("规划 bridge workflow", {"source": "test"})], planner.calls)
+            planned_task, planned_context = planner.calls[0]
+            self.assertEqual("规划 bridge workflow", planned_task)
+            self.assertEqual("test", planned_context["source"])
+            # The ink UI strips the "/workflow " prefix before planning, so the
+            # explicit opt-in has to travel in the context. Without it the
+            # planner fell back to the planner-only template and the run did none
+            # of the work (real case: wf_622266234f1345359d4e5f999758b922).
+            self.assertEqual("requested", planned_context["activation"]["action"])
+            self.assertEqual("explicit", planned_context["activation"]["mode"])
             self.assertEqual([run_id], PlannedRunFakeRuntime.started_run_ids)
             run_events = [event for event in events if event["type"] == "workflow_run"]
             self.assertGreaterEqual(len(run_events), 2)

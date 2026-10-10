@@ -824,6 +824,20 @@ class WorkflowPlanner:
         text = str(task_text or "")
         lowered = text.lower()
         activation = resolve_workflow_activation(text)
+        declared = context.get("activation") if isinstance(context, dict) else None
+        declared_action = (
+            str((declared or {}).get("action") or "").strip().lower()
+            if isinstance(declared, dict)
+            else ""
+        )
+        # The ink UI strips the "/workflow " prefix before planning, so the
+        # planner cannot see the user's explicit opt-in in the text itself; the
+        # caller carries it in context["activation"] (the auto-recommended path
+        # already did). Without it, an execution task whose wording misses the
+        # keyword lists below collapsed into the planner-only template and the
+        # run reported success having written nothing but PLAN.md
+        # (real case: wf_622266234f1345359d4e5f999758b922).
+        explicit_execution = "requested" in {declared_action, str(activation.action).strip().lower()}
         if activation.plan_only:
             task_type = "planning"
             read_write_mode = "read_only"
@@ -844,6 +858,15 @@ class WorkflowPlanner:
             task_type = "review"
             read_write_mode = "read_only"
             needs_code_change = False
+        elif explicit_execution:
+            # Explicit workflow opt-in with no recognisable shape: the task still
+            # has to be executed. Guessing "coding" from the wording is exactly
+            # the keyword coupling this planner is moving away from, so the type
+            # stays advisory ("general") and the host resolves the real contract
+            # from the declared capability classes.
+            task_type = "general"
+            read_write_mode = "may_write"
+            needs_code_change = False
         else:
             task_type = "planning"
             read_write_mode = "read_only"
@@ -853,7 +876,7 @@ class WorkflowPlanner:
             "readWriteMode": read_write_mode,
             "needsMcp": "search" in activation.matched_signals,
             "needsCodeChange": needs_code_change,
-            "needsVerification": activation.action != "none" or task_type in {"coding", "mixed"},
+            "needsVerification": explicit_execution or activation.action != "none" or task_type in {"coding", "mixed"},
             "riskLevel": "medium" if needs_code_change else "low",
             "clarifyingQuestions": [],
             "constraints": list((context or {}).get("constraints") or []),
@@ -1067,6 +1090,61 @@ class WorkflowPlanner:
                     "failWorkflowOnError": True,
                     "checks": ["python_unittest", "verification_schema"],
                 },
+            }
+        if classification["taskType"] == "general":
+            # Explicit "/workflow <task>" whose shape the keyword classifier did
+            # not recognise. The task must still be executed: the old fall-through
+            # produced a single planner job, so the run "succeeded" without doing
+            # any of the work the user asked for. The host resolves the declared
+            # capability classes against the tools that are actually connected, so
+            # this template never names a concrete tool, and it declares no
+            # required artifact because the deliverable shape is unknown here.
+            return {
+                "taskType": "general",
+                "meta": {
+                    "name": "dynamic-workflow-general",
+                    "description": "Execute the requested task, then verify the result",
+                },
+                "phases": [
+                    {"title": "Execute", "agents": [{
+                        "label": "execute-task",
+                        "role": "implementation",
+                        "prompt": (
+                            f"任务：{task_text}\n"
+                            "直接完成任务本身，不要只给计划、建议或提纲。"
+                            "需要落盘的内容写入 workspace 内的相对路径，写完用 file_read 读回确认；"
+                            "纯问答类任务直接把答案说清楚即可。"
+                        ),
+                        "actions": ["execute"],
+                        "toolProfile": "authoring",
+                        "capabilities": ["file_read", "file_write", "execute"],
+                        "dependsOn": [],
+                    }]},
+                    {"title": "Verify", "agents": [{
+                        "label": "verify-result",
+                        "role": "verification",
+                        "prompt": (
+                            "独立核验上游执行结果：原始任务要求的每一项是否真的完成、产物是否存在且内容正确。"
+                            "返回 verificationPassed、checks、blockingIssues；不要修改产物。"
+                        ),
+                        "actions": ["verify"],
+                        "toolProfile": "verify",
+                        "capabilities": ["file_read", "execute"],
+                        "schemaRef": "VERIFICATION_SCHEMA",
+                        "strictSchema": True,
+                        "dependsOn": ["execute-task"],
+                    }]},
+                ],
+                "schemas": {"VERIFICATION_SCHEMA": GA_WORKFLOW_VERIFICATION_SCHEMA},
+                "artifacts": ["verification"],
+                "constraints": ["no_secret_files", "no_git_commit"],
+                # The execute agent carries the implementation role, so the host
+                # holds this plan to the coding contract: one required,
+                # host-evaluable check. That check is the verifier's structured
+                # verdict. No test runner is declared, because the deliverable
+                # shape is unknown here -- guessing python_unittest is exactly
+                # the "research plan held to the coding gate" defect.
+                "acceptance": {"required": True, "failWorkflowOnError": True, "checks": ["verification_schema"]},
             }
         return {
             "taskType": classification["taskType"],

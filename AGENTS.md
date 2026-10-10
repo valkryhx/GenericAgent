@@ -302,3 +302,27 @@ Invariants:
 4. Startup rows say the truth: `MCP connecting in the background · N/M connected · X tools · you can type now` (`frontends/ink-ui/src/mcpPanel.ts`). Input is never disabled by MCP state, so the copy must not imply otherwise.
 
 Codex does the same thing (waits only for `required = true` servers, skips the wait when `allows_cached_startup()` has a cached catalog, 30s `DEFAULT_STARTUP_TIMEOUT`, per-server TUI status) — see `codex-rs/codex-mcp/src/connection_manager/required.rs` and `codex-rs/tui/src/chatwidget/mcp_startup.rs`. Measurements, per-server timings and probes: `docs/20261010-ga-ink-mcp-cold-start-latency.md`; probes live in `frontends/ink-ui/scripts/_probe_mcp_startup.ts` and `_probe_mcp_firstturn.ts`.
+
+## Workflow activation: an explicit /workflow request must execute
+
+`/workflow <task>` is an explicit user opt-in, but the ink UI strips the prefix before planning
+(`frontends/ink-ui/src/inputController.ts`), so the planner cannot see it in the task text. The bridge
+carries it as `context["activation"] = {action: "requested", mode: "explicit"}`
+(`frontends/ink_bridge.py::workflow_plan`, `setdefault` so the auto-recommended path keeps its own
+activation), and `WorkflowPlanner.classify()` must treat that as an execution request: an unrecognised
+task shape resolves to `taskType: "general"` and the `general` template (execute-task -> verify-result),
+never to the planner-only template. The planner-only shape is reserved for genuine plan-only requests
+(`只规划` / `不要执行`) and for text that never opted in.
+
+Why this is load-bearing: before it, `/workflow 写3个python demo并检验` classified as `planning` (the
+coding keyword list only knows 实现/修复/开发/修改/implement/fix/code), produced a single `planner` job,
+and the run reported `succeeded` having written nothing but PLAN.md. The `0/1 agents done` the user saw
+was truthful — the plan contained no execution step at all. Details, per-run evidence and the real E2E:
+`docs/20261010-ga-workflow-coding-task-planned-only.md`.
+
+Also remember that the production default planner is the **deterministic** one
+(`build_workflow_planner_from_env`, `GA_WORKFLOW_PLANNER_MODE` unset), which can only emit four fixed
+shapes (planning=1 job, research=2, coding=4, mixed=3). Dynamic DAGs by task difficulty only exist under
+`GA_WORKFLOW_PLANNER_MODE=prompt_guided|real`. Test scripts and probes set that variable, so their runs
+are **not** the path a user gets from `./ga` + `/workflow`; verify workflow behaviour on the default path
+before claiming a fix.

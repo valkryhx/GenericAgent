@@ -822,11 +822,24 @@ class GenericAgentBridge:
             session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
             with backend_output_redirect():
                 planner = self._make_workflow_planner()
+                # Every workflow_plan command is an explicit user opt-in: the ink
+                # UI only sends it for "/workflow <task>" and strips the prefix, so
+                # the planner cannot see the opt-in in the task text. Without this
+                # an execution task whose wording missed the planner keyword lists
+                # fell through to the planner-only template and the run did none of
+                # the work (real case: wf_622266234f1345359d4e5f999758b922).
+                plan_context = dict(context) if isinstance(context, dict) else {}
+                plan_context.setdefault("activation", {
+                    "action": "requested",
+                    "mode": "explicit",
+                    "confidence": 1.0,
+                    "reason": "explicit /workflow command",
+                })
                 run = self.workflow_controller.create_planned_run(
                     session_id=session_id,
                     task_text=task_text,
                     planner=planner,
-                    context=context if isinstance(context, dict) else {},
+                    context=plan_context,
                     auto_approve=bool(auto_approve),
                     workspace_path=str(self.workspace_root),
                 )

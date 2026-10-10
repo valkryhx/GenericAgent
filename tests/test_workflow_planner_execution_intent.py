@@ -35,5 +35,31 @@ class WorkflowPlannerExecutionIntentTest(unittest.TestCase):
         self.assertFalse(simple.classification['needsMcp'])
 
 
+    def test_explicit_workflow_opt_in_executes_instead_of_only_planning(self):
+        # Real case wf_622266234f1345359d4e5f999758b922: "/workflow 写3个python
+        # demo 并检验" was classified planning, so the only job was a planner and
+        # the run "succeeded" having written nothing but PLAN.md. The ink UI strips
+        # the "/workflow " prefix, so the planner learns about the opt-in from
+        # context["activation"]; an explicit opt-in must always execute.
+        task = "分别用python写3个demo：1.hello word程序 2. 1-100内的质数 3. html展示你好二字 然后检验结果"
+        draft = WorkflowPlanner().plan(task, {"activation": {"action": "requested", "mode": "explicit"}})
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual("general", draft.classification["taskType"])
+        labels = [agent["label"] for phase in draft.plan["phases"] for agent in phase["agents"]]
+        self.assertEqual(["execute-task", "verify-result"], labels)
+        self.assertEqual("authoring", draft.plan["phases"][0]["agents"][0]["toolProfile"])
+        # The deliverable shape is unknown here, so nothing may guess a test
+        # runner or a concrete tool name.
+        self.assertNotIn("python_unittest", str(draft.plan))
+        self.assertNotIn("mcp__", str(draft.plan))
+        self.assertTrue(draft.script)
+
+    def test_unrecognised_task_without_explicit_opt_in_keeps_planning_template(self):
+        # The keyword classifier alone must not turn a question into execution:
+        # only an explicit workflow opt-in changes the fallback shape.
+        draft = WorkflowPlanner().plan("分别用python写3个demo然后检验")
+        self.assertEqual("planning", draft.classification["taskType"])
+        self.assertEqual(["planner"], [agent["label"] for phase in draft.plan["phases"] for agent in phase["agents"]])
+
 if __name__ == '__main__':
     unittest.main()
