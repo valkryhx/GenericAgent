@@ -146,6 +146,38 @@ Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI�
 
 证据见 `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §12。
 
+## Ink workflow progress: planning off the command loop, live telemetry, panel keys
+
+`/workflow` responsiveness is a three-part contract. Do not regress any of them; the analysis,
+Codex comparison and real-run measurements are in `docs/20261010-ga-ink-workflow-progress-ui.md`.
+
+1. **The planner never runs on the JSONL stdin loop.** `run_jsonl_loop` dispatches `workflow_plan`
+   to `InkBridge.workflow_plan_async`, which flips `_workflow_planning`, emits
+   `status: running` + `activity: Planning workflow` immediately, and plans on a worker thread.
+   Running the planner inline made the composer lag and delayed the first workflow UI update.
+   Real measurement: 1 ms from `workflow_plan` to `status/activity`, and a second command answered
+   10 ms later while planning was still in flight.
+2. **Polling is signature-gated and rate-limited.** `_watch_workflow_progress` reads the run once
+   for `artifact_dir` and afterwards only `os.stat`s `workflow-progress.json`
+   (`_file_signature`), skipping the tick when nothing changed; `_emit_agent_read_model()` is
+   throttled by `_AGENT_READ_MODEL_MIN_INTERVAL`. The old version called
+   `workflow_store.load_run` (~12 ms) plus a full `json.dumps` four times a second.
+3. **Live child telemetry is a UI-only observation channel.** A running child writes
+   `agents/<jobId>/live.json` (`workflow_store.write_job_live_telemetry`, throttled <=1 s) with
+   `turn`/`toolCalls`/`lastToolName`/`elapsedSeconds`/`tokenUsage`; the bridge turns it into
+   `{"type": "workflow_live", "runId", "jobs": [...]}`. `workflow-progress.json` remains the single
+   durable snapshot and nothing in this channel may feed an acceptance check. The writer is
+   attached as `handler.live_telemetry` (via `LiveJobTelemetry`), never as an extra
+   `_build_handler` parameter, because test doubles replace that method with the old signature.
+4. **The workflow panel owns its keys while it is open.** `workflowPanelCapturesKey(panel, key, raw)`
+   claims `j k g x r s`, arrows, paging, `Enter` and `Esc`, and `App.tsx` must `return` on it so the
+   key never lands in the composer. Panel height follows the terminal
+   (`WORKFLOW_PANEL_MAX_ROWS`), not a hard-coded 8 rows.
+5. **After the terminal workflow event the UI may stay `running` on purpose.** The host hands the
+   workflow result to the agent loop, which answers with it, so `idle` arrives after
+   `workflow_final`. Real Ink E2E harnesses must `waitFor` idle (see
+   `real_ink_ui_workflow_autonomous_e2e.ts`) instead of asserting on the `workflow_final` frame.
+
 ## 文档命名约定
 
 新增测试记录、故障复盘、验收报告和技术调研文档时，文件名统一使用 `YYYYMMDD-xxxx.md` 格式，例如 `20260930-gpt6-luna-generic-agent-capability-evaluation.md`。日期使用 Asia/Shanghai 当前日期，`xxxx` 使用简洁、可检索的英文小写短语。
