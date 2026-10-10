@@ -47,6 +47,19 @@ class AgentMainMcpToolsTest(unittest.TestCase):
         self.assertEqual(agent_type.get("enum"), ["researcher"])
         self.assertIn("不是自由标签", agent_type["description"])
 
+    def test_load_tool_schema_publishes_the_builtin_role_catalog(self):
+        """The description must carry capability notes, not just bare names."""
+        import agentmain
+
+        agentmain.load_tool_schema(include_mcp_tools=False)
+
+        spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
+        agent_type = spawn["parameters"]["properties"]["agent_type"]
+        self.assertEqual(["explore", "plan", "review"], agent_type["enum"])
+        self.assertIn("explore (read-only", agent_type["description"])
+        self.assertIn("not a free-form label", agent_type["description"])
+        self.assertIn("Prefer a read-only role", agent_type["description"])
+
     def test_load_tool_schema_can_skip_mcp_discovery(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
         import agentmain

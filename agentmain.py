@@ -330,9 +330,23 @@ def normalize_display_assistant_text(full_resp: str) -> str:
 
 
 def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
-    from subagent_roles import SubagentRoleRegistry
+    """Publish the role catalog, with capability notes, on ``spawn_agent``.
 
-    role_names = sorted({role.name for role in SubagentRoleRegistry(root_dir).list_roles()})
+    Listing bare names is not enough: the choice happens before any catalog is
+    shown, so a caller that sees only ``explore, plan, review`` has no way to know
+    which of them may write. Step-Code solves this by deriving the tool
+    description from the agent catalog itself
+    (``step-subagent-agents.ts::formatBuiltinAgentGuidance``); the notes here come
+    from each role's own ``permission_profile`` for the same reason.
+    """
+
+    from subagent_roles import SubagentRoleRegistry, format_role_catalog
+
+    roles = sorted(
+        SubagentRoleRegistry(root_dir).list_roles(),
+        key=lambda role: str(getattr(role, "name", "") or ""),
+    )
+    role_names = [str(getattr(role, "name", "") or "") for role in roles if getattr(role, "name", None)]
     for tool in tools_schema:
         function = tool.get("function") or {}
         if function.get("name") != "spawn_agent":
@@ -344,16 +358,20 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
         agent_type = properties.setdefault("agent_type", {"type": "string"})
         agent_type["enum"] = role_names
         configured = ", ".join(role_names)
+        catalog = format_role_catalog(roles, language=language)
         if language == "zh":
             agent_type["description"] = (
-                f"可选的预配置角色名；当前可用值：{configured}。只能使用此列表中的精确名称，"
-                "也可省略以启动通用子智能体；该字段不是自由标签。"
+                f"可选的预配置角色名；当前可用值：{configured}。{catalog}"
+                "只能使用此列表中的精确名称，也可省略以启动通用子智能体；该字段不是自由标签。"
+                "审查 / 审计 / 探索类工作优先用只读角色，只有通用子智能体或声明了写权限的项目角色才能改文件。"
             )
         else:
             agent_type["description"] = (
-                f"Optional preconfigured role name. Available values: {configured}. "
+                f"Optional preconfigured role name. Available values: {configured}. {catalog} "
                 "Use one exact listed value, or omit this field to spawn a generic subagent; "
-                "this is not a free-form label."
+                "this is not a free-form label. Prefer a read-only role for review, audit or "
+                "exploration work; only a generic spawn (or a project role that declares write "
+                "access) can modify files."
             )
         return
 

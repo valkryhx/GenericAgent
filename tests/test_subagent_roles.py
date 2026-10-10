@@ -10,7 +10,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_roles import SubagentRoleRegistry, build_role_task_message  # noqa: E402
+from subagent_roles import (  # noqa: E402
+    BUILTIN_ROLES,
+    SubagentRoleRegistry,
+    build_role_task_message,
+    format_role_catalog,
+)
 
 
 class SubagentRolesTest(unittest.TestCase):
@@ -101,6 +106,71 @@ class SubagentRolesTest(unittest.TestCase):
             self.assertIn("name: researcher", message)
             self.assertIn("Inspect only.", message)
             self.assertTrue(message.rstrip().endswith("Find relevant tests."))
+
+    def test_builtin_roles_exist_without_any_configuration(self):
+        """A fresh install must have the read-only defaults pi/Step-Code ship.
+
+        GA shipped no roles at all, so the model had to hand-build the boundary
+        out of permission_profile + allowed_tools on every spawn -- or, more
+        often, spawn a full-access child for read-only work.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            registry = SubagentRoleRegistry(td)
+
+            names = [role.name for role in registry.list_roles()]
+
+            self.assertEqual(["explore", "plan", "review"], names)
+            for name in names:
+                with self.subTest(role=name):
+                    role = registry.get(name)
+                    self.assertEqual("read_only", role.permission_profile)
+                    self.assertTrue(role.system_prompt)
+                    self.assertTrue(role.when_to_use)
+
+    def test_project_role_overrides_the_builtin_of_the_same_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            roles_dir = Path(td) / ".ga" / "subagents"
+            roles_dir.mkdir(parents=True)
+            (roles_dir / "explore.json").write_text(
+                json.dumps({"name": "explore", "system_prompt": "Project-specific exploration rules."}),
+                encoding="utf-8",
+            )
+
+            role = SubagentRoleRegistry(td).get("explore")
+            names = [item.name for item in SubagentRoleRegistry(td).list_roles()]
+
+            self.assertEqual("Project-specific exploration rules.", role.system_prompt)
+            self.assertEqual(1, names.count("explore"))
+            self.assertIn("plan", names)
+            self.assertIn("review", names)
+
+    def test_role_catalog_annotates_each_role_with_its_capability(self):
+        """Listing bare names is not enough: the caller picks before seeing a catalog."""
+
+        catalog = format_role_catalog(BUILTIN_ROLES)
+
+        self.assertIn("explore (read-only", catalog)
+        self.assertIn("plan (read-only", catalog)
+        self.assertIn("review (read-only", catalog)
+
+    def test_role_catalog_marks_a_writable_project_role_as_writable(self):
+        """A description must never hide the capability note."""
+        from types import SimpleNamespace
+
+        catalog = format_role_catalog(
+            [SimpleNamespace(name="builder", permission_profile="workspace_write", description="edits files")]
+        )
+
+        self.assertIn("builder (can write", catalog)
+        self.assertIn("edits files", catalog)
+
+    def test_role_catalog_falls_back_to_the_permission_profile(self):
+        """A role file without a description still gets a truthful capability note."""
+        from types import SimpleNamespace
+
+        catalog = format_role_catalog([SimpleNamespace(name="auditor", permission_profile="read_only")])
+
+        self.assertIn("auditor (read-only)", catalog)
 
 
 if __name__ == "__main__":

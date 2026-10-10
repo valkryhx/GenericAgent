@@ -223,7 +223,34 @@ python -m unittest discover -s tests -p "test_subagent*.py"                     
 python -m unittest discover -s tests                                                                               -> 1378 OK (skipped=3)
 ```
 
+### 已实施 P1-2（同一轮续做）
+
+对齐 pi `examples/extensions/subagent/agents/*.md` 与 Step-Code
+`features/step-subagent-agents.ts::BUILTIN_AGENTS` + `formatBuiltinAgentGuidance()`：
+
+| 项 | 文件 | 具体改动 |
+|---|---|---|
+| 内置只读角色 | `subagent_roles.py` | 新增 `BUILTIN_ROLES` = `explore` / `plan` / `review`，均 `permission_profile=READ_ONLY`，各带 description / when_to_use / system_prompt，`source_path="builtin:<name>"`；`get()` 在文件查找 miss 后回落 builtin，`list_roles()` 项目角色优先、再追加未被覆盖的 builtin（同名项目角色始终胜出） |
+| 能力注解 + 目录渲染 | `subagent_roles.py` | 新增 `role_capability_note()`（从 `permission_profile` 派生 read-only / can write，不靠手写名单）与 `format_role_catalog()`（渲染 `name (capability — description)`：能力档始终由 `permission_profile` 派生，描述只作细节，避免手写标签与边界脱节；中文用「各自的能力：…。」） |
+| 目录进 spawn 描述 | `agentmain.py::_apply_subagent_role_schema` | roles 排序后 `agent_type.enum` 用角色名，描述里嵌入 `format_role_catalog(...)`，并补「审查 / 审计 / 探索类工作优先用只读角色，只有通用子智能体或声明了写权限的项目角色才能改文件」 |
+
+为什么不能只列名字：选择发生在模型看到目录之前，所以能力档必须写进 schema 描述——与 Step-Code
+把 `formatBuiltinAgentGuidance()` 渲染进 subagent 工具是同一个理由。
+
+### 证据：P1-2 红→绿
+
+```
+RED   tests/test_subagent_roles.py          BUILTIN_ROLES / format_role_catalog / role_capability_note 尚不存在
+RED   tests/test_agentmain_mcp_tools.py     agent_type.enum 在无 .ga/subagents 时为空、描述无目录
+GREEN tests/test_subagent_roles.py          test_builtin_roles_exist_without_any_configuration 等 4 项
+GREEN tests/test_agentmain_mcp_tools.py     test_load_tool_schema_publishes_the_builtin_role_catalog
+GREEN tests/test_ga_subagent_tools.py       available_agent_types 断言更新为内置目录 ['explore','plan','review']
+```
+
+行为变化：`spawn_agent` 报 `unknown_agent_type` 时 `available_agent_types` 不再可能为空，
+至少列出三个内置只读角色；`ga.py` 的 `agent_type` 校验因此也自动接受内置角色。
+
 ### 未做（按计划留给下一轮）
 
-P1-1 单一事实来源收敛（工具档位 / 编排规则抽模块并派生）、P1-2 角色目录进 `spawn_agent` 描述、
-P1-3 pi 式结构化分段与增量更新、P2-1 workflow 工具化、P2-2 计划规模反馈。
+P1-1 单一事实来源收敛（工具档位 / 编排规则抽模块并派生）、P1-3 pi 式结构化分段与增量更新、
+P2-1 workflow 工具化、P2-2 计划规模反馈。

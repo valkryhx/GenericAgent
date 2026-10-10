@@ -253,9 +253,26 @@ Step-Code (`features/workflow/step-workflow.ts` tool description, `agent-runner.
   `workflow_planner.CODING_AGENT_ROLES`. A declared role with no instruction is a role the child
   invents; keep one entry per role, and keep the `sharedWorkspace:` / `handoff:` lines.
 
-P1 follow-ups not yet done (see §3 of the doc): deriving tool-profile and orchestration text from a
-single module like Step-Code's `formatBuiltinAgentGuidance`, rendering the `.ga/subagents` role catalog
-into the `spawn_agent` description, and pi-style structured prompt sections with incremental updates.
+Built-in read-only roles now ship with the host and are published on `spawn_agent` (see the next
+section); the remaining P1 follow-ups (see §3 of the doc) are deriving tool-profile and orchestration
+text from a single module like Step-Code's `formatBuiltinAgentGuidance`, and pi-style structured prompt
+sections with incremental updates.
+
+## Built-in subagent roles and the published catalog
+
+`subagent_roles.py::BUILTIN_ROLES` defines `explore`, `plan` and `review`, all `READ_ONLY`, so a fresh
+workspace with no `.ga/subagents` directory still offers named roles instead of forcing every task
+through a generic subagent. `SubagentRoleRegistry.get()` falls back to a builtin only after a file
+lookup misses, and `list_roles()` puts project roles first and appends the builtins they do not
+override — a project role of the same name always wins.
+
+`agentmain._apply_subagent_role_schema()` publishes that catalog inside the `agent_type` description:
+`format_role_catalog()` renders `explore (read-only) — ...` per role, followed by a "prefer a read-only
+role for review, audit or exploration work" line. Listing bare names is not enough, because the choice
+happens before the model can see the directory — the same reason Step-Code renders
+`formatBuiltinAgentGuidance()` into its subagent tool. `role_capability_note()` derives "read-only" /
+"can write" from `permission_profile`, so a role added later is annotated by behaviour rather than by a
+hand-maintained list.
 
 ## Workflow tool boundary: host-owned profiles, never model-declared tool names
 

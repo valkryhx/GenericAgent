@@ -376,7 +376,10 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "error")
             self.assertEqual(outcome.data.get("reason"), "unknown_agent_type")
             self.assertEqual(outcome.data.get("requested_agent_type"), "missing")
-            self.assertEqual(outcome.data.get("available_agent_types"), [])
+            # Built-in read-only roles ship with the host, so the catalog is never empty.
+            self.assertEqual(
+                outcome.data.get("available_agent_types"), ["explore", "plan", "review"]
+            )
             self.assertIn("missing", outcome.data["msg"])
             self.assertIn("omit agent_type", outcome.data["msg"])
             self.assertNotIn("subagent_roles.py:", outcome.data["msg"])
@@ -400,7 +403,9 @@ class GaSubagentToolsTest(unittest.TestCase):
             )
 
             self.assertEqual(outcome.data.get("reason"), "unknown_agent_type")
-            self.assertEqual(outcome.data.get("available_agent_types"), ["auditor"])
+            self.assertEqual(
+                outcome.data.get("available_agent_types"), ["auditor", "explore", "plan", "review"]
+            )
             self.assertIn("auditor", outcome.data["msg"])
             self.assertIn("omit agent_type", outcome.data["msg"])
 
