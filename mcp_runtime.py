@@ -36,6 +36,23 @@ _MCP_TOOLS_CACHE_REVERIFY_TTL = 600.0
 # Local (stdio) servers settle in milliseconds; remote ones keep connecting in
 # the background and land in the schema when they are ready.
 _MCP_DISCOVERY_BUDGET_DEFAULT = 2.0
+# Per-server connect/initialize budget. Codex uses DEFAULT_STARTUP_TIMEOUT = 30s
+# (codex-mcp/src/rmcp_client.rs). The old 8s sat in the middle of the remote
+# TLS+initialize handshake distribution, so a merely slow server read as a hard
+# failure and stayed failed for the rest of the process.
+_MCP_DISCOVERY_TIMEOUT_DEFAULT = 30.0
+# Remote (HTTP/SSE) initialize retries, mirroring Codex's
+# STREAMABLE_HTTP_RETRY_DELAYS_MS = [250, 1000]
+# (rmcp-client/src/streamable_http_retry.rs). stdio is not retried: a local
+# process that died will die again.
+_MCP_REMOTE_CONNECT_ATTEMPTS = 3
+_MCP_REMOTE_CONNECT_RETRY_DELAYS = (0.25, 1.0)
+# Local stdio servers used to connect one at a time behind Semaphore(1), which
+# serialized three npx cold starts into a 12s+ discovery. Codex starts every
+# server concurrently; keep a bounded pool so npx cache contention stays finite.
+_MCP_LOCAL_CONNECT_CONCURRENCY_DEFAULT = 4
+# stderr from stdio servers is a debug log; bound it so it cannot grow forever.
+_MCP_STDERR_LOG_MAX_BYTES_DEFAULT = 256 * 1024
 _MAX_MCP_DESCRIPTION_LENGTH = 2048
 
 
@@ -277,8 +294,13 @@ class McpManager:
             await asyncio.wait(remaining, timeout=3)
         await asyncio.sleep(0.1)
 
-    def discover(self, include_unavailable: bool = False, timeout: Optional[float] = None) -> McpDiscovery:
-        self.ensure_all_connected(timeout=timeout, retry_failed=False)
+    def discover(
+        self,
+        include_unavailable: bool = False,
+        timeout: Optional[float] = None,
+        retry_failed: bool = False,
+    ) -> McpDiscovery:
+        self.ensure_all_connected(timeout=timeout, retry_failed=retry_failed)
         discovery = McpDiscovery()
         with self.lock:
             for state in self.states.values():
@@ -337,7 +359,7 @@ class McpManager:
                 return None
             future = state.connect_future
             if future is None or future.done():
-                state.status = "pending"
+                state.status = "connecting"
                 state.error = ""
                 startup_timeout = _default_timeout(state.config.get("startup_timeout_sec"))
                 future = self._submit(self._connect_state(state, startup_timeout))
@@ -346,13 +368,39 @@ class McpManager:
             return future
 
     async def _connect_state(self, state: McpServerState, timeout: float) -> None:
-        if not _is_local_mcp_server(state.config):
-            await self._connect_and_fetch_tools(state, timeout)
+        if _is_local_mcp_server(state.config):
+            semaphore = self._local_connect_semaphore
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(_local_connect_concurrency())
+                self._local_connect_semaphore = semaphore
+            with self.lock:
+                state.status = "connecting"
+            async with semaphore:
+                await self._connect_and_fetch_tools(state, timeout)
             return
-        if self._local_connect_semaphore is None:
-            self._local_connect_semaphore = asyncio.Semaphore(1)
-        async with self._local_connect_semaphore:
-            await self._connect_and_fetch_tools(state, timeout)
+        # Remote transports get bounded initialize retries, mirroring Codex: a
+        # transient TLS/handshake blip must not read as a permanent failure.
+        budget = max(0.05, float(timeout))
+        deadline = time.monotonic() + budget
+        for attempt in range(_MCP_REMOTE_CONNECT_ATTEMPTS):
+            remaining = max(0.05, deadline - time.monotonic())
+            with self.lock:
+                state.status = "connecting"
+            await self._connect_and_fetch_tools(state, min(budget, remaining))
+            if state.status == "connected":
+                return
+            if attempt >= _MCP_REMOTE_CONNECT_ATTEMPTS - 1:
+                return
+            if not _is_retryable_connect_error(state.error):
+                return
+            delay = _MCP_REMOTE_CONNECT_RETRY_DELAYS[
+                min(attempt, len(_MCP_REMOTE_CONNECT_RETRY_DELAYS) - 1)
+            ]
+            if deadline - time.monotonic() <= delay:
+                return
+            with self.lock:
+                state.status = "connecting"
+            await asyncio.sleep(delay)
 
     def ensure_connected(self, server_name: str, timeout: Optional[float] = None, stop_signal=None) -> McpServerState:
         wait_timeout = _default_timeout(timeout)
@@ -595,9 +643,7 @@ class McpManager:
         stderr_log = None
         if isinstance(getattr(transport, "transport", None), StdioTransport):
             transport.transport.keep_alive = True
-            _MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
-            log_name = f"{normalize_mcp_name(state.name)}.stderr.log"
-            stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
+            stderr_log = _open_stderr_log(state.name)
             transport.transport.log_file = stderr_log
         try:
             with _stdio_errlog_patch(transport, stderr_log):
@@ -910,6 +956,7 @@ def _background_discovery_worker(
     include_unavailable: bool,
     timeout: Optional[float],
     cache_path: Optional[os.PathLike | str],
+    retry_failed: bool = True,
 ) -> None:
     global _MCP_DISCOVERY_THREAD
     tools: list[dict[str, Any]] = []
@@ -921,6 +968,7 @@ def _background_discovery_worker(
             config_path=config_path,
             include_unavailable=include_unavailable,
             timeout=timeout,
+            retry_failed=retry_failed,
         )
         tools = [dict(tool) for tool in discovery.tools]
         errors = dict(discovery.errors)
@@ -963,8 +1011,14 @@ def start_background_discovery(
     include_unavailable: bool = False,
     timeout: Optional[float] = None,
     cache_path: Optional[os.PathLike | str] = None,
+    retry_failed: bool = True,
 ) -> Optional[threading.Thread]:
-    """Discover MCP tools off the caller thread; a no-op while one is running."""
+    """Discover MCP tools off the caller thread; a no-op while one is running.
+
+    The background pass is the self-heal channel, so it retries servers that
+    previously failed; the synchronous discovery helpers keep ``retry_failed``
+    off so they never hammer a server that is known to be down.
+    """
     global _MCP_DISCOVERY_THREAD
     with _MCP_DISCOVERY_LOCK:
         if _MCP_DISCOVERY_THREAD is not None and _MCP_DISCOVERY_THREAD.is_alive():
@@ -972,7 +1026,7 @@ def start_background_discovery(
         _MCP_DISCOVERY_STATE.update({"last_started_at": time.time()})
         thread = threading.Thread(
             target=_background_discovery_worker,
-            args=(config_path, include_unavailable, timeout, cache_path),
+            args=(config_path, include_unavailable, timeout, cache_path, retry_failed),
             name="ga-mcp-discovery",
             daemon=True,
         )
@@ -1009,10 +1063,12 @@ def discover_mcp(
     config_path: Optional[os.PathLike | str] = None,
     include_unavailable: bool = False,
     timeout: Optional[float] = None,
+    retry_failed: bool = False,
 ) -> McpDiscovery:
     return get_mcp_manager(config_path).discover(
         include_unavailable=include_unavailable,
         timeout=timeout,
+        retry_failed=retry_failed,
     )
 
 
@@ -1118,13 +1174,98 @@ def call_mcp_tool(
     )
 
 
-def _default_timeout(value: Optional[float], env_name: str = "GA_MCP_DISCOVERY_TIMEOUT", fallback: float = 8) -> float:
+def _default_timeout(
+    value: Optional[float],
+    env_name: str = "GA_MCP_DISCOVERY_TIMEOUT",
+    fallback: float = _MCP_DISCOVERY_TIMEOUT_DEFAULT,
+) -> float:
     if value is not None:
         return float(value)
     try:
         return float(os.environ.get(env_name, fallback))
     except (TypeError, ValueError):
         return fallback
+
+
+def _local_connect_concurrency() -> int:
+    try:
+        return max(
+            1,
+            int(os.environ.get("GA_MCP_LOCAL_CONNECT_CONCURRENCY", _MCP_LOCAL_CONNECT_CONCURRENCY_DEFAULT)),
+        )
+    except (TypeError, ValueError):
+        return _MCP_LOCAL_CONNECT_CONCURRENCY_DEFAULT
+
+
+def _mcp_stderr_log_max_bytes() -> int:
+    try:
+        return max(0, int(os.environ.get("GA_MCP_STDERR_LOG_MAX_BYTES", _MCP_STDERR_LOG_MAX_BYTES_DEFAULT)))
+    except (TypeError, ValueError):
+        return _MCP_STDERR_LOG_MAX_BYTES_DEFAULT
+
+
+def _open_stderr_log(server_name: str):
+    """Open a stdio server's stderr log, rotating it once it exceeds the cap."""
+    _MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = _MCP_LOG_DIR / f"{normalize_mcp_name(server_name)}.stderr.log"
+    try:
+        if path.exists() and path.stat().st_size >= _mcp_stderr_log_max_bytes():
+            path.unlink()
+    except OSError:
+        pass
+    return path.open("a", encoding="utf-8", errors="replace")
+
+
+_NON_RETRYABLE_CONNECT_HINTS = (
+    "unauthorized",
+    "forbidden",
+    "authentication",
+    "auth required",
+    "invalid api key",
+    "invalid_api_key",
+    "permission denied",
+    "not found",
+    "unsupported",
+    "invalid argument",
+    "401",
+    "403",
+    "404",
+)
+_RETRYABLE_CONNECT_HINTS = (
+    "timeout",
+    "timed out",
+    "failed to initialize",
+    "connect",
+    "reset",
+    "refused",
+    "broken pipe",
+    "unreachable",
+    "unavailable",
+    "temporarily",
+    "disconnected",
+    "network",
+    "econnreset",
+    "econnrefused",
+    "readtimeout",
+    "connecttimeout",
+    "remoteprotocolerror",
+    "too many requests",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+)
+
+
+def _is_retryable_connect_error(error: str) -> bool:
+    """Mirror Codex's retryable-initialize classification for remote servers."""
+    text = str(error or "").lower()
+    if not text:
+        return False
+    if any(hint in text for hint in _NON_RETRYABLE_CONNECT_HINTS):
+        return False
+    return any(hint in text for hint in _RETRYABLE_CONNECT_HINTS)
 
 
 def _make_fastmcp_client(Client, transport, server_name: str, timeout: float):
@@ -1311,9 +1452,7 @@ async def _mcp_client(single_config: dict[str, Any], server_name: str, timeout: 
     stderr_log = None
     if isinstance(getattr(transport, "transport", None), StdioTransport):
         transport.transport.keep_alive = False
-        _MCP_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_name = f"{normalize_mcp_name(server_name)}.stderr.log"
-        stderr_log = (_MCP_LOG_DIR / log_name).open("a", encoding="utf-8", errors="replace")
+        stderr_log = _open_stderr_log(server_name)
         transport.transport.log_file = stderr_log
     try:
         with _stdio_errlog_patch(transport, stderr_log):

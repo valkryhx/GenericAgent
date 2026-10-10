@@ -28,10 +28,12 @@ const statusEvent = {
 test('mcp status helpers map statuses to Claude-style symbols', () => {
   assert.equal(mcpStatusIcon('connected'), '✓')
   assert.equal(mcpStatusIcon('failed'), '✕')
+  assert.equal(mcpStatusIcon('connecting'), '◌')
   assert.equal(mcpStatusIcon('disabled'), '○')
   assert.equal(mcpStatusIcon('pending'), '○')
   assert.equal(mcpStatusColor('connected'), 'green')
   assert.equal(mcpStatusColor('failed'), 'red')
+  assert.equal(mcpStatusColor('connecting'), 'yellow')
   assert.equal(mcpStatusColor('disabled'), 'gray')
   assert.equal(mcpStatusColor('pending'), 'yellow')
 })
@@ -96,15 +98,17 @@ test('mcp startup status rows show per-server startup progress and final tool to
     loading: true,
     servers: [
       { name: 'exa', status: 'connected', tool_count: 3 },
-      { name: 'context7', status: 'pending', tool_count: 0 },
+      { name: 'context7', status: 'connecting', tool_count: 0 },
+      { name: 'tavily', status: 'pending', tool_count: 0 },
     ],
     tools: Array.from({ length: 3 }, (_, index) => ({
       type: 'function' as const,
       function: { name: `mcp__exa__tool${index}`, description: '', parameters: {} },
     })),
   })
-  assert.match(pendingRows[0] ?? '', /MCP initializing.*1\/2.*3 tools/)
-  assert.match(pendingRows.join('\n'), /context7.*pending/)
+  assert.match(pendingRows[0] ?? '', /MCP initializing.*1\/3.*3 tools/)
+  assert.match(pendingRows.join('\n'), /◌ context7.*connecting/)
+  assert.match(pendingRows.join('\n'), /tavily.*pending/)
 
   const readyRows = mcpStartupStatusRows({
     loading: false,

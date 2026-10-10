@@ -427,14 +427,30 @@ class GenericAgentBridge:
                 from mcp_runtime import mcp_status_snapshot, start_background_discovery
 
                 start_background_discovery()
+            recovery_done = False
             while True:
                 with backend_output_redirect():
                     payload = mcp_status_snapshot()
                 loading = bool(payload.get("loading"))
                 self.emit({"type": "mcp_progress", **payload, "loading": loading})
-                if not loading:
-                    return
-                threading.Event().wait(0.25)
+                if loading:
+                    threading.Event().wait(0.25)
+                    continue
+                failed = [
+                    server
+                    for server in payload.get("servers", [])
+                    if server.get("status") == "failed"
+                ]
+                if failed and not recovery_done:
+                    # One bounded self-heal pass: a server that lost a slow
+                    # handshake gets a second chance instead of showing a failure
+                    # marker until the process restarts.
+                    recovery_done = True
+                    with backend_output_redirect():
+                        start_background_discovery(retry_failed=True)
+                    threading.Event().wait(0.25)
+                    continue
+                return
         except Exception as exc:
             self.emit({
                 "type": "mcp_progress",

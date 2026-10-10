@@ -52,7 +52,7 @@ export type HistoryMessage = {
 
 export type McpServerStatus = {
   name: string
-  status: 'connected' | 'failed' | 'disabled' | 'pending' | string
+  status: 'connected' | 'connecting' | 'failed' | 'disabled' | 'pending' | string
   transport: string
   disabled: boolean
   error: string

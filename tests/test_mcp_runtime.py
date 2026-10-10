@@ -625,7 +625,9 @@ class McpRuntimeTest(unittest.TestCase):
         self.assertNotIn("error", box)
         self.assertEqual(box["tools"], [])
         self.assertFalse(cache_written, "cancelled discovery wrote an incomplete MCP tool cache")
-        self.assertEqual(server_status, "pending")
+        # The shared connect future keeps running after the waiter is cancelled
+        # (cancel_on_stop=False), so the server is mid-handshake, not unstarted.
+        self.assertEqual(server_status, "connecting")
         self.assertTrue(process_exited, f"startup MCP process {server_pid} survived manager shutdown")
 
     def test_cancelled_waiter_does_not_cancel_shared_server_startup(self):
@@ -1400,6 +1402,293 @@ class McpFastDiscoveryTest(unittest.TestCase):
         self.assertLess(elapsed, 3.0, f"budgeted discovery took {elapsed:.2f}s")
         self.assertEqual(tools, [])
         self.assertIsNotNone(warmup.get("last_started_at"), "no background refresh scheduled")
+
+
+class McpStartupResilienceTest(unittest.TestCase):
+    """Startup must not turn a slow MCP handshake into a permanent failure.
+
+    Regression context: the 8s connect budget sat in the middle of the remote
+    TLS+initialize distribution, so a merely slow server (context7 3-12s) was
+    marked failed with no retry and its tools vanished for the whole process.
+    See docs/20261010-ga-mcp-startup-connect-failures.md.
+    """
+
+    def tearDown(self):
+        clear_mcp_cache()
+        reset_mcp_manager()
+        os.environ.pop("GA_MCP_CONFIG", None)
+        os.environ.pop("GA_MCP_DISCOVERY_TIMEOUT", None)
+        os.environ.pop("GA_MCP_LOCAL_CONNECT_CONCURRENCY", None)
+
+    def _write_http_config(self, tmp_path):
+        config_path = tmp_path / "mcp.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "remote": {"type": "http", "url": "https://example.invalid/mcp"}
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return config_path
+
+    def _write_stdio_config(self, tmp_path):
+        config_path = tmp_path / "mcp.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "local": {
+                            "type": "stdio",
+                            "command": sys.executable,
+                            "args": ["-c", "pass"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return config_path
+
+    @contextmanager
+    def _patched_connect(self, behavior):
+        import mcp_runtime
+
+        original_method = mcp_runtime.McpManager._connect_and_fetch_tools
+        original_delays = mcp_runtime._MCP_REMOTE_CONNECT_RETRY_DELAYS
+        mcp_runtime.McpManager._connect_and_fetch_tools = behavior
+        mcp_runtime._MCP_REMOTE_CONNECT_RETRY_DELAYS = (0.0, 0.0)
+        try:
+            yield
+        finally:
+            mcp_runtime.McpManager._connect_and_fetch_tools = original_method
+            mcp_runtime._MCP_REMOTE_CONNECT_RETRY_DELAYS = original_delays
+
+    def test_default_discovery_timeout_matches_codex_startup_budget(self):
+        import mcp_runtime
+
+        os.environ.pop("GA_MCP_DISCOVERY_TIMEOUT", None)
+        self.assertEqual(mcp_runtime._MCP_DISCOVERY_TIMEOUT_DEFAULT, 30.0)
+        self.assertEqual(mcp_runtime._default_timeout(None), 30.0)
+        self.assertEqual(
+            mcp_runtime._default_timeout(None, env_name="GA_MCP_CALL_TIMEOUT", fallback=60),
+            60.0,
+        )
+
+    def test_remote_server_initialize_is_retried_then_connects(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            os.environ["GA_MCP_CONFIG"] = str(self._write_http_config(tmp_path))
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            calls = {"n": 0}
+
+            async def flaky(self, state, timeout):
+                calls["n"] += 1
+                if calls["n"] < mcp_runtime._MCP_REMOTE_CONNECT_ATTEMPTS:
+                    state.status = "failed"
+                    state.error = "RuntimeError: Client failed to connect: Failed to initialize"
+                    return
+                state.status = "connected"
+                state.error = ""
+                state.tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__remote__ping",
+                            "description": "ping",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ]
+
+            with self._patched_connect(flaky):
+                manager._connect_future(manager.states["remote"]).result(timeout=20)
+            status = manager.states["remote"].status
+            tools = len(manager.states["remote"].tools)
+            reset_mcp_manager()
+
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(status, "connected")
+        self.assertEqual(tools, 1)
+
+    def test_remote_server_retries_are_bounded_and_end_failed(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            os.environ["GA_MCP_CONFIG"] = str(self._write_http_config(tmp_path))
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            calls = {"n": 0}
+
+            async def always_fail(self, state, timeout):
+                calls["n"] += 1
+                state.status = "failed"
+                state.error = "RuntimeError: Client failed to connect: Failed to initialize"
+
+            with self._patched_connect(always_fail):
+                manager._connect_future(manager.states["remote"]).result(timeout=20)
+            status = manager.states["remote"].status
+            reset_mcp_manager()
+
+        self.assertEqual(calls["n"], mcp_runtime._MCP_REMOTE_CONNECT_ATTEMPTS)
+        self.assertEqual(status, "failed")
+
+    def test_stdio_server_is_not_retried(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            os.environ["GA_MCP_CONFIG"] = str(self._write_stdio_config(tmp_path))
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            calls = {"n": 0}
+
+            async def always_fail(self, state, timeout):
+                calls["n"] += 1
+                state.status = "failed"
+                state.error = "RuntimeError: Client failed to connect: Failed to initialize"
+
+            with self._patched_connect(always_fail):
+                manager._connect_future(manager.states["local"]).result(timeout=20)
+            status = manager.states["local"].status
+            reset_mcp_manager()
+
+        self.assertEqual(calls["n"], 1, "stdio servers must not be retried")
+        self.assertEqual(status, "failed")
+
+    def test_auth_error_is_not_retried(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            os.environ["GA_MCP_CONFIG"] = str(self._write_http_config(tmp_path))
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            calls = {"n": 0}
+
+            async def unauthorized(self, state, timeout):
+                calls["n"] += 1
+                state.status = "failed"
+                state.error = "RuntimeError: 401 Unauthorized"
+
+            with self._patched_connect(unauthorized):
+                manager._connect_future(manager.states["remote"]).result(timeout=20)
+            status = manager.states["remote"].status
+            reset_mcp_manager()
+
+        self.assertEqual(calls["n"], 1, "an auth error must not be retried")
+        self.assertEqual(status, "failed")
+
+    def test_connecting_status_is_distinct_from_pending(self):
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            os.environ["GA_MCP_CONFIG"] = str(self._write_http_config(tmp_path))
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            self.assertEqual(manager.states["remote"].status, "pending")
+
+            release = threading.Event()
+
+            async def blocked(self, state, timeout):
+                await asyncio.get_running_loop().run_in_executor(None, release.wait, 10)
+                state.status = "connected"
+                state.error = ""
+
+            with self._patched_connect(blocked):
+                future = manager._connect_future(manager.states["remote"])
+                status_while_connecting = manager.states["remote"].status
+                release.set()
+                future.result(timeout=20)
+            status_after = manager.states["remote"].status
+            reset_mcp_manager()
+
+        self.assertEqual(status_while_connecting, "connecting")
+        self.assertEqual(status_after, "connected")
+
+    def test_background_pass_retries_a_failed_server_and_recovers_it(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            tmp_path = Path(tmp)
+            config_path = self._write_http_config(tmp_path)
+            cache_path = tmp_path / "cache.json"
+            os.environ["GA_MCP_CONFIG"] = str(config_path)
+            reset_mcp_manager()
+            manager = get_mcp_manager()
+            calls = {"n": 0}
+
+            async def flaky(self, state, timeout):
+                calls["n"] += 1
+                if calls["n"] <= mcp_runtime._MCP_REMOTE_CONNECT_ATTEMPTS:
+                    state.status = "failed"
+                    state.error = "RuntimeError: Client failed to connect: Failed to initialize"
+                    return
+                state.status = "connected"
+                state.error = ""
+                state.tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__remote__ping",
+                            "description": "ping",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ]
+
+            with self._patched_connect(flaky):
+                manager.discover(timeout=5)
+                first_status = manager.states["remote"].status
+                calls_after_discover = calls["n"]
+                start_background_discovery(config_path=config_path, timeout=5, cache_path=cache_path)
+                wait_for_background_discovery(30)
+                final_status = manager.states["remote"].status
+                final_calls = calls["n"]
+            reset_mcp_manager()
+
+        self.assertEqual(first_status, "failed")
+        self.assertEqual(calls_after_discover, mcp_runtime._MCP_REMOTE_CONNECT_ATTEMPTS)
+        self.assertEqual(final_status, "connected")
+        self.assertGreater(final_calls, calls_after_discover)
+
+    def test_stderr_log_rotates_when_it_exceeds_the_cap(self):
+        import mcp_runtime
+
+        name = "rotate_" + uuid.uuid4().hex[:8]
+        log_path = mcp_runtime._MCP_LOG_DIR / (name + ".stderr.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "x" * (mcp_runtime._MCP_STDERR_LOG_MAX_BYTES_DEFAULT + 16),
+            encoding="utf-8",
+        )
+        handle = mcp_runtime._open_stderr_log(name)
+        handle.write("fresh")
+        handle.close()
+        size = log_path.stat().st_size
+        log_path.unlink()
+
+        self.assertEqual(size, len("fresh"))
+
+    def test_local_connect_concurrency_is_bounded_and_configurable(self):
+        import mcp_runtime
+
+        original = os.environ.pop("GA_MCP_LOCAL_CONNECT_CONCURRENCY", None)
+        try:
+            self.assertGreaterEqual(mcp_runtime._local_connect_concurrency(), 2)
+            os.environ["GA_MCP_LOCAL_CONNECT_CONCURRENCY"] = "2"
+            self.assertEqual(mcp_runtime._local_connect_concurrency(), 2)
+            os.environ["GA_MCP_LOCAL_CONNECT_CONCURRENCY"] = "not-a-number"
+            self.assertEqual(
+                mcp_runtime._local_connect_concurrency(),
+                mcp_runtime._MCP_LOCAL_CONNECT_CONCURRENCY_DEFAULT,
+            )
+        finally:
+            if original is None:
+                os.environ.pop("GA_MCP_LOCAL_CONNECT_CONCURRENCY", None)
+            else:
+                os.environ["GA_MCP_LOCAL_CONNECT_CONCURRENCY"] = original
 
 
 if __name__ == "__main__":

@@ -94,6 +94,7 @@ export function mcpToolsForServer(panel: McpPanelState, serverName: string): Mcp
 export function mcpStatusIcon(status: string): string {
   if (status === 'connected') return '✓'
   if (status === 'failed') return '✕'
+  if (status === 'connecting') return '◌'
   if (status === 'disabled') return '○'
   if (status === 'pending') return '○'
   return '?'
