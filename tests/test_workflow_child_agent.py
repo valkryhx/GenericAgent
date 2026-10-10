@@ -1143,6 +1143,45 @@ class LiveJobTelemetryTest(unittest.TestCase):
         # live channel mirrors the transcript, which records it too.
         self.assertIn("file_read", {payload["lastToolName"] for payload in tool_payloads})
         self.assertGreaterEqual(max(payload["turn"] for payload in tool_payloads), 1)
+    def test_child_prompt_carries_canonical_role_instructions(self):
+        """A declared role with no instruction is a role the child has to invent.
+
+        GA's CODING_AGENT_ROLES already listed research/synthesis/understanding/
+        contract/repair/summary, but only tests/implementation/verification/review
+        had any guidance, so output shapes drifted between runs.
+        """
+        for role, expected in (
+            ("research", "never invent numbers"),
+            ("synthesis", "instead of asking for the raw transcripts back"),
+            ("understanding", "do not modify files"),
+            ("contract", "acceptance checks"),
+            ("repair", "Reproduce it first"),
+            ("summary", "Do not restate the plan"),
+        ):
+            with self.subTest(role=role):
+                job = WorkflowJob(
+                    job_id="agent_1",
+                    prompt="do the assigned job",
+                    metadata={"runId": "wf_test", "label": "Job", "options": {"role": role}},
+                )
+                prompt = NativeGPTChildAgentRunner()._build_prompt(job)
+                self.assertIn(f"role: {role}", prompt)
+                self.assertIn(expected, prompt)
+
+    def test_child_prompt_carries_shared_workspace_and_handoff_contract(self):
+        job = WorkflowJob(
+            job_id="agent_1",
+            prompt="do the assigned job",
+            metadata={"runId": "wf_test", "label": "Job"},
+        )
+
+        prompt = NativeGPTChildAgentRunner()._build_prompt(job)
+
+        self.assertIn("sharedWorkspace:", prompt)
+        self.assertIn("never revert or rewrite another job's output", prompt)
+        self.assertIn("handoff:", prompt)
+        self.assertIn("not by the end user", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

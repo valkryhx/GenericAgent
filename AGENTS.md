@@ -229,6 +229,34 @@ Do not re-add general working-style or tool-discipline sections to `GA_AGENTS.md
 base prompt so that runs in *other* workspaces (which have no GA_AGENTS.md) still get them. Regression
 coverage lives in `tests/test_ga_agents_runtime.py::RepoPromptLayersTest`.
 
+## Prompt layers: base prompt, role hints, planner playbook
+
+GA's runtime prompt is layered, and each layer has a job. Read
+`docs/20261010-ga-prompt-layer-benchmark-and-plan.md` before editing any of them; it benchmarks GA
+against pi (`packages/coding-agent/src/core/system-prompt.ts`, per-tool `snippets`/`guidelines`, the
+`examples/extensions/subagent/agents/*.md` role prompts), Codex (`core/gpt_5_2_prompt.md`,
+`prompts/src/model_messages/multi_agent.rs`, `core/templates/collab/experimental_prompt.md`) and
+Step-Code (`features/workflow/step-workflow.ts` tool description, `agent-runner.ts`,
+`step-subagent-agents.ts::formatBuiltinAgentGuidance`).
+
+- `assets/sys_prompt.txt` / `_en`: identity, boundaries, working style (planning, change discipline,
+  review and deliverable quality), verification, tools, communication. Keep the two languages in sync.
+- `subagent_prompts.py`: root vs subagent role hints. A child shares the parent's workspace and gets
+  an isolated context, so the root hint must tell it to say "you are not alone in this workspace" and
+  to assign disjoint write paths; the subagent hint must say its final answer goes back to the parent
+  and that orchestration tools were removed.
+- `workflow_planner.py::_planner_prompt`: `orchestrationPolicy` is contract bookkeeping
+  (schemas, capability classes, acceptance ids) and `orchestrationPlaybook` is strategy (named
+  patterns, verification spend, sizing, no silent caps). Do not collapse one into the other: the
+  contract list alone produced two-or-three-agent chains for work that needed adversarial verification.
+- `workflow_child_agent.py`: `role_instructions` covers every canonical role in
+  `workflow_planner.CODING_AGENT_ROLES`. A declared role with no instruction is a role the child
+  invents; keep one entry per role, and keep the `sharedWorkspace:` / `handoff:` lines.
+
+P1 follow-ups not yet done (see §3 of the doc): deriving tool-profile and orchestration text from a
+single module like Step-Code's `formatBuiltinAgentGuidance`, rendering the `.ga/subagents` role catalog
+into the `spawn_agent` description, and pi-style structured prompt sections with incremental updates.
+
 ## Workflow tool boundary: host-owned profiles, never model-declared tool names
 
 A workflow child's tool boundary is decided by the **host**, not by the plan. The plan declares a

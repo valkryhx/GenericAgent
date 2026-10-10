@@ -57,5 +57,39 @@ class AgentMainRolePromptsTest(unittest.TestCase):
         mocked.assert_not_called()
 
 
+    def test_root_hint_carries_shared_workspace_and_cleanup_hygiene(self):
+        """Codex's collab prompt requires telling children they are not alone.
+
+        GA's root hint used to be silent about the shared directory, about
+        closing finished subagents, and about the limited concurrency slots.
+        """
+        prompt = self._system_prompt()
+
+        for expected in (
+            "共享同一个工作目录",
+            "你不是一个人在这个工作区",
+            "互不重叠的写入路径",
+            "close_agent",
+            "并发槽位有限",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, prompt)
+
+    def test_subagent_hint_carries_isolation_and_delivery_semantics(self):
+        subagent = type("Subagent", (), {"task_dir": str(REPO_ROOT / "temp" / "demo_subagent")})()
+
+        prompt = self._system_prompt(subagent)
+
+        for expected in (
+            "共享同一个工作目录",
+            "只改任务分配给你的路径",
+            "对你已剥离",
+            "回传给父代理",
+            "绝不编造数字",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

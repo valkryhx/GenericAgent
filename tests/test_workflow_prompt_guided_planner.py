@@ -633,3 +633,45 @@ if __name__ == "__main__":
         self.assertFalse(draft.validation["ok"])
         self.assertEqual("rejected", draft.validation["mode"])
         self.assertEqual(2, len(client.calls))
+
+
+    def test_planner_prompt_carries_the_orchestration_playbook(self):
+        """The planner needs strategy, not only contract bookkeeping.
+
+        Step-Code's workflow tool description teaches *which shape to build*
+        (named patterns, verification spend, sizing, no silent caps). GA's
+        orchestrationPolicy was almost entirely schema/artifact/capability
+        rules, so plans came out as two or three agents in a row.
+        """
+        client = FakePlannerClient(responses=[review_plan()])
+        planner = LLMWorkflowPlanner(client=client)
+
+        planner.plan("审查普通 workflow 任务", context={})
+
+        prompt = client.calls[0][0]["content"]
+        for expected in (
+            "orchestrationPlaybook",
+            "对抗验证",
+            "评审团",
+            "穷尽式搜索",
+            "完整性批评者",
+            "No silent caps",
+            "约 15 个 agent",
+            "什么时候不要用 workflow",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, prompt)
+
+    def test_repair_round_keeps_the_orchestration_playbook(self):
+        client = FakePlannerClient(responses=[invalid_coding_parallel_plan(), repaired_coding_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        planner.plan(
+            "实现 workflow controller 的 planned run 入口",
+            context={"constraints": ["不要读取 mykey.py", "不要提交"]},
+        )
+
+        self.assertEqual(2, len(client.calls))
+        repair_prompt = client.calls[1][0]["content"]
+        self.assertIn("orchestrationPlaybook", repair_prompt)
+        self.assertIn("do not satisfy the validator by silently deleting agents", repair_prompt)

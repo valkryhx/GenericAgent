@@ -1442,6 +1442,21 @@ class LLMWorkflowPlanner:
                 "Host preflights MCP/tool requirements and passes a capability snapshot; child agents must not probe local configuration or rediscover credentials.",
                 "agent label 使用清晰英文短语，避免无意义缩写。",
             ],
+            # Orchestration strategy, not contract mechanics. Step-Code's workflow
+            # tool description teaches the model *which shape to build* (named
+            # patterns, verification spend, sizing, no silent caps) before any
+            # schema rules; GA's policy list above was almost entirely contract
+            # bookkeeping, which is why plans came out as two or three agents in a
+            # row instead of an adversarially verified DAG.
+            "orchestrationPlaybook": [
+                "先选模式再填字段。可用模式：多路并行调研后综合（research 并行 → synthesis 依赖汇总）；对抗验证（同一结论派多个不同视角的 skeptic，多数反驳即否决该结论）；评审团（同一问题多种解法，评审后综合）；穷尽式搜索（反复派 finder 直到连续 K 轮没有新发现）；多模态扫描（每个 agent 走不同检索路径：命名 / 结构 / 历史 / 文档）；完整性批评者（最后一个 agent 只回答『还缺什么』）。",
+                "把 agent 花在验证上，而不是只花在生成上：对影响结论的关键主张安排独立验证，不要让产出者自证。",
+                "规模默认中等：除非用户明确要求规模，保持整个 run 在约 15 个 agent 以内；一个 agent 能做完的不要拆成三个，也不要为了显得完整而堆 agent。",
+                "No silent caps：任何被丢弃、截断、抽样、跳过的重试或 top-N 截断，都必须在产物或最终回答里显式记录，不允许静默丢信息。",
+                "什么时候不要用 workflow：单文件改动、一次性查询、约三次检索就能答完的问题，用 mode=direct 直接做，不要为了用 workflow 而拆分。",
+                "每个 agent 的 prompt 必须自带四件事：目标（要产出什么）、输入（上游短摘要 + 可 file_read 的 workspace-relative 路径）、输出契约（schemaRef 或明确字段）、完成与失败判据；不要写『分析一下 X』这类无边界指令。",
+                "phase 标题按交付物命名（例如『来源收集』『对抗验证』『综合报告』），让 UI 和人类读者一眼看懂进度；不要用『Phase 1』这类无语义标题。",
+            ],
             "requiredShape": {
                 "taskType": "research | coding | review | debugging | planning | mixed",
                 "meta": {"name": "...", "description": "..."},
@@ -1469,6 +1484,7 @@ class LLMWorkflowPlanner:
                     "Keep action ids identical between executionContract.actions and the assigned agent.actions.",
                     "Use only capability classes and machine-checkable acceptance ids from orchestrationPolicy; never invent concrete tool names.",
                     "Preserve valid phases and dependencies; return a complete replacement WorkflowPlan JSON object.",
+                    "Keep the orchestrationPlaybook shape: do not satisfy the validator by silently deleting agents, checks or verification steps -- if you drop something, say so in the plan.",
                 ],
             }
         return json.dumps(prompt, ensure_ascii=False, indent=2)

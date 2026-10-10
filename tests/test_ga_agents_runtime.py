@@ -189,6 +189,38 @@ class RepoPromptLayersTest(unittest.TestCase):
         self.assertIn("# 能力与边界", prompt)
         self.assertIn("GA_PROJECT_INSTRUCTIONS", prompt)
 
+    def test_base_prompt_carries_the_working_style_layers(self):
+        """Codex keeps Planning / Task execution / Validating / Presenting in the
+        model prompt. GA only had 身份/边界/怎么工作/验证/工具/沟通, so planning
+        discipline, change discipline and review/frontend quality were absent.
+        """
+        for heading in ("# 规划与推进", "# 代码与改动纪律", "# 审查与产物质量"):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.base)
+        for heading in ("# Planning and progress", "# Code and change discipline", "# Review and deliverable quality"):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.base_en)
+
+    def test_base_prompt_pins_the_working_style_lessons(self):
+        for expected in (
+            "不要把方案本身当交付",
+            "先修根因，不打表面补丁",
+            "不为通过测试而删测试",
+            "改完不要重复读回同一个文件确认",
+            "先列发现（按严重程度排序，带文件:行号）",
+            "AI 味",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.base)
+        for expected in (
+            "do not treat a proposal as the deliverable",
+            "Fix the root cause instead of patching the symptom",
+            "Never delete or loosen a test",
+            "findings first, ordered by severity with file:line",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.base_en)
+
 
 if __name__ == "__main__":
     unittest.main()
