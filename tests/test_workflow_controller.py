@@ -202,7 +202,11 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual("running", run.status)
             self.assertIn("export const meta", run.script)
             self.assertEqual("workflow-draft.json", run.metadata["workflowDraftRef"])
-            self.assertEqual("deterministic", run.metadata["plannerMode"])
+            # This draft was built by a directly-constructed template planner and
+            # declares no plannerMode, so the metadata is honestly "unknown". The
+            # production path is always model-authored now (prompt_guided), with
+            # "fallback_deterministic" reserved for a planner-model failure.
+            self.assertEqual("unknown", run.metadata["plannerMode"])
             self.assertEqual("research", run.metadata["workflowTaskType"])
             persisted = controller.store.load_run(run.run_id)
             self.assertEqual("running", persisted.status)
@@ -215,7 +219,7 @@ class WorkflowControllerTest(unittest.TestCase):
             self.assertEqual(["workflow_planned", "workflow_started"], [event.event_type for event in events])
             self.assertEqual([1, 2], [event.sequence for event in events])
             self.assertEqual("workflow-draft.json", events[0].payload["workflowDraftRef"])
-            self.assertEqual("deterministic", events[0].payload["plannerMode"])
+            self.assertEqual("unknown", events[0].payload["plannerMode"])
 
     def test_create_planned_coding_run_persists_acceptance_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

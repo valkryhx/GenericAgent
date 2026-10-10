@@ -555,12 +555,24 @@ class NativeWorkflowPlannerClientTest(unittest.TestCase):
         self.assertNotIn("mcp.json", text)
         self.assertIn("不要输出 JavaScript", text)
 
-    def test_build_workflow_planner_from_env_defaults_to_deterministic(self):
+    def test_build_workflow_planner_from_env_defaults_to_the_model_planner(self):
+        # A fixed template set is not a dynamic workflow: it can only pick one of
+        # N shapes, and a task whose wording misses the keywords loses its work
+        # (real case: wf_622266234f1345359d4e5f999758b922). The plan must be
+        # model-authored by default, like Step-Code, which has no plan template.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GA_WORKFLOW_PLANNER_MODE", None)
             planner = build_workflow_planner_from_env()
 
-        self.assertIsInstance(planner, WorkflowPlanner)
+        self.assertIsInstance(planner, LLMWorkflowPlanner)
+
+    def test_deterministic_planner_mode_is_rejected(self):
+        with patch.dict(os.environ, {"GA_WORKFLOW_PLANNER_MODE": "deterministic"}, clear=False):
+            with self.assertRaises(ValueError) as caught:
+                build_workflow_planner_from_env()
+
+        self.assertIn("deterministic", str(caught.exception))
+        self.assertIn("dynamic workflow", str(caught.exception))
 
     def test_build_workflow_planner_from_env_returns_prompt_guided_planner(self):
         with patch.dict(

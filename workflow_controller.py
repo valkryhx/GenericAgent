@@ -39,7 +39,7 @@ class WorkflowController:
         validation = getattr(draft, "validation", {}) or {}
         draft_context = getattr(draft, "context", {}) or {}
         classification = getattr(draft, "classification", {}) or {}
-        planner_mode = str(draft_context.get("plannerMode") or validation.get("mode") or "deterministic")
+        planner_mode = str(draft_context.get("plannerMode") or validation.get("mode") or "unknown")
         task_type = str(classification.get("taskType") or getattr(draft, "plan", {}).get("taskType") or "unknown")
         is_valid = bool(validation.get("ok"))
         script = getattr(draft, "script", "") if is_valid else ""

@@ -1250,9 +1250,27 @@ def build_workflow_planner_from_env(
     *,
     profile_name: str | None = None,
 ) -> WorkflowPlanner | LLMWorkflowPlanner:
-    mode = str(os.environ.get("GA_WORKFLOW_PLANNER_MODE") or "deterministic").strip().lower()
-    if mode not in {"prompt_guided", "llm", "real"}:
-        return WorkflowPlanner()
+    """Build the workflow planner. The plan is always model-authored.
+
+    Step-Code has no deterministic plan template: the model writes the
+    orchestration script itself. A fixed template set cannot be a *dynamic*
+    workflow -- it can only pick one of N shapes, so a task whose wording misses
+    the templates' keywords silently loses the work it asked for (real case:
+    wf_622266234f1345359d4e5f999758b922, where "/workflow 写3个python demo 并检验"
+    produced a planner-only plan). ``GA_WORKFLOW_PLANNER_MODE=deterministic`` is
+    therefore gone: an unset or unrecognised mode now means the LLM planner.
+
+    :class:`WorkflowPlanner` survives only as the internal fallback used when the
+    planner model errors, and that path marks the run ``degraded``
+    (``planner_fallback_deterministic``) instead of pretending the template was
+    a plan the model produced.
+    """
+    mode = str(os.environ.get("GA_WORKFLOW_PLANNER_MODE") or "prompt_guided").strip().lower()
+    if mode == "deterministic":
+        raise ValueError(
+            "GA_WORKFLOW_PLANNER_MODE=deterministic was removed: a fixed template set is not a "
+            "dynamic workflow. Unset it (or use prompt_guided/llm/real) to plan with the model."
+        )
     chosen = (
         profile_name
         or os.environ.get("GA_WORKFLOW_LLM_PROFILE")

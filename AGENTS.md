@@ -320,9 +320,34 @@ and the run reported `succeeded` having written nothing but PLAN.md. The `0/1 ag
 was truthful — the plan contained no execution step at all. Details, per-run evidence and the real E2E:
 `docs/20261010-ga-workflow-coding-task-planned-only.md`.
 
-Also remember that the production default planner is the **deterministic** one
-(`build_workflow_planner_from_env`, `GA_WORKFLOW_PLANNER_MODE` unset), which can only emit four fixed
-shapes (planning=1 job, research=2, coding=4, mixed=3). Dynamic DAGs by task difficulty only exist under
-`GA_WORKFLOW_PLANNER_MODE=prompt_guided|real`. Test scripts and probes set that variable, so their runs
-are **not** the path a user gets from `./ga` + `/workflow`; verify workflow behaviour on the default path
-before claiming a fix.
+The plan is **model-authored, always**. `build_workflow_planner_from_env()` defaults to
+`prompt_guided` (`LLMWorkflowPlanner`), and `GA_WORKFLOW_PLANNER_MODE=deterministic` is **removed** — it
+raises instead of being silently ignored, because a fixed template set can only pick one of N shapes and
+is therefore not a dynamic workflow (Step-Code has no plan template at all: the model writes the
+orchestration script itself). `WorkflowPlanner` survives only as the internal fallback for a planner-model
+error, and that path marks the run `fallback_deterministic` + `degraded`. `run.metadata["plannerMode"]` is
+`prompt_guided` on the production path, and `unknown` when a directly-built draft declares no mode.
+
+Test scripts and probes set `GA_WORKFLOW_PLANNER_MODE=real|prompt_guided` explicitly; that is not the
+path a user gets from `./ga` + `/workflow`, so verify workflow behaviour on the default path before
+claiming a fix.
+
+## Verification writes are side effects, not artifact collisions
+
+A verification job that *runs* the artifact under test will rewrite it. `verify` denies
+`file_write`/`file_patch` but allows `execute` (`workflow_tool_profiles.WORKFLOW_TOOL_PROFILES["verify"]`),
+and `code_run` is arbitrary Python that `workflow_path_acl.check_tool_call` only containment-checks — so
+"read-only verifier" and "execute the artifact" are in tension by construction. This is **not** a prompt
+defect: the verification role instruction actively tells the child to run the checks, and no runtime gate
+can stop an `execute` tool from writing.
+
+`workflow_scheduler._record_artifact_collisions()` therefore classifies a shared path by its number of
+**producing** writers (`_is_verification_job()`: `permissionProfile == "verify"`, `toolProfile ==
+"verify"`, or `role` in `{verification, review}`). More than one producer is still `artifactCollisions` +
+an `artifact_path_collision` issue (a real overwrite: reported, never fatal). One producer plus a verifier
+— or two verifiers — becomes `verificationSideEffects` + a `verification_side_effect` event and **must not
+enter `workflowIssues` or degrade the run**. `frontends/ink_bridge.py` publishes it in the handoff so a
+downstream reader does not mistake the re-generated deliverable for a second output. Real case:
+`wf_9d097fb199824a1eb4bb37776ef8a2f1`, where a correct run was reported `degraded`. Regression tests:
+`tests/test_workflow_scheduler.py::test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision`
+and `::test_a_verification_only_path_is_never_reported_as_a_collision`.

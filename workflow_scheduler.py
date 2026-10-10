@@ -1375,25 +1375,64 @@ class AgentScheduler:
         self.store.write_workflow_progress(self.run)
         self._append("artifact_written", job, {"paths": written[:32]})
 
-    def _record_artifact_collisions(self, job: WorkflowJob) -> None:
-        """Flag paths written by more than one job in this run.
+    @staticmethod
+    def _is_verification_job(metadata: dict) -> bool:
+        """Whether this job's host-resolved boundary is verification-only.
 
-        Two children writing ``report.md`` means the second silently overwrote
-        the first; without per-path ownership the handoff could only hand over
-        one opaque path. The run stays runnable, but the collision is recorded so
-        it is visible instead of being discovered from file contents later.
+        Reads the host's own resolution (``permissionProfile``) first, then the
+        plan's declared role / toolProfile, so it works for model-authored plans
+        and for the host-derived role defaults alike.
         """
+
+        if not isinstance(metadata, dict):
+            return False
+        profile = str(metadata.get("permissionProfile") or "").strip().lower()
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        role = str(options.get("role") or "").strip().lower()
+        tool_profile = str(options.get("toolProfile") or "").strip().lower()
+        return profile == "verify" or tool_profile == "verify" or role in {"verification", "review"}
+
+    def _record_artifact_collisions(self, job: WorkflowJob) -> None:
+        """Split shared paths into real collisions and verification side effects.
+
+        Two *producing* children writing ``report.md`` means the second silently
+        overwrote the first, so that stays a collision issue.
+
+        A verification job is a different case. Running the artifact under test is
+        the strongest check available, and a run may legitimately rewrite what it
+        is checking. ``verify`` denies ``file_write``/``file_patch`` but allows
+        ``execute``, and ``code_run`` is arbitrary code, so a verifier that runs
+        the artifact WILL touch it. That is a side effect of verifying, not a
+        competing producer, so it is reported separately and must not degrade the
+        run (real case: wf_9d097fb199824a1eb4bb37776ef8a2f1, where the verifier
+        re-ran the HTML generator and a correct run was reported ``degraded``).
+        """
+
         owners: dict[str, list[str]] = {}
+        verifying: set[str] = set()
         for item in self.run.jobs:
             metadata = item.metadata if isinstance(item.metadata, dict) else {}
+            if self._is_verification_job(metadata):
+                verifying.add(str(metadata.get("label") or item.job_id))
             for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
                 writer = entry.get("writer") or item.job_id
                 bucket = owners.setdefault(entry["path"], [])
                 if writer not in bucket:
                     bucket.append(writer)
-        collisions = {path: writers for path, writers in owners.items() if len(writers) > 1}
-        if not collisions:
+        shared = {path: writers for path, writers in owners.items() if len(writers) > 1}
+        if not shared:
             return
+        collisions: dict[str, list[str]] = {}
+        side_effects: dict[str, list[str]] = {}
+        for path, writers in shared.items():
+            # Only *producing* writers can collide with each other. One producer
+            # plus a verifier that ran the artifact is the normal verify flow,
+            # not two producers silently overwriting each other.
+            producers = [writer for writer in writers if writer not in verifying]
+            if len(producers) > 1:
+                collisions[path] = writers
+            else:
+                side_effects[path] = writers
         metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
         issues = list(metadata.get("workflowIssues") or [])
         for path, writers in sorted(collisions.items()):
@@ -1406,9 +1445,15 @@ class AgentScheduler:
             if not any(isinstance(item, dict) and item.get("code") == issue["code"] and item.get("path") == path for item in issues):
                 issues.append(issue)
         metadata["workflowIssues"] = issues
-        metadata["artifactCollisions"] = {path: writers for path, writers in sorted(collisions.items())}
+        if collisions:
+            metadata["artifactCollisions"] = {path: writers for path, writers in sorted(collisions.items())}
+        if side_effects:
+            metadata["verificationSideEffects"] = {path: writers for path, writers in sorted(side_effects.items())}
         self.run.metadata = metadata
-        self._append("artifact_collision", job, {"collisions": metadata["artifactCollisions"]})
+        if collisions:
+            self._append("artifact_collision", job, {"collisions": metadata["artifactCollisions"]})
+        if side_effects:
+            self._append("verification_side_effect", job, {"paths": metadata["verificationSideEffects"]})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
         for event in result.transcript_events:

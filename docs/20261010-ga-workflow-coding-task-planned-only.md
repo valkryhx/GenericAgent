@@ -108,36 +108,63 @@ elapsed 94s
 
 修复前同一条任务只产出 `PLAN.md`；修复后 3 个 demo + HTML 全部落盘，验收 passed。
 
-## 遗留问题（需要拍板，本轮未改）
+## 第二轮：两个遗留问题都已修复
 
-### 1. verifier 跑产物导致 `degraded`
+### A. 删掉 `plannerMode: deterministic`（计划必须由模型产出）
 
-verify agent 为了核验 HTML，用 `code_run` 执行了 `demo3_hello_html.py`（一种完全合理的核验手段），
-于是 `hello.html` 被重新生成了一次。宿主如实记录：
+对照 Step-Code：它的 workflow **没有确定性计划**——`workflow` 工具拿到的就是模型自己写的
+编排脚本（`step-workflow.ts` 的 `script` / `scriptPath` / `name` 三选一），不存在"从 N 个模板里挑一个"的
+规划器。固定模板集也谈不上 dynamic：它只能命中关键词选形状，选错就等于用户要的活没被安排。
+
+改动：
+
+- `build_workflow_planner_from_env()` 默认改为 `prompt_guided`，即 `LLMWorkflowPlanner`。
+  未设置 `GA_WORKFLOW_PLANNER_MODE` 时不再回退到模板规划器。
+- `GA_WORKFLOW_PLANNER_MODE=deterministic` **被删除**：显式设置它会直接抛错并说明原因
+  （"a fixed template set is not a dynamic workflow"），而不是被静默忽略。
+- `WorkflowPlanner`（模板规划器）只保留为**规划模型报错时的内部 fallback**，
+  该路径把 run 标成 `fallback_deterministic` 并降级，永远不会被当成正常计划。
+- `workflow_controller` 里 metadata 缺省值 `deterministic` 改成 `unknown`，
+  不再用一个已经删掉的名字当兜底。
+
+### B. verifier 跑产物不再算「抢占写入」
+
+**先回答那个问题：不是提示词没写好，是能力边界问题。** 三层事实：
+
+1. `verify` tool profile 只 deny `file_write`/`file_patch`，**allow `execute`**
+   （`workflow_tool_profiles.WORKFLOW_TOOL_PROFILES["verify"] = {file_write}`）。
+2. `code_run` 属于 `execute` 类，是任意 Python；`workflow_path_acl.check_tool_call` 对 `code_run`
+   只做**包含性**校验（cwd 与解析出的写入目标必须在 workspace 内），不做只读性校验。
+3. 于是"只读的 verifier"一旦**执行被测产物**（最强的核验手段），就必然改动 workspace。
+
+计划里的 prompt（"不要修改产物"）和 `workflow_child_agent` 的 verification role instruction 都只是建议，
+没有任何东西在执行期拦它——所以问题不在提示词，而在"允许 execute 的 profile 声称自己是只读"这个矛盾。
+Step-Code 的 `qa` profile 同样是 `READ_ONLY_TOOLS + run_command`，它不出这个症状只是因为
+它根本没有产物归属/碰撞的概念。
+
+改动（`workflow_scheduler`）：共享路径按**非验证写入者**的数量分类：
+
+- 两个 *产出者* 写同一路径 → 仍然是 `artifactCollisions` + `artifact_path_collision` issue（真问题，保留）；
+- 一个产出者 + 验证者（或纯验证者）写同一路径 → 记入 `verificationSideEffects` +
+  `verification_side_effect` 事件，**不再进 workflowIssues，因此不再降级**。
+
+`frontends/ink_bridge.py` 的 handoff 也带上 `verificationSideEffects`，并说明它是"同一个交付物被核验
+重新生成"，不是第二份产物——否则下游 LLM 会把 `hello.html` 当成两个人的输出。
+
+### 第二轮真实 E2E（默认路径，模型规划）
 
 ```
-artifact_path_collision: hello.html was written by multiple jobs: execute-task, verify-result
+plannerMode prompt_guided | taskType coding | mode workflow
+progress Python and HTML Implementation:running
+progress ... , Verification Runner:running
+FINAL status succeeded | outcome succeeded | acceptance passed | issues []
+elapsed 199s
 ```
 
-这条 issue 把 run 从 `succeeded` 降级成 `degraded`（验收仍然 passed、产物完好）。
-问题在于 `verify` profile 是「read-only + execute」，而 `code_run` 天然能写文件，
-所以「只读的 verifier」在跑产物时会不可避免地改动 workspace。
-
-两种改法，取向不同：
-
-- **A（推荐）**：ownership 只归第一个产出者；`role=verification` 的 job 重写一个已有路径
-  记成「验证副作用」而不是 collision，不再降级。verifier 新建的文件仍然算它的证据。
-- **B**：verify job 在 workspace 的临时副本里执行，改动不落回主 workspace。更干净，但要动 runtime 的 workspace 布局。
-
-### 2. 是否让 LLM planner 成为 `/workflow` 的默认
-
-现在生产默认是 deterministic（4 个固定模板）。要真正做到「按任务难度生成不同 DAG」，
-需要把默认改成 `prompt_guided`（LLM planner），deterministic 退为 fallback。
-代价：每次 `/workflow` 多一次 planner LLM 往返（延迟 + 成本），
-好处：DAG 由任务本身决定，而不是命中哪个关键词。
-这属于产品行为变更，等用户决定后再动 `build_workflow_planner_from_env` 的默认值
-（注意 `tests/test_workflow_prompt_guided_planner.py::test_build_workflow_planner_from_env_defaults_to_deterministic`
-断言的就是这个默认值，改默认要一起改）。
+产物：`src/hello_world.py`、`src/primes_1_100.py`、`src/hello.html`；
+`artifactCollisions`/`verificationSideEffects`/`workflowIssues` 全为空。
+注意 phase 名（`Python and HTML Implementation` → `Verification Runner`）是模型自己起的，
+不再是那 4 个模板之一；`taskType` 也由模型判成 `coding`——关键词分类器当初判的是 `planning`。
 
 ## 复现与回归
 
@@ -146,6 +173,15 @@ python -m unittest tests.test_workflow_planner_execution_intent tests.test_ink_b
 python -m unittest discover -s tests -p "test_workflow*.py"
 ```
 
-新增回归：`test_explicit_workflow_opt_in_executes_instead_of_only_planning`、
-`test_unrecognised_task_without_explicit_opt_in_keeps_planning_template`、
-以及 `tests/test_ink_bridge.py` 中对 `workflow_plan` 必须携带显式 activation 的断言。
+新增回归：
+
+- `test_explicit_workflow_opt_in_executes_instead_of_only_planning`、
+  `test_unrecognised_task_without_explicit_opt_in_keeps_planning_template`，以及
+  `tests/test_ink_bridge.py` 中对 `workflow_plan` 必须携带显式 activation 的断言（第一轮）；
+- `test_build_workflow_planner_from_env_defaults_to_the_model_planner`、
+  `test_deterministic_planner_mode_is_rejected`（A：默认模型规划、deterministic 抛错）；
+- `test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision`、
+  `test_a_verification_only_path_is_never_reported_as_a_collision`（B：验证写入记 side effect）。
+
+真实 E2E 探针：`frontends/ink-ui/scripts/_probe_workflow_default_planner.ts`
+（走默认路径、不设 `GA_WORKFLOW_PLANNER_MODE`）。

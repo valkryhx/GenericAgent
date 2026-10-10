@@ -382,6 +382,65 @@ class WorkflowSchedulerTest(unittest.TestCase):
             self.assertEqual([{"path": "report.md", "writer": "Research"}], first.metadata["observedArtifacts"])
             self.assertEqual([{"path": "report.md", "writer": "Synthesis"}], second.metadata["observedArtifacts"])
 
+    def test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision(self):
+        """Verifying by executing the artifact must not degrade the run.
+
+        Real case wf_9d097fb199824a1eb4bb37776ef8a2f1: the verify job ran the
+        HTML generator to check it, which rewrote hello.html, and a correct run
+        was reported degraded for it. verify denies file_write but allows
+        execute, and code_run is arbitrary code, so the rewrite is structural.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            producer = scheduler.register_agent(prompt="build", label="execute-task", options={"role": "implementation"})
+            verifier = scheduler.register_agent(
+                prompt="verify", label="verify-result",
+                options={"role": "verification", "dependsOn": ["execute-task"]},
+            )
+            self.assertEqual("verify", verifier.metadata["permissionProfile"])
+
+            scheduler._record_observed_artifacts(producer, AgentResult(
+                job_id=producer.job_id, status="succeeded", payload={},
+                tool_summary={"writtenPaths": ["hello.html", "demo1.py"]},
+            ))
+            scheduler._record_observed_artifacts(verifier, AgentResult(
+                job_id=verifier.job_id, status="succeeded", payload={},
+                tool_summary={"writtenPaths": ["hello.html"]},
+            ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertNotIn("artifactCollisions", loaded.metadata)
+            self.assertEqual(
+                {"hello.html": ["execute-task", "verify-result"]},
+                loaded.metadata["verificationSideEffects"],
+            )
+            codes = [issue["code"] for issue in loaded.metadata.get("workflowIssues") or []]
+            self.assertNotIn("artifact_path_collision", codes)
+            self.assertIn("verification_side_effect", self.event_types(store))
+            # A verifier that writes a path nobody else wrote is still its own
+            # evidence, not a side effect.
+            self.assertEqual([{"path": "hello.html", "writer": "verify-result"}], verifier.metadata["observedArtifacts"])
+
+    def test_a_verification_only_path_is_never_reported_as_a_collision(self):
+        """Two verification jobs sharing a path is not a producer collision."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="verify a", label="verify-a", options={"role": "verification"})
+            second = scheduler.register_agent(prompt="verify b", label="verify-b", options={"role": "review"})
+
+            for job in (first, second):
+                scheduler._record_observed_artifacts(job, AgentResult(
+                    job_id=job.job_id, status="succeeded", payload={},
+                    tool_summary={"writtenPaths": ["scratch.json"]},
+                ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertNotIn("artifactCollisions", loaded.metadata)
+            self.assertEqual({"scratch.json": ["verify-a", "verify-b"]}, loaded.metadata["verificationSideEffects"])
     def test_no_collision_is_recorded_when_each_job_writes_its_own_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
