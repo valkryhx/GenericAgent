@@ -273,6 +273,19 @@ synthesis=planner, tests=authoring, understanding=planner, verification=verify�
 orchestration 一律禁用），用 capabilities 声明需要的能力类别（web_search、web_fetch、file_read、file_write、execute）。
 ```
 
+### 已实施 P1-3（同一轮续做）：系统提示词分段 + 变更可观测
+
+对齐 pi `core/system-prompt.ts`（命名分段 `preamble/tools/rules/docs/skills/cwd` + `diffSystemPromptSections`）。GA 原来把 8 段文本在一个函数里顺序拼接——文本相同，但不可 diff，因此「这轮 prompt cache 为什么 miss」只能靠猜。
+
+| 项 | 文件 | 具体改动 |
+|---|---|---|
+| 命名分段 | `agentmain.py` | `SYSTEM_PROMPT_SECTION_ORDER`（base/date/project/notifications/memory/skills/role_hint/permission_mode）+ `build_system_prompt_sections(agent)` 返回有序 dict + `render_system_prompt(sections)` 作为唯一渲染器；`get_system_prompt()` 退化为 `render(build(...))` |
+| 变更可观测 | `agentmain.py` | `diff_system_prompt_sections(prev, cur)` 返回变化的段名；`note_system_prompt_sections(agent, sections)` 在 agent 上记住上一轮快照并返回变化段名；主循环每轮重建 prompt 时打印 `[Prompt] system prompt sections changed: ...` |
+
+**行为零变化**：真实装配对比 `load_base_system_prompt + date + project + notifications + memory + skills + role_hint + permission_mode` 的顺序拼接，与 `get_system_prompt()` 输出**逐字节相同**（16211 chars == 16211 chars，脚本实测 `identical: True`）。变化只在可观测性：稳态会话不再有任何输出，某段真的变了才打一行。
+
+新增测试（`tests/test_agentmain_role_prompts.py`，4 项）：段名与顺序、`render(build(x)) == get_system_prompt(x)`、`diff` 只报变化段、`note_system_prompt_sections` 首轮不报、后续只报变化段、subagent 的 notifications 段为空但键仍在。
+
 ### 未做（按计划留给下一轮）
 
-P1-3 pi 式结构化分段与增量更新、P2-1 workflow 工具化、P2-2 计划规模反馈。
+P2-1 workflow 工具化、P2-2 计划规模反馈。

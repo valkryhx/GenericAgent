@@ -57,6 +57,87 @@ class AgentMainRolePromptsTest(unittest.TestCase):
         mocked.assert_not_called()
 
 
+    def test_system_prompt_is_rendered_from_named_sections(self):
+        """One renderer, named sections: the prompt must stay byte-identical.
+
+        pi splits its system prompt into named sections so a caller can tell
+        which ones changed; GA's pieces were concatenated inline, which is the
+        same text but not diffable.
+        """
+        with mock.patch.object(agentmain, "load_base_system_prompt", return_value="[base]"):
+            with mock.patch.object(agentmain, "build_ga_project_instructions", return_value="[project]"):
+                with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="[notify]"):
+                    with mock.patch.object(agentmain, "get_global_memory", return_value="[memory]"):
+                        with mock.patch.object(agentmain, "build_skill_prompt", return_value="[skills]"):
+                            with mock.patch.object(agentmain, "build_agent_role_usage_hint", return_value="[role]"):
+                                with mock.patch.object(agentmain, "build_permission_mode_hint", return_value="[perm]"):
+                                    sections = agentmain.build_system_prompt_sections()
+                                    prompt = agentmain.get_system_prompt()
+
+        self.assertEqual(
+            (
+                "base",
+                "date",
+                "project",
+                "notifications",
+                "memory",
+                "skills",
+                "role_hint",
+                "permission_mode",
+            ),
+            agentmain.SYSTEM_PROMPT_SECTION_ORDER,
+        )
+        self.assertEqual(agentmain.SYSTEM_PROMPT_SECTION_ORDER, tuple(sections))
+        self.assertEqual("[base]", sections["base"])
+        self.assertEqual("[notify]", sections["notifications"])
+        self.assertEqual(chr(10) + "[role]" + chr(10), sections["role_hint"])
+        self.assertEqual(agentmain.render_system_prompt(sections), prompt)
+        self.assertTrue(prompt.startswith("[base]"))
+        for earlier, later in (
+            ("[project]", "[notify]"),
+            ("[notify]", "[memory]"),
+            ("[memory]", "[skills]"),
+            ("[skills]", "[role]"),
+            ("[role]", "[perm]"),
+        ):
+            with self.subTest(earlier=earlier, later=later):
+                self.assertLess(prompt.index(earlier), prompt.index(later))
+
+    def test_diff_reports_only_the_sections_that_changed(self):
+        sections = {name: name for name in agentmain.SYSTEM_PROMPT_SECTION_ORDER}
+        changed = dict(sections)
+        changed["memory"] = "different"
+
+        self.assertEqual(["memory"], agentmain.diff_system_prompt_sections(sections, changed))
+        self.assertEqual([], agentmain.diff_system_prompt_sections(sections, dict(sections)))
+        self.assertEqual([], agentmain.diff_system_prompt_sections(None, {}))
+
+    def test_note_system_prompt_sections_reports_the_first_turn_as_no_change(self):
+        agent = type("Agent", (), {})()
+
+        first = agentmain.note_system_prompt_sections(agent, {"base": "b"})
+
+        self.assertEqual([], first)
+        self.assertEqual({"base": "b"}, agent._last_prompt_sections)
+
+    def test_note_system_prompt_sections_names_only_what_changed(self):
+        agent = type("Agent", (), {})()
+        agentmain.note_system_prompt_sections(agent, {"base": "b", "memory": "m1"})
+
+        changed = agentmain.note_system_prompt_sections(agent, {"base": "b", "memory": "m2"})
+
+        self.assertEqual(["memory"], changed)
+        self.assertEqual({"base": "b", "memory": "m2"}, agent._last_prompt_sections)
+        self.assertEqual([], agentmain.note_system_prompt_sections(agent, {"base": "b", "memory": "m2"}))
+
+    def test_subagent_skips_the_notifications_section_without_breaking_the_order(self):
+        subagent = type("Subagent", (), {"task_dir": str(REPO_ROOT / "temp" / "demo_subagent")})()
+
+        sections = agentmain.build_system_prompt_sections(subagent)
+
+        self.assertEqual("", sections["notifications"])
+        self.assertIn("notifications", sections)
+
     def test_root_hint_carries_shared_workspace_and_cleanup_hygiene(self):
         """Codex's collab prompt requires telling children they are not alone.
 

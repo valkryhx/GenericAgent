@@ -460,21 +460,84 @@ if not os.path.exists(cdp_cfg):
         open(cdp_cfg, 'w', encoding='utf-8').write(f"const TID = '__ljq_{hex(random.randint(0, 99999999))[2:8]}';")
     except Exception as e: print(f'[WARN] CDP config init failed: {e} — advanced web features (tmwebdriver) will be unavailable.')
 
-def get_system_prompt(agent=None):
-    prompt = load_base_system_prompt(script_dir, lang_suffix)
-    prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
-    prompt += build_ga_project_instructions(script_dir, os.getcwd())
-    if not bool(getattr(agent, 'task_dir', None)):
+# Render order of the system prompt. The pieces are kept separate (rather than
+# concatenated inline) so the prompt is diffable: pi splits its system prompt
+# into named sections and reports which ones changed
+# (``diffSystemPromptSections``) instead of re-sending the whole thing blind.
+SYSTEM_PROMPT_SECTION_ORDER = (
+    "base",
+    "date",
+    "project",
+    "notifications",
+    "memory",
+    "skills",
+    "role_hint",
+    "permission_mode",
+)
+
+
+def build_system_prompt_sections(agent=None):
+    """Named prompt sections in render order; ``render_system_prompt`` joins them."""
+
+    is_subagent = bool(getattr(agent, 'task_dir', None))
+    notifications = ""
+    if not is_subagent:
         try:
             from subagent_notifications import build_subagent_notifications_prompt
-            prompt += build_subagent_notifications_prompt(script_dir)
+            notifications = build_subagent_notifications_prompt(script_dir)
         except Exception:
             pass
-    prompt += get_global_memory()
-    prompt += build_skill_prompt()
-    prompt += "\n" + build_agent_role_usage_hint(is_subagent=bool(getattr(agent, 'task_dir', None)), lang_suffix=lang_suffix) + "\n"
-    prompt += build_permission_mode_hint(getattr(agent, 'permission_mode', None))
-    return prompt
+    return {
+        "base": load_base_system_prompt(script_dir, lang_suffix),
+        "date": f"\nToday: {time.strftime('%Y-%m-%d %a')}\n",
+        "project": build_ga_project_instructions(script_dir, os.getcwd()),
+        "notifications": notifications,
+        "memory": get_global_memory(),
+        "skills": build_skill_prompt(),
+        "role_hint": "\n" + build_agent_role_usage_hint(is_subagent=is_subagent, lang_suffix=lang_suffix) + "\n",
+        "permission_mode": build_permission_mode_hint(getattr(agent, 'permission_mode', None)),
+    }
+
+
+def render_system_prompt(sections):
+    """Join the sections in ``SYSTEM_PROMPT_SECTION_ORDER`` (the only renderer)."""
+
+    return "".join(str((sections or {}).get(name) or "") for name in SYSTEM_PROMPT_SECTION_ORDER)
+
+
+def diff_system_prompt_sections(previous, current):
+    """Names of the sections whose text changed, in render order."""
+
+    previous = previous if isinstance(previous, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    return [
+        name
+        for name in SYSTEM_PROMPT_SECTION_ORDER
+        if str(previous.get(name) or "") != str(current.get(name) or "")
+    ]
+
+
+def note_system_prompt_sections(agent, sections):
+    """Remember this turn's sections and return the names that changed.
+
+    The system prompt is rebuilt for every turn, so an unchanged prompt is a
+    cache hit and a changed one is a miss the model must re-read. Reporting the
+    section names turns "why did the cache miss" into a one-line answer instead
+    of a guess (pi keeps the same miss statistics).
+    """
+
+    previous = getattr(agent, "_last_prompt_sections", None)
+    try:
+        setattr(agent, "_last_prompt_sections", sections)
+    except Exception:
+        pass
+    if previous is None:
+        return []
+    return diff_system_prompt_sections(previous, sections)
+
+
+def get_system_prompt(agent=None):
+    return render_system_prompt(build_system_prompt_sections(agent))
 
 
 def build_permission_mode_hint(mode):
@@ -907,7 +970,11 @@ class GenericAgent:
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             
-            sys_prompt = get_system_prompt(self) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
+            sections = build_system_prompt_sections(self)
+            changed_sections = note_system_prompt_sections(self, sections)
+            if changed_sections:
+                print(f"[Prompt] system prompt sections changed: {', '.join(changed_sections)}")
+            sys_prompt = render_system_prompt(sections) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
             if self.handler and 'key_info' in self.handler.working: 

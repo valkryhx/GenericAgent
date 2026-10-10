@@ -253,10 +253,22 @@ Step-Code (`features/workflow/step-workflow.ts` tool description, `agent-runner.
   `workflow_planner.CODING_AGENT_ROLES`. A declared role with no instruction is a role the child
   invents; keep one entry per role, and keep the `sharedWorkspace:` / `handoff:` lines.
 
-Built-in read-only roles now ship with the host and are published on `spawn_agent`, and the
-tool-profile wording in the planner prompt is generated from the host tables (see the next two
-sections). The remaining P1 follow-up (see §3 of the doc) is pi-style structured prompt sections with
-incremental updates.
+All three P1 follow-ups from `docs/20261010-ga-prompt-layer-benchmark-and-plan.md` §3 are now in:
+built-in read-only roles published on `spawn_agent`, tool-profile wording generated from the host
+tables, and the sectioned system prompt (see the next three sections).
+
+## System prompt sections: named, diffable, one renderer
+
+`agentmain.build_system_prompt_sections()` returns the system prompt as a named, ordered dict
+(`SYSTEM_PROMPT_SECTION_ORDER` = base / date / project / notifications / memory / skills / role_hint /
+permission_mode) and `render_system_prompt()` is the only renderer; `get_system_prompt()` is just
+`render(build(...))`, so the rendered bytes are unchanged. The point is pi's
+`diffSystemPromptSections`: the prompt is rebuilt every turn, so `note_system_prompt_sections(agent,
+sections)` records the previous snapshot and the loop prints
+`[Prompt] system prompt sections changed: ...` only when a section actually changed. That turns "why
+did the prompt cache miss this turn" into a one-line answer. Do not re-inline the concatenation in the
+turn loop, and do not add a section without adding it to `SYSTEM_PROMPT_SECTION_ORDER` — an unordered
+section is a section `render_system_prompt` silently drops.
 
 ## Workflow prompt text is generated from the host tables
 
