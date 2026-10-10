@@ -291,3 +291,73 @@ _live_usage(make_tool_client(binding_from_profile('cc-deepseek-v4.1-flash-chat')
    结果交给 agent 循环续写最终答复（这正是用户此前要求的行为），idle 会晚到几十秒。
    已改为 `waitFor(idle, 180s)` 再断言，避免把正确的产品行为判成失败。
 
+## 9. 复测（网络恢复后，2026-10-10）
+
+第 8 节那次运行赶上了上游网络的 `SSLError` 风暴。网络恢复后用同一个探针重跑了一遍，
+结论如下（同 profile `cc-deepseek-v4.1-flash-chat`，真实 Tavily MCP）。
+
+| 观测量 | 第 8 节（网络故障） | 复测（正常） |
+|---|---|---|
+| `ready` | 2.0 s | 1.9 s |
+| `mcp_ready` | 82.1 s | 37.7 s |
+| `planSentToFirstStatusMs` | 1 ms | **1 ms** |
+| `planSentToFirstActivityMs` | 1 ms | **2 ms** |
+| 第二条命令返回（规划中） | 10 ms | **17 ms** |
+| `workflow_progress` 事件 | 33 | 17 |
+| `workflow_live` 事件 | 12 | 11 |
+| `maxLiveTurn` | 3 | **6** |
+| `error` 事件 | 有（子代理 SSL） | **0** |
+| `workflow_final` | 381.2 s | 231.7 s |
+| 回到 idle | 439.8 s | 277.9 s |
+
+**live 遥测这次带上了真实 token**，例如 `agents/agent_1/live.json`：
+
+```json
+{"jobId": "agent_1", "turn": 6, "toolCalls": 17,
+ "tokenUsage": {"input_tokens": 81241, "output_tokens": 404,
+                "total_tokens": 81645, "cached_tokens": 80256, ...},
+ "elapsedSeconds": 65.2}
+```
+
+也就是说第 8 节 `tokenUsage: {}` 确实只是 SSL 故障的连带结果，P4 的 token 通道本身可用。
+
+子代理这次真的调了工具（不再是清一色 `no_tool`）：
+`mcp__tavily__tavily_search` / `tavily_extract` / `mcp__exa__web_search_exa` / `mcp__fetch__fetch_markdown`
+/ `file_write` / `file_read` / `code_run`，三个 child 全部 `succeeded`，`executionOutcome: succeeded`，
+产物 `artifacts/research-sources.json` + `artifacts/overview.html` 都按契约落地。
+
+### 复测暴露并已修复的问题：planner 回复 JSON 语法错误 → 直接降级
+
+run 的 `executionOutcome` 是 `succeeded`，但 `status` 是 `degraded`，`workflowIssues` 里写着：
+
+```
+planner_fallback_deterministic:
+  planner fell back to the deterministic template; plan was not model-authored
+  reason: Expecting property name enclosed in double quotes: line 190 column 25 (char 5884)
+```
+
+根因在 `workflow_planner.py::LLMWorkflowPlanner`：`NativeWorkflowPlannerClient` 已经用了容错解析器
+`parse_json_object`，但模型这次给出的是**语法级**坏 JSON（行尾多余逗号），连容错解析器也解不开，
+于是 `JSONDecodeError` 冒泡到 `plan()` 里的 `except Exception` → **立刻** `_fallback_draft(...)`，
+把整个 run 降级成确定性模板。也就是说：**已有修复循环只处理"契约不合规"，不处理"压根解析不了"**。
+
+修复（`workflow_planner.py`）：
+
+1. 新增 `PlannerResponseError`，把"模型答复存在但解不成 JSON"与"provider/传输失败"区分开。
+2. `_request_plan()` 捕获 `json.JSONDecodeError`（来自 client 或字符串分支）并转成
+   `PlannerResponseError`；字符串分支改用容错的 `parse_json_object` 而不是裸 `json.loads`。
+3. `plan()` 遇到 `PlannerResponseError` 时不再直接 fallback，而是把解析错误作为
+   `planner_response_unparsable` issue 回喂给模型，走已有的修复循环；provider 失败仍然是硬失败。
+
+回归测试：`tests/test_workflow_prompt_guided_planner.py::LLMWorkflowPlannerTest::test_unparsable_planner_reply_is_repaired_instead_of_degrading`
+（第一次回复坏 JSON、第二次回复合法 plan，断言 `plannerMode == "prompt_guided"` 且消耗了一次
+`planner_response_unparsable` 修复）。
+
+### 复测后的总体结论
+
+- 现象 1/2/3 的修复在真实运行中全部生效，且有 1 ms / 2 ms / 17 ms 与 11 个 `workflow_live` 的硬证据。
+- P4 的 token 通道确认可用（真实 `total_tokens` 81,645）。
+- workflow 本身也能真实跑通（3 child 全 succeeded、真调 MCP、产物落盘、验收通过）。
+- 仍待单独一轮处理：MCP 冷启动 37–82 s；planner 仍可能偶发降级（现在至少有一次修复机会，
+  且降级原因会明确写进 `workflowIssues`）。
+

@@ -85,7 +85,11 @@ try {
   const live = events.filter(e => e.type === 'workflow_live')
   const liveJobs = live.flatMap(e => (e.jobs as Array<Record<string, unknown>>) || [])
   const maxTurn = liveJobs.reduce((m, j) => Math.max(m, Number(j.turn) || 0), 0)
-  const withTokens = liveJobs.filter(j => j.tokenUsage && Number((j.tokenUsage as Record<string, unknown>).total ?? (j.tokenUsage as Record<string, unknown>).input ?? 0) > 0).length
+  const withTokens = liveJobs.filter(j => {
+    const u = (j.tokenUsage || {}) as Record<string, unknown>
+    return Number(u.total_tokens ?? u.input_tokens ?? 0) > 0
+  }).length
+  const maxLiveTokens = liveJobs.reduce((m, j) => Math.max(m, Number(((j.tokenUsage || {}) as Record<string, unknown>).total_tokens ?? 0)), 0)
   const progress = events.filter(e => e.type === 'workflow_progress')
   let idle = false
   try { await waitFor('idle', () => events.some(e => e.type === 'status' && e.status === 'idle'), IDLE_TIMEOUT_MS); idle = true } catch {}
@@ -97,6 +101,7 @@ try {
     workflowProgressEvents: progress.length,
     maxLiveTurn: maxTurn,
     liveSamplesWithTokens: withTokens,
+    maxLiveTotalTokens: maxLiveTokens,
     returnedToIdle: idle,
     planSentToWorkflowFinalMs: stamps.workflow_final !== undefined && stamps.plan_sent !== undefined ? stamps.workflow_final - stamps.plan_sent : null,
     planSentToIdleMs: stamps.idle !== undefined && stamps.plan_sent !== undefined ? stamps.idle - stamps.plan_sent : null,

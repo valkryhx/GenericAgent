@@ -1200,6 +1200,14 @@ def build_workflow_planner_from_env(
     )
 
 
+class PlannerResponseError(ValueError):
+    """The planner model replied with text that is not a decodable JSON object.
+
+    Distinct from a provider/transport failure: the model answered, we just
+    cannot parse it, so the repair loop can show it the exact parse error.
+    """
+
+
 class LLMWorkflowPlanner:
     def __init__(self, *, client, fallback: WorkflowPlanner | None = None, max_repair_attempts: int = 2):
         self.client = client
@@ -1208,36 +1216,48 @@ class LLMWorkflowPlanner:
 
     def plan(self, task_text: str, context: dict[str, Any] | None = None) -> WorkflowDraft:
         context = copy.deepcopy(context or {})
-        try:
-            raw_plan = self._request_plan(task_text, context, issues=[])
-        except Exception as exc:
-            return self._fallback_draft(task_text, context, reason=str(exc))
-
         repair_attempts: list[dict[str, Any]] = []
         plan: dict[str, Any] = {}
         validation: dict[str, Any] = {"ok": False, "issues": []}
+        try:
+            raw_plan: dict[str, Any] | None = self._request_plan(task_text, context, issues=[])
+        except PlannerResponseError as exc:
+            # The model replied, but not with JSON we can decode. That is a
+            # repairable defect, not a provider outage: feed the exact parse
+            # error back to the model instead of dropping straight to the
+            # deterministic template, which degraded a run whose work would
+            # otherwise have succeeded (real case: wf_a076100a22ef4e799fe2cd8dd81a027a).
+            raw_plan = None
+            validation = {
+                "ok": False,
+                "issues": [{"code": "planner_response_unparsable", "message": str(exc)}],
+            }
+        except Exception as exc:
+            return self._fallback_draft(task_text, context, reason=str(exc))
+
         for _ in range(self.max_repair_attempts + 1):
-            try:
-                plan = _normalize_plan_contract(raw_plan)
-                validation = validate_workflow_plan(plan)
-            except (TypeError, ValueError, KeyError) as exc:
-                # A malformed contract is a validator issue, not a provider
-                # failure. Keep the raw plan so the normal repair prompt can
-                # show the model the exact contract defect instead of silently
-                # switching to the deterministic planner.
-                plan = copy.deepcopy(raw_plan) if isinstance(raw_plan, dict) else {}
-                validation = {
-                    "ok": False,
-                    "issues": [{"code": "invalid_plan_contract", "message": str(exc)}],
-                }
-            if validation["ok"]:
-                classification = self.fallback.classify(task_text, context)
-                classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
-                script = render_workflow_plan(plan)
-                context["plannerMode"] = "prompt_guided"
-                if repair_attempts:
-                    context["repairAttempts"] = repair_attempts
-                return WorkflowDraft(task_text=task_text, context=context, classification=classification, plan=plan, validation=validation, script=script)
+            if raw_plan is not None:
+                try:
+                    plan = _normalize_plan_contract(raw_plan)
+                    validation = validate_workflow_plan(plan)
+                except (TypeError, ValueError, KeyError) as exc:
+                    # A malformed contract is a validator issue, not a provider
+                    # failure. Keep the raw plan so the normal repair prompt can
+                    # show the model the exact contract defect instead of silently
+                    # switching to the deterministic planner.
+                    plan = copy.deepcopy(raw_plan) if isinstance(raw_plan, dict) else {}
+                    validation = {
+                        "ok": False,
+                        "issues": [{"code": "invalid_plan_contract", "message": str(exc)}],
+                    }
+                if validation["ok"]:
+                    classification = self.fallback.classify(task_text, context)
+                    classification["taskType"] = str(plan.get("taskType") or classification["taskType"])
+                    script = render_workflow_plan(plan)
+                    context["plannerMode"] = "prompt_guided"
+                    if repair_attempts:
+                        context["repairAttempts"] = repair_attempts
+                    return WorkflowDraft(task_text=task_text, context=context, classification=classification, plan=plan, validation=validation, script=script)
             if len(repair_attempts) >= self.max_repair_attempts:
                 break
             repair_attempts.append({"issues": copy.deepcopy(validation["issues"]), "plan": copy.deepcopy(plan)})
@@ -1248,6 +1268,12 @@ class LLMWorkflowPlanner:
                     issues=validation["issues"],
                     previous_plan=plan,
                 )
+            except PlannerResponseError as exc:
+                raw_plan = None
+                validation = {
+                    "ok": False,
+                    "issues": [{"code": "planner_response_unparsable", "message": str(exc)}],
+                }
             except Exception as exc:
                 return self._fallback_draft(task_text, context, reason=str(exc))
         return self._rejected_draft(task_text, context, plan=plan, validation=validation, repair_attempts=repair_attempts)
@@ -1260,11 +1286,17 @@ class LLMWorkflowPlanner:
         issues: list[dict[str, Any]],
         previous_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = self.client.complete([{"role": "system", "content": self._planner_prompt(task_text, context, issues=issues, previous_plan=previous_plan)}])
+        try:
+            response = self.client.complete([{"role": "system", "content": self._planner_prompt(task_text, context, issues=issues, previous_plan=previous_plan)}])
+        except json.JSONDecodeError as exc:
+            raise PlannerResponseError(str(exc)) from exc
         if isinstance(response, dict):
             return copy.deepcopy(response)
         if isinstance(response, str):
-            return json.loads(response)
+            try:
+                return parse_json_object(response)
+            except json.JSONDecodeError as exc:
+                raise PlannerResponseError(str(exc)) from exc
         raise TypeError("planner client must return WorkflowPlan JSON as dict or JSON string")
 
     def _planner_prompt(

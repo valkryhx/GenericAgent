@@ -232,6 +232,24 @@ class LLMWorkflowPlannerTest(unittest.TestCase):
         self.assertLess(phase_of["superpowers-coding-agent"], phase_of["verification-agent"])
         self.assertLess(phase_of["verification-agent"], phase_of["synthesis-agent"])
 
+    def test_unparsable_planner_reply_is_repaired_instead_of_degrading(self):
+        # A syntax-level defect (here a trailing comma) used to escape as a
+        # generic exception and drop the whole run to the deterministic
+        # template, which degraded a run whose work would have succeeded.
+        broken = '{"taskType": "review", "phases": [],}'
+        client = FakePlannerClient(responses=[broken, review_plan()])
+        planner = LLMWorkflowPlanner(client=client, max_repair_attempts=1)
+
+        draft = planner.plan("全面审查这个 PR 的安全、性能、测试缺口和回归风险", context={})
+
+        self.assertTrue(draft.validation["ok"], draft.validation)
+        self.assertEqual("prompt_guided", draft.context["plannerMode"])
+        self.assertEqual(2, len(client.calls))
+        attempts = draft.context.get("repairAttempts") or []
+        self.assertTrue(attempts, "a parse failure must consume a repair attempt")
+        codes = {issue["code"] for attempt in attempts for issue in attempt["issues"]}
+        self.assertIn("planner_response_unparsable", codes)
+
     def test_prompt_guided_planner_uses_llm_plan_json_for_dynamic_review_topology(self):
         client = FakePlannerClient(responses=[review_plan()])
         planner = LLMWorkflowPlanner(client=client)
