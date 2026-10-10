@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentRecord, BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
+import type { AgentEvent, AgentRecord, BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
 import {
   commitStreamingAssistantMessages,
   committedAssistantPrefix,
@@ -15,6 +15,8 @@ export type AppState = {
   workflowEvents: WorkflowEvent[]
   workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }>
   workflowResults: Record<string, Record<string, unknown>>
+  /** runId -> jobId -> live counters published while children still run. */
+  liveTelemetry: Record<string, Record<string, WorkflowLiveJob>>
   /** 重印 <Static> 的代数：每次整段替换/裁剪历史都 +1，让重挂与 messages 落在同一次 commit。 */
   staticGeneration: number
   agents: AgentRecord[]
@@ -33,6 +35,7 @@ export const initialState: AppState = {
   workflowEvents: [],
   workflowDetails: {},
   workflowResults: {},
+  liveTelemetry: {},
   staticGeneration: 0,
   agents: [],
   agentEvents: [],
@@ -137,6 +140,21 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'workflow_final') {
     return { ...state, workflowResults: { ...state.workflowResults, [event.runId]: event.result }, error: null }
+  }
+  if (event.type === 'workflow_live') {
+    // Live telemetry only exists to make a running child observable. It must
+    // not resurrect a run the UI has never seen (an old run's late tick).
+    const known = state.workflows.some(run => run.runId === event.runId) || Boolean(state.workflowDetails[event.runId])
+    if (!known) return state
+    const jobs: Record<string, WorkflowLiveJob> = { ...(state.liveTelemetry[event.runId] ?? {}) }
+    for (const job of event.jobs) {
+      if (job && typeof job.jobId === 'string') jobs[job.jobId] = job
+    }
+    return {
+      ...state,
+      liveTelemetry: { ...state.liveTelemetry, [event.runId]: jobs },
+      error: null,
+    }
   }
   if (event.type === 'agent_snapshot') {
     return {

@@ -2920,3 +2920,34 @@ class HostCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunnerTelemetryWiringTest(unittest.TestCase):
+    def test_runtime_wires_a_live_telemetry_sink_under_the_run_dir(self):
+        captured = {}
+
+        class SinkRunner(NeverFinishesRunner):
+            def set_telemetry_sink(self, sink):
+                captured['sink'] = sink
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(session_id="session", script="return 1"))
+            runtime = WorkflowRuntime(store=store, runner=SinkRunner(), timeout_seconds=5)
+
+            runtime._wire_runner_telemetry(run)
+
+            self.assertIn("sink", captured)
+            captured["sink"]("agent_1", {"jobId": "agent_1", "turn": 2, "toolCalls": 3})
+            payload = store.read_job_live_telemetry(run, "agent_1")
+            self.assertEqual(2, payload["turn"])
+            self.assertEqual(3, payload["toolCalls"])
+            self.assertTrue((Path(run.artifact_dir) / "agents" / "agent_1" / "live.json").is_file())
+
+    def test_runtime_tolerates_a_runner_without_a_telemetry_sink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(session_id="session", script="return 1"))
+            runtime = WorkflowRuntime(store=store, runner=NeverFinishesRunner(), timeout_seconds=5)
+
+            runtime._wire_runner_telemetry(run)

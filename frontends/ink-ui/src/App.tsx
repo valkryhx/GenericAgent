@@ -8,7 +8,17 @@ import { createPasteStore } from './paste.js'
 import { createImageAttachmentStore } from './imageAttachments.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput, applyClipboardImagePaste } from './inputController.js'
-import { workflowListPanelFromRuns, workflowPanelCommandForKey, workflowPanelFromDetail, workflowPanelRows, workflowPanelWithRunUpdate, type WorkflowPanelState } from './workflowPanel.js'
+import {
+  WORKFLOW_PANEL_MAX_ROWS,
+  workflowListPanelFromRuns,
+  workflowPanelCapturesKey,
+  workflowPanelCommandForKey,
+  workflowPanelFromDetail,
+  workflowPanelRows,
+  workflowPanelWithLive,
+  workflowPanelWithRunUpdate,
+  type WorkflowPanelState,
+} from './workflowPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
@@ -373,10 +383,10 @@ function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme
   )
 }
 
-function WorkflowPanelView({ panel, theme }: { panel: WorkflowPanelState; theme: InkTheme }) {
+function WorkflowPanelView({ lines, theme }: { lines: string[]; theme: InkTheme }) {
   return (
     <Box flexDirection="column" paddingX={1}>
-      {workflowPanelRows(panel).map((line, index, rows) => (
+      {lines.map((line, index, rows) => (
         <Text key={index} color={index === 0 ? theme.accent : index >= 4 && index < rows.length - 1 ? undefined : theme.muted} wrap="truncate-end">
           {line}
         </Text>
@@ -1007,6 +1017,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
         return
       }
+      if (event.type === 'workflow_live') {
+        dispatch(event)
+        // Live counters are UI-only; fold them into the open panel so the
+        // agent rows show the current turn/tool/token without a full refresh.
+        setWorkflowPanel(panel => (panel ? workflowPanelWithLive(panel, event.runId, event.jobs) : panel))
+        return
+      }
       if (event.type === 'workflow_run') {
         dispatch(event)
         setWorkflowPanel(panel => panel ? workflowPanelWithRunUpdate(panel, event.run) : panel)
@@ -1171,6 +1188,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         dismissPendingLocalCommand()
         return
       }
+      // The overlay owns its keys: an unhandled `r`/`x`/`j` must not be typed
+      // into the composer, which would then disable the status-bar shortcut
+      // (it only runs while the composer is empty).
+      if (workflowPanelCapturesKey(workflowPanel, key, rawInput)) return
     }
     if (modelPanel) {
       if (key.escape) {
@@ -1464,6 +1485,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const inputRows = promptViewport.lines.length
   const errorRows = state.error ? 1 : 0
   const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage, completedTurnActivity !== null)
+  const workflowPanelLines = useMemo(
+    () => (workflowPanel ? workflowPanelRows(workflowPanel).slice(0, WORKFLOW_PANEL_MAX_ROWS) : []),
+    [workflowPanel],
+  )
   const panelRows = approvalPanel
     ? approvalPanelRows(approvalPanel)
     : modelPanel
@@ -1477,7 +1502,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     : selector
       ? Math.min(selectorSize(selector), 8) + 2
     : workflowPanel
-      ? Math.min(workflowPanelRows(workflowPanel).length, 8)
+      ? workflowPanelLines.length
     : footerPanel
       ? footerPanelRows(footerPanel)
     : showMcpStartupStatus
@@ -1642,7 +1667,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
-      if (workflowPanel) return <WorkflowPanelView key={section} panel={workflowPanel} theme={theme} />
+      if (workflowPanel) return <WorkflowPanelView key={section} lines={workflowPanelLines} theme={theme} />
       if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }

@@ -201,6 +201,34 @@ class WorkflowStore:
                 fh.write(json.dumps(sanitize(event), ensure_ascii=False, separators=(",", ":")) + "\n")
         return transcript_ref
 
+    def live_telemetry_path(self, run: WorkflowRun | str, job_id: str) -> Path:
+        artifact_dir = self._run_dir(run) if isinstance(run, WorkflowRun) else self._find_run_dir(run)
+        return artifact_dir / "agents" / str(job_id) / "live.json"
+
+    def write_job_live_telemetry(self, run: WorkflowRun | str, job_id: str, payload: dict) -> None:
+        """Persist one running child's live turn/tool/token counters.
+
+        A child only writes its transcript when the job *ends*, so a
+        multi-minute child used to be a frozen row in the UI. This file is a
+        UI observation channel only: it never feeds a durable contract check,
+        and ``workflow-progress.json`` stays the single durable snapshot.
+        """
+        if not isinstance(payload, dict):
+            return
+        path = self.live_telemetry_path(run, job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(path, sanitize(payload))
+
+    def read_job_live_telemetry(self, run: WorkflowRun | str, job_id: str) -> dict | None:
+        path = self.live_telemetry_path(run, job_id)
+        if not path.exists():
+            return None
+        try:
+            payload = read_json_retrying(path)
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def copy_agent_transcript(self, source_run: WorkflowRun | str, source_ref: str, target_run: WorkflowRun, target_job: WorkflowJob) -> str | None:
         if not source_ref:
             return None

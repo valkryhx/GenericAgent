@@ -1,4 +1,4 @@
-import type { BridgeCommand, WorkflowJob, WorkflowProgressEntry, WorkflowRun } from './protocol.js'
+import type { BridgeCommand, WorkflowJob, WorkflowLiveJob, WorkflowProgressEntry, WorkflowRun } from './protocol.js'
 import type { AppState } from './state.js'
 import type { InputKey } from './inputController.js'
 
@@ -11,6 +11,8 @@ export type WorkflowStatusBarSummary = {
   activeAgent?: string
   lastActivity?: string
   tokenText?: string
+  /** Live-only counters for the active child (turn / tools / elapsed). */
+  liveText?: string
   integrationText?: string
 }
 
@@ -38,6 +40,7 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = ru
   const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached' || agent.state === 'degraded').length
   const totalAgents = agents.length
   const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
+  const live = liveForActive(state.liveTelemetry[run.runId], active)
   const summary: WorkflowStatusBarSummary = {
     runId: run.runId,
     status,
@@ -45,9 +48,13 @@ function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = ru
     completedAgents,
     totalAgents,
     activeAgent: labelForProgress(active),
-    lastActivity: typeof active?.lastToolName === 'string' && active.lastToolName.trim() ? active.lastToolName.trim() : undefined,
-    tokenText: formatTokenUsage(sumTokenUsage(agents)),
+    // While a child runs the durable snapshot has no token total yet, so the
+    // live channel is the only place that knows the current turn and usage.
+    lastActivity: stringValue(live?.lastToolName) ?? (typeof active?.lastToolName === 'string' && active.lastToolName.trim() ? active.lastToolName.trim() : undefined),
+    tokenText: formatTokenUsage(tokenTotal(live?.tokenUsage) ?? sumTokenUsage(agents)),
   }
+  const liveText = liveStatusText(live)
+  if (liveText) summary.liveText = liveText
   const integrationText = workflowIntegrationText(run, state)
   if (integrationText) summary.integrationText = integrationText
   return summary
@@ -79,6 +86,7 @@ export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
   }
   const pieces = [`${bar.completedAgents}/${bar.totalAgents} agents done`]
   if (bar.activeAgent) pieces.push(bar.lastActivity ? `${bar.activeAgent}: ${bar.lastActivity}` : bar.activeAgent)
+  if (bar.liveText) pieces.push(bar.liveText)
   if (bar.tokenText) pieces.push(bar.tokenText)
   if (bar.integrationText) pieces.push(bar.integrationText)
   const icon =
@@ -150,6 +158,35 @@ function formatTokenUsage(total: number | null): string | undefined {
     return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded}k tok`
   }
   return `${total} tok`
+}
+
+function liveForActive(
+  live: Record<string, WorkflowLiveJob> | undefined,
+  active?: WorkflowProgressEntry,
+): WorkflowLiveJob | undefined {
+  if (!live || !active) return undefined
+  for (const key of [active.jobId, active.agentId, active.label]) {
+    if (typeof key === 'string' && key && live[key]) return live[key]
+  }
+  return undefined
+}
+
+function liveStatusText(live?: WorkflowLiveJob): string | undefined {
+  if (!live) return undefined
+  const pieces = [
+    typeof live.turn === 'number' && live.turn > 0 ? `turn ${live.turn}` : null,
+    typeof live.toolCalls === 'number' && live.toolCalls > 0 ? `${live.toolCalls} tools` : null,
+    elapsedText(live.elapsedSeconds),
+  ].filter(Boolean)
+  return pieces.length > 0 ? pieces.join(' · ') : undefined
+}
+
+function elapsedText(seconds: unknown): string | null {
+  const value = numberValue(seconds)
+  if (value === null || value < 0) return null
+  if (value < 60) return `${Math.round(value)}s`
+  const minutes = Math.floor(value / 60)
+  return `${minutes}m ${Math.round(value - minutes * 60)}s`
 }
 
 function numberValue(value: unknown): number | null {

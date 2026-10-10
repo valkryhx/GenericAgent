@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows, workflowAgentDetailPanelFromOverview, workflowPanelWithRunUpdate } from './workflowPanel.js'
+import { workflowPanelFromDetail, workflowRawDetailPanelFromDetail, workflowPanelRows, workflowPanelCommandForKey, workflowPanelCapturesKey, workflowListRows, workflowListCommandForKey, workflowOverviewFromDetail, workflowOverviewRows, workflowAgentDetailPanelFromOverview, workflowPanelWithLive, workflowPanelWithRunUpdate } from './workflowPanel.js'
 import type { WorkflowRun } from './protocol.js'
 
 const workflowRuns: WorkflowRun[] = [
@@ -91,7 +91,7 @@ test('workflowOverviewRows groups agents by progress phaseTitle', () => {
     'Phases | Inspect · 2 agents',
     '› ✓ Inspect 2/2 | ✓ planner-api  24.9k tok · 16 tools',
     '  ✓ Matrix 1/1 | ✓ real-e2e-patterns  45k tok · 24 tools',
-    'Enter agent - Up/Down phase - Esc back',
+    'Enter agent · j/k phase · PgUp/PgDn · Esc back',
   ])
 })
 
@@ -271,18 +271,21 @@ test('workflowAgentDetailRows renders selected agent Prompt Activity Outcome sec
   })
   const detailPanel = workflowAgentDetailPanelFromOverview(panel, 0, 0)
 
-  assert.deepEqual(workflowPanelRows(detailPanel).slice(0, 14), [
+  assert.deepEqual(workflowPanelRows(detailPanel), [
     'Inspect · 2 agents | planner-api',
     '› ✓ planner-api | ✓ Completed · Opus 4.8 (1M context) · 24.9k tok · 4 tool calls',
     '  ✓ real-e2e-patterns | Prompt',
     '                   |   Inspect workflow_planner.py',
-    '                   | Activity · last 3 of 4 tool calls',
+    '                   | Activity · last 4 of 4 tool calls',
+    '                   |   Read 1',
     '                   |   Read 2',
     '                   |   Grep workflow symbols',
     '                   |   Read final notes',
     '                   | Outcome',
     '                   |   已检查 workflow planner public API。',
-    '↑↓ agent · j/k scroll · esc back',
+    '                   | ',
+    '                   | ',
+    '↑↓ agent · j/k scroll · PgUp/PgDn page · g/G ends · esc back',
   ])
 })
 
@@ -300,7 +303,16 @@ test('workflowPanelCommandForKey opens agent detail and navigates within it', ()
     script: 'return 1',
     events: [],
     draft: { taskText: 'x', classification: {}, plan: { meta: { name: 'x' }, phases: [{ title: 'P', agents: [{ label: 'first' }, { label: 'second' }] }] }, validation: { ok: true } },
-    progress: null,
+    // Enough tool calls that the detail window actually overflows and scrolls.
+    progress: {
+      runId: 'wf_agent_keys',
+      sessionId: 'session',
+      status: 'running',
+      workflowProgress: [
+        { jobId: 'agent_1', label: 'first', state: 'running', toolCalls: Array.from({ length: 20 }, (_, index) => `Tool ${index + 1}`) },
+        { jobId: 'agent_2', label: 'second', state: 'running', toolCalls: Array.from({ length: 20 }, (_, index) => `Tool ${index + 1}`) },
+      ],
+    },
   })
 
   const opened = workflowPanelCommandForKey(overviewPanel, { return: true }, '')?.panel
@@ -408,4 +420,134 @@ test('workflowPanelCommandForKey maps resume shortcut for completed or interrupt
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 'r'), null)
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'cancelled' } }, {}, 'r'), null)
   assert.equal(workflowPanelRows(panel).at(-1), 'r resume - s stop - Esc close')
+})
+
+function multiPhaseDetail() {
+  return {
+    run: { runId: 'wf_phases', sessionId: 'session', status: 'running', jobs: [] },
+    script: 'return 1',
+    events: [],
+    draft: {
+      taskText: 'x',
+      classification: {},
+      plan: {
+        meta: { name: 'x' },
+        phases: [
+          { title: 'One', agents: [{ label: 'a1' }] },
+          { title: 'Two', agents: [{ label: 'a2' }] },
+          { title: 'Three', agents: [{ label: 'a3' }] },
+        ],
+      },
+      validation: { ok: true },
+    },
+    progress: null,
+  }
+}
+
+test('workflowPanelCommandForKey navigates overview phases with j/k/PgDn/g/G', () => {
+  const panel = workflowPanelFromDetail(multiPhaseDetail())
+  assert.equal(panel.mode, 'overview')
+
+  const down = workflowPanelCommandForKey(panel, {}, 'j')?.panel
+  if (down?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(down.overview.selectedPhase, 1)
+
+  const up = workflowPanelCommandForKey(down, {}, 'k')?.panel
+  if (up?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(up.overview.selectedPhase, 0)
+
+  const paged = workflowPanelCommandForKey(panel, { pageDown: true }, '')?.panel
+  if (paged?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(paged.overview.selectedPhase, 2)
+
+  const last = workflowPanelCommandForKey(panel, {}, 'G')?.panel
+  if (last?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(last.overview.selectedPhase, 2)
+
+  const first = workflowPanelCommandForKey(last, {}, 'g')?.panel
+  if (first?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(first.overview.selectedPhase, 0)
+
+  // Up past the top clamps instead of wrapping into a negative index.
+  const clamped = workflowPanelCommandForKey(panel, { upArrow: true }, '')?.panel
+  if (clamped?.mode !== 'overview') throw new Error('expected overview panel')
+  assert.equal(clamped.overview.selectedPhase, 0)
+})
+
+test('workflowPanelCapturesKey keeps panel keys out of the composer', () => {
+  const panel = workflowPanelFromDetail(multiPhaseDetail())
+  assert.equal(workflowPanelCapturesKey(panel, {}, 'j'), true)
+  assert.equal(workflowPanelCapturesKey(panel, {}, 'k'), true)
+  assert.equal(workflowPanelCapturesKey(panel, {}, 'x'), true)
+  assert.equal(workflowPanelCapturesKey(panel, {}, 'a'), false)
+  assert.equal(workflowPanelCapturesKey(panel, { ctrl: true }, 'j'), false)
+  assert.equal(workflowPanelCapturesKey(panel, { downArrow: true }, ''), true)
+  assert.equal(workflowPanelCapturesKey(panel, { pageDown: true }, ''), true)
+})
+
+test('live telemetry surfaces turn, tool and token counters for a running child', () => {
+  const detail = {
+    run: {
+      runId: 'wf_live',
+      sessionId: 'session',
+      status: 'running',
+      jobs: [{ jobId: 'agent_1', status: 'running', metadata: { label: 'researcher' } }],
+    },
+    script: 'return 1',
+    events: [],
+    draft: null,
+    progress: {
+      runId: 'wf_live',
+      sessionId: 'session',
+      status: 'running',
+      workflowProgress: [{ jobId: 'agent_1', label: 'researcher', state: 'running', toolCalls: ['tavily_search'] }],
+    },
+    live: {
+      agent_1: {
+        jobId: 'agent_1',
+        turn: 4,
+        toolCalls: 9,
+        lastToolName: 'tavily_search',
+        tokenUsage: { totalTokens: 52000 },
+        elapsedSeconds: 95,
+      },
+    },
+  }
+
+  const overview = workflowOverviewFromDetail(detail)
+  const rows = workflowOverviewRows(overview)
+  assert.equal(rows.some(row => row.includes('turn 4') && row.includes('52k tok') && row.includes('tavily_search')), true)
+
+  const panel = workflowAgentDetailPanelFromOverview({ mode: 'overview', overview, detailSource: detail }, 0, 0)
+  const detailRows = workflowPanelRows(panel)
+  assert.equal(detailRows[1].includes('turn 4'), true)
+  assert.equal(detailRows[1].includes('1m 35s'), true)
+  assert.equal(detailRows[1].includes('52k tok'), true)
+})
+
+test('workflowPanelWithLive folds live counters into an open panel', () => {
+  const panel = workflowPanelFromDetail({
+    run: { runId: 'wf_live_panel', sessionId: 'session', status: 'running', jobs: [] },
+    script: 'return 1',
+    events: [],
+    draft: {
+      taskText: 'x',
+      classification: {},
+      plan: { meta: { name: 'x' }, phases: [{ title: 'Work', agents: [{ label: 'researcher' }] }] },
+      validation: { ok: true },
+    },
+    progress: null,
+  })
+
+  const updated = workflowPanelWithLive(panel, 'wf_live_panel', [
+    { jobId: 'researcher', turn: 2, toolCalls: 3, lastToolName: 'exa_search', tokenUsage: { totalTokens: 1200 }, elapsedSeconds: 12 },
+  ])
+  const rows = workflowPanelRows(updated)
+  assert.equal(rows.some(row => row.includes('turn 2') && row.includes('exa_search')), true)
+
+  // A live tick for a different run must not touch this panel.
+  const untouched = workflowPanelWithLive(panel, 'wf_other', [
+    { jobId: 'researcher', turn: 9, toolCalls: 9, lastToolName: 'nope' },
+  ])
+  assert.deepEqual(workflowPanelRows(untouched), workflowPanelRows(panel))
 })

@@ -232,6 +232,7 @@ class WorkflowRuntime:
         else:
             self.store.save_run(run)
         resume_plan = self._build_resume_plan(run, args=runtime_args, cache_args=args, resume_from_run_id=resume_from_run_id)
+        self._wire_runner_telemetry(run)
         scheduler = AgentScheduler(
             store=self.store,
             run=run,
@@ -393,6 +394,25 @@ class WorkflowRuntime:
             reader_done.set()
             if hasattr(self.runner, "clear_run_capabilities"):
                 self.runner.clear_run_capabilities(run.run_id)
+
+    def _wire_runner_telemetry(self, run: WorkflowRun) -> None:
+        """Let running children publish live turn/tool/token counters.
+
+        Best-effort and optional: a runner without ``set_telemetry_sink`` (test
+        doubles, older callers) keeps working exactly as before.
+        """
+        setter = getattr(self.runner, "set_telemetry_sink", None)
+        if not callable(setter):
+            return
+        store = self.store
+
+        def sink(job_id: str, payload: dict) -> None:
+            try:
+                store.write_job_live_telemetry(run, job_id, payload)
+            except Exception:
+                pass
+
+        setter(sink)
 
     def _handle_rpc(
         self,

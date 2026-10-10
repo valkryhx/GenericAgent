@@ -232,6 +232,24 @@ export type WorkflowProgressPayload = {
   workflowProgress: WorkflowProgressEntry[]
 }
 
+/**
+ * Live per-job counters published by the bridge while a child is still running.
+ *
+ * This is a UI observation channel only: ``workflow-progress.json`` stays the
+ * single durable snapshot (a child writes its transcript only when the job
+ * ends, so without this a multi-minute child is a frozen row).
+ */
+export type WorkflowLiveJob = {
+  jobId: string
+  turn?: number
+  toolCalls?: number
+  lastToolName?: string | null
+  lastToolSummary?: string | null
+  tokenUsage?: Record<string, unknown>
+  elapsedSeconds?: number
+  updatedAt?: number
+}
+
 export type AgentCapabilities = {
   actions: string[]
   features: string[]
@@ -316,6 +334,7 @@ export type BridgeEvent =
   | { type: 'workflow_runs'; runs: WorkflowRun[] }
   | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
   | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
+  | { type: 'workflow_live'; runId: string; jobs: WorkflowLiveJob[] }
   | { type: 'workflow_event'; event: WorkflowEvent }
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'agent_snapshot'; snapshot: AgentSnapshot }

@@ -26,6 +26,103 @@ class ChildAgentRunner(Protocol):
     def cancel(self, job) -> None: ...
 
 
+def _live_usage(client) -> dict:
+    for candidate in (client, getattr(client, "backend", None)):
+        if candidate is None:
+            continue
+        usage = getattr(candidate, "last_usage_tokens", None)
+        if isinstance(usage, dict) and usage:
+            return copy.deepcopy(usage)
+    return {}
+
+
+def _summarize_tool_data(data, limit: int = 160) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        text = data
+    else:
+        try:
+            text = json.dumps(data, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(data)
+    return " ".join(text.split())[:limit]
+
+
+class LiveJobTelemetry:
+    """Throttled, best-effort live counters for one running workflow child.
+
+    The host injects a sink (``NativeGPTChildAgentRunner.set_telemetry_sink``);
+    without one every call is a no-op, so unit tests and other callers are
+    unaffected. A child only writes its transcript when the job *ends*, so
+    without this a multi-minute child is a frozen row in the Ink UI.
+    """
+
+    def __init__(
+        self,
+        sink,
+        job_id: str,
+        *,
+        min_interval: float = 1.0,
+        started_at: float | None = None,
+        client=None,
+    ):
+        self._sink = sink
+        self._job_id = str(job_id)
+        self._min_interval = float(min_interval)
+        self._client = client
+        self._started_at = time.time() if started_at is None else float(started_at)
+        self._lock = threading.Lock()
+        self._last_emit = 0.0
+        self._last_fingerprint: str | None = None
+        self._tool_calls = 0
+        self._last_tool_name: str | None = None
+        self._last_tool_summary: str | None = None
+
+    def note_tool_call(self, tool_name) -> None:
+        with self._lock:
+            self._tool_calls += 1
+            self._last_tool_name = str(tool_name or "")
+
+    def note_tool_result(self, tool_name, data) -> None:
+        with self._lock:
+            if tool_name:
+                self._last_tool_name = str(tool_name)
+            self._last_tool_summary = _summarize_tool_data(data)
+
+    def update(self, handler, client=None, *, force: bool = False) -> None:
+        if self._sink is None:
+            return
+        if client is None:
+            client = self._client
+        now = time.time()
+        with self._lock:
+            if not force and now - self._last_emit < self._min_interval:
+                return
+            payload = {
+                "jobId": self._job_id,
+                "turn": int(getattr(handler, "current_turn", 0) or 0),
+                "toolCalls": self._tool_calls,
+                "lastToolName": self._last_tool_name,
+                "lastToolSummary": self._last_tool_summary,
+                "tokenUsage": _live_usage(client),
+                "elapsedSeconds": round(now - self._started_at, 1),
+                "updatedAt": now,
+            }
+            try:
+                fingerprint = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                fingerprint = None
+            if not force and fingerprint is not None and fingerprint == self._last_fingerprint:
+                return
+            self._last_emit = now
+            self._last_fingerprint = fingerprint
+        try:
+            self._sink(self._job_id, payload)
+        except Exception:
+            pass
+
+
 class FakeChildAgentRunner:
     def __init__(
         self,
@@ -395,6 +492,7 @@ class NativeGPTChildAgentRunner:
         max_tokens: int | None = None,
         enable_tools: bool = True,
         max_turns: int = 40,
+        telemetry_min_interval: float = 1.0,
     ):
         # config_name kept for factory call signature / legacy tests; not used for mykey resolve by default.
         self.config_name = config_name if config_name is not None else (profile_name or "")
@@ -407,12 +505,22 @@ class NativeGPTChildAgentRunner:
         self.max_tokens = max_tokens
         self.enable_tools = bool(enable_tools)
         self.max_turns = int(max_turns)
+        self.telemetry_min_interval = float(telemetry_min_interval)
         self.last_capability_snapshot: dict = {}
         self._run_capability_schemas: dict[str, tuple[list[dict], dict]] = {}
         self.last_job_tool_profile: str = ""
         self.last_llm_binding: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._telemetry_sink = None
+
+    def set_telemetry_sink(self, sink) -> None:
+        """Receive ``sink(job_id, payload)`` updates from running children.
+
+        Optional and best-effort: a runner without a sink behaves exactly as
+        before, so tests and non-Ink callers are unaffected.
+        """
+        self._telemetry_sink = sink if callable(sink) else None
 
     def start(self, job) -> None:
         executable, is_tool_client, llm_meta = self._new_executable()
@@ -573,6 +681,14 @@ class NativeGPTChildAgentRunner:
         from agent_loop import agent_runner_loop
         from mcp_runtime import mcp_cancellation_scope
         handler = self._build_handler(job, transcript_events, profile, version)
+        live = LiveJobTelemetry(
+            self._telemetry_sink,
+            job.job_id,
+            min_interval=self.telemetry_min_interval,
+            client=client,
+        )
+        handler.live_telemetry = live
+        live.update(handler, force=True)
         with self._lock:
             state["handler"] = handler
             cancelled = bool(state.get("cancelled"))
@@ -623,6 +739,22 @@ class NativeGPTChildAgentRunner:
             tool_summary["writtenPaths"] = written[:64]
         return output, usage, tool_summary
 
+    def _live_update(self, handler, *, tool_name=None, tool_data=None, force: bool = False) -> None:
+        """Best-effort live telemetry hook for a running child.
+
+        The writer is attached to the handler (``handler.live_telemetry``) so
+        this stays invisible to callers and test doubles that replace
+        ``_build_handler``.
+        """
+        live = getattr(handler, "live_telemetry", None)
+        if live is None:
+            return
+        if tool_name is not None:
+            live.note_tool_call(tool_name)
+        if tool_data is not None:
+            live.note_tool_result(tool_name, tool_data)
+        live.update(handler, force=force)
+
     def _build_handler(self, job, transcript_events: list[dict], profile: str, version: str):
         from ga import GenericAgentHandler
         from workflow_permissions import ToolPermissionPolicy
@@ -648,12 +780,14 @@ class NativeGPTChildAgentRunner:
                 "toolName": tool_name,
                 "args": copy.deepcopy({k: v for k, v in (args or {}).items() if not str(k).startswith("_")}),
             })
+            self._live_update(handler, tool_name=tool_name)
 
         def after(tool_name, args, response, ret):
             data = getattr(ret, "data", ret)
             if not isinstance(data, (dict, list, str, int, float, bool, type(None))):
                 data = {"content": getattr(data, "content", str(data))}
             transcript_events.append({"type": "tool_result", "toolName": tool_name, "data": copy.deepcopy(data)})
+            self._live_update(handler, tool_name=tool_name, tool_data=data)
 
         handler.tool_before_callback = before
         handler.tool_after_callback = after

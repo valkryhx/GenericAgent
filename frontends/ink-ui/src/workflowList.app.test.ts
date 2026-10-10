@@ -20,6 +20,7 @@ class CaptureWriteStream extends EventEmitter {
 
 class FakeReadStream extends EventEmitter {
   isTTY = true
+  private queue: string[] = []
 
   setRawMode(): this {
     return this
@@ -37,8 +38,14 @@ class FakeReadStream extends EventEmitter {
     return this
   }
 
-  read(): null {
-    return null
+  read(): string | null {
+    return this.queue.shift() ?? null
+  }
+
+  /** Queue a keystroke the way a terminal would deliver it. */
+  push(chunk: string): void {
+    this.queue.push(chunk)
+    this.emit('readable')
   }
 }
 
@@ -191,6 +198,82 @@ test('App shows live workflow status bar without opening workflow panel', async 
     assert.match(frame, /1\/2 agents done/)
     assert.equal(frame.includes('Dynamic workflows'), false)
     assert.equal(sent.some(command => command.type === 'workflow_detail'), false)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})
+
+test('App keeps workflow panel keys out of the composer', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const sent: BridgeCommand[] = []
+  const stdin = new FakeReadStream()
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0))
+    timers.push(setTimeout(() => onEvent({
+      type: 'workflow_detail',
+      run: { runId: 'wf_keys', sessionId: 'session', status: 'running', jobs: [] },
+      script: 'return 1',
+      events: [],
+      draft: {
+        taskText: 'x',
+        classification: {},
+        plan: {
+          meta: { name: 'keys-demo' },
+          phases: [
+            { title: 'One', agents: [{ label: 'a1' }] },
+            { title: 'Two', agents: [{ label: 'a2' }] },
+            { title: 'Three', agents: [{ label: 'a3' }] },
+          ],
+        },
+        validation: { ok: true },
+      },
+      progress: null,
+    }), 20))
+    return {
+      send(command: BridgeCommand) {
+        sent.push(command)
+      },
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    const opened = await waitForFrame(stdout, frame => frame.includes('keys-demo') && frame.includes('› ✓ One'))
+    assert.match(opened, /› ✓ One/)
+
+    stdin.push('j')
+    const moved = await waitForFrame(stdout, frame => frame.includes('› ✓ Two'))
+    assert.match(moved, /› ✓ Two/)
+    // The overlay owns 'j': it must not be typed into the composer.
+    assert.equal(moved.includes('> j'), false)
+
+    // 'r' is a panel key that maps to nothing on a running run. It still must
+    // not land in the composer, which would disable the status-bar shortcut
+    // (that path only runs while the composer is empty).
+    stdin.push('r')
+    await delay(80)
+    const after = stdout.chunks.map(stripAnsi).filter(isLiveChromeFrame).at(-1) ?? ''
+    assert.equal(after.includes('> r'), false)
+    assert.equal(sent.some(command => command.type === 'submit'), false)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))

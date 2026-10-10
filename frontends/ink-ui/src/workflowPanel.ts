@@ -1,4 +1,4 @@
-import type { BridgeCommand, WorkflowDraftPayload, WorkflowEvent, WorkflowProgressEntry, WorkflowProgressPayload, WorkflowRun, WorkflowJob } from './protocol.js'
+import type { BridgeCommand, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressEntry, WorkflowProgressPayload, WorkflowRun, WorkflowJob } from './protocol.js'
 import type { InputKey } from './inputController.js'
 
 export type WorkflowDetailPayload = {
@@ -7,7 +7,18 @@ export type WorkflowDetailPayload = {
   events: WorkflowEvent[]
   draft?: WorkflowDraftPayload | null
   progress?: WorkflowProgressPayload | null
+  /** jobId -> live counters published while children still run (UI-only). */
+  live?: Record<string, WorkflowLiveJob>
 }
+
+/**
+ * The workflow panel is a modal overlay under the composer, so its row budget
+ * has to be fixed: rendering "all rows" and then letting the caller cut the
+ * list produced an 8-row window with no scroll indicator and no way to tell
+ * how much content was hidden.
+ */
+export const WORKFLOW_PANEL_MAX_ROWS = 14
+const ACTIVITY_TAIL_ROWS = 12
 
 export type WorkflowOverviewAgent = {
   id: string
@@ -16,6 +27,10 @@ export type WorkflowOverviewAgent = {
   model?: string
   tokenText?: string
   toolCount: number
+  /** Live-only: current turn index and wall-clock elapsed time. */
+  turnCount?: number
+  elapsedText?: string
+  lastToolName?: string
 }
 
 export type WorkflowOverviewPhase = {
@@ -46,6 +61,8 @@ export type WorkflowAgentDetail = {
   model?: string
   tokenText?: string
   toolCount: number
+  turnCount?: number
+  elapsedText?: string
   prompt: string
   activityRows: string[]
   activityTotal: number
@@ -58,6 +75,7 @@ export type WorkflowPanelState =
     run: WorkflowRun
     script: string
     events: WorkflowEvent[]
+    live?: Record<string, WorkflowLiveJob>
   }
   | WorkflowListPanelState
   | WorkflowOverviewPanelState
@@ -130,6 +148,40 @@ export function workflowPanelWithRunUpdate(panel: WorkflowPanelState, run: Workf
   return panel.run.runId === run.runId ? { ...panel, run } : panel
 }
 
+export function workflowPanelWithLive(
+  panel: WorkflowPanelState,
+  runId: string,
+  jobs: WorkflowLiveJob[],
+): WorkflowPanelState {
+  if (panel.mode === 'list') return panel
+  if (panel.mode === 'detail') {
+    return panel.run.runId === runId ? { ...panel, live: mergeLiveJobs(panel.live, jobs) } : panel
+  }
+  if (panel.mode !== 'overview' && panel.mode !== 'agent_detail') return panel
+  if (panel.overview.run.runId !== runId) return panel
+  const detailSource = { ...panel.detailSource, live: mergeLiveJobs(panel.detailSource.live, jobs) }
+  const selectedPhase = panel.mode === 'agent_detail' ? panel.phaseIndex : panel.overview.selectedPhase
+  const overview = workflowOverviewFromDetail(detailSource, selectedPhase)
+  if (panel.mode === 'overview') return { mode: 'overview', overview, detailSource }
+  return workflowAgentDetailPanelFromOverview(
+    { mode: 'overview', overview, detailSource },
+    panel.phaseIndex,
+    panel.agentIndex,
+    panel.scrollOffset,
+  )
+}
+
+function mergeLiveJobs(
+  existing: Record<string, WorkflowLiveJob> | undefined,
+  jobs: WorkflowLiveJob[],
+): Record<string, WorkflowLiveJob> {
+  const merged: Record<string, WorkflowLiveJob> = { ...(existing ?? {}) }
+  for (const job of jobs) {
+    if (job && typeof job.jobId === 'string' && job.jobId) merged[job.jobId] = job
+  }
+  return merged
+}
+
 export function workflowListPanelFromRuns(runs: WorkflowRun[]): WorkflowListPanelState {
   return { mode: 'list', runs, selected: 0 }
 }
@@ -200,7 +252,11 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
   for (const entry of progressEntries) {
     const label = entry.label || entry.jobId || entry.agentId || 'agent'
     const phaseTitle = entry.phaseTitle || entry.phase || draftPhaseByLabel.get(label) || '未分阶段'
-    const agent = overviewAgentFromProgress(entry, jobs.find(job => job.jobId === entry.jobId || job.metadata?.label === label))
+    const agent = overviewAgentFromProgress(
+      entry,
+      jobs.find(job => job.jobId === entry.jobId || job.metadata?.label === label),
+      liveFor(detail.live, entry.jobId, entry.agentId, label),
+    )
     if (!phases.has(phaseTitle)) phases.set(phaseTitle, [])
     phases.get(phaseTitle)!.push(agent)
   }
@@ -210,19 +266,29 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
       const label = jobLabel(job)
       const phaseTitle = job.phase || draftPhaseByLabel.get(label) || '未分阶段'
       if (!phases.has(phaseTitle)) phases.set(phaseTitle, [])
-      phases.get(phaseTitle)!.push(overviewAgentFromJob(job))
+      phases.get(phaseTitle)!.push(overviewAgentFromJob(job, liveFor(detail.live, job.jobId, undefined, label)))
     }
   }
 
   if (phases.size === 0) {
     for (const phase of draft?.plan.phases ?? []) {
       const title = phase.title || '未分阶段'
-      const agents = (phase.agents ?? []).map(agent => ({
-        id: agent.label || 'agent',
-        label: agent.label || 'agent',
-        status: 'registered',
-        toolCount: 0,
-      }))
+      const agents = (phase.agents ?? []).map(agent => {
+        const label = agent.label || 'agent'
+        const live = liveFor(detail.live, label)
+        return {
+          id: label,
+          label,
+          // Live telemetry only exists while a child runs, so its presence is
+          // the most accurate status a draft-only phase can report.
+          status: live ? 'running' : 'registered',
+          toolCount: live?.toolCalls ?? 0,
+          tokenText: formatTokenUsage(live?.tokenUsage) ?? undefined,
+          turnCount: live?.turn,
+          elapsedText: formatElapsed(live?.elapsedSeconds),
+          lastToolName: stringMetadata(live?.lastToolName),
+        }
+      })
       if (agents.length > 0) phases.set(title, agents)
     }
   }
@@ -268,7 +334,7 @@ export function workflowOverviewRows(overview: WorkflowOverview): string[] {
     const agent = selectedPhase?.agents[index]
     rows.push(`${phase ? phaseRow(phase, index === overview.selectedPhase) : ''.padEnd(16)} | ${agent ? overviewAgentRow(agent) : ''}`)
   }
-  rows.push('Enter agent - Up/Down phase - Esc back')
+  rows.push('Enter agent · j/k phase · PgUp/PgDn · Esc back')
   return rows
 }
 
@@ -289,6 +355,7 @@ export function workflowAgentDetailPanelFromOverview(
   const phase = panel.overview.phases[Math.min(Math.max(0, phaseIndex), Math.max(0, panel.overview.phases.length - 1))]
   const agents = phase?.agents ?? []
   const clampedAgentIndex = Math.min(Math.max(0, agentIndex), Math.max(0, agents.length - 1))
+  const detail = resolveAgentDetail(panel.detailSource, agents[clampedAgentIndex], phase?.title || 'Agents')
   return {
     mode: 'agent_detail',
     overview: panel.overview,
@@ -297,7 +364,7 @@ export function workflowAgentDetailPanelFromOverview(
     agentIndex: clampedAgentIndex,
     scrollOffset: Math.max(0, scrollOffset),
     agents,
-    detail: resolveAgentDetail(panel.detailSource, agents[clampedAgentIndex], phase?.title || 'Agents'),
+    detail,
   }
 }
 
@@ -307,12 +374,16 @@ function resolveAgentDetail(source: WorkflowDetailPayload, agent: WorkflowOvervi
   const job = jobs.find(candidate => candidate.jobId === agent?.id || jobLabel(candidate) === agent?.label)
   const entry = entries.find(candidate => candidate.jobId === agent?.id || candidate.agentId === agent?.id || candidate.label === agent?.label)
   const label = agent?.label || stringMetadata(entry?.label) || jobLabel(job ?? { jobId: 'agent', status: 'registered' })
+  const live = liveFor(source.live, entry?.jobId, entry?.agentId, agent?.id, label, job?.jobId)
+  const liveToolName = stringMetadata(live?.lastToolName)
   const toolCalls = normalizedToolCalls(entry)
   const activityRows = toolCalls.length > 0
-    ? toolCalls.slice(-3)
-    : entry?.lastToolName
-      ? [`${entry.lastToolName}${entry.lastToolSummary ? ` · ${entry.lastToolSummary}` : ''}`]
-      : ['(no recent activity)']
+    ? toolCalls.slice(-ACTIVITY_TAIL_ROWS)
+    : liveToolName
+      ? [`${liveToolName}${stringMetadata(live?.lastToolSummary) ? ` · ${stringMetadata(live?.lastToolSummary)}` : ''}`]
+      : entry?.lastToolName
+        ? [`${entry.lastToolName}${entry.lastToolSummary ? ` · ${entry.lastToolSummary}` : ''}`]
+        : ['(no recent activity)']
   const status = agent?.status || entry?.state || job?.status || 'registered'
   const prompt = stringMetadata(job?.prompt) || stringMetadata(entry?.promptPreview) || draftAgentPrompt(source.draft ?? null, phaseTitle, label) || '(no prompt)'
   const outcome = stringMetadata(entry?.resultPreview) || stringMetadata(job?.error) || stringMetadata(entry?.error) || (status === 'running' || status === 'queued' || status === 'registered' ? '(no outcome yet)' : '(agent did not produce an outcome)')
@@ -322,8 +393,17 @@ function resolveAgentDetail(source: WorkflowDetailPayload, agent: WorkflowOvervi
     status,
     statusText: workflowStatusText(status),
     model: agent?.model || stringMetadata(job?.metadata?.model),
-    tokenText: agent?.tokenText || formatTokenUsage(entry?.tokenUsage) || formatTokenUsage(job?.metadata?.tokenUsage) || undefined,
-    toolCount: toolCalls.length || agent?.toolCount || 0,
+    // While a child runs the durable snapshot has no token total yet; the live
+    // channel is the only place that knows it.
+    tokenText:
+      agent?.tokenText
+      || formatTokenUsage(entry?.tokenUsage)
+      || formatTokenUsage(live?.tokenUsage)
+      || formatTokenUsage(job?.metadata?.tokenUsage)
+      || undefined,
+    toolCount: toolCalls.length || live?.toolCalls || agent?.toolCount || 0,
+    turnCount: live?.turn,
+    elapsedText: formatElapsed(live?.elapsedSeconds),
     prompt,
     activityRows,
     activityTotal: toolCalls.length || activityRows.filter(row => row !== '(no recent activity)').length,
@@ -334,21 +414,36 @@ function resolveAgentDetail(source: WorkflowDetailPayload, agent: WorkflowOvervi
 function workflowAgentDetailRows(panel: WorkflowAgentDetailPanelState): string[] {
   const phase = panel.overview.phases[panel.phaseIndex]
   const detailRows = agentDetailRightRows(panel.detail)
-  const visibleDetailRows = detailRows.slice(panel.scrollOffset)
-  const rows = [`${phase?.title || 'Agents'} · ${panel.agents.length} ${panel.agents.length === 1 ? 'agent' : 'agents'} | ${panel.detail.label}`]
-  const maxRows = Math.max(panel.agents.length, visibleDetailRows.length)
-  for (let index = 0; index < maxRows; index++) {
-    const agent = panel.agents[index]
-    const left = agent ? agentDetailAgentRow(agent, index === panel.agentIndex) : ''.padEnd(18)
+  const bodyRows = detailBodyRows()
+  const scroll = workflowAgentDetailScrollInfo(panel)
+  const visibleDetailRows = detailRows.slice(scroll.offset, scroll.offset + bodyRows)
+  const scrollLabel = scroll.maxOffset > 0 ? `  ${scroll.offset + 1}-${scroll.offset + visibleDetailRows.length}/${scroll.total}` : ''
+  const rows = [`${phase?.title || 'Agents'} · ${panel.agents.length} ${panel.agents.length === 1 ? 'agent' : 'agents'} | ${panel.detail.label}${scrollLabel}`]
+  // Keep the selected agent inside the visible window instead of letting the
+  // list overflow the panel and hide the selection.
+  const agentOffset = Math.min(Math.max(0, panel.agentIndex - bodyRows + 1), Math.max(0, panel.agents.length - bodyRows))
+  for (let index = 0; index < bodyRows; index++) {
+    const agentIndex = agentOffset + index
+    const agent = panel.agents[agentIndex]
+    const left = agent ? agentDetailAgentRow(agent, agentIndex === panel.agentIndex) : ''.padEnd(18)
     const right = visibleDetailRows[index] ?? ''
     rows.push(`${left} | ${right}`)
   }
-  rows.push('↑↓ agent · j/k scroll · esc back')
+  const hiddenAgents = panel.agents.length - bodyRows
+  const agentHint = hiddenAgents > 0 ? ` · ${panel.agents.length} agents` : ''
+  rows.push(`↑↓ agent · j/k scroll · PgUp/PgDn page · g/G ends · esc back${agentHint}`)
   return rows
 }
 
 function agentDetailRightRows(detail: WorkflowAgentDetail): string[] {
-  const header = [`${workflowStatusIcon(detail.status)} ${detail.statusText}`, detail.model, detail.tokenText, detail.toolCount ? `${detail.toolCount} ${detail.toolCount === 1 ? 'tool call' : 'tool calls'}` : null].filter(Boolean).join(' · ')
+  const header = [
+    `${workflowStatusIcon(detail.status)} ${detail.statusText}`,
+    detail.turnCount ? `turn ${detail.turnCount}` : null,
+    detail.elapsedText,
+    detail.model,
+    detail.tokenText,
+    detail.toolCount ? `${detail.toolCount} ${detail.toolCount === 1 ? 'tool call' : 'tool calls'}` : null,
+  ].filter(Boolean).join(' · ')
   const activityCount = detail.activityTotal
   const shown = detail.activityRows.filter(row => row !== '(no recent activity)').length
   return [
@@ -360,6 +455,17 @@ function agentDetailRightRows(detail: WorkflowAgentDetail): string[] {
     'Outcome',
     `  ${detail.outcome}`,
   ]
+}
+
+/** Body rows available to the agent list / detail table (header + hint excluded). */
+function detailBodyRows(): number {
+  return Math.max(1, WORKFLOW_PANEL_MAX_ROWS - 2)
+}
+
+export function workflowAgentDetailScrollInfo(panel: WorkflowAgentDetailPanelState): { offset: number; maxOffset: number; total: number } {
+  const total = agentDetailRightRows(panel.detail).length
+  const maxOffset = Math.max(0, total - detailBodyRows())
+  return { offset: Math.min(panel.scrollOffset, maxOffset), maxOffset, total }
 }
 
 function agentDetailAgentRow(agent: WorkflowOverviewAgent, selected: boolean): string {
@@ -400,27 +506,55 @@ function draftPhaseLookup(draft: WorkflowDraftPayload | null): Map<string, strin
   return result
 }
 
-function overviewAgentFromProgress(entry: WorkflowProgressEntry, job?: WorkflowJob): WorkflowOverviewAgent {
+function liveFor(
+  live: Record<string, WorkflowLiveJob> | undefined,
+  ...keys: Array<string | null | undefined>
+): WorkflowLiveJob | undefined {
+  if (!live) return undefined
+  for (const key of keys) {
+    if (typeof key === 'string' && key && live[key]) return live[key]
+  }
+  return undefined
+}
+
+function overviewAgentFromProgress(entry: WorkflowProgressEntry, job?: WorkflowJob, live?: WorkflowLiveJob): WorkflowOverviewAgent {
   const label = stringMetadata(entry.label) || stringMetadata(job?.metadata?.label) || stringMetadata(entry.jobId) || stringMetadata(entry.agentId) || 'agent'
   return {
     id: stringMetadata(entry.jobId) || stringMetadata(entry.agentId) || job?.jobId || label,
     label,
     status: entry.state || job?.status || 'registered',
     model: stringMetadata(job?.metadata?.model),
-    tokenText: formatTokenUsage(entry.tokenUsage) ?? undefined,
-    toolCount: entry.toolCalls?.length ?? 0,
+    // While a child runs the durable snapshot has no token total yet; the live
+    // channel is the only place that knows it.
+    tokenText: formatTokenUsage(entry.tokenUsage) ?? formatTokenUsage(live?.tokenUsage) ?? undefined,
+    toolCount: entry.toolCalls?.length ?? live?.toolCalls ?? 0,
+    turnCount: live?.turn,
+    elapsedText: formatElapsed(live?.elapsedSeconds),
+    lastToolName: stringMetadata(live?.lastToolName),
   }
 }
 
-function overviewAgentFromJob(job: WorkflowJob): WorkflowOverviewAgent {
+function overviewAgentFromJob(job: WorkflowJob, live?: WorkflowLiveJob): WorkflowOverviewAgent {
   return {
     id: job.jobId,
     label: jobLabel(job),
     status: job.status,
     model: stringMetadata(job.metadata?.model),
-    tokenText: formatTokenUsage(job.metadata?.tokenUsage) ?? undefined,
-    toolCount: Array.isArray(job.metadata?.toolCalls) ? job.metadata.toolCalls.length : 0,
+    tokenText: formatTokenUsage(job.metadata?.tokenUsage) ?? formatTokenUsage(live?.tokenUsage) ?? undefined,
+    toolCount: Array.isArray(job.metadata?.toolCalls) ? job.metadata.toolCalls.length : (live?.toolCalls ?? 0),
+    turnCount: live?.turn,
+    elapsedText: formatElapsed(live?.elapsedSeconds),
+    lastToolName: stringMetadata(live?.lastToolName),
   }
+}
+
+function formatElapsed(seconds: unknown): string | undefined {
+  const value = numberValue(seconds)
+  if (value === null || value < 0) return undefined
+  if (value < 60) return `${Math.round(value)}s`
+  const minutes = Math.floor(value / 60)
+  const rest = Math.round(value - minutes * 60)
+  return `${minutes}m ${rest}s`
 }
 
 function jobLabel(job: WorkflowJob): string {
@@ -450,7 +584,14 @@ function phaseRow(phase: WorkflowOverviewPhase, selected: boolean): string {
 }
 
 function overviewAgentRow(agent: WorkflowOverviewAgent): string {
-  const stats = [agent.tokenText, agent.toolCount ? `${agent.toolCount} tools` : null].filter(Boolean).join(' · ')
+  const live = agent.turnCount && agent.status === 'running' ? `turn ${agent.turnCount}` : null
+  const stats = [
+    live,
+    agent.elapsedText,
+    agent.tokenText,
+    agent.toolCount ? `${agent.toolCount} tools` : null,
+    agent.lastToolName,
+  ].filter(Boolean).join(' · ')
   return `${workflowStatusIcon(agent.status)} ${agent.label}${stats ? `  ${stats}` : ''}`
 }
 
@@ -504,10 +645,19 @@ export function workflowPanelCommandForKey(
   rawInput: string,
 ): WorkflowPanelDecision | null {
   if (panel.mode === 'list') return workflowListCommandForKey(panel, key, rawInput)
+  const lowered = rawInput.toLowerCase()
   if (panel.mode === 'overview') {
-    if (!key.return) return null
-    const phase = panel.overview.phases[panel.overview.selectedPhase]
-    return phase && phase.agents.length > 0 ? { panel: workflowAgentDetailPanelFromOverview(panel) } : null
+    if (key.upArrow || lowered === 'k') return { panel: overviewPanelWithPhase(panel, panel.overview.selectedPhase - 1) }
+    if (key.downArrow || lowered === 'j') return { panel: overviewPanelWithPhase(panel, panel.overview.selectedPhase + 1) }
+    if (key.pageUp) return { panel: overviewPanelWithPhase(panel, panel.overview.selectedPhase - 5) }
+    if (key.pageDown) return { panel: overviewPanelWithPhase(panel, panel.overview.selectedPhase + 5) }
+    if (rawInput === 'g') return { panel: overviewPanelWithPhase(panel, 0) }
+    if (rawInput === 'G') return { panel: overviewPanelWithPhase(panel, panel.overview.phases.length - 1) }
+    if (key.return) {
+      const phase = panel.overview.phases[panel.overview.selectedPhase]
+      return phase && phase.agents.length > 0 ? { panel: workflowAgentDetailPanelFromOverview(panel) } : null
+    }
+    return workflowRunControlForKey(panel.overview.run, key, rawInput)
   }
   if (panel.mode === 'agent_detail') {
     if (key.escape) {
@@ -515,17 +665,65 @@ export function workflowPanelCommandForKey(
     }
     if (key.upArrow) return { panel: workflowAgentDetailPanelFromOverview({ mode: 'overview', overview: panel.overview, detailSource: panel.detailSource }, panel.phaseIndex, Math.max(0, panel.agentIndex - 1), panel.scrollOffset) }
     if (key.downArrow) return { panel: workflowAgentDetailPanelFromOverview({ mode: 'overview', overview: panel.overview, detailSource: panel.detailSource }, panel.phaseIndex, Math.min(Math.max(0, panel.agents.length - 1), panel.agentIndex + 1), panel.scrollOffset) }
-    const lowered = rawInput.toLowerCase()
-    if (lowered === 'j') return { panel: workflowAgentDetailPanelFromOverview({ mode: 'overview', overview: panel.overview, detailSource: panel.detailSource }, panel.phaseIndex, panel.agentIndex, panel.scrollOffset + 1) }
-    if (lowered === 'k') return { panel: workflowAgentDetailPanelFromOverview({ mode: 'overview', overview: panel.overview, detailSource: panel.detailSource }, panel.phaseIndex, panel.agentIndex, Math.max(0, panel.scrollOffset - 1)) }
-    return null
+    const page = detailBodyRows()
+    if (lowered === 'j') return { panel: detailPanelWithScroll(panel, panel.scrollOffset + 1) }
+    if (lowered === 'k') return { panel: detailPanelWithScroll(panel, panel.scrollOffset - 1) }
+    if (key.pageDown) return { panel: detailPanelWithScroll(panel, panel.scrollOffset + page) }
+    if (key.pageUp) return { panel: detailPanelWithScroll(panel, panel.scrollOffset - page) }
+    if (rawInput === 'g') return { panel: detailPanelWithScroll(panel, 0) }
+    if (rawInput === 'G') return { panel: detailPanelWithScroll(panel, Number.MAX_SAFE_INTEGER) }
+    return workflowRunControlForKey(panel.overview.run, key, rawInput)
   }
-  const lowered = rawInput.toLowerCase()
-  if (lowered === 's' && panel.run.status === 'running') {
-    return { command: { type: 'workflow_stop', runId: panel.run.runId, reason: 'stopped from Ink UI' } }
+  return workflowRunControlForKey(panel.run, key, rawInput)
+}
+
+/** Keys the workflow overlay owns while it is open. */
+const WORKFLOW_PANEL_LETTER_KEYS = new Set(['j', 'k', 'g', 'x', 'r', 's'])
+
+/**
+ * True when an open workflow panel should consume this key.
+ *
+ * Without this, a key the panel does not act on (`j` in the overview, for
+ * example) fell through to the composer and was typed as text -- which then
+ * made the status-bar shortcut stop working, because that path only runs while
+ * the composer is empty.
+ */
+export function workflowPanelCapturesKey(
+  panel: WorkflowPanelState,
+  key: InputKey,
+  rawInput: string,
+): boolean {
+  if (key.escape || key.return || key.upArrow || key.downArrow || key.pageUp || key.pageDown) return true
+  if (key.ctrl || key.meta) return false
+  if (panel.mode === 'list') return false
+  return WORKFLOW_PANEL_LETTER_KEYS.has(rawInput)
+}
+
+function overviewPanelWithPhase(panel: WorkflowOverviewPanelState, selectedPhase: number): WorkflowPanelState {
+  const clamped = Math.min(Math.max(0, selectedPhase), Math.max(0, panel.overview.phases.length - 1))
+  return { mode: 'overview', overview: { ...panel.overview, selectedPhase: clamped }, detailSource: panel.detailSource }
+}
+
+function detailPanelWithScroll(panel: WorkflowAgentDetailPanelState, scrollOffset: number): WorkflowPanelState {
+  // Clamp against the rendered window so holding `j` cannot build an offset
+  // that then needs the same number of `k` presses to undo.
+  const maxOffset = workflowAgentDetailScrollInfo(panel).maxOffset
+  return workflowAgentDetailPanelFromOverview(
+    { mode: 'overview', overview: panel.overview, detailSource: panel.detailSource },
+    panel.phaseIndex,
+    panel.agentIndex,
+    Math.min(Math.max(0, scrollOffset), maxOffset),
+  )
+}
+
+function workflowRunControlForKey(run: WorkflowRun, key: InputKey, rawInput: string): WorkflowPanelDecision | null {
+  if (key.ctrl || key.meta) return null
+  if (rawInput === 'x' || rawInput === 's') {
+    if (run.status !== 'running') return null
+    return { command: { type: 'workflow_stop', runId: run.runId, reason: 'stopped from Ink UI' } }
   }
-  if (lowered === 'r' && resumeableWorkflowStatuses.has(panel.run.status)) {
-    return { command: { type: 'workflow_resume', runId: panel.run.runId } }
+  if (rawInput === 'r' && resumeableWorkflowStatuses.has(run.status)) {
+    return { command: { type: 'workflow_resume', runId: run.runId } }
   }
   return null
 }

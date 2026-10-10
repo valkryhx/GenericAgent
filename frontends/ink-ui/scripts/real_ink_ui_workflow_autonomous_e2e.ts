@@ -260,6 +260,10 @@ async function main(): Promise<number> {
     const eventRows = state.workflowEvents.filter(event => event.runId === runId)
     assert.ok(eventRows.some(event => event.type === 'workflow_capability_snapshot'), 'host capability preflight snapshot missing')
     assert.ok(eventRows.some(event => event.type === 'workflow_finished'), 'terminal workflow_finished event missing')
+    // The host feeds the workflow result back into the agent loop, which then
+    // answers using it, so idle arrives *after* `workflow_final`, not at the
+    // same instant. Wait for it instead of asserting on the exact frame.
+    await waitFor('ink idle after terminal workflow event', () => state.status === 'idle', 180_000)
     assert.equal(state.status, 'idle', 'Ink UI did not return to idle after terminal workflow event')
     const contract = run?.metadata?.executionContract as { requiredToolEvidence?: Array<{ tool?: string }> ; artifacts?: Array<{ path?: string }> } | undefined
     assert.ok(contract?.requiredToolEvidence?.some(item => item.tool === EXPECTED_MCP_TOOL), `run has no ${EXPECTED_MCP_TOOL} evidence contract`)

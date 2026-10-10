@@ -1918,6 +1918,98 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"notes.md": ["research"]}, document["artifactOwnership"])
         self.assertIn("artifactOwnership", payload)
 
+    def test_progress_watcher_does_not_reload_the_run_when_progress_is_unchanged(self):
+        # Regression: every 0.25s tick called workflow_store.load_run (~12ms
+        # state.json read) plus a full json.dumps. That fixed cost is what made
+        # the Ink input box lag while a workflow ran.
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+            )
+            run = bridge.workflow_controller.create_draft(session_id="s", script="return 1")
+            bridge.workflow_store.write_workflow_progress(run)
+
+            calls = {"load_run": 0}
+            real_store = bridge.workflow_store
+
+            class CountingStore:
+                def __getattr__(self, name):
+                    return getattr(real_store, name)
+
+                def load_run(self, run_id):
+                    calls["load_run"] += 1
+                    return real_store.load_run(run_id)
+
+            bridge.workflow_store = CountingStore()
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=bridge._watch_workflow_progress,
+                args=(run.run_id, stop),
+                kwargs={"interval": 0.05},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.6)
+            stop.set()
+            thread.join(timeout=2)
+
+        self.assertEqual(1, calls["load_run"])
+        progress_events = [event for event in events if event.get("type") == "workflow_progress"]
+        self.assertEqual(1, len(progress_events))
+
+    def test_progress_watcher_publishes_live_child_telemetry(self):
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+            )
+            run = bridge.workflow_controller.create_draft(session_id="s", script="return 1")
+            bridge.workflow_store.write_workflow_progress(run)
+            live_dir = Path(run.artifact_dir) / "agents" / "agent_1"
+            live_dir.mkdir(parents=True, exist_ok=True)
+            (live_dir / "live.json").write_text(
+                json.dumps(
+                    {
+                        "jobId": "agent_1",
+                        "turn": 3,
+                        "toolCalls": 5,
+                        "lastToolName": "tavily_search",
+                        "tokenUsage": {"total_tokens": 45200},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=bridge._watch_workflow_progress,
+                args=(run.run_id, stop),
+                kwargs={"interval": 0.05},
+                daemon=True,
+            )
+            thread.start()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not any(
+                event.get("type") == "workflow_live" for event in events
+            ):
+                time.sleep(0.05)
+            stop.set()
+            thread.join(timeout=2)
+
+        live_events = [event for event in events if event.get("type") == "workflow_live"]
+        self.assertTrue(live_events)
+        self.assertEqual("agent_1", live_events[0]["jobs"][0]["jobId"])
+        self.assertEqual(3, live_events[0]["jobs"][0]["turn"])
+        # Deduplicated: the same live payload is not re-emitted every tick.
+        self.assertEqual(1, len(live_events))
+
     def test_workflow_progress_exposes_the_run_level_ownership_index(self):
         agent = FakeAgent()
         agent.session_id = "session_progress_owners"
@@ -3853,13 +3945,58 @@ return { marker: child.summary }
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
 
-        bridge.workflow_plan.assert_called_once_with(
+        # The planner is a real LLM call, so the stdin loop hands it to a
+        # worker thread instead of blocking every later command on it.
+        bridge.workflow_plan_async.assert_called_once_with(
             "规划 JSONL workflow",
             context={"source": "jsonl"},
             auto_approve=False,
             args={"x": 1},
             timeout_seconds=4.0,
         )
+
+    def test_jsonl_loop_does_not_block_on_workflow_planning(self):
+        sleep_seconds = 0.6
+        seen: list[str] = []
+
+        class SlowPlanBridge:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def emit(self, event):
+                pass
+
+            def workflow_plan_async(self, task_text, **kwargs):
+                seen.append("plan_async")
+
+                def _slow():
+                    time.sleep(sleep_seconds)
+                    seen.append("plan_done")
+
+                threading.Thread(target=_slow, daemon=True).start()
+                return 1
+
+            def mcp_status(self):
+                seen.append("mcp_status")
+
+            def stop(self):
+                pass
+
+        nl = chr(10)
+        stdin = io.StringIO(
+            json.dumps({"type": "workflow_plan", "taskText": "慢规划"}) + nl
+            + json.dumps({"type": "mcp_status"}) + nl
+            + json.dumps({"type": "shutdown"}) + nl
+        )
+        stdout = io.StringIO()
+        started = time.monotonic()
+        with patch("ink_bridge.GenericAgentBridge", SlowPlanBridge):
+            run_jsonl_loop(stdin, stdout)
+        elapsed = time.monotonic() - started
+
+        # The loop must not wait for planning to finish before the next command.
+        self.assertLess(elapsed, sleep_seconds / 2)
+        self.assertEqual(["plan_async", "mcp_status"], seen)
 
     def test_default_workflow_planner_factory_uses_env_builder(self):
         agent = FakeAgent()

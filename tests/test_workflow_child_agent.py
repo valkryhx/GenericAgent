@@ -1,12 +1,13 @@
 import json
 import tempfile
+import types
 import threading
 import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
-from workflow_child_agent import NativeGPTChildAgentRunner, bounded_structured_summary
+from workflow_child_agent import LiveJobTelemetry, NativeGPTChildAgentRunner, bounded_structured_summary
 from workflow_models import WorkflowJob
 
 
@@ -1055,6 +1056,93 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertIn("file_read", {event.get("toolName") for event in result.transcript_events if event.get("type") == "tool_call"})
             self.assertNotIn("file_write", {event.get("toolName") for event in result.transcript_events if event.get("type") == "tool_call"})
 
+
+
+class LiveJobTelemetryTest(unittest.TestCase):
+    def test_payload_carries_turn_tool_and_token_counters(self):
+        seen = []
+        live = LiveJobTelemetry(lambda job_id, payload: seen.append((job_id, payload)), "agent_1", min_interval=0.0)
+        handler = types.SimpleNamespace(current_turn=2)
+        client = types.SimpleNamespace(last_usage_tokens={"total_tokens": 45200})
+
+        live.note_tool_call("tavily_search")
+        live.note_tool_result("tavily_search", {"results": ["a", "b"]})
+        live.update(handler, client)
+
+        self.assertEqual(1, len(seen))
+        job_id, payload = seen[0]
+        self.assertEqual("agent_1", job_id)
+        self.assertEqual(2, payload["turn"])
+        self.assertEqual(1, payload["toolCalls"])
+        self.assertEqual("tavily_search", payload["lastToolName"])
+        self.assertEqual({"total_tokens": 45200}, payload["tokenUsage"])
+        self.assertIn("elapsedSeconds", payload)
+
+    def test_unchanged_payload_is_not_re_emitted(self):
+        seen = []
+        live = LiveJobTelemetry(lambda job_id, payload: seen.append((job_id, payload)), "agent_1", min_interval=0.0)
+        handler = types.SimpleNamespace(current_turn=1)
+        client = types.SimpleNamespace(last_usage_tokens={"total_tokens": 10})
+
+        live.update(handler, client)
+        live.update(handler, client)
+
+        self.assertEqual(1, len(seen))
+
+    def test_throttle_skips_rapid_updates_but_force_always_emits(self):
+        seen = []
+        live = LiveJobTelemetry(lambda job_id, payload: seen.append((job_id, payload)), "agent_1", min_interval=60.0)
+        handler = types.SimpleNamespace(current_turn=1)
+        client = types.SimpleNamespace(last_usage_tokens={"total_tokens": 10})
+
+        live.update(handler, client)
+        live.update(handler, client)
+        self.assertEqual(1, len(seen))
+
+        live.update(handler, client, force=True)
+        self.assertEqual(2, len(seen))
+
+    def test_without_a_sink_every_call_is_a_noop(self):
+        live = LiveJobTelemetry(None, "agent_1", min_interval=0.0)
+        handler = types.SimpleNamespace(current_turn=1)
+
+        live.note_tool_call("file_read")
+        live.update(handler, types.SimpleNamespace(last_usage_tokens={}))
+
+    def test_runner_publishes_live_telemetry_while_a_tool_job_runs(self):
+        from agent_loop import StepOutcome
+
+        client = StubToolClient([
+            StubToolResponse("<summary>read</summary>", [
+                StubToolCall("file_read", {"path": __file__}, id="tool_read"),
+            ]),
+            StubToolResponse("<summary>done</summary>finished"),
+        ])
+        tools = [
+            {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        job = WorkflowJob(job_id="agent_live", prompt="read it", metadata={"runId": "wf_test"})
+        runner = NativeGPTChildAgentRunner(
+            client_factory=lambda config_name: client,
+            tools_schema_factory=lambda: tools,
+            telemetry_min_interval=0.0,
+        )
+        seen = []
+        runner.set_telemetry_sink(lambda job_id, payload: seen.append((job_id, payload)))
+
+        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "hello"})), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            runner.start(job)
+            result = NativeGPTChildAgentRunnerTest().wait_for_result(runner, job)
+
+        self.assertEqual("succeeded", result.status)
+        self.assertTrue(seen)
+        self.assertTrue(all(job_id == "agent_live" for job_id, _ in seen))
+        tool_payloads = [payload for _, payload in seen if payload.get("toolCalls")]
+        self.assertTrue(tool_payloads, f"expected a tool call in {seen}")
+        # ``no_tool`` is the loop's sentinel for a turn without tool calls; the
+        # live channel mirrors the transcript, which records it too.
+        self.assertIn("file_read", {payload["lastToolName"] for payload in tool_payloads})
+        self.assertGreaterEqual(max(payload["turn"] for payload in tool_payloads), 1)
 
 if __name__ == "__main__":
     unittest.main()

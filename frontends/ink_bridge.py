@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import glob
 import json
 import os
 import queue
 import sys
 import threading
+import time
 from typing import Any, Callable, TextIO
 
 
@@ -54,6 +56,11 @@ _WORKFLOW_HANDOFF_MAX_BYTES = 64 * 1024
 # Product default for /workflow without --timeout. WorkflowRuntime itself still
 # defaults to 10s for unit tests that construct it directly.
 DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 900.0
+# The progress watcher publishes agent events/snapshots only this often while a
+# workflow runs; the durable progress payload still goes out on every change.
+_AGENT_READ_MODEL_MIN_INTERVAL = 1.0
+# Live per-job telemetry files written by running children.
+_LIVE_TELEMETRY_RELATIVE = os.path.join("agents", "*", "live.json")
 
 
 def _backend_log_path() -> str:
@@ -120,6 +127,28 @@ def backend_output_redirect():
 
 def encode_event(event: Event) -> str:
     return json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n"
+
+
+def _file_signature(path: str) -> tuple[int, int] | None:
+    """Cheap change detector: (mtime_ns, size) or None when the file is absent."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _read_json_object(path: str) -> dict[str, Any] | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return sanitize(payload)
 
 
 def make_stdout_emitter(stdout: TextIO) -> EmitFn:
@@ -343,6 +372,74 @@ class GenericAgentBridge:
                 auto_approve=True,
                 _activation_internal=True,
             )
+        finally:
+            with self._workflow_planning_lock:
+                self._workflow_planning = False
+
+    def workflow_plan_async(
+        self,
+        task_text: str,
+        *,
+        context: dict | None = None,
+        auto_approve: bool = True,
+        args: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> int:
+        """Plan a workflow off the JSONL command thread.
+
+        ``run_jsonl_loop`` is a single-threaded stdin loop. Running the planner
+        (a real LLM call) inline in it meant the UI saw nothing until planning
+        finished and no other command -- stop, progress, detail, mcp_status --
+        could be processed meanwhile. Return immediately and let a worker
+        thread plan, exactly like ``_submit_recommended_workflow``.
+        """
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return -1
+        text = str(task_text or "")
+        if not text.strip():
+            self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
+            return -1
+        with self._workflow_planning_lock:
+            if self._workflow_planning:
+                self.emit({"type": "error", "code": "busy", "message": "workflow planner is running"})
+                return -1
+            self._workflow_planning = True
+        self.emit({"type": "status", "status": "running"})
+        self.emit({"type": "activity", "label": "Planning workflow"})
+        thread = threading.Thread(
+            target=self._run_planned_workflow,
+            args=(text, context, auto_approve, args, timeout_seconds),
+            daemon=True,
+            name="ga-ink-workflow-plan",
+        )
+        self._workflow_planning_thread = thread
+        thread.start()
+        return 1
+
+    def _run_planned_workflow(
+        self,
+        task_text: str,
+        context: dict | None,
+        auto_approve: bool,
+        args: Any,
+        timeout_seconds: float | None,
+    ) -> None:
+        try:
+            # ``_activation_internal`` because this thread owns the
+            # ``_workflow_planning`` flag it just set.
+            self.workflow_plan(
+                task_text,
+                context=context if isinstance(context, dict) else {},
+                auto_approve=bool(auto_approve),
+                args=args,
+                timeout_seconds=timeout_seconds,
+                _activation_internal=True,
+            )
+        except Exception as exc:  # pragma: no cover - defensive, workflow_plan reports its own errors
+            self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
+            self.emit({"type": "activity", "label": None})
+            self.emit({"type": "status", "status": "idle"})
         finally:
             with self._workflow_planning_lock:
                 self._workflow_planning = False
@@ -1022,34 +1119,89 @@ class GenericAgentBridge:
     def _watch_workflow_progress(self, run_id: str, stop: threading.Event, *, interval: float = 0.25) -> None:
         """Publish workflow-progress snapshots until the run settles.
 
-        ``workflow_progress`` reads a durable file, so polling is safe from a
-        background thread; events are already deduplicated by sequence for the
-        event stream and progress is a full snapshot, so repeats are harmless.
+        Cheap by design. The durable snapshot is a file, so a tick that finds it
+        unchanged costs a single ``stat``. The previous implementation called
+        ``workflow_store.load_run`` (a ~12 ms ``state.json`` read) plus a full
+        ``json.dumps`` on *every* tick; that fixed cost, four times a second,
+        is what made the Ink input box lag while a workflow ran.
         """
-        last_serialized: str | None = None
+        try:
+            with backend_output_redirect():
+                artifact_dir = os.path.abspath(os.fspath(self.workflow_store.load_run(run_id).artifact_dir or ""))
+        except Exception:
+            return
+        if not artifact_dir:
+            return
+        progress_path = os.path.join(artifact_dir, "workflow-progress.json")
+        last_progress_signature: tuple[int, int] | None = None
+        last_live_fingerprint: str | None = None
+        last_read_model_at = 0.0
         while not stop.wait(interval):
-            try:
-                with backend_output_redirect():
-                    run = self.workflow_store.load_run(run_id)
-                    progress = self._workflow_artifact_payload(run, "workflow-progress.json")
-            except Exception:
+            progress: dict[str, Any] | None = None
+            signature = _file_signature(progress_path)
+            if signature is not None and signature != last_progress_signature:
+                last_progress_signature = signature
+                progress = _read_json_object(progress_path)
+            live = self._read_live_telemetry(artifact_dir)
+            live_fingerprint = json.dumps(live, ensure_ascii=True, sort_keys=True, separators=(",", ":")) if live else None
+            if live_fingerprint == last_live_fingerprint:
+                live = None
+            if progress is None and live is None:
                 continue
+            now = time.monotonic()
+            # Agent events are cheap and drive the agent list; the full snapshot
+            # serialization is not, so it is rate-limited independently of the
+            # progress payload.
+            if progress is not None or now - last_read_model_at >= _AGENT_READ_MODEL_MIN_INTERVAL:
+                last_read_model_at = now
+                try:
+                    self._emit_agent_read_model()
+                except Exception:
+                    pass
+            if live is not None:
+                last_live_fingerprint = live_fingerprint
+                try:
+                    self.emit({"type": "workflow_live", "runId": run_id, "jobs": live})
+                except Exception:
+                    continue
             if progress is None:
                 continue
             try:
-                serialized = json.dumps(progress, ensure_ascii=False, sort_keys=True, default=str)
-            except Exception:
-                continue
-            if serialized == last_serialized:
-                continue
-            last_serialized = serialized
-            try:
-                self._emit_agent_read_model()
                 self.emit({"type": "workflow_progress", "progress": progress})
             except Exception:
                 continue
-            if str(progress.get("status") or "") in {"succeeded", "degraded", "failed", "cancelled", "killed", "interrupted"}:
+            if str(progress.get("status") or "") in {
+                "succeeded",
+                "degraded",
+                "failed",
+                "cancelled",
+                "killed",
+                "interrupted",
+            }:
                 return
+
+    def _read_live_telemetry(self, artifact_dir: str) -> list[dict[str, Any]]:
+        """Return the per-job live telemetry written by running children.
+
+        Live telemetry is a UI-only observation channel: it never feeds a
+        durable contract check, and ``workflow-progress.json`` stays the single
+        durable snapshot. It exists because a child only writes its transcript
+        when the job *ends*, so a multi-minute child used to show a frozen row.
+        """
+        jobs: list[dict[str, Any]] = []
+        try:
+            paths = sorted(glob.glob(os.path.join(artifact_dir, _LIVE_TELEMETRY_RELATIVE)))
+        except Exception:
+            return jobs
+        for path in paths:
+            payload = _read_json_object(path)
+            if not isinstance(payload, dict):
+                continue
+            job_id = payload.get("jobId") or os.path.basename(os.path.dirname(path))
+            entry = dict(payload)
+            entry["jobId"] = str(job_id)
+            jobs.append(entry)
+        return jobs
 
     def _make_workflow_planner(self):
         if self.workflow_planner_factory is not None:
@@ -1220,16 +1372,7 @@ class GenericAgentBridge:
                 return None
         except ValueError:
             return None
-        if not os.path.isfile(path):
-            return None
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                payload = json.load(fh)
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        return sanitize(payload)
+        return _read_json_object(path)
 
     def _run_workspace_root(self, run) -> str:
         """Return the workspace this run's artifacts are rooted at.
@@ -2015,7 +2158,9 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
                 auto_approve = command.get("auto_approve")
             if auto_approve is None:
                 auto_approve = True
-            bridge.workflow_plan(
+            # Off the stdin loop: planning is a real LLM call and used to
+            # block every later command (and the first workflow UI update).
+            bridge.workflow_plan_async(
                 str(command.get("taskText") or command.get("task_text") or ""),
                 context=command.get("context") if isinstance(command.get("context"), dict) else {},
                 auto_approve=bool(auto_approve),
