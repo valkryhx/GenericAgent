@@ -1140,6 +1140,41 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([event["loading"] for event in progress], [True, False])
         self.assertEqual(progress[-1]["servers"][0]["tool_count"], 8)
 
+    def test_mcp_watch_self_heal_reconnects_only_the_failed_server(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        snapshots = [
+            {
+                "config_path": "mcp.json",
+                "servers": [
+                    {"name": "context7", "status": "failed", "tool_count": 0},
+                    {"name": "tavily", "status": "connected", "tool_count": 5},
+                ],
+                "tools": [], "errors": {"context7": "handshake timed out"},
+                "loading": False, "discovery_running": False, "discovery_complete": False,
+            },
+            {
+                "config_path": "mcp.json",
+                "servers": [
+                    {"name": "context7", "status": "connected", "tool_count": 2},
+                    {"name": "tavily", "status": "connected", "tool_count": 5},
+                ],
+                "tools": [], "errors": {},
+                "loading": False, "discovery_running": False, "discovery_complete": True,
+            },
+        ]
+        with (
+            patch("mcp_runtime.start_background_discovery") as start_discovery,
+            patch("mcp_runtime.reconnect_mcp_server") as reconnect,
+            patch("mcp_runtime.mcp_status_snapshot", side_effect=snapshots),
+        ):
+            bridge.start_mcp_status_watch()
+            bridge._mcp_watch_thread.join(timeout=3)
+
+        start_discovery.assert_called_once_with()
+        reconnect.assert_called_once_with("context7")
+
     def test_emit_mcp_action_result_then_status(self):
         agent = FakeAgent()
         events = []

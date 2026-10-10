@@ -366,6 +366,28 @@ class McpRuntimeTest(unittest.TestCase):
             "mcp__my_server__search_web",
         )
 
+    def test_npx_stdio_servers_are_spawned_with_prefer_offline(self):
+        # npx hits the registry on every spawn even when the package is already
+        # cached; measured 4-8s per stdio server versus a stable ~2s without the
+        # lookup. The host injects the flag so it also applies to a user's
+        # (gitignored) mcp.json.
+        from mcp_runtime import _normalize_server_config
+
+        injected = _normalize_server_config(
+            {"type": "stdio", "command": "npx", "args": ["-y", "mcp-fetch-server"]}
+        )
+        self.assertEqual(["--prefer-offline", "-y", "mcp-fetch-server"], injected["args"])
+
+        respected = _normalize_server_config(
+            {"type": "stdio", "command": "npx", "args": ["-y", "--offline", "pkg"]}
+        )
+        self.assertEqual(["-y", "--offline", "pkg"], respected["args"])
+
+        untouched = _normalize_server_config(
+            {"type": "stdio", "command": "uvx", "args": ["mcp-server-fetch"]}
+        )
+        self.assertEqual(["mcp-server-fetch"], untouched["args"])
+
     def test_load_mcp_config_accepts_claudecode_mcpservers_shape(self):
         with _tempdir() as tmp:
             config_path = Path(tmp) / "mcp.json"

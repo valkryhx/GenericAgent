@@ -1502,6 +1502,29 @@ def _stdio_errlog_patch(transport: Any, stderr_log: Any):
         stdio_transport.connect_session = original_connect_session
 
 
+# npx resolves the registry on every spawn even when the package is already in
+# the npx cache. Measured on this machine, that round-trip is what made one
+# stdio server cost 4-8s and spike to 16s on a slow network, versus a stable
+# ~2s once the registry lookup is skipped. `--prefer-offline` keeps the cached
+# package fast and still installs when it is genuinely missing, so a fresh
+# machine keeps working. Applied by the host, not by mcp.json, because the
+# server list is user config (and is gitignored).
+_NPX_COMMANDS = frozenset({"npx", "npx.cmd", "npx.exe", "npx.ps1"})
+_NPX_PREFER_OFFLINE_FLAG = "--prefer-offline"
+
+
+def _prefer_offline_args(command: Any, args: Any) -> list[str]:
+    resolved = [str(item) for item in (args or [])]
+    if os.path.basename(str(command or "")).lower() not in _NPX_COMMANDS:
+        return resolved
+    if any(
+        str(item).lower().startswith("--prefer-offline") or str(item).lower() == "--offline"
+        for item in resolved
+    ):
+        return resolved
+    return [_NPX_PREFER_OFFLINE_FLAG, *resolved]
+
+
 def _normalize_server_config(server_config: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(server_config)
     cfg_type = cfg.get("type")
@@ -1510,6 +1533,7 @@ def _normalize_server_config(server_config: dict[str, Any]) -> dict[str, Any]:
     if cfg.get("command") and not cfg.get("transport"):
         cfg["transport"] = "stdio"
     if cfg.get("command"):
+        cfg["args"] = _prefer_offline_args(cfg.get("command"), cfg.get("args"))
         merged_env = dict(os.environ)
         merged_env.update({str(k): str(v) for k, v in (cfg.get("env") or {}).items() if v is not None})
         merged_env.setdefault("PYTHONIOENCODING", "utf-8")

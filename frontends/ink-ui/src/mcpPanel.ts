@@ -29,8 +29,12 @@ export function mcpStartupStatusRows(status: McpStartupStatus): string[] {
   const connected = status.servers.filter(server => server.status === 'connected').length
   const failed = status.servers.filter(server => server.status === 'failed').length
   const totalTools = status.tools.length || status.servers.reduce((sum, server) => sum + server.tool_count, 0)
+  // Startup is a background observation, not a gate: the bridge answers the
+  // first turn without waiting for every server (measured: first token 160ms
+  // after ready, MCP ready ~7s later). Say so, otherwise the warning-coloured
+  // banner reads as "GA is still booting, do not type".
   const summary = status.loading
-    ? `MCP initializing · ${connected}/${status.servers.length} connected · ${totalTools} tools`
+    ? `MCP connecting in the background · ${connected}/${status.servers.length} connected · ${totalTools} tools · you can type now`
     : failed > 0
       ? `MCP ready with failures · ${status.servers.length} servers · ${totalTools} tools · ${failed} failed`
       : `MCP ready · ${status.servers.length} servers · ${totalTools} tools`

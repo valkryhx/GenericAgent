@@ -539,12 +539,18 @@ class GenericAgentBridge:
                     if server.get("status") == "failed"
                 ]
                 if failed and not recovery_done:
-                    # One bounded self-heal pass: a server that lost a slow
-                    # handshake gets a second chance instead of showing a failure
-                    # marker until the process restarts.
+                    # One bounded self-heal: retry only the servers that failed
+                    # rather than re-running discovery for every server. A full
+                    # second pass used to double the "initializing" window for
+                    # every user because one flaky server had failed.
                     recovery_done = True
                     with backend_output_redirect():
-                        start_background_discovery(retry_failed=True)
+                        from mcp_runtime import reconnect_mcp_server
+                        for server in failed:
+                            try:
+                                reconnect_mcp_server(str(server.get("name") or ""))
+                            except Exception:
+                                pass
                     threading.Event().wait(0.25)
                     continue
                 return

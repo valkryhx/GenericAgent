@@ -605,8 +605,8 @@ test('App starts MCP status monitoring on bridge ready and shows progress beneat
   })
 
   try {
-    const output = await waitForOutput(stdout, value => value.includes('MCP initializing') && value.includes('context7'))
-    assert.match(output, /MCP initializing/)
+    const output = await waitForOutput(stdout, value => value.includes('MCP connecting in the background') && value.includes('context7'))
+    assert.match(output, /MCP connecting in the background/)
     assert.match(output, /context7.*pending/)
     const frame = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('context7')).at(-1) ?? ''
     assert.ok(frame.indexOf('Enter send') < frame.indexOf('context7'), 'MCP progress should render below the input composer')

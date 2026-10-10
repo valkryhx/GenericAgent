@@ -106,7 +106,10 @@ test('mcp startup status rows show per-server startup progress and final tool to
       function: { name: `mcp__exa__tool${index}`, description: '', parameters: {} },
     })),
   })
-  assert.match(pendingRows[0] ?? '', /MCP initializing.*1\/3.*3 tools/)
+  assert.match(pendingRows[0] ?? '', /MCP connecting in the background.*1\/3.*3 tools/)
+  // Startup must not read as a gate: the first turn is answerable while
+  // servers are still connecting.
+  assert.match(pendingRows[0] ?? '', /you can type now/)
   assert.match(pendingRows.join('\n'), /◌ context7.*connecting/)
   assert.match(pendingRows.join('\n'), /tavily.*pending/)
 
