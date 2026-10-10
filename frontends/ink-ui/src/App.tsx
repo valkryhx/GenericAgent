@@ -111,6 +111,7 @@ import {
   clearInlineLiveViewportSequence,
   enterMainScreenTerminalSequenceForMode,
   reassertMouseTracking,
+  resetViewportSequence,
 } from './terminalCleanup.js'
 import { inputCursorPosition } from './terminalCursor.js'
 import type { CursorParkController } from './stdoutCursorPark.js'
@@ -547,6 +548,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     columns: Math.max(1, stdout.columns || 80),
     rows: Math.max(1, stdout.rows || 24),
   }))
+  /** 与 terminalSize 同步的即时快照：resize 监听里要判断「宽/高是否真的变了」。 */
+  const terminalSizeRef = useRef(terminalSize)
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
   const [input, setInput] = useState('')
   const [cursorOffset, setCursorOffset] = useState(0)
@@ -792,19 +795,34 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
 
   useEffect(() => {
     const syncTerminalSize = () => {
+      // 退出清理之后（终端状态已交还）绝不能再写整屏重置，否则会清掉用户自己的屏幕。
+      if (terminalCleanedRef.current) return
       const next = {
         columns: Math.max(1, stdout.columns || 80),
         rows: Math.max(1, stdout.rows || 24),
       }
-      setTerminalSize(current => (
-        current.columns === next.columns && current.rows === next.rows ? current : next
-      ))
+      const previous = terminalSizeRef.current
+      if (previous.columns === next.columns && previous.rows === next.rows) return
+      terminalSizeRef.current = next
+      // 先提交新尺寸：React（legacy root）会同步重画一帧，此后所有写入都按新宽度折行。
+      setTerminalSize(next)
+      if (previous.columns === next.columns) return
+      // 宽度变化会让终端对**已经写出**的帧做 reflow（长行重新折行），上一帧实际占用的行数
+      // 随之改变；而 ink 下一帧仍用改尺寸前的 previousLineCount 做相对擦除（log-update 的
+      // eraseLines），于是擦不干净 → 旧帧顶行残留。真机表现就是放大/缩小终端后底部信息重复
+      // 叠加（截图 2026-10-10 092005）。参考 Claude Code（log-update 的
+      // fullResetSequence_CAUSES_FLICKER）与 Codex（draw_with_resize_reflow 的
+      // clear_after_position + invalidate_viewport）：不猜 reflow 后的几何，直接整屏重置 +
+      // 全量重绘 —— 重挂 <Static> 让 ink 重发历史，ink 随后按新宽度写出新帧，屏幕上只留一份。
+      if (cursorPark) cursorPark.resetViewport()
+      else stdout.write(resetViewportSequence())
+      resetStaticTranscriptOutput()
     }
     stdout.on('resize', syncTerminalSize)
     return () => {
       stdout.off('resize', syncTerminalSize)
     }
-  }, [stdout])
+  }, [stdout, cursorPark])
 
   useEffect(() => {
     if (state.status === 'running' || state.status === 'stopping') {

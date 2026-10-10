@@ -27,6 +27,8 @@
  * 使原生光标只在「已停在 caret」时可见，不会在帧底/写入过程中闪现。反显块保留作为兜底。
  */
 
+import { resetViewportSequence } from './terminalCleanup.js'
+
 const SHOW_CURSOR = '\x1b[?25h'
 const HIDE_CURSOR = '\x1b[?25l'
 
@@ -50,6 +52,8 @@ export class CursorParkWriter {
   private currentSpec: ParkSpec = null
   private scheduled = false
   private disposed = false
+  /** 每次整屏重置 +1：让已排队但尚未执行的 park microtask 失效。 */
+  private parkEpoch = 0
 
   constructor(
     private readonly sink: (chunk: string) => void,
@@ -74,6 +78,20 @@ export class CursorParkWriter {
     this.currentSpec = null
   }
 
+  /**
+   * 终端 reflow（宽度变化）后的整屏重置：写出「清屏 + 清 scrollback + 归位」，并丢弃
+   * park 记账。
+   *
+   * 必须同时作废未决的 park microtask 并清掉 parkedUp：光标已被 CSI H 归位到屏幕左上，
+   * 若下一次写入仍按旧的 parkedUp 下移（unpark），整帧会写到错误位置。
+   */
+  resetViewport(sequence: string): void {
+    this.parkEpoch += 1
+    this.scheduled = false
+    this.parkedUp = null
+    this.sink(sequence)
+  }
+
   /** 供非字符串透传路径：只把光标移回帧底，不安排 park。 */
   flushUnpark(): void {
     this.unpark()
@@ -90,7 +108,10 @@ export class CursorParkWriter {
   private schedulePark(): void {
     if (this.scheduled) return
     this.scheduled = true
+    const epoch = this.parkEpoch
     this.schedule(() => {
+      // 期间发生过整屏重置（终端宽度变化）→ 这次 park 的几何已经失效，丢弃。
+      if (this.parkEpoch !== epoch) return
       this.scheduled = false
       if (this.disposed) return
       // 若在 microtask 触发前又发生了写入，unpark 会把 parkedUp 清回 null；
@@ -113,6 +134,8 @@ export type CursorParkController = {
   setPark(spec: ParkSpec): void
   /** 退出清理前调用：若当前 park 在 caret，先相对移回帧底，让后续清理几何确定。 */
   unpark(): void
+  /** 终端宽度变化（reflow）时调用：整屏重置 + 丢弃 park 记账，随后由 App 触发全量重绘。 */
+  resetViewport(): void
   dispose(): void
 }
 
@@ -148,6 +171,7 @@ export function createCursorParkStdout(base: NodeJS.WriteStream): CursorParkCont
     stdout: proxy,
     setPark: (spec) => writer.setPark(spec),
     unpark: () => writer.flushUnpark(),
+    resetViewport: () => writer.resetViewport(resetViewportSequence()),
     dispose: () => writer.dispose(),
   }
 }

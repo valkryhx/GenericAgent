@@ -6,6 +6,7 @@ import {
   enterMainScreenTerminalSequenceForMode,
   exitTerminalCleanupSequence,
   reassertMouseTracking,
+  resetViewportSequence,
 } from './terminalCleanup.js'
 
 test('exitTerminalCleanupSequence restores terminal state without visible symbols', () => {
@@ -72,4 +73,13 @@ test('clearInlineLiveViewportSequence clears when the cursor is below the inline
   assert.equal(sequence.startsWith('\u001B[0m\u001B[7A\r'), true)
   assert.equal((sequence.match(/\u001B\[2K/g) ?? []).length, 7)
   assert.equal(sequence.endsWith('\u001B[6A\r'), true)
+})
+
+test('resetViewportSequence clears screen + scrollback and homes the cursor', () => {
+  const sequence = resetViewportSequence()
+  assert.ok(sequence.includes('\u001B[2J'), '必须清屏')
+  assert.ok(sequence.includes('\u001B[3J'), '现代终端还要清 scrollback（否则重绘后历史会出现两份）')
+  assert.ok(sequence.endsWith('\u001B[H'), '光标必须归位，供 ink 从行 0 全量重绘')
+  assert.doesNotMatch(sequence, /\u001B\[?25l/)
+  assert.doesNotMatch(sequence, /[\p{Extended_Pictographic}]/u)
 })

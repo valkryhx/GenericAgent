@@ -27,6 +27,20 @@ GenericAgent 是一个紧凑的 Python 项目。核心运行时代码位于仓�
 
 Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
 
+### Ink 终端 resize（reflow）：禁止依赖 ink 的相对 eraseLines
+
+终端**宽度**变化会让终端对已写出的缓冲区 reflow（长行重新折行），ink 的 `log-update` 下一帧仍按
+「改尺寸前」的 `previousLineCount` 做相对擦除，擦不干净就会残留旧帧顶行 —— 真机表现是放大/缩小终端后
+底部信息重复叠加。处理方式固定为「整屏重置 + 全量重绘」，不要改成去猜 reflow 之后的几何：
+
+- `terminalCleanup.resetViewportSequence()` 产出清屏 + 清 scrollback + 归位序列；
+- `cursorPark.resetViewport()` 写出该序列并丢弃 park 记账（含作废未决的 park microtask）；
+- `App.tsx` 的 resize 监听先提交新尺寸，再重置，最后重挂 `<Static>` 让 ink 重发历史并按新宽度重画。
+
+根因、Claude Code / Codex 对照、复现模型与红/绿证据见
+`docs/20261010-ink-resize-reflow-duplication-fix.md`；回归测试 `src/resizeReflow.test.ts`（配套
+reflow 感知虚拟终端 `src/resizeReflowModel.ts`）。高度变化不触发重置（不 reflow，且可能因帧内容未变而空屏）。
+
 ## 提交与 PR 规范
 
 近期历史使用 Conventional Commits，例如 `feat(tui): ...`、`fix(tgapp): ...`、`docs: ...` 和 `refactor: ...`。提交应小而聚焦。PR 应说明背景、概述行为变化、列出验证命令；只有可见 UI 变化才附截图。避免不必要的新依赖和大范围重构。

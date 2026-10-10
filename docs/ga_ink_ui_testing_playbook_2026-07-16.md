@@ -353,4 +353,5 @@ flush();          assert.equal(w.parkedUp, 2)      // 手动触发 microtask：p
 | `insertHistory.test.ts` | ④视口滚动状态机 + 单调性模拟 |
 | `messageWindow.test.ts` | ⑤宽度换行 + 结构化 parts 颜色断言 |
 | `messagePartition.test.ts` | ⑥分区不变量 |
+| `resizeReflowModel.ts` / `resizeReflow.test.ts` | ①虚拟终端（reflow 感知）+ ③帧几何 + ②字节级契约（终端缩放后重复信息） |
 | `terminalCursor.test.ts` | ②光标坐标纯函数字节断言 |

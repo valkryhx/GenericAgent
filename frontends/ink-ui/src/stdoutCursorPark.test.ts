@@ -117,3 +117,33 @@ test('end-to-end: eraseLines always erases from frame bottom across parked frame
     prevContentTop = contentTop
   }
 })
+
+test('resetViewport writes the full reset and drops park bookkeeping', () => {
+  const out: string[] = []
+  const { schedule, flush } = manualScheduler()
+  const w = new CursorParkWriter((c) => out.push(c), schedule)
+  w.setPark({ up: 2, col: 3 })
+  w.write('frame')
+  flush()
+  assert.equal(w.parkedUp, 2)
+
+  const reset = '\x1b[2J\x1b[3J\x1b[H'
+  w.resetViewport(reset)
+  assert.deepEqual(out.slice(-1), [reset])
+  // 光标已被 CSI H 归位到屏幕左上：parkedUp 必须清空，下一次写入不能再按旧几何下移。
+  assert.equal(w.parkedUp, null)
+  w.write('frame-2')
+  assert.deepEqual(out.slice(-1), ['frame-2'])
+})
+
+test('resetViewport invalidates an already-scheduled park', () => {
+  const out: string[] = []
+  const { schedule, flush } = manualScheduler()
+  const w = new CursorParkWriter((c) => out.push(c), schedule)
+  w.setPark({ up: 2, col: 3 })
+  w.write('frame')
+  w.resetViewport('RESET')
+  flush()
+  assert.deepEqual(out, ['frame', 'RESET'])
+  assert.equal(w.parkedUp, null)
+})
