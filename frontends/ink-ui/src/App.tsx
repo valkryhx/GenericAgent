@@ -621,6 +621,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     setStaticTranscriptGeneration(value => value + 1)
   }
 
+  // 整屏重置（清屏 + 清 scrollback + 光标归位）。<Static> 只能追加、无法撤销已写出的行，
+  // 所以「历史被替换/裁剪后重印」必须先重置，否则旧行与新行叠加成重复。
+  const resetTranscriptViewport = () => {
+    if (cursorPark) cursorPark.resetViewport()
+    else stdout.write(resetViewportSequence())
+  }
+
   const cleanupTerminalOnce = () => {
     if (terminalCleanedRef.current) return
     terminalCleanedRef.current = true
@@ -814,8 +821,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // fullResetSequence_CAUSES_FLICKER）与 Codex（draw_with_resize_reflow 的
       // clear_after_position + invalidate_viewport）：不猜 reflow 后的几何，直接整屏重置 +
       // 全量重绘 —— 重挂 <Static> 让 ink 重发历史，ink 随后按新宽度写出新帧，屏幕上只留一份。
-      if (cursorPark) cursorPark.resetViewport()
-      else stdout.write(resetViewportSequence())
+      resetTranscriptViewport()
       resetStaticTranscriptOutput()
     }
     stdout.on('resize', syncTerminalSize)
@@ -972,8 +978,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         resumePendingRef.current = false
         flushDeltas()
         pendingHistoryReplacementScrollRef.current = true
+        // 重挂 <Static> 的代数由 reducer 在同一个 action 里 +1，与 messages 落在同一次
+        // commit；这里若再单独 bump，会先按「追加尾部」写一次、再全量重印 → 尾部重复
+        // （resume 恢复的历史比当前会话长时可见，截图 resume_bug.png）。
         dispatch(event)
-        resetStaticTranscriptOutput()
         // /compact 成功结果已在 history_replace 的 system 文案里；再 append 会把
         // 「/compact」插到结果后面，且 pending 若不清掉会影响后续 system 事件。
         // resume 等仍回显触发命令。
@@ -1010,8 +1018,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setSelector(null)
         setInput(event.text)
         flushDeltas()
+        // rewind 让历史变短，但 Static 不会撤销已写出的行；先整屏重置再重印，
+        // 屏幕上只剩裁剪后的那一份（reducer 里 staticGeneration +1 触发重挂）。
+        resetTranscriptViewport()
         dispatch(event)
-        resetStaticTranscriptOutput()
         if (commandText) {
           dispatch({ type: 'local_command_input', text: commandText })
           appendLocalCommandOutput('Rewound to selected message')
@@ -1684,7 +1694,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   return (
     <>
       {mouseMode === 'full' ? null : (
-        <Static key={staticTranscriptGeneration} items={staticTranscriptRows}>
+        <Static key={String(state.staticGeneration) + ':' + staticTranscriptGeneration} items={staticTranscriptRows}>
           {line => <TranscriptLineView key={line.id} line={line} />}
         </Static>
       )}

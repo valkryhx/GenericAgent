@@ -15,6 +15,8 @@ export type AppState = {
   workflowEvents: WorkflowEvent[]
   workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }>
   workflowResults: Record<string, Record<string, unknown>>
+  /** 重印 <Static> 的代数：每次整段替换/裁剪历史都 +1，让重挂与 messages 落在同一次 commit。 */
+  staticGeneration: number
   agents: AgentRecord[]
   agentEvents: AgentEvent[]
   agentCursors: Record<string, number>
@@ -31,6 +33,7 @@ export const initialState: AppState = {
   workflowEvents: [],
   workflowDetails: {},
   workflowResults: {},
+  staticGeneration: 0,
   agents: [],
   agentEvents: [],
   agentCursors: {},
@@ -189,13 +192,14 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
           ? { id, role: message.role, text: message.text, done: true }
           : { id, role: message.role, text: message.text, done: true, taskId: message.taskId }
       }),
+      staticGeneration: state.staticGeneration + 1,
       error: null,
     }
   }
   if (event.type === 'rewind_done') {
     const idx = state.messages.findIndex(message => message.id === `u-${event.taskId}`)
     if (idx === -1) return { ...state, error: null }
-    return { ...state, messages: state.messages.slice(0, idx), error: null }
+    return { ...state, messages: state.messages.slice(0, idx), staticGeneration: state.staticGeneration + 1, error: null }
   }
   if (event.type === 'user') {
     // P0-A: open-turn user stays !done so it only paints in live until finalize.

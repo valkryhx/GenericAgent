@@ -1,6 +1,9 @@
 temp/
 tmp/
 
+# /resume 列表缓存（listing_cache.py；按 (mtime, size) 失效，可随时删）
+.listing_cache.json
+
 __pycache__/
 *.py[cod]
 *$py.class

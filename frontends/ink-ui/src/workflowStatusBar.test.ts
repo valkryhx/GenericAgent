@@ -1,25 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
-import type { AppState } from './state.js'
+import { initialState, type AppState } from './state.js'
 
 function stateWithWorkflows(overrides: Partial<AppState>): AppState {
-  return {
-    status: 'idle',
-    activityLabel: null,
-    tokenUsage: null,
-    messages: [],
-    error: null,
-    workflows: [],
-    workflowEvents: [],
-    workflowDetails: {},
-    workflowResults: {},
-    agents: [],
-    agentEvents: [],
-    agentCursors: {},
-    agentErrors: {},
-    ...overrides,
-  }
+  return { ...initialState, status: 'idle', ...overrides }
 }
 
 test('workflowStatusBarFromState returns null when no live workflow exists', () => {

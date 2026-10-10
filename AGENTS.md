@@ -41,6 +41,35 @@ Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + ts
 `docs/20261010-ink-resize-reflow-duplication-fix.md`；回归测试 `src/resizeReflow.test.ts`（配套
 reflow 感知虚拟终端 `src/resizeReflowModel.ts`）。高度变化不触发重置（不 reflow，且可能因帧内容未变而空屏）。
 
+### Ink 转录区重印：`/resume`、`/rewind` 必须一次 commit 完成
+
+Ink v5 用 **legacy root**（`ink/build/ink.js` 里 `createContainer(..., 0, ...)`），React 事件之外的
+多次 state 更新**不会**被自动批处理。`<Static>` 只能追加、无法撤销已经写进 scrollback 的行，所以
+「历史被替换/裁剪后重印」必须满足两条：
+
+1. 重印代数由 reducer 原子 `+1`（`AppState.staticGeneration`，`history_replace` / `rewind_done`
+   各自在同一个 action 里改 messages 与代数），一次 `dispatch` 就是一次 commit、一次重印；
+   不要在 bridge 事件处理里再单独调 `resetStaticTranscriptOutput()` —— 那会先「追加尾部」再
+   「全量重印」，恢复的历史比当前会话长时尾部会重复（截图 `resume_bug.png`）。
+   `resetStaticTranscriptOutput()` 只用于「历史没变、纯重画」的终端 resize。
+2. 历史变短的路径（`/rewind`）必须先整屏重置（`resetTranscriptViewport()`）再重印，否则留在
+   scrollback 上的旧行会与新印的行叠加。
+
+回归测试 `frontends/ink-ui/src/resumeTranscriptDuplication.test.ts`（屏幕级断言用
+`src/resizeReflowModel.ts`）。复盘见 `docs/20261010-ink-resume-duplication-and-list-latency.md`。
+
+### `/resume` 列表：只走轻量扫描 + `(mtime, size)` 缓存
+
+`frontends/continue_cmd.py::list_sessions()` 是 `/resume` 的列表入口，Ink bridge 一次 `/resume`
+会调它两次（列列表、按序号恢复）。它**不得**调用 `session_transcript.load_session()`：
+`session_transcript.list_sessions()` 返回 `SessionSummary`（只含 session_id / preview / rounds /
+last_seq / 用户消息文本），turn 簿记与 `load_session` 逐条对齐。legacy 日志的用户消息文本从
+`_pairs()` 结果里取（`_user_text`），不要再整读一遍重建整段对话。
+
+列表字段按 `(mtime, size)` 缓存在被扫描目录的 `.listing_cache.json`（`listing_cache.py`，原子写、
+可损坏自愈、失败只退化为重扫）；日志都是纯追加，所以这个失效依据成立。本机 2471 个文件实测：
+修复前 9–17 s，修复后冷启 3.0 s / 热启 0.09–0.15 s，输出与旧实现逐条一致。
+
 ## 提交与 PR 规范
 
 近期历史使用 Conventional Commits，例如 `feat(tui): ...`、`fix(tgapp): ...`、`docs: ...` 和 `refactor: ...`。提交应小而聚焦。PR 应说明背景、概述行为变化、列出验证命令；只有可见 UI 变化才附截图。避免不必要的新依赖和大范围重构。

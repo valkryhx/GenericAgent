@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import listing_cache
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
@@ -42,6 +44,27 @@ class LoadedSession:
     turns: list[TranscriptTurn] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     last_seq: int = 0
+
+
+@dataclass
+class SessionSummary:
+    """Lightweight ``/resume`` listing row -- not a restorable session.
+
+    Listing runs on every picker open (and twice per resume), so it must not pay
+    for a full restore: ``load_session()`` parses every event and deep-copies the
+    backend history of every turn, while the picker only needs identity, preview,
+    round count and the user texts (``continue_cmd`` uses those to hide a legacy
+    log a transcript already covers).  There is deliberately no ``ui_messages`` /
+    ``backend_history`` here -- call ``load_session()`` when the data is needed.
+    """
+
+    path: str
+    session_id: str
+    mtime: float
+    preview: str
+    rounds: int
+    last_seq: int = 0
+    user_texts: list = field(default_factory=list)
 
 
 @dataclass
@@ -243,21 +266,113 @@ def load_session(path):
     )
 
 
+def _listing_cache_path(base):
+    return str(base / ".listing_cache.json")
+
+
+def _scan_session_summary(path, stat):
+    """Scan one transcript for the listing fields only (no deep copies).
+
+    Mirrors ``load_session``'s turn bookkeeping exactly -- inferred rewinds
+    (``backend_history_before`` matching an earlier ``backend_history_after``),
+    explicit ``rewind`` events and ``compact`` events truncate identically -- so
+    ``preview``/``rounds``/``last_seq`` agree with a full load.
+    """
+    p = Path(path)
+    session_id = ""
+    last_seq = 0
+    turns = []            # (user_text, backend_history_after)
+    backend_after = None
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(event, dict) or event.get("version") != 1:
+            continue
+        session_id = event.get("session_id") or session_id
+        seq = event.get("seq")
+        if isinstance(seq, int) and seq > last_seq:
+            last_seq = seq
+        kind = event.get("type")
+        if kind == "turn":
+            before = event.get("backend_history_before") or []
+            after = event.get("backend_history_after") or []
+            keep = None
+            if backend_after:
+                for idx in range(len(turns) - 1, -1, -1):
+                    if turns[idx][1] == before:
+                        keep = idx + 1
+                        break
+            if keep is not None and keep < len(turns):
+                del turns[keep:]
+            turns.append((str(event.get("user_text") or ""), after))
+            backend_after = after
+        elif kind == "compact":
+            backend_after = event.get("backend_history_after") or []
+        elif kind == "rewind":
+            keep = max(0, min(int(event.get("keep_turns") or 0), len(turns)))
+            del turns[keep:]
+            backend_after = event.get("backend_history_after") or []
+    preview = next((text.strip() for text, _ in turns if text.strip()), "")
+    return {
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
+        "session_id": session_id or p.stem,
+        "preview": preview,
+        "rounds": len(turns),
+        "last_seq": last_seq,
+        "user_texts": [text.strip() for text, _ in turns if text.strip()],
+    }
+
+
 def list_sessions(root=None, exclude_session_id=None, include_empty=False):
-    out = []
+    """Summaries of ``session_*.jsonl`` under ``root``, newest-first.
+
+    Each file is scanned once per (mtime, size) and the summary is cached next to
+    it (``.listing_cache.json``); unchanged files are never re-parsed.
+    """
     base = _root(root)
     if not base.exists():
         return []
+    cached = listing_cache.load(_listing_cache_path(base))
+    entries = {}
+    changed = False
+    out = []
     for p in base.glob("session_*.jsonl"):
         try:
-            loaded = load_session(p)
-        except Exception:
+            stat = p.stat()
+        except OSError:
             continue
-        if exclude_session_id and loaded.session_id == exclude_session_id:
+        key = str(p)
+        entry = cached.get(key)
+        if not listing_cache.is_fresh(entry, stat):
+            try:
+                entry = _scan_session_summary(p, stat)
+            except Exception:
+                continue
+            changed = True
+        entries[key] = entry
+        if exclude_session_id and entry.get("session_id") == exclude_session_id:
             continue
-        if not include_empty and loaded.rounds <= 0:
+        rounds = int(entry.get("rounds") or 0)
+        if not include_empty and rounds <= 0:
             continue
-        out.append(loaded)
+        out.append(SessionSummary(
+            path=key,
+            session_id=entry.get("session_id") or Path(key).stem,
+            mtime=stat.st_mtime,
+            preview=entry.get("preview") or "",
+            rounds=rounds,
+            last_seq=int(entry.get("last_seq") or 0),
+            user_texts=list(entry.get("user_texts") or []),
+        ))
+    # 只有真的重扫过、或缓存里有多余条目（文件被删/改名）时才落盘：整表深比较本身
+    # 就要上百毫秒，而命中缓存时每个条目按定义都完全相同。
+    if changed or len(entries) != len(cached):
+        listing_cache.save(_listing_cache_path(base), entries)
     # Sort newest-first. mtime is the primary key so genuinely newer files win.
     # last_seq breaks mtime ties by true write order (coarse-resolution clocks
     # can collapse rapid appends to the same mtime), and session_id is a final

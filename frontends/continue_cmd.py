@@ -6,13 +6,18 @@ try:
     import session_transcript
 except Exception:
     session_transcript = None
+try:
+    import listing_cache
+except Exception:
+    listing_cache = None
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         'temp', 'model_responses')
 _LOG_GLOB = os.path.join(_LOG_DIR, 'model_responses_*.txt')
 _SESSION_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'temp', 'sessions')
-_BLOCK_RE = re.compile(r'^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)',
-                       re.DOTALL | re.MULTILINE)
+# 标记行。用 re.split 而不是「惰性 .*? + 前瞻」的 findall：后者每个块都要回溯，
+# 在 temp/model_responses 这种上百 MB 的历史日志上，单次 /resume 打开要多花数秒。
+_BLOCK_SPLIT_RE = re.compile(r'^=== (Prompt|Response) ===.*\n', re.MULTILINE)
 _SUMMARY_RE = re.compile(r'<summary>\s*(.*?)\s*</summary>', re.DOTALL)
 
 def _rel_time(mtime):
@@ -23,8 +28,9 @@ def _rel_time(mtime):
     return f'{d // 86400}天前'
 
 def _pairs(content):
-    blocks, pairs, pending = _BLOCK_RE.findall(content or ''), [], None
-    for label, body in blocks:
+    parts = _BLOCK_SPLIT_RE.split(content or '')
+    pairs, pending = [], None
+    for label, body in zip(parts[1::2], parts[2::2]):
         if label == 'Prompt': pending = body.strip()
         elif pending is not None:
             pairs.append((pending, body.strip())); pending = None
@@ -128,18 +134,52 @@ def _parse_native_history(pairs):
         history.append({'role': 'assistant', 'content': blocks})
     return history
 
+def _legacy_listing_cache_path():
+    return os.path.join(os.path.dirname(os.path.abspath(_LOG_GLOB)), '.listing_cache.json')
+
+
+def _scan_legacy_summary(path, stat):
+    """Listing fields for one legacy ``model_responses_*.txt`` log.
+
+    ``users`` comes from the prompt bodies we already split out for ``pairs``;
+    the old path re-read the whole file and rebuilt every assistant bubble just
+    to read its user texts, which cost ~5s per /resume open across the corpus.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+    except Exception:
+        return None
+    pairs = _pairs(content)
+    if not pairs:
+        # 「没有可解析的对话」是内容决定的：记一个负结果，否则这种文件每次 /resume
+        # 都会被重读一遍（实测 1135 个 legacy 日志里有 367 个是这种）。
+        return {'mtime': stat.st_mtime, 'size': stat.st_size, 'empty': True}
+    users = [text for text in (_user_text(prompt) for prompt, _ in pairs) if text]
+    return {
+        'mtime': stat.st_mtime,
+        'size': stat.st_size,
+        'preview': _preview_text(pairs),
+        'rounds': len(pairs),
+        'users': users,
+    }
+
+
 def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     """Transcript sessions first, newest-first within each source."""
     transcripts = []
     transcript_keys = set()
-    transcript_user_sequences = []
+    # 只有「首个用户消息出现在该 transcript 里」的 legacy 日志才可能是它的连续子序列，
+    # 所以先按用户消息文本建索引：否则每个 legacy 文件都要和上千条 transcript 序列做
+    # 滑窗比较（/resume 打开时剩下的主要耗时）。这是必要条件，结果与全量比对等价。
+    sequences_by_first_user = {}
     if session_transcript is not None:
-        all_transcripts = session_transcript.list_sessions(root=_SESSION_ROOT)
-        for s in all_transcripts:
+        for s in session_transcript.list_sessions(root=_SESSION_ROOT):
             transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
-            users = [t.user_text.strip() for t in s.turns if t.user_text.strip()]
+            users = [text.strip() for text in getattr(s, 'user_texts', []) if text.strip()]
             if users:
-                transcript_user_sequences.append(users)
+                for text in set(users):
+                    sequences_by_first_user.setdefault(text, []).append(users)
             if exclude_session_id and s.session_id == exclude_session_id:
                 continue
             transcripts.append((s.path, s.mtime, s.preview, s.rounds))
@@ -151,19 +191,33 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     if exclude_path:
         excluded = os.path.abspath(exclude_path)
         files = [f for f in files if os.path.abspath(f) != excluded]
+    cache_path = _legacy_listing_cache_path()
+    cached = listing_cache.load(cache_path) if listing_cache is not None else {}
+    entries = {}
+    changed = False
     for f in files:
         try:
-            with open(f, encoding='utf-8', errors='replace') as fh:
-                content = fh.read()
-        except Exception: continue
-        pairs = _pairs(content)
-        if not pairs: continue
-        users = _ui_session_users(f)
+            stat = os.stat(f)
+        except OSError:
+            continue
+        entry = cached.get(f)
+        if listing_cache is None or not listing_cache.is_fresh(entry, stat):
+            entry = _scan_legacy_summary(f, stat)
+            if entry is None:
+                continue          # 读失败：不写负缓存，下次再试
+            changed = True
+        entries[f] = entry
+        if entry.get('empty'):
+            continue
+        users = entry.get('users') or []
         if users and _session_fingerprint(users[0], len(users)) in transcript_keys:
             continue
-        if users and any(_is_contiguous_subsequence(users, seq) for seq in transcript_user_sequences):
+        candidates = sequences_by_first_user.get(users[0]) if users else None
+        if candidates and any(_is_contiguous_subsequence(users, seq) for seq in candidates):
             continue
-        out.append((f, os.path.getmtime(f), _preview_text(pairs), len(pairs)))
+        out.append((f, stat.st_mtime, entry.get('preview') or '', int(entry.get('rounds') or 0)))
+    if listing_cache is not None and (changed or len(entries) != len(cached)):
+        listing_cache.save(cache_path, entries)
     transcripts.sort(key=lambda x: x[1], reverse=True)
     out.sort(key=lambda x: x[1], reverse=True)
     return transcripts + out
