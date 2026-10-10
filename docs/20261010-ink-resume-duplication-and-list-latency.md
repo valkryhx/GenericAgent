@@ -147,6 +147,10 @@ reducer 的代数负责"整段替换/裁剪"，App 本地那个 `staticTranscrip
 `/resume` 现在两次调用（列列表 + 按序号恢复）都是热路径，用户感知到的等待从"十几秒"降到
 "几乎瞬时"。
 
+真实链路（不是进程内调用）：直接启动 `frontends/ink_bridge.py`，向它的 JSONL 循环发命令实测 ——
+bridge ready 2.2 s，`list_resume_sessions` **245 / 260 / 284 ms**（1032 条会话），也就是 Ink UI
+里 `/resume` 打开选择器与按序号恢复这两次调用现在都是几百毫秒级。
+
 正确性：把旧实现（旧 `_pairs` 正则 + `_ui_session_users` + `load_session` 全量列表）原样重建，
 对 `{}` / `exclude_session_id` / `exclude_pid` / `exclude_path` 四种调用各比对一次，
 **输出逐条相等**（含排序）。
