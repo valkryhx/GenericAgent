@@ -180,6 +180,70 @@ def profile_for_role(role) -> str:
     return ROLE_DEFAULT_TOOL_PROFILE.get(name, DEFAULT_TOOL_PROFILE)
 
 
+def allowed_capabilities_for_profile(profile) -> tuple[str, ...]:
+    """Capability classes a profile still permits, in canonical order.
+
+    ``"*"`` (and any name outside the table) means "every class except the
+    always-denied ones".  Derived from ``WORKFLOW_TOOL_PROFILES`` so generated
+    guidance can never describe a boundary the host does not actually apply.
+    """
+
+    denied = WORKFLOW_TOOL_PROFILES.get(str(profile or "").strip()) or frozenset()
+    return tuple(
+        name
+        for name in CAPABILITY_CLASSES
+        if name not in denied and name not in ALWAYS_DENIED_CAPABILITIES
+    )
+
+
+def _join_capabilities(capabilities) -> str:
+    return "+".join(capabilities) if capabilities else "none"
+
+
+def format_tool_profile_guidance(language: str = "en") -> str:
+    """Profile semantics text, generated from ``WORKFLOW_TOOL_PROFILES``.
+
+    The planner prompt must not restate this table by hand: a profile added here
+    has to appear in the prompt without anyone remembering a second edit.
+    Step-Code renders its subagent tool guidance from its own tables for the
+    same reason.
+    """
+
+    entries = [
+        f"{name}={_join_capabilities(allowed_capabilities_for_profile(name))}"
+        for name in sorted(WORKFLOW_TOOL_PROFILES)
+    ]
+    entries.append(
+        f"{UNRESTRICTED_TOOL_PROFILE}="
+        f"{_join_capabilities(allowed_capabilities_for_profile(UNRESTRICTED_TOOL_PROFILE))}"
+    )
+    joined = "; ".join(entries)
+    if str(language or "").lower().startswith("zh"):
+        return f"toolProfile 取值：{joined}"
+    return f"toolProfile values: {joined}"
+
+
+def format_role_profile_guidance(language: str = "en") -> str:
+    """Role -> derived profile mapping, generated from the same table."""
+
+    joined = ", ".join(
+        f"{role}={profile}" for role, profile in sorted(ROLE_DEFAULT_TOOL_PROFILE.items())
+    )
+    if str(language or "").lower().startswith("zh"):
+        return f"不写 toolProfile 时按 role 推导：{joined}；其它 role 一律 {DEFAULT_TOOL_PROFILE}"
+    return (
+        f"roles without an explicit toolProfile derive one: {joined}; "
+        f"anything else is {DEFAULT_TOOL_PROFILE}"
+    )
+
+
+def format_capability_classes(language: str = "en", separator: str = "、") -> str:
+    """The capability class names a plan may declare, orchestration excluded."""
+
+    names = [name for name in CAPABILITY_CLASSES if name not in ALWAYS_DENIED_CAPABILITIES]
+    return separator.join(names)
+
+
 def effective_tool_profile(options: dict | None) -> tuple[str, frozenset[str] | None]:
     """Resolve ``(profile_name, denied_capabilities)`` for one agent packet.
 

@@ -253,10 +253,26 @@ Step-Code (`features/workflow/step-workflow.ts` tool description, `agent-runner.
   `workflow_planner.CODING_AGENT_ROLES`. A declared role with no instruction is a role the child
   invents; keep one entry per role, and keep the `sharedWorkspace:` / `handoff:` lines.
 
-Built-in read-only roles now ship with the host and are published on `spawn_agent` (see the next
-section); the remaining P1 follow-ups (see §3 of the doc) are deriving tool-profile and orchestration
-text from a single module like Step-Code's `formatBuiltinAgentGuidance`, and pi-style structured prompt
-sections with incremental updates.
+Built-in read-only roles now ship with the host and are published on `spawn_agent`, and the
+tool-profile wording in the planner prompt is generated from the host tables (see the next two
+sections). The remaining P1 follow-up (see §3 of the doc) is pi-style structured prompt sections with
+incremental updates.
+
+## Workflow prompt text is generated from the host tables
+
+Never hand-copy "what a toolProfile means" into a prompt: the prompt would keep advertising a
+capability the host denies the moment someone edits the table. `workflow_tool_profiles.py` owns the
+wording — `allowed_capabilities_for_profile()` derives a profile's allowed classes from
+`WORKFLOW_TOOL_PROFILES` (`*` = everything except orchestration), and
+`format_tool_profile_guidance()` / `format_role_profile_guidance()` / `format_capability_classes()`
+render it. `workflow_planner._planner_prompt` calls those instead of listing
+`planner=.../research=.../authoring=...` by hand.
+
+`workflow_child_agent.ROLE_INSTRUCTIONS` is the module-level single source for per-role guidance; it
+must stay in two-way sync with `workflow_planner.CODING_AGENT_ROLES` (a declared role with no
+instruction is a role the child invents). Drift guards live in
+`tests/test_workflow_prompt_single_source.py`: they patch the tables and assert the new text reaches
+the prompt, so a table edit cannot silently miss the prompt.
 
 ## Built-in subagent roles and the published catalog
 

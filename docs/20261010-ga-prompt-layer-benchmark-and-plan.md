@@ -250,7 +250,29 @@ GREEN tests/test_ga_subagent_tools.py       available_agent_types 断言更新�
 行为变化：`spawn_agent` 报 `unknown_agent_type` 时 `available_agent_types` 不再可能为空，
 至少列出三个内置只读角色；`ga.py` 的 `agent_type` 校验因此也自动接受内置角色。
 
+### 已实施 P1-1（同一轮续做）：工具档位文本单一事实来源
+
+对齐 Step-Code 的 `formatBuiltinAgentGuidance()`：提示词里描述「档位是什么」的句子不再手抄，而是从宿主表派生。
+
+| 项 | 文件 | 具体改动 |
+|---|---|---|
+| 派生档位语义 | `workflow_tool_profiles.py` | 新增 `allowed_capabilities_for_profile()`（从 `WORKFLOW_TOOL_PROFILES` 反推允许的能力类，`*` = 除 orchestration 外全部）、`format_tool_profile_guidance()`、`format_role_profile_guidance()`、`format_capability_classes()` |
+| planner 不再手抄 | `workflow_planner.py::_planner_prompt` | 删掉 `planner=只读+检索、research=只读+检索+落盘、authoring=全部、verify=只读+执行、*=不限制` 这段手写文字，改为 `format_tool_profile_guidance("zh")` + `format_role_profile_guidance("zh")` + `format_capability_classes("zh")`；JSON 形状样例里的 capabilities 列表也改为 `format_capability_classes("en", " | ")` |
+| 角色指令抽为常量 | `workflow_child_agent.py` | `role_instructions` 从 `_build_prompt` 内的局部 dict 提升为模块级 `ROLE_INSTRUCTIONS`，供漂移守卫断言 |
+
+新增守卫测试 `tests/test_workflow_prompt_single_source.py`（6 项）：patch `WORKFLOW_TOOL_PROFILES` 加一个新档位 / 放宽 `research`，断言新文本出现在 planner prompt 里；patch `ROLE_DEFAULT_TOOL_PROFILE` 加 `scout=planner` 同样出现；断言旧手写串 `planner=只读+检索` 已不存在；断言 `CODING_AGENT_ROLES` 与 `ROLE_INSTRUCTIONS` 双向一致，且每个 canonical role 都能解析到已知档位。
+
+证据：`format_tool_profile_guidance` / `format_role_profile_guidance` / `ROLE_INSTRUCTIONS` 在 `HEAD` 中全部为 0 命中（红），改动后 6 项测试全绿。运行期真实产出：
+
+```
+工具边界由宿主拥有……每个 agent 用 toolProfile 声明档位（toolProfile 取值：authoring=web_search+web_fetch+file_read+file_write+execute;
+planner=web_search+web_fetch+file_read; research=web_search+web_fetch+file_read+file_write;
+verify=web_search+web_fetch+file_read+execute; *=web_search+web_fetch+file_read+file_write+execute；
+不写 toolProfile 时按 role 推导：implementation=authoring, repair=authoring, research=research, review=verify,
+synthesis=planner, tests=authoring, understanding=planner, verification=verify；其它 role 一律 authoring；
+orchestration 一律禁用），用 capabilities 声明需要的能力类别（web_search、web_fetch、file_read、file_write、execute）。
+```
+
 ### 未做（按计划留给下一轮）
 
-P1-1 单一事实来源收敛（工具档位 / 编排规则抽模块并派生）、P1-3 pi 式结构化分段与增量更新、
-P2-1 workflow 工具化、P2-2 计划规模反馈。
+P1-3 pi 式结构化分段与增量更新、P2-1 workflow 工具化、P2-2 计划规模反馈。

@@ -13,7 +13,13 @@ from typing import Any
 from workflow_policy import normalize_delegation_policy
 from workflow_activation import resolve_workflow_activation
 from workflow_verification import normalize_verification_contract
-from workflow_tool_profiles import CAPABILITY_CLASSES, is_known_tool_profile
+from workflow_tool_profiles import (
+    CAPABILITY_CLASSES,
+    format_capability_classes,
+    format_role_profile_guidance,
+    format_tool_profile_guidance,
+    is_known_tool_profile,
+)
 
 
 CODING_AGENT_ROLES = frozenset(
@@ -1404,6 +1410,12 @@ class LLMWorkflowPlanner:
         previous_plan: dict[str, Any] | None,
     ) -> str:
         classification_hint = self.fallback.classify(task_text, context)
+        # Generated, never hand-copied: a profile added to WORKFLOW_TOOL_PROFILES
+        # or a capability class added to CAPABILITY_CLASSES must show up here
+        # without a second edit (Step-Code renders its guidance from its tables).
+        tool_profile_guidance = format_tool_profile_guidance("zh")
+        role_profile_guidance = format_role_profile_guidance("zh")
+        capability_classes = format_capability_classes("zh")
         prompt = {
             "role": "GA Workflow Planner",
             "task": task_text,
@@ -1433,7 +1445,7 @@ class LLMWorkflowPlanner:
                 "每个 schemaRef 的 schema 必须完整到子代理无需猜测：声明 type、properties（每个必须出现的字段都要有 type，数组要给 items 或至少 type=array）以及 required。只写 required 而不写 properties 会让子代理返回自然语言并按 schema 失败阻塞整条 run；不要依赖子代理自觉输出 JSON。",
                 "声明了 schemaRef 的 agent 的 prompt 必须显式要求按该 schema 输出 JSON 字段，不要只写「返回结构化摘要」这类自然语言指令；宿主会把 schema 作为硬性输出契约校验。",
                 "strictSchema 默认为 true 语义：声明了 schemaRef 的 agent 若 schema 校验失败即视为该 job 失败并阻塞 run。只有确实允许文本降级的 agent 才显式写 schemaPolicy: \"optional\"；此时降级会被宿主记为 degraded（部分交付）终态，而不是成功，所以不要为了省事批量声明 optional。",
-                "工具边界由宿主拥有，你不要猜测或指定具体工具名。每个 agent 用 toolProfile 声明档位（planner=只读+检索、research=只读+检索+落盘、authoring=全部、verify=只读+执行、*=不限制；不写时宿主按 role 推导），用 capabilities 声明需要的能力类别（web_search、web_fetch、file_read、file_write、execute）。宿主会把档位解析成该 agent 实际可用的工具集合，并拒绝档位外的调用；能力在环境里不存在时 run 记 degraded，而不是失败。requiredCapabilityEvidence 只有 mode=required 才阻塞；web_search 默认 required，file_write/file_read 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
+                f"工具边界由宿主拥有，你不要猜测或指定具体工具名。每个 agent 用 toolProfile 声明档位（{tool_profile_guidance}；{role_profile_guidance}；orchestration 一律禁用），用 capabilities 声明需要的能力类别（{capability_classes}）。宿主会把档位解析成该 agent 实际可用的工具集合，并拒绝档位外的调用；能力在环境里不存在时 run 记 degraded，而不是失败。requiredCapabilityEvidence 只有 mode=required 才阻塞；web_search 默认 required，file_write/file_read 默认 preferred。artifact_exists 和 artifact_readback 是通用硬门禁；artifact_structure/source_count 默认只是 advisory 观察项，不要猜测 DOCX/HTML/PDF/图片内容。只有用户或计划明确声明 strict=true/contentValidation=true 时，才把内容结构/来源数量作为阻塞检查。DOCX 可使用 code_run + python-docx。",
                 "action id must match the exact same string in the assigned agent.actions array; action ids are stable ids such as search, create_artifact, verify_artifact, never display labels or prose.",
                 "Never write a concrete tool name (mcp__*, file_write, code_run, ...) in requiredTools or in a prompt as an instruction. Declare the profile and the capability classes instead; the host resolves them against the tools that are actually connected. requiredTools/requiredToolEvidence are accepted only for backward compatibility with older plans.",
                 "acceptanceChecks and executionContract.artifacts[].requiredChecks must use machine-checkable ids only: artifact_exists, artifact_readback, artifact_structure, required_capability_evidence, required_tool_evidence, source_count, schema_valid, command_exit_zero, no_secret_pattern. Never put natural-language sentences in check arrays. Host artifact requiredChecks must match the writer checks; independent structure checks belong to the verifier agent.",
@@ -1467,7 +1479,7 @@ class LLMWorkflowPlanner:
                 "executionContract": {
                     "requiresExecution": "boolean",
                     "actions": [{"id": "...", "agent": "..."}],
-                    "capabilities": ["web_search | web_fetch | file_read | file_write | execute"],
+                    "capabilities": [format_capability_classes("en", " | ")],
                     "requiredCapabilityEvidence": [{"capability": "...", "agent": "...", "minimumCalls": 1, "mode": "required | preferred"}],
                     "artifacts": [{"path": "...", "writer": "...", "requiredChecks": ["..."], "optional": "boolean, default false; true exempts this artifact from host existence checking"}],
                 },

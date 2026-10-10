@@ -467,6 +467,27 @@ def _retry_feedback_block(metadata: dict | None) -> str:
     ])
 
 
+
+# One line per canonical role (``workflow_planner.CODING_AGENT_ROLES``). A role a
+# plan can declare but that gets no instruction is a role the child has to
+# invent, which is how output shapes drifted between runs. Keep every entry to
+# what the role must produce and what counts as evidence; the drift guard in
+# ``tests/test_workflow_child_agent.py`` asserts the two sets stay in sync.
+ROLE_INSTRUCTIONS: dict[str, str] = {
+    "tests": "Write or run tests before implementation. Report the exact command, exit code, and observed RED/GREEN evidence; do not claim a test ran unless it did.",
+    "implementation": "Make the smallest change for the assigned implementation. Preserve existing contracts and run relevant tests after edits; do not claim success from code inspection alone. List every changed path in your answer.",
+    "verification": "Independently verify the result. Run the requested checks and report machine-observed commands, exit codes, and failures. Return the required structured verification fields. Never infer pass from another agent's summary; missing evidence means verificationPassed=false.",
+    "review": "Review independently against the supplied rubric. Report only actionable findings with concrete evidence; do not modify files unless the task explicitly permits it.",
+    "research": "Gather evidence from independent sources. Give a URL or workspace-relative path plus a fetch time for every claim, mark anything unverified as unverified, and never invent numbers, dates, version numbers or quotations. Write the full evidence list to the artifact path you were given and keep your answer to a bounded summary.",
+    "synthesis": "Combine the upstream results you were handed into one deliverable. Work from the handoff summaries plus the artifact paths -- read those files instead of asking for the raw transcripts back. Preserve each claim's source, and where sources conflict show both instead of averaging.",
+    "understanding": "Map the relevant code or material before anything changes. Report exact paths with line references and the constraints later stages must respect; do not modify files.",
+    "contract": "State the interface the rest of the run must honour: paths, field names, formats, acceptance checks. Be precise enough that a later agent can implement against it without guessing.",
+    "repair": "Fix exactly the reported failure. Reproduce it first, then make the smallest change that removes it, then re-run the same check and report the before/after evidence.",
+    "summary": "Summarize what was actually produced: objective, artifacts with workspace-relative paths, verification evidence, and open gaps. Do not restate the plan.",
+}
+
+
+
 class NativeGPTChildAgentRunner:
     """Real workflow child agent.
 
@@ -974,22 +995,7 @@ class NativeGPTChildAgentRunner:
         permission_policy_version = self._permission_policy_version(job)
         tool_profile, _denied = effective_tool_profile(options)
         role = options.get("role") or ""
-        # One line per canonical role. A role that is declared by the plan but
-        # gets no instruction is a role the child has to invent, which is how
-        # output shapes drifted between runs. Keep every entry to what the role
-        # must produce and what counts as evidence.
-        role_instructions = {
-            "tests": "Write or run tests before implementation. Report the exact command, exit code, and observed RED/GREEN evidence; do not claim a test ran unless it did.",
-            "implementation": "Make the smallest change for the assigned implementation. Preserve existing contracts and run relevant tests after edits; do not claim success from code inspection alone. List every changed path in your answer.",
-            "verification": "Independently verify the result. Run the requested checks and report machine-observed commands, exit codes, and failures. Return the required structured verification fields. Never infer pass from another agent's summary; missing evidence means verificationPassed=false.",
-            "review": "Review independently against the supplied rubric. Report only actionable findings with concrete evidence; do not modify files unless the task explicitly permits it.",
-            "research": "Gather evidence from independent sources. Give a URL or workspace-relative path plus a fetch time for every claim, mark anything unverified as unverified, and never invent numbers, dates, version numbers or quotations. Write the full evidence list to the artifact path you were given and keep your answer to a bounded summary.",
-            "synthesis": "Combine the upstream results you were handed into one deliverable. Work from the handoff summaries plus the artifact paths -- read those files instead of asking for the raw transcripts back. Preserve each claim's source, and where sources conflict show both instead of averaging.",
-            "understanding": "Map the relevant code or material before anything changes. Report exact paths with line references and the constraints later stages must respect; do not modify files.",
-            "contract": "State the interface the rest of the run must honour: paths, field names, formats, acceptance checks. Be precise enough that a later agent can implement against it without guessing.",
-            "repair": "Fix exactly the reported failure. Reproduce it first, then make the smallest change that removes it, then re-run the same check and report the before/after evidence.",
-            "summary": "Summarize what was actually produced: objective, artifacts with workspace-relative paths, verification evidence, and open gaps. Do not restate the plan.",
-        }.get(str(role), "")
+        role_instructions = ROLE_INSTRUCTIONS.get(str(role), "")
         dependency_handoff = job.metadata.get("dependencyHandoff") or []
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
