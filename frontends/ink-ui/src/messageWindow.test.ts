@@ -213,6 +213,34 @@ test('transcriptLines keeps full assistant output without vertical omission mark
 })
 
 
+test('transcriptLines repairs legacy inline workflow fence close', () => {
+  // Real 2026-10-12 regression: the workflow tool result had its closing
+  // 5-backtick fence appended to the [Workflow] line. A stream-commit segment
+  // started at the opening fence, so Turn 3 and Turn 4 were swallowed by the
+  // code block and rendered as literal ** markers.
+  const messages: ChatMessage[] = [{
+    id: 'a-11-c12',
+    role: 'assistant',
+    text: [
+      '`````',
+      '[Workflow] launched model-availability-research (wf_test); use /workflows to monitor.`````',
+      '',
+      '**LLM Running (Turn 3) ...**',
+      '',
+      '🔨 Tool: `update_working_checkpoint`  📥 args:',
+      '````text',
+    ].join('\n'),
+    done: true,
+    taskId: 11,
+  }]
+
+  const rows = transcriptLines(messages, { expandedTools: false })
+  const turn = rows.find(row => row.text.includes('LLM Running (Turn 3)'))
+  assert.ok(turn)
+  assert.equal(turn!.text, 'LLM Running (Turn 3) ...')
+  assert.equal(turn!.parts?.some(part => part.bold), true)
+})
+
 test('transcriptLines renders assistant markdown as styled parts', () => {
   const lines = transcriptLines([
     { id: 'a1', role: 'assistant', text: 'Use **bold** and `code`.', done: true },

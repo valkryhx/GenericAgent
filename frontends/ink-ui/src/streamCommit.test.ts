@@ -10,6 +10,8 @@ import {
 import type { ChatMessage } from './protocol.js'
 import { applyBridgeEvent, initialState } from './state.js'
 import { splitStaticAndActiveMessages } from './messagePartition.js'
+import { formatAssistantText } from './messageFormat.js'
+import { renderMarkdownLines } from './markdownRender.js'
 
 function liveAssistant(taskId: number, text: string): ChatMessage {
   return { id: `a-${taskId}`, role: 'assistant', text, done: false, taskId }
@@ -73,10 +75,56 @@ test('commitStreamingAssistantMessages does not split inside an open backtick fe
 function fenceBalance(text: string): number {
   let open = 0
   for (const line of text.split(/\r?\n/)) {
-    if (/^`{3,}\s*$/.test(line.trim())) open = open === 0 ? 1 : 0
+    const trimmed = line.trim()
+    if (open === 0) {
+      const opener = trimmed.match(/^(`{3,})([^`]*)$/)
+      if (opener) open = opener[1]!.length
+      continue
+    }
+    const standalone = trimmed.match(/^(`{3,})\s*$/)
+    if (standalone && standalone[1]!.length >= open) {
+      open = 0
+      continue
+    }
+    const inline = trimmed.match(/`{3,}$/)
+    if (inline && inline[0]!.length >= open) open = 0
   }
   return open
 }
+
+test('commitStreamingAssistantMessages does not split before a closer after an inline status fence', () => {
+  // Real 2026-10-12 regression: the [Workflow] line ended with its closing
+  // 5-backtick run on the same line. The old fence parser toggled on every
+  // fence line, so it thought the next ````text opener had closed the outer
+  // fence and could cut immediately before the [Info] closer. That closer then
+  // became an opener in the live segment and swallowed Turn 4.
+  const lines = [
+    '`````',
+    '[Workflow] launched model-availability-research (wf_test); use /workflows to monitor.`````',
+    '',
+    '**LLM Running (Turn 3) ...**',
+    '🔨 Tool: `update_working_checkpoint`  📥 args:',
+    '````text',
+    '{',
+    '  "key_info": "x"',
+    '}',
+    '````',
+    '`````',
+    '[Info] Updated key_info and related_sop.',
+    '`````',
+    '',
+    '**LLM Running (Turn 4) ...**',
+  ]
+  const messages: ChatMessage[] = [liveAssistant(12, lines.join('\n'))]
+  const next = commitStreamingAssistantMessages(messages, 12, 4)
+  const live = next.find(m => m.id === 'a-12')
+  assert.ok(live)
+  const rendered = renderMarkdownLines(formatAssistantText(live!.text, { expanded: true }))
+  const turn4 = rendered.find(line => line.text.includes('LLM Running (Turn 4)'))
+  assert.ok(turn4)
+  assert.equal(turn4!.text, 'LLM Running (Turn 4) ...')
+  assert.equal(turn4!.parts?.some(part => part.bold), true)
+})
 
 test('commitStreamingAssistantMessages keeps committing while a tool-args block is still open', () => {
   // Regression (2026-10-03): requiring the live tail to be fence-balanced as well as the

@@ -764,9 +764,9 @@ class GenericAgentHandler(BaseHandler):
         if payload.get("status") == "async_launched":
             run_id = str(payload.get("runId") or "")
             workflow_name = str(payload.get("workflowName") or "workflow")
-            yield f"[Workflow] launched {workflow_name} ({run_id}); use /workflows to monitor."
+            yield f"[Workflow] launched {workflow_name} ({run_id}); use /workflows to monitor.\n"
         else:
-            yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}"
+            yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}\n"
         return StepOutcome(payload, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def _get_subagent_manager(self):

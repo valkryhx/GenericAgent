@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from agent_loop import (  # noqa: E402
     StepOutcome,
     _batch_tool_calls,
+    _run_single_tool,
     _tool_execution_mode,
     agent_runner_loop,
 )
@@ -175,6 +176,27 @@ class ParallelToolExecutionTest(unittest.TestCase):
         client = _Client([_Response([_ToolCall("mcp__s__bad", call_id="bad")])])
         with self.assertRaises(RuntimeError):
             _run(client, handler)
+
+
+class _NoNewlineHandler:
+    def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        yield "workflow output"
+        return StepOutcome({"tool": tool_name}, next_prompt="\n")
+
+
+class ToolFenceTest(unittest.TestCase):
+    def test_single_tool_closing_fence_starts_on_new_line(self):
+        chunks = list(_run_single_tool(
+            _NoNewlineHandler(),
+            _Response([]),
+            {"tool_name": "workflow", "args": {}},
+            0,
+            1,
+            True,
+        ))
+        joined = "".join(str(chunk) for chunk in chunks)
+        self.assertIn("workflow output\n`````\n", joined)
+        self.assertNotIn("workflow output`````", joined)
 
 
 if __name__ == "__main__":

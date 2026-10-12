@@ -114,13 +114,23 @@ def _run_single_tool(handler, response, tool_call, index, tool_num, verbose):
     # as in the original loop.
     yield "`````\n"
     yield first
+    last_chunk = first
     outcome = None
     while True:
         try:
-            yield next(gen)
+            chunk = next(gen)
         except StopIteration as e:
             outcome = e.value
             break
+        if chunk:
+            last_chunk = chunk
+        yield chunk
+    # A tool may yield text without a trailing newline (for example the
+    # workflow launch result). Without this break the closing fence is
+    # concatenated onto the content line, and a later stream-commit segment
+    # can start with an unmatched opening fence, swallowing later Turn headers.
+    if last_chunk and not str(last_chunk).endswith("\n"):
+        yield "\n"
     yield "`````\n"
     return outcome
 
@@ -149,6 +159,8 @@ def _run_parallel_tools(handler, response, batch, tool_num, verbose):
             texts, outcome = _dispatch_tool(handler, response, name, args, index, tool_num)
             for chunk in texts:
                 sink.put(("text", index, chunk))
+            if texts and texts[-1] and not str(texts[-1]).endswith("\n"):
+                sink.put(("text", index, "\n"))
             sink.put(("outcome", index, outcome))
         except BaseException as e:  # re-raised on the agent thread below
             sink.put(("error", index, e))

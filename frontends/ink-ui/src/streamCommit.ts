@@ -85,18 +85,43 @@ export function findFenceSafeOverflowCount(lines: string[], maxTail: number): nu
   return 0
 }
 
-/** Toggle on fence-only lines (` ``` ` / longer). 0 = closed, 1 = open. */
+/**
+ * Return the length of the currently open fence, or 0 when balanced.
+ *
+ * Markdown closers must be at least as long as their opener, and a shorter
+ * fence line inside an open block is content rather than a toggle. GA's
+ * legacy inline-closed status fences (`[Workflow] ...````` `) are also treated
+ * as closers here so stream commits cannot split before the *next* closing
+ * line and turn a closer into an opener in the following segment.
+ */
 function fenceOpenState(lines: string[]): number {
   let open = 0
   for (const line of lines) {
-    if (isFenceLine(line)) open = open === 0 ? 1 : 0
+    const trimmed = line.trim()
+    if (open === 0) {
+      const opener = fenceOpenerLength(trimmed)
+      if (opener > 0) open = opener
+      continue
+    }
+    const closer = fenceCloserLength(trimmed, open)
+    if (closer > 0) open = 0
   }
   return open
 }
 
-function isFenceLine(line: string): boolean {
-  // GA uses 3–5 backticks, optionally with a language tag (````text`).
-  return /^`{3,}[^\n`]*$/.test(line.trim())
+function fenceOpenerLength(line: string): number {
+  const match = line.match(/^(`{3,})([^`]*)$/)
+  return match ? match[1]!.length : 0
+}
+
+function fenceCloserLength(line: string, openLength: number): number {
+  const standalone = line.match(/^(`{3,})\s*$/)
+  if (standalone && standalone[1]!.length >= openLength) return standalone[1]!.length
+  // GA legacy malformed closer: the tool result line ends with the closing
+  // backtick run instead of putting it on its own line.
+  const inline = line.match(/`{3,}$/)
+  if (inline && inline[0]!.length >= openLength) return inline[0]!.length
+  return 0
 }
 
 /**

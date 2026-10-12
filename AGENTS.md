@@ -517,3 +517,19 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   验证：`python -m unittest discover -s tests` **1324 OK (skipped=3)**；
   `npm --prefix frontends/ink-ui run typecheck` OK；`npm test` **405 pass / 0 fail**。
 - 实施记录：`docs/20261012-ga-dynamic-workflow-实施记录-直写JS入口.md`。
+### 中途调研 2026-10-12：GA Ink workflow 内联 fence 关闭导致 Turn 3/4 字面星号
+
+- 触发：用户实测 `/workflow` 启动后，Ink UI 中 Turn 1/2 的 `LLM Running` 正常加粗，Turn 3/4 变成字面量 `**LLM Running ...**`，并与 `🔨 Tool:` 行混在同一段。
+- 证据：
+  - `temp/sessions/session_a0df2e7356e54111b99aa8eccf4ada56.jsonl` 第 2 条 `turn` 的 `assistant_text` 中，`workflow` 工具结果被包在 5 反引号 status fence 里，但结束 fence 被拼到了正文行尾：
+    `[Workflow] launched ... use /workflows to monitor.`````
+  - `ga.py:767` 的 `do_workflow()` 输出没有结尾 `\n`；`agent_loop.py::_run_single_tool()` 随后直接追加 `"`````\n"`，于是形成上述畸形 fence。
+  - 用真实 transcript 按 16 字符 delta 重放 `applyBridgeEvent`：Turn 2 为 bold，Turn 3/4 为 code/gray 且 `**` 原样显示；只在正文和结束 fence 之间插入换行后，Turn 3/4 恢复 bold。
+- 结论：这是服务端 fence 生成缺陷，不是 `marked` 解析器随机故障。stream-commit 可以从 ` ````` ` 这一行开始新 segment；`formatAssistantText()` 把 4/5 反引号压成 3 后，Markdown 只看到 opener、看不到独立闭合行，后续 Turn 和 Tool 行全部落入 code block。
+- 修复：
+  - `agent_loop.py` 在关闭工具输出 fence 前保证最后一个 chunk 以换行结尾（顺序工具和并行工具路径都覆盖）。
+  - `ga.py::do_workflow()` 的 `[Workflow]` / `[Warn]` 输出显式补 `\n`。
+  - `frontends/ink-ui/src/messageFormat.ts` 兼容历史 transcript 中已经存在的 `[Workflow] ...````` ` / `[Warn] ...````` ` 内联关闭形式。
+  - `frontends/ink-ui/src/streamCommit.ts` 的 fence 状态机改为按 Markdown 语义匹配 opener/closer 长度，并把 legacy 内联关闭视为 closer；否则它会把嵌套的 ````text` 误判为关闭 5 反引号块，从而在 `[Info]` 的真正 closer 前切段，让下一段以 closer 开头并吞掉 Turn 4。
+- 详细文档：`docs/20261012-ga-ink-workflow-fence-inline-close-fix.md`。
+- 状态（2026-10-12）：已实施；回归覆盖 Python 工具输出 fence、Ink transcript 渲染与 stream-commit fence 状态机。验证：`python -m unittest discover -s tests` 1325 OK（skipped=3），`npm --prefix frontends/ink-ui test` 407 pass，typecheck OK。

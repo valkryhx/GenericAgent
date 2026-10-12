@@ -77,6 +77,14 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
   text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `> ${name}(${args})`)
+  // Repair legacy GA status fences whose closing marker was emitted on the
+  // same line as the body. This happens when a tool yields text without a
+  // trailing newline (notably the workflow launch result); otherwise the next
+  // "**LLM Running ...**" is swallowed by the unclosed Markdown fence.
+  text = text.replace(
+    /(^|\n)(`{4,})[ \t]*\n(\[(?:Workflow|Warn)\][^\n]*?)`{4,}[ \t]*(?=\n|$)/g,
+    (_match, prefix: string, fence: string, body: string) => `${prefix}${fence}\n${body}\n${fence}`,
+  )
   // GA wraps tool execution status in 4–5 backtick fences. Unwrap those status
   // blocks (keep [Action]/[Status]/[Stdout] body) so a later turn header is
   // never trapped inside a markdown code fence after stream-commit splits.
