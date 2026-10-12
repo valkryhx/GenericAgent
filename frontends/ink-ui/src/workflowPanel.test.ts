@@ -31,6 +31,18 @@ test('workflowListRows renders Dynamic workflows summary and selected prefix ord
   ])
 })
 
+test('workflowListRows lists saved named workflows with the run-by-name hint', () => {
+  assert.deepEqual(workflowListRows({ mode: 'list', runs: workflowRuns, selected: 0, savedWorkflows: ['demo-flow', 'nightly'] }), [
+    'Dynamic workflows',
+    '1 completed',
+    '',
+    '› ✓ prompt-guided-planner-real-e2e-design  4 agents',
+    '  ◌ read-recent-git-commits  2 agents',
+    'Saved: demo-flow, nightly - /workflow run <name>',
+    'Enter view - Up/Down move - Esc close',
+  ])
+})
+
 test('workflowListCommandForKey moves selection and opens detail on Enter', () => {
   const panel = { mode: 'list' as const, runs: workflowRuns, selected: 0 }
 
@@ -394,16 +406,23 @@ test('workflowRawDetailPanelFromDetail exposes raw script and approval metadata 
     'Script:',
     'export const meta = { name: "demo" }',
     'return { ok: true }',
-    'Esc close',
+    's save - Esc close',
   ])
 })
 
-test('workflowPanelCommandForKey maps stop and resume without approve/deny', () => {
+test('workflowPanelCommandForKey maps CC save and GA stop without approve/deny', () => {
   const panel = workflowRawDetailPanelFromDetail({ run: awaitingRun, script: 'return 1', events: [] })
+  const running = { ...panel, run: { ...awaitingRun, status: 'running' } }
 
   assert.equal(workflowPanelCommandForKey(panel, { return: true }, '')?.command, undefined)
   assert.equal(workflowPanelCommandForKey(panel, {}, 'd')?.command, undefined)
-  assert.deepEqual(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 's')?.command, {
+  // CC m1906: ``s`` saves the run as a named workflow.
+  assert.deepEqual(workflowPanelCommandForKey(running, {}, 's')?.command, {
+    type: 'workflow_save',
+    runId: 'wf_demo',
+  })
+  // GA keeps ``x`` as stop so save and stop never collide.
+  assert.deepEqual(workflowPanelCommandForKey(running, {}, 'x')?.command, {
     type: 'workflow_stop',
     runId: 'wf_demo',
     reason: 'stopped from Ink UI',
@@ -419,7 +438,7 @@ test('workflowPanelCommandForKey maps resume shortcut for completed or interrupt
   })
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'running' } }, {}, 'r'), null)
   assert.equal(workflowPanelCommandForKey({ ...panel, run: { ...awaitingRun, status: 'cancelled' } }, {}, 'r'), null)
-  assert.equal(workflowPanelRows(panel).at(-1), 'r resume - s stop - Esc close')
+  assert.equal(workflowPanelRows(panel).at(-1), 'r resume - s save - x stop - Esc close')
 })
 
 function multiPhaseDetail() {

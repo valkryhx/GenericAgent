@@ -23,6 +23,12 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
   if (command.type === 'workflow_resume') return `/workflow resume ${command.runId}`
   if (command.type === 'workflow_stop') return `/workflow stop ${command.runId}${command.reason ? ` ${command.reason}` : ''}`
+  if (command.type === 'workflow_save') {
+    const flags = [command.name ?? '', command.overwrite ? '--overwrite' : ''].filter(Boolean).join(' ')
+    return `/workflow save ${command.runId}${flags ? ` ${flags}` : ''}`
+  }
+  if (command.type === 'workflow_run_named') return `/workflow run ${command.name}`
+  if (command.type === 'workflow_named_list') return '/workflows saved'
   if (command.type === 'stop') return '/stop'
   return null
 }

@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentRecord, BridgeEvent, ChatMessage, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
+import type { AgentEvent, AgentRecord, BridgeEvent, ChatMessage, NamedWorkflow, TokenUsage, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressPayload, WorkflowRun } from './protocol.js'
 import {
   commitStreamingAssistantMessages,
   committedAssistantPrefix,
@@ -12,6 +12,8 @@ export type AppState = {
   messages: ChatMessage[]
   error: string | null
   workflows: WorkflowRun[]
+  /** Saved named workflows (CC "save as named workflow"). */
+  namedWorkflows: NamedWorkflow[]
   workflowEvents: WorkflowEvent[]
   workflowDetails: Record<string, { run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }>
   workflowResults: Record<string, Record<string, unknown>>
@@ -32,6 +34,7 @@ export const initialState: AppState = {
   messages: [],
   error: null,
   workflows: [],
+  namedWorkflows: [],
   workflowEvents: [],
   workflowDetails: {},
   workflowResults: {},
@@ -137,6 +140,13 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'workflow_event') {
     return { ...state, workflowEvents: [...state.workflowEvents, event.event], error: null }
+  }
+  if (event.type === 'named_workflows') {
+    return { ...state, namedWorkflows: event.workflows, error: null }
+  }
+  if (event.type === 'workflow_saved') {
+    const existing = state.namedWorkflows.filter(item => item.name !== event.workflow.name)
+    return { ...state, namedWorkflows: [...existing, event.workflow].sort((a, b) => a.name.localeCompare(b.name)), error: null }
   }
   if (event.type === 'workflow_final') {
     return { ...state, workflowResults: { ...state.workflowResults, [event.runId]: event.result }, error: null }

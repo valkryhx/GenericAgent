@@ -130,6 +130,39 @@ function parseSlashSubmit(
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
   // approve/deny were removed from the product path; swallow them so they are not sent as chat.
   if (/^\/workflow\s+(approve|deny)\b/i.test(trimmed)) return {}
+  // CC "save as named workflow" (m1906) + "run a saved workflow by name"
+  // (Workflow({name, args})). ``--overwrite`` is the non-modal stand-in for
+  // CC's "Press Enter again to overwrite" second press.
+  if (trimmed === '/workflows saved' || trimmed === '/workflow saved' || trimmed === '/workflow named') {
+    return { command: { type: 'workflow_named_list' } }
+  }
+  const workflowRunNamed = /^\/workflow\s+run\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (workflowRunNamed) {
+    const argsText = (workflowRunNamed[2] ?? '').trim()
+    let args: unknown
+    if (argsText) {
+      try {
+        args = JSON.parse(argsText)
+      } catch {
+        args = { task: argsText }
+      }
+    }
+    return { command: { type: 'workflow_run_named', name: workflowRunNamed[1]!, ...(args === undefined ? {} : { args }) } }
+  }
+  const workflowSave = /^\/workflow\s+save\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (workflowSave) {
+    const rest = (workflowSave[2] ?? '').trim()
+    const overwrite = /(^|\s)--overwrite(\s|$)/.test(rest)
+    const name = rest.replace(/(^|\s)--overwrite(\s|$)/g, ' ').trim()
+    return {
+      command: {
+        type: 'workflow_save',
+        runId: workflowSave[1]!,
+        ...(name ? { name } : {}),
+        ...(overwrite ? { overwrite: true } : {}),
+      },
+    }
+  }
   const workflowAction = /^\/workflow\s+(detail|resume|stop)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (workflowAction) {
     const action = workflowAction[1]

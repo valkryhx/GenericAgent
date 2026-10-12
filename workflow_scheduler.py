@@ -230,8 +230,10 @@ class AgentScheduler:
         manage_run_completion: bool = True,
         args=None,
         cache_args=_CACHE_ARGS_UNSET,
+        job_id_prefix: str = "",
     ):
         self.store = store
+        self.job_id_prefix = str(job_id_prefix or "")
         self.run = run
         self.runner = runner or FakeChildAgentRunner()
         self.config = config or SchedulerConfig()
@@ -250,6 +252,9 @@ class AgentScheduler:
     @property
     def queued_count(self) -> int:
         return sum(1 for job in self.jobs if job.status == "queued")
+
+    def _new_job_id(self, call_index: int) -> str:
+        return f"{self.job_id_prefix}agent_{call_index + 1}"
 
     def register_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None) -> WorkflowJob:
         options = normalize_agent_options(options)
@@ -278,7 +283,7 @@ class AgentScheduler:
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
-            job_id=f"agent_{call_index + 1}",
+            job_id=self._new_job_id(call_index),
             prompt=prompt,
             status="queued",
             phase=options.get("phase"),
@@ -321,7 +326,7 @@ class AgentScheduler:
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
-            job_id=f"agent_{call_index + 1}",
+            job_id=self._new_job_id(call_index),
             prompt=prompt,
             status="cached",
             phase=options.get("phase"),
@@ -1065,7 +1070,7 @@ class AgentScheduler:
             f"{(job.prompt or '')[:4_000]}"
         )
         repair_job = WorkflowJob(
-            job_id=f"agent_{call_index + 1}",
+            job_id=self._new_job_id(call_index),
             prompt=prompt,
             status="queued",
             phase=job.phase,

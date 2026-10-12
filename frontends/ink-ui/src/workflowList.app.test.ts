@@ -193,7 +193,7 @@ test('App shows live workflow status bar without opening workflow panel', async 
   try {
     const frame = await waitForFrame(stdout, current => current.includes('read-recent-git-commits') && current.includes('1/2 agents done'))
 
-    assert.match(frame, /Enter view · x stop/)
+    assert.match(frame, /Enter · \/workflows · x stop/)
     assert.match(frame, /read-recent-git-commits/)
     assert.match(frame, /1\/2 agents done/)
     assert.equal(frame.includes('Dynamic workflows'), false)

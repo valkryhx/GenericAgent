@@ -36,11 +36,24 @@ class SkillsRuntimeTest(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"USERPROFILE": str(home), "HOME": str(home)}, clear=False):
-                skills = discover_skills()
+                skills = discover_skills([
+                    home / ".claude" / "skills",
+                    home / ".codex" / "skills",
+                ])
 
         self.assertEqual([s.name for s in skills], ["review", "imagegen"])
         self.assertTrue(str(skills[0].path).endswith(os.path.join(".claude", "skills", "review", "SKILL.md")))
         self.assertTrue(str(skills[1].path).endswith(os.path.join(".codex", "skills", "imagegen", "SKILL.md")))
+
+    def test_default_roots_include_repository_workflow_authoring_skill(self):
+        from skills_runtime import discover_skills
+
+        skills = discover_skills()
+        names = {skill.name for skill in skills}
+
+        self.assertIn("workflow-authoring", names)
+        workflow_skill = next(skill for skill in skills if skill.name == "workflow-authoring")
+        self.assertTrue(str(workflow_skill.path).endswith(os.path.join("skills", "workflow-authoring", "SKILL.md")))
 
     def test_discovers_nested_codex_system_skills(self):
         from skills_runtime import discover_skills

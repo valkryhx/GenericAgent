@@ -628,6 +628,65 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertEqual("agent_1", data["workflowProgress"][0]["jobId"])
 
 
+class NamedWorkflowLibraryTest(unittest.TestCase):
+    """CC "save as named workflow" (m1906_0xe19cc02.js) storage contract."""
+
+    SCRIPT = "export const meta = { name: 'demo', description: 'demo' }" + chr(10) + "return 1"
+
+    def test_save_list_and_load_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+
+            saved = store.save_named_workflow("My Flow", self.SCRIPT, source_run_id="wf_1", description="demo")
+
+            self.assertEqual("My-Flow", saved["name"])
+            self.assertEqual("My Flow", saved["requestedName"])
+            self.assertEqual("wf_1", saved["sourceRunId"])
+            self.assertNotIn("script", saved)
+            self.assertTrue((Path(tmp) / "named-workflows" / "My-Flow.json").is_file())
+
+            records = store.list_named_workflows()
+            self.assertEqual(["My-Flow"], [item["name"] for item in records])
+            self.assertNotIn("script", records[0])
+
+            loaded = store.load_named_workflow("My Flow")
+            self.assertEqual(self.SCRIPT, loaded["script"])
+            self.assertEqual(saved["scriptHash"], loaded["scriptHash"])
+
+    def test_save_refuses_to_clobber_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            store.save_named_workflow("demo", self.SCRIPT)
+
+            with self.assertRaises(FileExistsError):
+                store.save_named_workflow("demo", "return 2")
+
+            # Nothing was overwritten.
+            self.assertEqual(self.SCRIPT, store.load_named_workflow("demo")["script"])
+
+            store.save_named_workflow("demo", "return 2", overwrite=True)
+            self.assertEqual("return 2", store.load_named_workflow("demo")["script"])
+
+    def test_save_rejects_empty_name_and_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+
+            with self.assertRaises(ValueError):
+                store.save_named_workflow("   ", self.SCRIPT)
+            with self.assertRaises(ValueError):
+                store.save_named_workflow("demo", "   ")
+
+    def test_load_missing_named_workflow_raises_file_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            with self.assertRaises(FileNotFoundError):
+                store.load_named_workflow("nope")
+
+    def test_list_named_workflows_is_empty_without_a_library(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual([], WorkflowStore(root=tmp).list_named_workflows())
+
+
 class WorkflowStoreConcurrencyTest(unittest.TestCase):
     """`state.json` has several writers, so a whole-row `save_run` needs the M5 treatment.
 

@@ -27,7 +27,11 @@ def _home_dir() -> Path:
 
 
 def get_default_skill_roots() -> list[Path]:
-    roots = [_home_dir() / ".claude" / "skills", _home_dir() / ".codex" / "skills"]
+    roots = [
+        Path(__file__).resolve().parent / "skills",
+        _home_dir() / ".claude" / "skills",
+        _home_dir() / ".codex" / "skills",
+    ]
     extra = os.environ.get("GA_SKILL_PATHS", "")
     if extra:
         roots.extend(Path(p.strip()) for p in extra.split(os.pathsep) if p.strip())

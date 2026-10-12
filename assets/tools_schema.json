@@ -217,5 +217,41 @@
     "name": "start_long_term_update",
     "description": "Start distilling long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed",
     "parameters": {"type": "object", "properties": {}}}
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workflow",
+      "description": "Execute a dynamic workflow JavaScript script that orchestrates subagents deterministically. The workflow runs in the background: this tool returns immediately with a runId, and a <workflow_handoff> message is queued for the main agent when it finishes. Use /workflows to watch live progress, inspect, stop, save, or re-run a workflow. ONLY call this tool when the user has explicitly opted into multi-agent orchestration: they said 'use a workflow' / 'run a workflow' / 'fan out agents' / 'orchestrate this with subagents', invoked a workflow skill or slash command, or asked for a specific named or saved workflow. A task that would merely benefit from a workflow does NOT count. Before writing a script, load the `workflow-authoring` skill; it is the workflow authoring reference. Every script must begin with a pure-literal `export const meta = { name, description, phases? }` and must be deterministic (Date.now(), Math.random(), and no-argument new Date() are unavailable). Pass the script inline via `script`; do not write it to a file first. To iterate, use `scriptPath`; to resume, use `resumeFromRunId`; to run a saved workflow, use `name`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "Inline workflow JavaScript. Must start with a pure-literal export const meta = {...}."
+          },
+          "scriptPath": {
+            "type": "string",
+            "description": "Path to an existing workflow script inside the workflow workspace; use for iteration instead of resending script."
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of a saved workflow to run."
+          },
+          "args": {
+            "type": "object",
+            "description": "JSON value injected into the script as global args."
+          },
+          "resumeFromRunId": {
+            "type": "string",
+            "description": "Run id to resume; unchanged agent() prefix is served from cache."
+          },
+          "timeoutSeconds": {
+            "type": "number",
+            "description": "Optional run timeout in seconds; product default is 900."
+          }
+        }
+      }
+    }
   }
 ]

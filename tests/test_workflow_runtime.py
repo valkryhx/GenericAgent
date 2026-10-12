@@ -7,10 +7,23 @@ import unittest
 from pathlib import Path
 
 from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
-from workflow_models import WorkflowJob, WorkflowRun
+from workflow_models import WorkflowJob, WorkflowRun as _WorkflowRun
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
+
+
+_CC_META_PREFIX = "export const meta = { name: 'runtime-test', description: 'runtime test workflow' }\n"
+
+
+class WorkflowRun(_WorkflowRun):
+    """Test adapter that migrates legacy test bodies to the CC meta contract."""
+
+    def __init__(self, *args, **kwargs):
+        script = kwargs.get("script")
+        if isinstance(script, str) and script and not script.lstrip().startswith("export const meta"):
+            kwargs["script"] = _CC_META_PREFIX + script
+        super().__init__(*args, **kwargs)
 
 
 class NeverFinishesRunner:
@@ -70,6 +83,39 @@ class SucceedsThenFailsRunner:
                 payload={"error": "agent two failed after one success"},
                 transcript_events=[{"type": "error", "error": "agent two failed after one success"}],
             )
+        return None
+
+    def cancel(self, job):
+        self.cancelled_job_ids.add(job.job_id)
+
+
+class StaggeredPipelineRunner:
+    """Runs agent_1 immediately and agent_2 one tick later.
+
+    With CC pipeline semantics, item A's second stage can register before
+    item B's first stage completes; with a stage barrier it cannot.
+    """
+
+    def __init__(self):
+        self.started_job_ids: list[str] = []
+        self.cancelled_job_ids: set[str] = set()
+        self._agent_2_ticks = 0
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+
+    def poll(self, job):
+        if job.job_id == "agent_1":
+            return AgentResult(job_id=job.job_id, payload={"summary": "A"})
+        if job.job_id == "agent_2":
+            if self._agent_2_ticks == 0:
+                self._agent_2_ticks += 1
+                return None
+            return AgentResult(job_id=job.job_id, payload={"summary": "B"})
+        if job.job_id == "agent_3":
+            return AgentResult(job_id=job.job_id, payload={"summary": "AA"})
+        if job.job_id == "agent_4":
+            return AgentResult(job_id=job.job_id, payload={"summary": "BB"})
         return None
 
     def cancel(self, job):
@@ -941,6 +987,27 @@ return {summary: result.summary}
             self.assertEqual({"summary": "accepted"}, outcome.result)
             self.assertEqual("succeeded", store.load_run("wf_test").status)
 
+    def test_runtime_rejects_nondeterministic_script_before_worker_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_nondeterministic",
+                session_id="session_test",
+                script="return { now: Date.now() }",
+                status="running",
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            with self.assertRaisesRegex(RuntimeError, "must be deterministic"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(
+                store=store,
+                run=run,
+                marker="must be deterministic",
+                expected_jobs=0,
+            )
+
     def test_runtime_marks_run_failed_when_worker_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
@@ -1435,7 +1502,7 @@ return repair
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual(2, final_result["result"]["repairAttempts"])
 
-    def test_runtime_parallel_thunk_sync_throw_fails_without_agent_jobs(self):
+    def test_runtime_parallel_thunk_sync_throw_returns_null(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             script = """
@@ -1448,10 +1515,11 @@ return results
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
 
-            with self.assertRaisesRegex(RuntimeError, "GA_P8_PARALLEL_THUNK_THROW"):
-                runtime.run(run)
+            outcome = runtime.run(run)
 
-            self.assert_runtime_failed_with_marker(store=store, run=run, marker="GA_P8_PARALLEL_THUNK_THROW")
+            self.assertEqual([1, None], outcome.result)
+            self.assertEqual("succeeded", store.load_run("wf_test").status)
+            self.assertEqual([], store.load_run("wf_test").jobs)
 
     def test_runtime_marks_bigint_return_as_failed_worker_serialization_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1530,7 +1598,7 @@ return results.map(r => r.summary)
             self.assertIn(("agent_started", "agent_1"), event_pairs[:first_completed])
             self.assertIn(("agent_started", "agent_2"), event_pairs[:first_completed])
 
-    def test_runtime_pipeline_runs_stage_batches_and_preserves_item_order(self):
+    def test_runtime_pipeline_runs_items_without_stage_barrier(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             script = """
@@ -1544,15 +1612,7 @@ return results.map(r => r.summary)
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(
                 store=store,
-                runner=FakeChildAgentRunner(
-                    delay_ticks=1,
-                    results={
-                        "agent_1": {"summary": "A"},
-                        "agent_2": {"summary": "B"},
-                        "agent_3": {"summary": "AA"},
-                        "agent_4": {"summary": "BB"},
-                    },
-                ),
+                runner=StaggeredPipelineRunner(),
                 scheduler_config=SchedulerConfig(max_concurrent=2),
             )
 
@@ -1564,9 +1624,27 @@ return results.map(r => r.summary)
             self.assertEqual(["stage1 a", "stage1 b", "stage2 A", "stage2 B"], [job.prompt for job in loaded.jobs])
             events = store.replay_events("wf_test")
             event_pairs = [(event.event_type, event.job_id) for event in events]
-            stage2_first_registered = event_pairs.index(("agent_registered", "agent_3"))
-            self.assertLess(event_pairs.index(("agent_completed", "agent_1")), stage2_first_registered)
-            self.assertLess(event_pairs.index(("agent_completed", "agent_2")), stage2_first_registered)
+            stage2_registered = event_pairs.index(("agent_registered", "agent_3"))
+            self.assertLess(event_pairs.index(("agent_completed", "agent_1")), stage2_registered)
+            self.assertLess(stage2_registered, event_pairs.index(("agent_completed", "agent_2")))
+
+    def test_runtime_pipeline_short_circuits_null_per_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const seen = []
+const results = await pipeline(
+  [1, 2],
+  async item => item === 1 ? null : item,
+  async value => { seen.push(value); return value * 10 }
+)
+return {results, seen}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+            self.assertEqual({"results": [None, 20], "seen": [2]}, outcome.result)
 
     def test_runtime_agent_options_label_is_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2565,31 +2643,7 @@ return [first.summary, second.summary, third.summary]
             final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
             self.assertEqual("failed", final_result["status"])
 
-    def test_runtime_worker_error_after_parallel_cancels_pending_jobs(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = WorkflowStore(root=tmp)
-            runner = FailingAndHangingRunner()
-            script = """
-const results = await parallel([() => agent('fails'), () => agent('still running')])
-return results
-"""
-            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2), timeout_seconds=1.0)
-
-            with self.assertRaisesRegex(RuntimeError, "agent one failed"):
-                runtime.run(run)
-
-            loaded = store.load_run("wf_test")
-            self.assertEqual("failed", loaded.status)
-            self.assertEqual("failed", loaded.jobs[0].status)
-            self.assertEqual("cancelled", loaded.jobs[1].status)
-            self.assertEqual({"agent_2"}, runner.cancelled_job_ids)
-            event_types = [event.event_type for event in store.replay_events("wf_test")]
-            self.assertIn("agent_failed", event_types)
-            self.assertIn("agent_cancelled", event_types)
-            self.assertEqual("workflow_failed", event_types[-1])
-
-    def test_runtime_parallel_partial_failure_preserves_success_artifact_and_failed_result(self):
+    def test_runtime_parallel_partial_failure_returns_null_and_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             runner = SucceedsThenFailsRunner()
@@ -2600,13 +2654,14 @@ return results
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2), timeout_seconds=2.0)
 
-            with self.assertRaisesRegex(RuntimeError, "agent two failed after one success"):
-                runtime.run(run)
+            outcome = runtime.run(run)
 
+            self.assertEqual("agent one succeeded", outcome.result[0]["summary"])
+            self.assertIsNone(outcome.result[1])
             loaded = store.load_run("wf_test")
             artifact_dir = Path(loaded.artifact_dir)
-            self.assertEqual("failed", loaded.status)
-            self.assertIn("agent two failed after one success", loaded.error)
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("partial", loaded.metadata["executionOutcome"])
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual([], sorted(runner.cancelled_job_ids))
             self.assertEqual(["succeeded", "failed"], [job.status for job in loaded.jobs])
@@ -2630,15 +2685,36 @@ return results
             self.assertTrue(failed_transcript.exists())
 
             final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_result["status"])
-            self.assertIn("agent two failed after one success", final_result["error"])
+            self.assertEqual("succeeded", final_result["status"])
+            self.assertEqual("partial", final_result["executionOutcome"])
             event_types = [event.event_type for event in store.replay_events("wf_test")]
             self.assertLess(event_types.index("agent_completed"), event_types.index("agent_failed"))
-            self.assertEqual("workflow_failed", event_types[-1])
+            self.assertEqual("workflow_finished", event_types[-1])
             failed_event = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_failed")
             self.assertEqual("agent_2", failed_event.job_id)
             self.assertEqual("agent two failed after one success", failed_event.payload["error"])
             self.assertEqual("agents/agent_2/result.json", failed_event.payload["resultRef"])
+
+    def test_runtime_parallel_rejects_promise_items_like_cc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_test",
+                session_id="session_test",
+                script="return await parallel([Promise.resolve(1)])",
+                status="running",
+            ))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            with self.assertRaisesRegex(RuntimeError, "expects an array of functions, not promises"):
+                runtime.run(run)
+
+            self.assert_runtime_failed_with_marker(
+                store=store,
+                run=run,
+                marker="expects an array of functions, not promises",
+                expected_jobs=0,
+            )
 
     def test_handled_child_failure_persists_partial_execution_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2674,7 +2750,7 @@ return {handled, first}
             self.assertEqual(loaded.metadata["childSummary"], final_result["childSummary"])
             self.assertEqual(loaded.metadata["childSummary"], progress["childSummary"])
 
-    def test_runtime_provider_429_rate_limit_failure_preserves_artifacts_and_events(self):
+    def test_runtime_provider_429_rate_limit_failure_returns_null_and_preserves_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             runner = RateLimitAfterFirstSuccessRunner()
@@ -2685,14 +2761,15 @@ return results
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
             runtime = WorkflowRuntime(store=store, runner=runner, scheduler_config=SchedulerConfig(max_concurrent=2), timeout_seconds=2.0)
 
-            with self.assertRaisesRegex(RuntimeError, "429.*rate limit"):
-                runtime.run(run)
+            outcome = runtime.run(run)
 
+            self.assertEqual("agent one succeeded before rate limit", outcome.result[0]["summary"])
+            self.assertIsNone(outcome.result[1])
             loaded = store.load_run("wf_test")
             artifact_dir = Path(loaded.artifact_dir)
-            self.assertEqual("failed", loaded.status)
-            self.assertIn("429", loaded.error)
-            self.assertIn("rate limit", loaded.error.lower())
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("partial", loaded.metadata["executionOutcome"])
+            self.assertEqual(1, loaded.metadata["childSummary"]["failed"])
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual(["succeeded", "failed"], [job.status for job in loaded.jobs])
 
@@ -2711,11 +2788,12 @@ return results
             self.assertTrue((artifact_dir / loaded.jobs[1].metadata["transcriptRef"]).exists())
 
             final_result = json.loads((artifact_dir / "final-result.json").read_text(encoding="utf-8"))
-            self.assertEqual("failed", final_result["status"])
-            self.assertIn("429", final_result["error"])
+            self.assertEqual("succeeded", final_result["status"])
+            self.assertEqual("partial", final_result["executionOutcome"])
+            self.assertEqual(1, final_result["childSummary"]["failed"])
             event_types = [event.event_type for event in store.replay_events("wf_test")]
             self.assertLess(event_types.index("agent_completed"), event_types.index("agent_failed"))
-            self.assertEqual("workflow_failed", event_types[-1])
+            self.assertEqual("workflow_finished", event_types[-1])
             failed_event = next(event for event in store.replay_events("wf_test") if event.event_type == "agent_failed")
             self.assertEqual("agent_2", failed_event.job_id)
             self.assertIn("429", failed_event.payload["error"])
@@ -2951,3 +3029,325 @@ class RunnerTelemetryWiringTest(unittest.TestCase):
             runtime = WorkflowRuntime(store=store, runner=NeverFinishesRunner(), timeout_seconds=5)
 
             runtime._wire_runner_telemetry(run)
+
+
+class CancelsFirstChildRunner:
+    """Cancels the first child agent while the workflow itself stays alive.
+
+    CC evidence (m0869 @43713 ``jo``): once the workflow abort signal is set,
+    ``agent()`` returns a Promise that never settles. A cancelled child must
+    therefore park the script at the awaited call instead of letting
+    ``parallel()``/``pipeline()`` swallow the cancellation into ``null``.
+    """
+
+    def __init__(self):
+        self.started_job_ids: list[str] = []
+        self.cancelled_job_ids: set[str] = set()
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+
+    def poll(self, job):
+        if job.job_id == "agent_1":
+            return AgentResult(job_id=job.job_id, status="cancelled", payload={"cancelled": True})
+        return AgentResult(job_id=job.job_id, status="succeeded", payload={"summary": job.job_id})
+
+    def cancel(self, job):
+        self.cancelled_job_ids.add(job.job_id)
+
+
+class _CapturingStdin:
+    def __init__(self, sink: list[dict]):
+        self._sink = sink
+
+    def write(self, text: str) -> None:
+        self._sink.append(json.loads(text))
+
+    def flush(self) -> None:
+        pass
+
+
+class CapturingProcess:
+    """Minimal Popen stand-in that records the rpc_result frames we send."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+        self.stdin = _CapturingStdin(self.sent)
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        pass
+
+
+def _run_in_thread(runtime, run, errors):
+    try:
+        runtime.run(run)
+    except Exception as exc:  # pragma: no cover - asserted by the caller
+        errors.append(exc)
+
+
+class WorkflowCancellationSemanticsTest(unittest.TestCase):
+    """CC-aligned cancellation semantics (m0869 @43713 jo, @74546 Ko, @75362 zo)."""
+
+    def _log_messages(self, store, run_id):
+        return [
+            event.payload.get("message")
+            for event in store.replay_events(run_id)
+            if event.event_type == "workflow_log"
+        ]
+
+    def test_cancelled_agent_never_settles_so_script_does_not_advance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            runner = CancelsFirstChildRunner()
+            script = """
+const first = await agent('first')
+log('after-first')
+const second = await agent('second')
+return [first, second]
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=runner, timeout_seconds=0.3)
+
+            with self.assertRaisesRegex(RuntimeError, "(?i)(timeout|deadline)"):
+                runtime.run(run)
+
+            # The cancelled agent() call parked the script: no later agent was
+            # registered and the post-await log never fired.
+            self.assertEqual(["agent_1"], runner.started_job_ids)
+            self.assertNotIn("after-first", self._log_messages(store, "wf_test"))
+            loaded = store.load_run("wf_test")
+            self.assertEqual("cancelled", loaded.jobs[0].status)
+
+    def test_parallel_cancellation_is_not_swallowed_into_null(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            runner = CancelsFirstChildRunner()
+            script = """
+const results = await parallel([() => agent('one'), () => agent('two')])
+log('after-parallel:' + JSON.stringify(results))
+return results
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(
+                store=store,
+                runner=runner,
+                scheduler_config=SchedulerConfig(max_concurrent=2),
+                timeout_seconds=0.3,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "(?i)(timeout|deadline)"):
+                runtime.run(run)
+
+            # CC parallel() registers every thunk up front, so agent_2 still
+            # starts. But the cancelled slot never settles, so parallel() must
+            # not resolve with [null, {...}] and the post-await log stays silent.
+            self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
+            self.assertEqual(
+                [],
+                [message for message in self._log_messages(store, "wf_test") if message and message.startswith("after-parallel")],
+            )
+
+    def test_runtime_observes_external_cancel_of_running_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+log('ready for external cancel')
+return await new Promise(() => {})
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            errors = []
+
+            thread = threading.Thread(target=_run_in_thread, args=(runtime, run, errors), daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")))
+            cancelled = store.load_run("wf_test")
+            cancelled.status = "cancelled"
+            cancelled.error = "user cancelled"
+            store.save_run(cancelled)
+            thread.join(timeout=10.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(errors)
+            self.assertIn("cancel", str(errors[0]).lower())
+            loaded = store.load_run("wf_test")
+            self.assertEqual("cancelled", loaded.status)
+            self.assertEqual("user cancelled", loaded.error)
+            final_result = json.loads((Path(run.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("cancelled", final_result["status"])
+            self.assertEqual("workflow_cancelled", store.replay_events("wf_test")[-1].event_type)
+
+    def test_complete_pending_rpc_never_settles_for_cancelled_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(session_id="session", script="return 1"))
+            scheduler = AgentScheduler(store=store, run=run, runner=FakeChildAgentRunner(), manage_run_completion=False)
+            process = CapturingProcess()
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+
+            cancelled_job = scheduler.register_agent(prompt="work", label=None, options={})
+            scheduler._cancel_job(cancelled_job, reason="cancelled")
+            cancelled_pending = {7: cancelled_job}
+            runtime._complete_pending_rpc(process, scheduler, cancelled_pending, cancelled_job)
+            self.assertEqual([], process.sent)
+            self.assertIn(7, cancelled_pending)
+
+            failed_job = scheduler.register_agent(prompt="work two", label=None, options={})
+            scheduler._fail_job(failed_job, "boom")
+            failed_pending = {8: failed_job}
+            runtime._complete_pending_rpc(process, scheduler, failed_pending, failed_job)
+            self.assertEqual(1, len(process.sent))
+            self.assertFalse(process.sent[0]["ok"])
+            self.assertEqual(8, process.sent[0]["id"])
+            self.assertNotIn(8, failed_pending)
+
+
+class NestedWorkflowRuntimeTest(unittest.TestCase):
+    def _store(self, tmp):
+        return WorkflowStore(root=tmp)
+
+    def test_named_nested_workflow_returns_child_result_and_records_parent(self):
+        outer = """export const meta = { name: 'outer', description: 'outer' }
+const child = await workflow('child', { value: 7 })
+return { child }
+"""
+        child = """export const meta = { name: 'child', description: 'child' }
+return { value: args.value, nested: true }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            store.save_named_workflow('child', child)
+            run = WorkflowRun(run_id='wf_outer', session_id='sess', script=outer, status='running')
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+            self.assertEqual({'child': {'value': 7, 'nested': True}}, outcome.result)
+            nested = next(item for item in store.list_runs() if item.metadata.get('parentRunId') == 'wf_outer')
+            self.assertEqual('succeeded', nested.status)
+            self.assertEqual(1, nested.metadata.get('workflowDepth'))
+            self.assertEqual('child', nested.metadata.get('nestedWorkflow'))
+            self.assertEqual('named', nested.metadata.get('scriptSource'))
+
+    def test_inline_nested_workflow_returns_child_result(self):
+        inline_child = "export const meta = { name: 'inline-child', description: 'inline child' }\nreturn { inline: true }"
+        outer = (
+            "export const meta = { name: 'outer-inline', description: 'outer inline' }\n"
+            "return await workflow({script: " + json.dumps(inline_child) + "})\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            run = WorkflowRun(run_id='wf_outer_inline', session_id='sess', script=outer, status='running')
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+            self.assertEqual({'inline': True}, outcome.result)
+            nested = next(item for item in store.list_runs() if item.metadata.get('parentRunId') == 'wf_outer_inline')
+            self.assertEqual('inline', nested.metadata.get('scriptSource'))
+
+    def test_script_path_nested_workflow_returns_child_result(self):
+        child = "export const meta = { name: 'path-child', description: 'path child' }\nreturn { fromPath: true }\n"
+        outer = """export const meta = { name: 'outer-path', description: 'outer path' }
+return await workflow({scriptPath: 'child.js'})
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'child.js').write_text(child, encoding='utf-8', newline='\n')
+            store = self._store(tmp)
+            run = WorkflowRun(run_id='wf_outer_path', session_id='sess', script=outer, status='running')
+            outcome = WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(
+                run,
+                args={'workspacePath': tmp},
+            )
+
+            self.assertEqual({'fromPath': True}, outcome.result)
+            nested = next(item for item in store.list_runs() if item.metadata.get('parentRunId') == 'wf_outer_path')
+            self.assertEqual('scriptPath', nested.metadata.get('scriptSource'))
+
+    def test_second_level_workflow_is_rejected(self):
+        outer = """export const meta = { name: 'outer-two', description: 'outer two' }
+return await workflow('child')
+"""
+        child = """export const meta = { name: 'child-two', description: 'child two' }
+return await workflow('grandchild')
+"""
+        grandchild = """export const meta = { name: 'grandchild', description: 'grandchild' }
+return { ok: true }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            store.save_named_workflow('child', child)
+            store.save_named_workflow('grandchild', grandchild)
+            run = WorkflowRun(run_id='wf_outer_two', session_id='sess', script=outer, status='running')
+
+            with self.assertRaisesRegex(RuntimeError, 'limited to one level'):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+            self.assertEqual('failed', store.load_run('wf_outer_two').status)
+            nested = next(item for item in store.list_runs() if item.metadata.get('parentRunId') == 'wf_outer_two')
+            self.assertEqual('failed', nested.status)
+
+    def test_nested_agent_jobs_use_run_scoped_prefix(self):
+        outer = """export const meta = { name: 'outer-jobs', description: 'outer jobs' }
+return await workflow('child')
+"""
+        child = """export const meta = { name: 'child-jobs', description: 'child jobs' }
+return await agent('child task', { label: 'child-agent' })
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            store.save_named_workflow('child', child)
+            run = WorkflowRun(run_id='wf_outer_jobs', session_id='sess', script=outer, status='running')
+            WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+            outer_run = store.load_run('wf_outer_jobs')
+            nested = next(item for item in store.list_runs() if item.metadata.get('parentRunId') == 'wf_outer_jobs')
+            self.assertEqual([], [job.job_id for job in outer_run.jobs])
+            self.assertEqual(1, len(nested.jobs))
+            self.assertTrue(nested.jobs[0].job_id.startswith(f'nested_{nested.run_id}_'))
+
+    def test_parent_stop_marks_nested_run_killed(self):
+        child = """export const meta = { name: 'child-stop', description: 'child stop' }
+return { ok: true }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            parent = store.create_run(
+                WorkflowRun(
+                    run_id='wf_parent_stop',
+                    session_id='sess',
+                    script="export const meta = { name: 'parent', description: 'parent' }\nreturn 1",
+                    status='killed',
+                )
+            )
+            nested = WorkflowRun(
+                run_id='wf_child_stop',
+                session_id='sess',
+                script=child,
+                status='running',
+                metadata={'parentRunId': parent.run_id},
+            )
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner())
+            runtime.parent_run_id = parent.run_id
+
+            with self.assertRaisesRegex(RuntimeError, 'killed'):
+                runtime.run(nested)
+
+            loaded = store.load_run('wf_child_stop')
+            self.assertEqual('killed', loaded.status)
+            self.assertEqual('workflow_killed', store.replay_events('wf_child_stop')[-1].event_type)
+
+    def test_workflow_rejects_non_string_or_object_ref(self):
+        outer = """export const meta = { name: 'outer-bad-ref', description: 'outer bad ref' }
+return await workflow(42)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            run = WorkflowRun(run_id='wf_bad_ref', session_id='sess', script=outer, status='running')
+
+            with self.assertRaisesRegex(RuntimeError, r'workflow\(\) expects'):
+                WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)

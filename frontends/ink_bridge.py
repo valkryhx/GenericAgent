@@ -17,6 +17,7 @@ import queue
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, TextIO
 
 
@@ -27,8 +28,10 @@ if PROJECT_DIR not in sys.path:
 from sensitive_redaction import sanitize, redact_sensitive_text
 from workflow_store import build_artifact_ownership_index
 from workflow_workspace import (
+    WorkspacePathError,
     default_workspace_root,
     observed_artifact_paths,
+    resolve_workspace_child,
     resolve_workspace_root,
     workspace_metadata,
     workspace_writes_with_writer,
@@ -234,6 +237,10 @@ class GenericAgentBridge:
             self.agent = self.agent_factory()
             self.agent.inc_out = True
             self.agent.verbose = True
+        # The model-visible workflow tool is dispatched from the agent's handler.
+        # The bridge owns run creation, so expose the launcher on the agent
+        # object that the handler receives as ``parent``.
+        self.agent.workflow_tool_launcher = self.workflow_launch_from_tool
         raw_emit = emit or make_stdout_emitter(sys.stdout)
         self.emit = lambda event: raw_emit(sanitize(event))
         # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
@@ -958,11 +965,260 @@ class GenericAgentBridge:
         thread.start()
         return resumed.run_id
 
+    def workflow_save(self, run_id: str, *, name: str | None = None, overwrite: bool = False) -> bool:
+        """Save a run's script as a named workflow (CC m1906 "save as").
+
+        CC evidence (m1906_0xe19cc02.js): the default name comes from the
+        script's ``meta.name`` (falling back to a slug of the summary), and a
+        name collision asks the user to press Enter again to overwrite. GA has
+        no modal dialog, so the second press is the explicit ``overwrite`` flag
+        (``/workflow save <runId> <name> --overwrite``); without it a collision
+        is reported as ``workflow_name_exists`` and nothing is written.
+        """
+        run_id = str(run_id or "")
+        if not run_id:
+            self.emit({"type": "error", "code": "workflow_bad_run_id", "message": "workflow runId is required"})
+            return False
+        try:
+            with backend_output_redirect():
+                run = self.workflow_store.load_run(run_id)
+                script = str(run.script or "")
+                if not script.strip():
+                    raise ValueError("workflow has no script to save")
+                metadata = run.metadata if isinstance(run.metadata, dict) else {}
+                requested = str(name or "").strip() or str(metadata.get("workflowName") or "").strip() or run_id
+                record = self.workflow_store.save_named_workflow(
+                    requested,
+                    script,
+                    source_run_id=run_id,
+                    description=str(metadata.get("workflowTaskType") or "").strip() or None,
+                    overwrite=bool(overwrite),
+                )
+        except FileExistsError as exc:
+            slug = exc.args[0] if exc.args else "workflow"
+            self.emit({
+                "type": "error",
+                "code": "workflow_name_exists",
+                "message": f"workflow '{slug}' already exists; save again with --overwrite to replace it",
+            })
+            return False
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_save_failed", "message": str(exc)})
+            return False
+        self.emit({"type": "workflow_saved", "workflow": record, "overwritten": bool(overwrite)})
+        self._emit_named_workflows()
+        return True
+
+    def workflow_launch_from_tool(
+        self,
+        *,
+        script: str | None = None,
+        script_path: str | None = None,
+        name: str | None = None,
+        args: Any = None,
+        resume_from_run_id: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Launch a workflow from the model-visible workflow tool.
+
+        This method is called from inside the main agent's tool dispatch, when
+        ``agent.is_running`` is true. It therefore intentionally does not use
+        the busy guard shared by the interactive workflow commands.
+        """
+        requested_script = str(script).strip() if isinstance(script, str) and str(script).strip() else ""
+        requested_path = str(script_path).strip() if isinstance(script_path, str) and str(script_path).strip() else ""
+        requested_name = str(name).strip() if isinstance(name, str) and str(name).strip() else ""
+        if sum(bool(value) for value in (requested_script, requested_path, requested_name)) > 1:
+            return {"status": "error", "error": "workflow accepts exactly one of script, scriptPath, or name"}
+        resume_id = str(resume_from_run_id).strip() if isinstance(resume_from_run_id, str) and str(resume_from_run_id).strip() else ""
+        try:
+            resume_run = None
+            if resume_id:
+                resume_run = self.workflow_store.load_run(resume_id)
+                if resume_run.status not in {"succeeded", "degraded", "failed", "killed", "cancelled", "interrupted"}:
+                    raise ValueError(f"cannot resume workflow {resume_id} from {resume_run.status}")
+            source_kind = ""
+            source_name = ""
+            if requested_name:
+                record = self.workflow_store.load_named_workflow(requested_name)
+                workflow_script = str(record.get("script") or "")
+                source_kind = "named"
+                source_name = str(record.get("name") or requested_name)
+            elif requested_path:
+                workflow_script = self._read_workflow_tool_script_path(requested_path)
+                source_kind = "scriptPath"
+                source_name = Path(requested_path).name
+            elif requested_script:
+                workflow_script = str(script)
+                source_kind = "inline"
+            elif resume_run is not None:
+                workflow_script = str(resume_run.script or "")
+                source_kind = "resume"
+                source_name = str((resume_run.metadata or {}).get("workflowName") or "")
+            else:
+                raise ValueError("workflow requires script, scriptPath, name, or resumeFromRunId")
+            if not workflow_script.strip():
+                raise ValueError("workflow script is empty")
+            from workflow_planner import validate_rendered_workflow_script
+
+            preflight = validate_rendered_workflow_script(workflow_script)
+            if not preflight.get("ok"):
+                raise ValueError("Invalid workflow script: " + str(preflight.get("error") or "workflow script validation failed"))
+            meta = preflight.get("meta") if isinstance(preflight.get("meta"), dict) else {}
+            workflow_name = str(meta.get("name") or source_name or "dynamic-workflow")
+            summary = str(meta.get("description") or "")
+            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+            with backend_output_redirect():
+                run = self.workflow_controller.create_draft(session_id=session_id, script=workflow_script)
+                run.status = "running"
+                run.metadata.update({
+                    "workflowName": workflow_name,
+                    "workflowSummary": summary,
+                    "workflowTaskType": "dynamic_workflow",
+                    "launchedBy": "workflow_tool",
+                    "scriptSource": source_kind,
+                })
+                if requested_name:
+                    run.metadata["namedWorkflow"] = source_name
+                if resume_id:
+                    run.metadata["resumeFromRunId"] = resume_id
+                if not self._assign_run_workspace(run):
+                    run.metadata.update(workspace_metadata(self.workspace_root))
+                self.workflow_store.save_run(run)
+                from workflow_models import WorkflowEvent
+
+                self.workflow_store.append_event(
+                    run,
+                    WorkflowEvent(
+                        run_id=run.run_id,
+                        session_id=run.session_id,
+                        event_type="workflow_started",
+                        sequence=0,
+                        payload={
+                            "launchedBy": "workflow_tool",
+                            "scriptSource": source_kind,
+                            "workflowName": workflow_name,
+                            "resumeFromRunId": resume_id or None,
+                        },
+                    ),
+                )
+        except FileNotFoundError as exc:
+            return {"status": "error", "error": f"workflow source not found: {exc}"}
+        except Exception as exc:
+            return {"status": "error", "error": redact_sensitive_text(str(exc))}
+
+        self._emit_agent_read_model()
+        self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+        self._emit_workflow_events(run.run_id)
+        try:
+            effective_timeout = self._effective_workflow_timeout(timeout_seconds)
+        except Exception as exc:
+            return {"status": "error", "error": redact_sensitive_text(str(exc))}
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, effective_timeout, resume_id or None),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        artifact_dir = os.fspath(run.artifact_dir or "")
+        return {
+            "status": "async_launched",
+            "taskId": f"local_workflow_{run.run_id}",
+            "taskType": "local_workflow",
+            "runId": run.run_id,
+            "workflowName": workflow_name,
+            "summary": summary,
+            "transcriptDir": os.path.join(artifact_dir, "agents"),
+            "scriptPath": os.path.join(artifact_dir, "script.js"),
+            "workspacePath": str((run.metadata or {}).get("workspacePath") or self.workspace_root),
+            "message": "Workflow launched in the background; use /workflows to monitor progress.",
+        }
+
+    def _read_workflow_tool_script_path(self, raw_path: str) -> str:
+        roots = [self.workspace_root]
+        store_root = Path(self.workflow_store.root)
+        if store_root.exists():
+            roots.append(store_root)
+        for root in roots:
+            try:
+                path = resolve_workspace_child(raw_path, root)
+            except (WorkspacePathError, OSError, ValueError):
+                continue
+            if path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")
+        raise FileNotFoundError(f"workflow scriptPath not found or outside workspace: {raw_path}")
+
+    def workflow_run_named(self, name: str, *, args: Any = None, timeout_seconds: float | None = None) -> str:
+        """Start a fresh run from a saved named workflow (CC Workflow({name, args}))."""
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return ""
+        requested = str(name or "").strip()
+        if not requested:
+            self.emit({"type": "error", "code": "workflow_bad_name", "message": "workflow name is required"})
+            return ""
+        try:
+            with backend_output_redirect():
+                from workflow_models import WorkflowEvent
+
+                record = self.workflow_store.load_named_workflow(requested)
+                session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
+                run = self.workflow_controller.create_draft(session_id=session_id, script=str(record.get("script") or ""))
+                run.status = "running"
+                run.metadata["workflowName"] = str(record.get("name") or requested)
+                run.metadata["namedWorkflow"] = str(record.get("name") or requested)
+                self.workflow_store.save_run(run)
+                self.workflow_store.append_event(
+                    run,
+                    WorkflowEvent(
+                        run_id=run.run_id,
+                        session_id=run.session_id,
+                        event_type="workflow_started",
+                        sequence=0,
+                        payload={"namedWorkflow": run.metadata["namedWorkflow"]},
+                    ),
+                )
+            self._emit_agent_read_model()
+            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
+        except FileNotFoundError:
+            self.emit({"type": "error", "code": "workflow_name_not_found", "message": f"no saved workflow named '{requested}'"})
+            return ""
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_run_named_failed", "message": str(exc)})
+            return ""
+        thread = threading.Thread(
+            target=self._run_workflow_runtime,
+            args=(run.run_id, args, self._effective_workflow_timeout(timeout_seconds), None),
+            daemon=True,
+            name=f"ga-ink-workflow-{run.run_id}",
+        )
+        self._workflow_threads[run.run_id] = thread
+        thread.start()
+        return run.run_id
+
+    def workflow_named_list(self) -> None:
+        try:
+            self._emit_named_workflows()
+        except Exception as exc:
+            self.emit({"type": "error", "code": "workflow_named_list_failed", "message": str(exc)})
+
+    def _emit_named_workflows(self) -> None:
+        self.emit({"type": "named_workflows", "workflows": self.workflow_store.list_named_workflows()})
+
     def workflow_list(self) -> None:
         try:
             runs = self._list_workflow_runs()
             self._emit_agent_read_model()
-            self.emit({"type": "workflow_runs", "runs": [self._workflow_run_payload(run) for run in runs]})
+            self.emit({
+                "type": "workflow_runs",
+                "runs": [self._workflow_run_payload(run) for run in runs],
+                # CC m1906 lists saved named workflows next to the run history;
+                # GA surfaces them as names so the list panel can hint
+                # ``/workflow run <name>``.
+                "savedWorkflows": [str(item.get("name") or "") for item in self.workflow_store.list_named_workflows()],
+            })
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
 
@@ -1376,7 +1632,35 @@ class GenericAgentBridge:
     def _workflow_run_payload(self, run) -> dict[str, Any]:
         data = run.to_dict()
         data.pop("script", None)
+        recovery = self._workflow_recovery_hint(run)
+        if recovery:
+            data["recovery"] = recovery
         return data
+
+    # CC evidence: m0567_0xcdd6311.js CTn() injects
+    # "Resume the paused workflow by calling: Workflow({scriptPath, resumeFromRunId})"
+    # and the <recovery> block of a failed/killed task-notification says
+    # "To resume after editing the script, call: Workflow({...})" plus
+    # "Agent transcripts: <dir>". GA has no Workflow() tool, so the same
+    # guidance points at the GA resume entry point instead.
+    RECOVERABLE_WORKFLOW_STATUSES = frozenset({"failed", "killed", "cancelled", "interrupted"})
+
+    def _workflow_recovery_hint(self, run) -> dict[str, Any] | None:
+        status = str(getattr(run, "status", "") or "")
+        if status not in self.RECOVERABLE_WORKFLOW_STATUSES:
+            return None
+        run_id = str(getattr(run, "run_id", "") or "")
+        hint: dict[str, Any] = {
+            "command": f"/workflow resume {run_id}",
+            "message": (
+                f"To resume after editing the script, run: /workflow resume {run_id} "
+                "— completed agents return cached results."
+            ),
+        }
+        artifact_dir = getattr(run, "artifact_dir", None)
+        if artifact_dir:
+            hint["agentTranscriptsDir"] = os.path.join(os.fspath(artifact_dir), "agents")
+        return hint
 
     def _workflow_artifact_payload(self, run, artifact_ref: Any) -> dict[str, Any] | None:
         if not run.artifact_dir or not artifact_ref:
@@ -2204,6 +2488,22 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
             timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
             bridge.workflow_resume(str(command.get("runId") or command.get("run_id") or ""), args=command.get("args"), timeout_seconds=timeout_seconds)
+        elif cmd_type == "workflow_save":
+            bridge.workflow_save(
+                str(command.get("runId") or command.get("run_id") or ""),
+                name=str(command.get("name") or "") or None,
+                overwrite=bool(command.get("overwrite")),
+            )
+        elif cmd_type == "workflow_run_named":
+            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
+            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+            bridge.workflow_run_named(
+                str(command.get("name") or ""),
+                args=command.get("args"),
+                timeout_seconds=timeout_seconds,
+            )
+        elif cmd_type == "workflow_named_list":
+            bridge.workflow_named_list()
         elif cmd_type == "workflow_list":
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":

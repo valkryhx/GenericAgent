@@ -1008,7 +1008,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       if (event.type === 'workflow_runs') {
         dispatch(event)
-        setWorkflowPanel(workflowListPanelFromRuns(event.runs))
+        setWorkflowPanel(workflowListPanelFromRuns(event.runs, event.savedWorkflows ?? []))
         return
       }
       if (event.type === 'workflow_detail') {

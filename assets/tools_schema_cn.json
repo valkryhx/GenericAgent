@@ -217,5 +217,41 @@
     "name": "start_long_term_update",
     "description": "准备开始提炼记忆。发现值得长期记忆的信息（环境事实/用户偏好/避坑经验）时调用此工具。已记忆更新或在自主流程内时无需调用。超15轮完成的任务必须调用以沉淀经验",
     "parameters": {"type": "object", "properties": {}}}
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "workflow",
+      "description": "执行一个确定性的 dynamic workflow JavaScript 脚本，用多个子 agent 编排复杂任务。工作流在后台运行：本工具立即返回 runId，完成后会给主 agent 排入一条 <workflow_handoff> 消息。用 /workflows 查看实时进度、详情、停止、保存或重跑工作流。只有用户明确选择多 agent 编排时才调用：用户说了“用 workflow / 跑一个 workflow / fan out agents / 用 subagent 编排”，或调用了要求运行 workflow 的 skill/slash command，或点名某个已保存 workflow。仅仅“这个任务适合 workflow”不算 opt-in。写脚本前先 load_skill 加载 `workflow-authoring`，它是 workflow 编写参考。每个脚本必须以纯字面量 `export const meta = { name, description, phases? }` 作为第一条语句，且必须确定性：不可用 Date.now()、Math.random()、无参 new Date()。新脚本用 `script` 内联传入，不要先写文件；迭代用 `scriptPath`；恢复用 `resumeFromRunId`；跑已保存 workflow 用 `name`。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "内联 workflow JavaScript。必须以纯字面量 export const meta = {...} 开头。"
+          },
+          "scriptPath": {
+            "type": "string",
+            "description": "workflow workspace 内已有脚本的路径；用于迭代，避免重复发送完整脚本。"
+          },
+          "name": {
+            "type": "string",
+            "description": "要运行的已保存 workflow 名称。"
+          },
+          "args": {
+            "type": "object",
+            "description": "作为全局 args 注入脚本的 JSON 值。"
+          },
+          "resumeFromRunId": {
+            "type": "string",
+            "description": "要恢复的 runId；未变化的 agent() 前缀会命中缓存。"
+          },
+          "timeoutSeconds": {
+            "type": "number",
+            "description": "可选运行超时秒数；产品默认 900。"
+          }
+        }
+      }
+    }
   }
 ]

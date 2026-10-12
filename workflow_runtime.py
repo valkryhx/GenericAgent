@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from workflow_determinism import determinism_error
 from sensitive_redaction import is_sensitive_key, redact_sensitive_text, sanitize
 from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
@@ -168,6 +169,14 @@ class WorkflowRuntime:
         self._phases: list[str] = []
         self._test_gates: list[dict] = []
         self._last_worker_result: Any = None
+        # G8: CC allows exactly one level of workflow() nesting. A nested
+        # runtime gets depth=1 and refuses to start a third level.
+        self.workflow_depth = 0
+        self.parent_run_id: str | None = None
+        # Nested runs share the outer runner in GA. Prefix their job ids so
+        # NativeGPTChildAgentRunner._states cannot overwrite the outer run's
+        # agent_1/agent_2 entries.
+        self.job_id_prefix = ""
 
     def _default_runner(self):
         kwargs = {"enable_tools": True}
@@ -241,19 +250,25 @@ class WorkflowRuntime:
             manage_run_completion=False,
             args=runtime_args,
             cache_args=args,
+            job_id_prefix=self.job_id_prefix,
         )
-        process = subprocess.Popen(
-            [self._node_executable(), str(self.worker_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
-        reader_queue, reader_done = self._start_reader(process)
-        deadline = time.monotonic() + self.timeout_seconds
-        pending_rpc_jobs: dict[int, WorkflowJob] = {}
+        process: subprocess.Popen | None = None
+        reader_done: threading.Event | None = None
         try:
+            deterministic_error = determinism_error(run.script)
+            if deterministic_error:
+                raise RuntimeError(deterministic_error)
+            process = subprocess.Popen(
+                [self._node_executable(), str(self.worker_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            reader_queue, reader_done = self._start_reader(process)
+            deadline = time.monotonic() + self.timeout_seconds
+            pending_rpc_jobs: dict[int, WorkflowJob] = {}
             ready = self._wait_for_message(process, reader_queue, reader_done, deadline)
             if ready.get("type") != "ready":
                 raise RuntimeError(f"workflow worker did not become ready: {ready}")
@@ -261,7 +276,7 @@ class WorkflowRuntime:
             self._send(process, {"type": "start", "script": run.script, "args": runtime_args, "timeoutMs": timeout_ms})
             while True:
                 self._raise_if_deadline_expired(deadline)
-                self._raise_if_externally_killed(run, scheduler, process)
+                self._raise_if_externally_stopped(run, scheduler, process)
 
                 for completed_job in scheduler.tick(failure_policy="continue"):
                     self._complete_pending_rpc(process, scheduler, pending_rpc_jobs, completed_job)
@@ -337,8 +352,11 @@ class WorkflowRuntime:
             reason = redact_sensitive_text(str(exc))
             self._cancel_unfinished_jobs(scheduler, reason=reason)
             current = self._safe_load_current_run(run)
-            if current.status == "killed":
-                run.status = "killed"
+            if current.status in {"killed", "cancelled"}:
+                # External stop. The run keeps the caller's intent instead of
+                # being rewritten to "failed" by the deadline/teardown error.
+                terminal_status = current.status
+                run.status = terminal_status
                 run.error = current.error or reason
                 metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                 metadata["integrationStatus"] = "cancelled"
@@ -350,10 +368,14 @@ class WorkflowRuntime:
                 self._write_final_audit(run)
                 self.store.write_final_result(
                     run,
-                    self._final_payload(run, "killed", result=self._last_worker_result, error=run.error),
+                    self._final_payload(run, terminal_status, result=self._last_worker_result, error=run.error),
                 )
                 self.store.save_run(run)
-                self._append(run, "workflow_killed", {"error": run.error})
+                self._append(
+                    run,
+                    "workflow_killed" if terminal_status == "killed" else "workflow_cancelled",
+                    {"error": run.error},
+                )
             else:
                 run.status = "failed"
                 run.error = reason
@@ -390,8 +412,10 @@ class WorkflowRuntime:
                 })
             raise
         finally:
-            self._terminate(process)
-            reader_done.set()
+            if process is not None:
+                self._terminate(process)
+            if reader_done is not None:
+                reader_done.set()
             if hasattr(self.runner, "clear_run_capabilities"):
                 self.runner.clear_run_capabilities(run.run_id)
 
@@ -437,6 +461,15 @@ class WorkflowRuntime:
                 deadline=deadline or (time.monotonic() + self.timeout_seconds),
             )
             self._send(process, {"type": "rpc_result", "id": int(message.get("id")), "ok": True, "value": result})
+            return
+        if method == "workflow":
+            self._handle_nested_workflow_rpc(
+                scheduler,
+                message,
+                process=process,
+                args=args,
+                deadline=deadline,
+            )
             return
         if method != "agent":
             raise RuntimeError(f"unsupported workflow rpc: {method}")
@@ -499,6 +532,195 @@ class WorkflowRuntime:
             return
         job = scheduler.register_agent(prompt=prompt, label=label, options=options)
         pending_rpc_jobs[int(message.get("id"))] = job
+
+    def _handle_nested_workflow_rpc(
+        self,
+        scheduler: AgentScheduler,
+        message: dict,
+        *,
+        process: subprocess.Popen | None = None,
+        args: Any = None,
+        deadline: float | None = None,
+    ) -> None:
+        """Run one child workflow for a script-level ``workflow()`` call.
+
+        CC allows exactly one level of nesting (m0869 @29905 ``tsr``).  The
+        outer runtime owns the worker process; a nested runtime owns a second
+        worker process and the same runner.  The prefix on nested job ids is
+        required because ``NativeGPTChildAgentRunner`` keys state by job id.
+        """
+        if process is None:
+            raise RuntimeError("workflow nested rpc process unavailable")
+        rpc_id = int(message.get("id"))
+
+        def reply(ok: bool, *, value: Any = None, error: Any = None) -> None:
+            payload: dict[str, Any] = {"type": "rpc_result", "id": rpc_id, "ok": bool(ok)}
+            if ok:
+                payload["value"] = value
+            else:
+                payload["error"] = redact_sensitive_text(str(error or "nested workflow failed"))
+            self._send(process, payload)
+
+        if self.workflow_depth >= 1:
+            reply(
+                False,
+                error=(
+                    "nested workflows are limited to one level; "
+                    "workflow() is unavailable inside a nested workflow"
+                ),
+            )
+            return
+
+        try:
+            params = message.get("params") or {}
+            if not isinstance(params, dict):
+                raise TypeError("workflow() params must be a plain object")
+            script, source_kind, source_name = self._resolve_nested_workflow_script(
+                params.get("nameOrRef"),
+                scheduler.run,
+                args,
+            )
+            from workflow_planner import validate_rendered_workflow_script
+
+            preflight = validate_rendered_workflow_script(script)
+            if not preflight.get("ok"):
+                raise ValueError(
+                    "Invalid workflow script: "
+                    + str(preflight.get("error") or "workflow script validation failed")
+                )
+
+            parent = self._safe_load_current_run(scheduler.run)
+            if parent.status in {"killed", "cancelled"}:
+                raise RuntimeError(f"workflow {parent.status}: {parent.error or 'parent workflow stopped'}")
+
+            outer_metadata = scheduler.run.metadata if isinstance(scheduler.run.metadata, dict) else {}
+            workspace = str(
+                outer_metadata.get("workspacePath")
+                or normalize_workflow_workspace(args)
+                or self.workspace_root
+            )
+            meta = preflight.get("meta") if isinstance(preflight.get("meta"), dict) else {}
+            nested_metadata: dict[str, Any] = {
+                "parentRunId": scheduler.run.run_id,
+                "workflowDepth": self.workflow_depth + 1,
+                "nestedWorkflow": source_name,
+                "launchedBy": "nested_workflow",
+                "scriptSource": source_kind,
+                "workspacePath": workspace,
+                "workspaceBasePath": str(outer_metadata.get("workspaceBasePath") or self.workspace_root),
+                "workflowTaskType": "nested",
+            }
+            if meta.get("name"):
+                nested_metadata["workflowName"] = str(meta.get("name"))
+            if meta.get("description"):
+                nested_metadata["workflowSummary"] = str(meta.get("description"))
+            nested_run = WorkflowRun(
+                session_id=scheduler.run.session_id,
+                script=script,
+                status="running",
+                metadata=nested_metadata,
+            )
+            nested_run = self.store.create_run(nested_run)
+            self.store.append_event(
+                nested_run,
+                WorkflowEvent(
+                    run_id=nested_run.run_id,
+                    session_id=nested_run.session_id,
+                    event_type="workflow_started",
+                    sequence=0,
+                    payload={
+                        "parentRunId": scheduler.run.run_id,
+                        "workflowDepth": nested_metadata["workflowDepth"],
+                        "nestedWorkflow": source_name,
+                    },
+                ),
+            )
+
+            remaining = self.timeout_seconds
+            if deadline is not None:
+                remaining = min(remaining, max(0.1, deadline - time.monotonic()))
+            nested_runtime = WorkflowRuntime(
+                store=self.store,
+                runner=self.runner,
+                scheduler_config=self.scheduler_config,
+                worker_path=self.worker_path,
+                timeout_seconds=remaining,
+                llm_binding_provider=self.llm_binding_provider,
+                workspace_root=self.workspace_root,
+            )
+            nested_runtime.workflow_depth = self.workflow_depth + 1
+            nested_runtime.parent_run_id = scheduler.run.run_id
+            nested_runtime.job_id_prefix = f"nested_{nested_run.run_id}_"
+            try:
+                nested_result = nested_runtime.run(nested_run, args=params.get("args"))
+            finally:
+                # The runner has one telemetry sink; restore the outer run after
+                # the nested runtime rewires it for its own jobs.
+                self._wire_runner_telemetry(scheduler.run)
+            reply(True, value=nested_result.result)
+        except Exception as exc:
+            reply(False, error=exc)
+
+    def _resolve_nested_workflow_script(
+        self,
+        name_or_ref: Any,
+        outer_run: WorkflowRun,
+        args: Any,
+    ) -> tuple[str, str, str]:
+        if isinstance(name_or_ref, str):
+            name = name_or_ref.strip()
+            if not name:
+                raise ValueError("workflow() name must be a non-empty string")
+            record = self.store.load_named_workflow(name)
+            return str(record.get("script") or ""), "named", str(record.get("name") or name)
+
+        if not isinstance(name_or_ref, dict):
+            raise TypeError("workflow() expects a workflow name or a {script|scriptPath|name} object")
+        present = [
+            key
+            for key in ("name", "script", "scriptPath")
+            if key in name_or_ref and name_or_ref.get(key) is not None
+        ]
+        if len(present) != 1:
+            raise ValueError("workflow() object must provide exactly one of name, script, or scriptPath")
+        key = present[0]
+        if key == "name":
+            name = str(name_or_ref.get("name") or "").strip()
+            if not name:
+                raise ValueError("workflow() name must be a non-empty string")
+            record = self.store.load_named_workflow(name)
+            return str(record.get("script") or ""), "named", str(record.get("name") or name)
+        if key == "script":
+            script = name_or_ref.get("script")
+            if not isinstance(script, str):
+                raise TypeError("workflow() script must be a string")
+            return script, "inline", "inline"
+
+        raw_path = name_or_ref.get("scriptPath")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise TypeError("workflow() scriptPath must be a non-empty string")
+        outer_metadata = outer_run.metadata if isinstance(outer_run.metadata, dict) else {}
+        workspace = str(
+            outer_metadata.get("workspacePath")
+            or normalize_workflow_workspace(args)
+            or self.workspace_root
+        )
+        path = self._resolve_nested_script_path(raw_path, workspace)
+        return path.read_text(encoding="utf-8", errors="replace"), "scriptPath", path.name
+
+    def _resolve_nested_script_path(self, raw_path: str, workspace: str) -> Path:
+        roots = [Path(workspace)]
+        store_root = Path(self.store.root)
+        if store_root.exists():
+            roots.append(store_root)
+        for root in roots:
+            try:
+                path = resolve_workspace_child(raw_path, root)
+            except (WorkspacePathError, OSError, ValueError):
+                continue
+            if path.is_file():
+                return path
+        raise FileNotFoundError(f"workflow scriptPath not found or outside workspace: {raw_path}")
 
     def _run_python_unittest(self, run: WorkflowRun, params: dict, *, args: Any, deadline: float) -> dict:
         gate_number = len(self._test_gates) + 1
@@ -1257,6 +1479,12 @@ class WorkflowRuntime:
                 break
         if rpc_id is None:
             return
+        if job.status in {"cancelled", "killed"}:
+            # CC semantics (m0869 @43713 jo): a cancelled agent() call returns a
+            # Promise that never settles. Answering with ok:false would let
+            # parallel()/pipeline() swallow the cancellation into null and keep
+            # the script running, so the RPC stays pending on purpose.
+            return
         pending_rpc_jobs.pop(rpc_id, None)
         if job.status in {"succeeded", "degraded"}:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": scheduler.downstream_result(job)})
@@ -1285,7 +1513,7 @@ class WorkflowRuntime:
         if source_run.session_id != run.session_id:
             return []
         plan: list[dict] = []
-        probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args, cache_args=cache_args)
+        probe_scheduler = AgentScheduler(store=self.store, run=run, runner=self.runner, config=self.scheduler_config, manage_run_completion=False, args=args, cache_args=cache_args, job_id_prefix=self.job_id_prefix)
         for source_job in source_run.jobs:
             # Only clean deliveries form a reusable prefix. A degraded job is a
             # partial-fidelity result; replaying it as a "cached success" would
@@ -1416,12 +1644,28 @@ class WorkflowRuntime:
         if time.monotonic() >= deadline:
             raise RuntimeError("workflow runtime deadline exceeded")
 
-    def _raise_if_externally_killed(self, run: WorkflowRun, scheduler: AgentScheduler, process: subprocess.Popen) -> None:
+    def _raise_if_externally_stopped(self, run: WorkflowRun, scheduler: AgentScheduler, process: subprocess.Popen) -> None:
+        """Observe an external stop of a running workflow.
+
+        CC evidence (m0869 @43713 ``jo``): the workflow abort signal is what
+        stops a run. Once it is set, every in-flight ``agent()`` call is
+        abandoned -- its Promise never settles -- so the script cannot walk
+        further down a cancelled path. The host mirrors that here: the run
+        keeps the caller's intent (``killed`` or ``cancelled``), unfinished
+        jobs are cancelled, and the worker process is torn down.
+        """
         current = self._safe_load_current_run(run)
-        if current.status != "killed":
+        stop_status = current.status if current.status in {"killed", "cancelled"} else None
+        stop_error = current.error
+        if stop_status is None and self.parent_run_id:
+            parent = self._safe_load_run_by_id(self.parent_run_id)
+            if parent is not None and parent.status in {"killed", "cancelled"}:
+                stop_status = parent.status
+                stop_error = parent.error
+        if stop_status is None:
             return
-        run.status = "killed"
-        run.error = current.error or "workflow killed"
+        run.status = stop_status
+        run.error = stop_error or ("workflow killed" if stop_status == "killed" else "workflow cancelled")
         self._cancel_unfinished_jobs(scheduler, reason=run.error)
         if process.poll() is None:
             process.kill()
@@ -1429,13 +1673,21 @@ class WorkflowRuntime:
                 process.wait(timeout=1)
             except Exception:
                 pass
-        raise RuntimeError(f"workflow killed: {run.error}")
+        raise RuntimeError(f"workflow {run.status}: {run.error}")
 
     def _safe_load_current_run(self, run: WorkflowRun) -> WorkflowRun:
         try:
             return self.store.load_run(run.run_id)
         except Exception:
             return run
+
+    def _safe_load_run_by_id(self, run_id: str | None) -> WorkflowRun | None:
+        if not run_id:
+            return None
+        try:
+            return self.store.load_run(str(run_id))
+        except Exception:
+            return None
 
     def _cancel_unfinished_jobs(self, scheduler: AgentScheduler, *, reason: str) -> None:
         for job in list(scheduler.jobs):

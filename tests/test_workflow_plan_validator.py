@@ -384,10 +384,20 @@ class WorkflowPlanValidatorTest(unittest.TestCase):
         self.assertNotIn("JSON.stringify", script)
 
     def test_rendered_workflow_script_syntax_preflight_rejects_invalid_javascript(self):
-        result = validate_rendered_workflow_script("const research/source_1.json = {}")
+        result = validate_rendered_workflow_script(
+            "export const meta = { name: 'syntax', description: 'syntax' }" + chr(10) + "const research/source_1.json = {}"
+        )
 
         self.assertFalse(result["ok"])
-        self.assertIn("SyntaxError", result["error"])
+        self.assertIn("Script parse error", result["error"])
+
+    def test_rendered_workflow_script_preflight_rejects_nondeterminism(self):
+        result = validate_rendered_workflow_script(
+            "export const meta = { name: 'nondeterministic', description: 'nondeterministic' }" + chr(10) + "return Date.now()"
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("must be deterministic", result["error"])
 
     def test_renderer_keeps_path_like_schema_refs_as_object_keys(self):
         plan = self.valid_plan()

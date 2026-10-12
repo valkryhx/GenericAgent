@@ -11,11 +11,22 @@ from agent_loop import exhaust
 from ga import GenericAgentHandler
 from session_transcript import create_session, load_session, record_turn, record_workflow_event
 from workflow_child_agent import AgentResult
-from workflow_models import DEFAULT_PERMISSION_POLICY_VERSION, DEFAULT_PERMISSION_PROFILE, WorkflowRun
+from workflow_models import DEFAULT_PERMISSION_POLICY_VERSION, DEFAULT_PERMISSION_PROFILE, WorkflowRun as _WorkflowRun
 from workflow_permissions import ToolPermissionPolicy
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import AgentScheduler, SchedulerConfig
 from workflow_store import WorkflowStore
+
+
+_CC_META_PREFIX = "export const meta = { name: 'permission-inheritance-test', description: 'permission inheritance test workflow' }\n"
+
+
+class WorkflowRun(_WorkflowRun):
+    def __init__(self, *args, **kwargs):
+        script = kwargs.get("script")
+        if isinstance(script, str) and script and not script.lstrip().startswith("export const meta"):
+            kwargs["script"] = _CC_META_PREFIX + script
+        super().__init__(*args, **kwargs)
 
 
 class ParentStub:

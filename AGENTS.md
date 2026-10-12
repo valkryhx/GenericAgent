@@ -434,3 +434,59 @@ downstream reader does not mistake the re-generated deliverable for a second out
 `wf_9d097fb199824a1eb4bb37776ef8a2f1`, where a correct run was reported `degraded`. Regression tests:
 `tests/test_workflow_scheduler.py::test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision`
 and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
+
+## 中途补充调研的持久化流程（强制）
+
+实施过程中发现新的上游源码事实、设计差异或复刻决策时，必须按以下顺序操作，不能直接改代码：
+
+1. 先在本文件追加/更新一条「中途调研」记录：日期、触发点、源码坐标、结论、对 GA 的影响、待办。
+2. 再写独立调研文档 `docs/YYYYMMDD-<主题>-调研补充.md`，展开证据、原文摘录、方案与验收。
+3. 最后按该独立文档实施代码，并在实施记录中回链本文件与调研文档。
+
+目的：让中途研究可持久化、可复核，避免只存在于会话上下文。
+
+### 中途调研 2026-10-12：CC Workflow 工具入口 + G8/G9
+
+- 触发：用户要求 GA 的 workflow 入口必须按 CC 设计，不能只停留在 `/workflow` 的 JSON plan 路径；除 B1 `budget` 外，CC 能对齐的能力都要对齐。
+- CC 证据：
+  - `m1569_0xdceb889.js @61628 inputSchema`：`script` / `scriptPath` / `name` / `args` / `resumeFromRunId` / `runId` / `remote`。
+  - `@62439 validateInput`：feature gate、named-only、scriptPath 可读性、resume 校验；`Fy()` 解析 meta；`LKt()` 确定性闸门。
+  - `@64578 checkPermissions`：默认 `ask`（"Review dynamic workflow before running"）。
+  - `@65948 call`：编译/落盘后注册后台任务，立即返回 `{status:"async_launched", taskId, runId, workflowName, summary, transcriptDir, scriptPath}`；完成走 task notification。
+  - `m1502_0xdb4a986.js xnr(e)`：有 skill 系统时只给短提示让模型 `load_skill` authoring reference；无 skill 系统时把约 17K 的 reference 全文塞进 tool description。GA 有 `load_skill` + `skills_runtime`，走 `e=true` 分支。
+  - CC 子 agent 的 `disallowedTools` 包含 Workflow 工具（`Fd`），禁止递归起 workflow。
+- GA 结论：
+  - 新增模型可见的 `workflow` 工具；`/workflow <task>` 保留为兼容的 planner 路径，但 CC 风格主入口是工具。
+  - 新增 `skills/workflow-authoring/SKILL.md`，并让 `get_default_skill_roots()` 发现仓库内 `skills/`。
+  - tool description 用 CC 原文的本地化版 + “先 load_skill('workflow-authoring')”短提示。
+  - bridge 增加 `workflow_launch_from_tool()`：绕过主 agent busy 检查（工具调用发生在主 agent 运行中），校验后创建 run、标记 running、追加 `workflow_started`、启动既有 `_run_workflow_runtime` watcher，立即返回 `async_launched`；完成后既有 `_queue_workflow_handoff` 把 `<workflow_handoff>` 排给主 agent。
+  - `workflow` 加入 `ORCHESTRATION_TOOLS`，workflow 子 agent 不可见/不可调用。
+- G8 结论：
+  - CC 允许脚本内 `await workflow(nameOrRef, args)` 且只允许一层；二层拒绝。
+  - GA 实现：worker 注入 `workflow()` RPC；runtime 新增 `workflow` RPC 处理，解析 named workflow / inline script / scriptPath；用嵌套 `WorkflowRuntime` 执行，`workflow_depth=1` 拒绝二层；嵌套 run 记录 `parentRunId`，父 run 停止时子 run 也停止。
+  - 嵌套 run 与外层共享 workspace；为避免共用 runner 的 `job_id` 状态冲突，scheduler 增加 `job_id_prefix`，嵌套 run 用 `nested_<runId>_` 前缀。
+- 不在范围：
+  - B1 `budget`（用户点名暂缓）。
+  - CC 云端会话 `isolation:"remote"` / `Ho()`：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 详细文档：`docs/20261012-ga-dynamic-workflow-C3-G8-调研补充.md`。
+- 实施记录：`docs/20261012-ga-dynamic-workflow-实施记录-C3-G8.md`（**已创建**）。
+- 状态（2026-10-12）：C3/G8 **已完成**。`workflow` 工具入口 + `workflow-authoring` skill + 一层
+  `workflow()` 嵌套均已落地；工具启动/嵌套 run 复用 `/workflows` 全部 UI 能力；子 agent 隔离
+  与父 run 停止传播已实现；`NestedWorkflowRuntimeTest`(7) / `WorkflowToolEntryTest`(4) /
+  `test_subagent_capabilities`(9) / `test_skills_runtime`(7) 全绿，合并 246 tests OK。B1 `budget` 仍暂缓。
+
+### 中途调研 2026-10-12：CC Dynamic Workflow 剩余可对齐能力清单（H1~H28）
+
+- 触发：用户提问“继续还有哪些可以抄 CC 的 dynamic workflow 的？”，要求把答案持久化后再实施。
+- 结论：A1~A4 / B2 / C1~C2 / C3 / G8 已完成；对照 CC v2.1.283 全链路后，还有 20 项可对齐能力（编号 H1~H28）。
+- 高价值四组：
+  1. **通知/可观测性**（H17 `<usage>` / H18 `<failures>`+`<diagnostics>` / H19 外部 artifact 注入告警）——GA 的 `<workflow_handoff>` 缺这三块。
+  2. **启动前批准**（H5）——CC 默认 `ask`（"Review dynamic workflow before running"），GA 的 `workflow` 工具直接跑。
+  3. **单 agent 能力**（H7 per-agent `model`/`effort`）——GA 声明接受但 child runner 不用，且未进缓存键。
+  4. **引擎一致性**（H12 嵌套共享并发/计数 / H13 并发上限 `min(16,CPU-2)` / H15 限流等待 reset）。
+- 其余：H1 `ultracode` 关键词、H2 banner+忽略键、H3 feature gate、H4 `/effort ultracode`、H6 `stallMs`、H8 `agentType`（语义映射）、H9 `disallowedTools`（已等价）、H10 `bashCommandClamp`、H16 auto 安全分类器、H20 进度批量上报、H22 详情面板下钻+过滤、H23 单 agent skip/retry、H24 pause、H25 `/tasks`、H26 本地跨会话 adopt、H27 JSON Schema lint、H28 沙箱边界克隆器。
+- 已覆盖无需再抄：H21 `agent_cached` 进度（GA 已有 `agent_cached` 事件）。
+- 不复刻：云端 `remote_launched`/`isolation:"remote"`/`Ho()`（**【复刻时暂时不需要参考 claudecode 云端会话的实现】**）、工具层 `runId` run-op（本 build provider 不存在）、**H14 `budget`（用户点名暂缓 B1）**。
+- 建议实施批次：① 可观测性(H17/H18/H19) → ② 入口(H5/H1/H2) → ③ 单 agent(H7) → ④ 引擎(H12/H13/H15) → ⑤ UI(H22/H23/H24/H26) → ⑥ 校验(H27/H28)。
+- 详细文档：`docs/20261012-ga-dynamic-workflow-可继续对齐CC能力清单-调研补充.md`。
+- 实施记录：待创建（按批次落地后补 `docs/20261012-ga-dynamic-workflow-实施记录-*.md`）。

@@ -1,0 +1,9 @@
+{
+  "name": "genericagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GenericAgent runtime dependencies",
+  "dependencies": {
+    "acorn": "^8.15.0"
+  }
+}

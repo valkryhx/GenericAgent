@@ -106,7 +106,7 @@ test('workflowStatusBarRows formats running workflow controls and summary', () =
   }))
 
   assert.deepEqual(workflowStatusBarRows(bar!), [
-    'Enter view · x stop',
+    'Enter · /workflows · x stop',
     '› ◌ live-workflow  1/2 agents done',
   ])
 })

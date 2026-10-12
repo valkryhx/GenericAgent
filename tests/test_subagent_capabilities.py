@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from subagent_capabilities import (  # noqa: E402
     build_subagent_capability_profile,
     filter_tool_schema_for_capabilities,
 )
+from agent_loop import exhaust  # noqa: E402
 from ga import GenericAgentHandler  # noqa: E402
 
 
@@ -71,6 +73,63 @@ class SubagentCapabilityProfileTest(unittest.TestCase):
             [item["function"]["name"] for item in schema],
             ["file_read", "spawn_agent", "close_agent"],
         )
+
+    def test_workflow_tool_schema_is_visible_and_removed_from_children(self):
+        for schema_name in ("tools_schema.json", "tools_schema_cn.json"):
+            with self.subTest(schema_name=schema_name):
+                schema = json.loads((REPO_ROOT / "assets" / schema_name).read_text(encoding="utf-8"))
+                workflow = next(item["function"] for item in schema if item["function"]["name"] == "workflow")
+                self.assertEqual(
+                    {"script", "scriptPath", "name", "args", "resumeFromRunId", "timeoutSeconds"},
+                    set(workflow["parameters"]["properties"]),
+                )
+
+        schema = [
+            {"type": "function", "function": {"name": "workflow"}},
+            {"type": "function", "function": {"name": "file_read"}},
+        ]
+        child = build_subagent_capability_profile(
+            is_subagent=True,
+            available_tools={"workflow", "file_read"},
+        )
+        filtered = filter_tool_schema_for_capabilities(schema, child)
+        self.assertEqual([item["function"]["name"] for item in filtered], ["file_read"])
+
+    def test_workflow_tool_forwards_cc_fields_to_the_bridge_launcher(self):
+        captured = {}
+
+        def launcher(**kwargs):
+            captured.update(kwargs)
+            return {"status": "async_launched", "runId": "wf_tool", "workflowName": "demo"}
+
+        handler = GenericAgentHandler(
+            SimpleNamespace(task_dir="", workflow_tool_launcher=launcher),
+            cwd=".",
+        )
+        outcome = exhaust(handler.do_workflow({
+            "script": "export const meta = { name: 'demo', description: 'demo' }",
+            "scriptPath": None,
+            "name": None,
+            "args": {"value": 1},
+            "resumeFromRunId": "wf_source",
+            "timeoutSeconds": 12,
+        }, None))
+
+        self.assertEqual("async_launched", outcome.data["status"])
+        self.assertEqual("wf_tool", outcome.data["runId"])
+        self.assertEqual("export const meta = { name: 'demo', description: 'demo' }", captured["script"])
+        self.assertIsNone(captured["script_path"])
+        self.assertIsNone(captured["name"])
+        self.assertEqual({"value": 1}, captured["args"])
+        self.assertEqual("wf_source", captured["resume_from_run_id"])
+        self.assertEqual(12, captured["timeout_seconds"])
+
+    def test_workflow_tool_without_launcher_returns_structured_error(self):
+        handler = GenericAgentHandler(SimpleNamespace(task_dir=""), cwd=".")
+        outcome = exhaust(handler.do_workflow({}, None))
+
+        self.assertEqual("error", outcome.data["status"])
+        self.assertIn("launcher unavailable", outcome.data["error"])
 
     def test_handler_hard_denies_a_hallucinated_orchestration_call(self):
         handler = GenericAgentHandler(SimpleNamespace(task_dir=""), cwd=".")

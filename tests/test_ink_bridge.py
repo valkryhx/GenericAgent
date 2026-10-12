@@ -35,6 +35,17 @@ from workflow_store import build_artifact_ownership_index  # noqa: E402
 from agent_runtime_models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
 
 
+_CC_META_PREFIX = "export const meta = { name: 'ink-test', description: 'ink test workflow' }\n"
+
+
+def _cc_script(script):
+    if not isinstance(script, str) or not script:
+        return script
+    if script.lstrip().startswith("export const meta"):
+        return script
+    return _CC_META_PREFIX + script
+
+
 class FakeBackend:
     def __init__(self):
         self.history = []
@@ -2409,6 +2420,151 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("awaiting_approval", detail["progress"]["status"])
             self.assertEqual("return 1", detail["script"])
 
+    def test_workflow_save_writes_a_named_workflow_from_the_run_script(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft('export const meta = { name: "demo" }' + chr(10) + 'return { ok: true }')
+
+            saved = bridge.workflow_save(run_id, name="demo-flow")
+
+            self.assertTrue(saved)
+            saved_events = [event for event in events if event["type"] == "workflow_saved"]
+            self.assertEqual(1, len(saved_events))
+            self.assertEqual("demo-flow", saved_events[0]["workflow"]["name"])
+            self.assertFalse(saved_events[0]["overwritten"])
+            named_events = [event for event in events if event["type"] == "named_workflows"]
+            self.assertEqual(["demo-flow"], [item["name"] for item in named_events[-1]["workflows"]])
+            record = bridge.workflow_store.load_named_workflow("demo-flow")
+            self.assertIn("export const meta", record["script"])
+
+    def test_workflow_save_defaults_to_the_run_workflow_name(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            run = bridge.workflow_store.load_run(run_id)
+            run.metadata["workflowName"] = "Bounded Recovery"
+            bridge.workflow_store.save_run(run)
+
+            self.assertTrue(bridge.workflow_save(run_id))
+
+            saved = [event for event in events if event["type"] == "workflow_saved"][-1]
+            self.assertEqual("Bounded-Recovery", saved["workflow"]["name"])
+            self.assertEqual("Bounded Recovery", saved["workflow"]["requestedName"])
+
+    def test_workflow_save_collision_reports_name_exists_until_overwrite(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            self.assertTrue(bridge.workflow_save(run_id, name="demo-flow"))
+            events.clear()
+
+            self.assertFalse(bridge.workflow_save(run_id, name="demo-flow"))
+            collisions = [event for event in events if event.get("code") == "workflow_name_exists"]
+            self.assertEqual(1, len(collisions))
+            self.assertIn("--overwrite", collisions[0]["message"])
+
+            self.assertTrue(bridge.workflow_save(run_id, name="demo-flow", overwrite=True))
+            saved = [event for event in events if event["type"] == "workflow_saved"][-1]
+            self.assertTrue(saved["overwritten"])
+
+    def test_workflow_run_named_starts_a_run_from_the_saved_script(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        script = 'export const meta = { name: "demo", description: "demo" }' + chr(10) + 'return { ok: true }'
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            source_run_id = bridge.workflow_draft(script)
+            self.assertTrue(bridge.workflow_save(source_run_id, name="demo-flow"))
+            events.clear()
+
+            new_run_id = bridge.workflow_run_named("demo-flow")
+
+            self.assertTrue(new_run_id.startswith("wf_"))
+            self.assertNotEqual(source_run_id, new_run_id)
+            run_events = [event for event in events if event["type"] == "workflow_run"]
+            self.assertEqual(new_run_id, run_events[-1]["run"]["runId"])
+            self.assertEqual("demo-flow", run_events[-1]["run"]["metadata"]["namedWorkflow"])
+            loaded = bridge.workflow_store.load_run(new_run_id)
+            self.assertEqual(script, loaded.script)
+            # Let the runtime thread finish before the TemporaryDirectory is
+            # torn down, otherwise Windows refuses to delete the run artifacts.
+            thread = bridge._workflow_threads.get(new_run_id)
+            if thread is not None:
+                thread.join(timeout=15)
+            if thread is not None and thread.is_alive():
+                bridge.workflow_stop(new_run_id, reason="test cleanup")
+                thread.join(timeout=5)
+
+    def test_workflow_run_named_reports_unknown_name(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+
+            self.assertEqual("", bridge.workflow_run_named("missing-flow"))
+
+            errors = [event for event in events if event.get("code") == "workflow_name_not_found"]
+            self.assertEqual(1, len(errors))
+
+    def test_workflow_run_payload_carries_recovery_hint_only_for_stopped_runs(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            run = bridge.workflow_store.load_run(run_id)
+
+            run.status = "succeeded"
+            self.assertNotIn("recovery", bridge._workflow_run_payload(run))
+
+            run.status = "failed"
+            hint = bridge._workflow_run_payload(run)["recovery"]
+            self.assertEqual(f"/workflow resume {run_id}", hint["command"])
+            self.assertIn("cached results", hint["message"])
+            self.assertTrue(hint["agentTranscriptsDir"].endswith("agents"))
+
+    def test_workflow_list_includes_saved_workflow_names(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            bridge.workflow_save(run_id, name="demo-flow")
+            events.clear()
+
+            bridge.workflow_list()
+
+            listed = [event for event in events if event["type"] == "workflow_runs"][-1]
+            self.assertEqual(["demo-flow"], listed["savedWorkflows"])
+
+    def test_workflow_named_list_emits_saved_workflows(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft("return 1")
+            bridge.workflow_save(run_id, name="demo-flow")
+            events.clear()
+
+            bridge.workflow_named_list()
+
+            listed = [event for event in events if event["type"] == "named_workflows"][-1]
+            self.assertEqual(["demo-flow"], [item["name"] for item in listed["workflows"]])
+
     def test_workflow_draft_creates_run_and_emits_approval_event(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
@@ -2687,7 +2843,7 @@ class InkBridgeTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft("return await new Promise(() => {})")
+            run_id = bridge.workflow_draft(_cc_script("return await new Promise(() => {})"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=0.2))
             bridge.wait_for_workflow_idle(run_id, timeout=3)
 
@@ -2705,7 +2861,7 @@ class InkBridgeTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft("throw new Error('GA_P8_TOP_LEVEL_THROW')")
+            run_id = bridge.workflow_draft(_cc_script("throw new Error('GA_P8_TOP_LEVEL_THROW')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -2716,7 +2872,7 @@ class InkBridgeTest(unittest.TestCase):
                 marker="GA_P8_TOP_LEVEL_THROW",
             )
 
-    def test_workflow_approve_real_runtime_pipeline_throw_emits_failed_final_error_and_idle(self):
+    def test_workflow_approve_real_runtime_pipeline_stage_throw_returns_null_and_idle(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -2732,36 +2888,18 @@ return values
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
-            self.assert_workflow_failed_final_error_and_idle(
-                bridge=bridge,
-                events=events,
-                run_id=run_id,
-                marker="GA_P8_PIPELINE_STAGE_THROW",
-            )
+            run = bridge.workflow_store.load_run(run_id)
+            self.assertEqual("succeeded", run.status)
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual([1, None], final_event["result"]["result"])
+            self.assert_bridge_idle_tail(events)
 
-    def test_workflow_approve_sandbox_rejects_process_access_and_emits_failed_final_error_and_idle(self):
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft("return process.env")
-            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
-            bridge.wait_for_workflow_idle(run_id, timeout=5)
-
-            self.assert_workflow_failed_final_error_and_idle(
-                bridge=bridge,
-                events=events,
-                run_id=run_id,
-                marker="Cannot read properties of undefined",
-            )
-
-    def test_workflow_approve_real_runtime_parallel_thunk_throw_emits_failed_final_error_and_idle(self):
+    def test_workflow_approve_real_runtime_parallel_thunk_throw_returns_null_and_idle(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -2775,7 +2913,25 @@ return results
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+
+            run = bridge.workflow_store.load_run(run_id)
+            self.assertEqual("succeeded", run.status)
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual([1, None], final_event["result"]["result"])
+            self.assert_bridge_idle_tail(events)
+
+    def test_workflow_approve_sandbox_rejects_process_access_and_emits_failed_final_error_and_idle(self):
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft(_cc_script("return process.env"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -2783,7 +2939,7 @@ return results
                 bridge=bridge,
                 events=events,
                 run_id=run_id,
-                marker="GA_P8_PARALLEL_THUNK_THROW",
+                marker="Cannot read properties of undefined",
             )
 
     def test_workflow_approve_real_runtime_non_serializable_return_emits_failed_final_error_and_idle(self):
@@ -2793,7 +2949,7 @@ return results
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft("return 1n")
+            run_id = bridge.workflow_draft(_cc_script("return 1n"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -2811,7 +2967,7 @@ return results
 
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
-            run_id = bridge.workflow_draft("return await agent('p', 'bad-options')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('p', 'bad-options')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -2871,7 +3027,7 @@ return results.map(result => result.summary)
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=5.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -2888,7 +3044,7 @@ return results.map(result => result.summary)
             self.assertIn("resultRef", detail_text)
             self.assert_bridge_idle_tail(events[:-1])
 
-    def test_workflow_approve_parallel_partial_failure_emits_failed_final_error_and_preserves_artifacts(self):
+    def test_workflow_approve_parallel_partial_failure_returns_null_and_preserves_artifacts(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -2913,12 +3069,14 @@ return results
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
             run = bridge.workflow_store.load_run(run_id)
             artifact_dir = Path(run.artifact_dir)
+            self.assertEqual("succeeded", run.status)
+            self.assertEqual("partial", run.metadata["executionOutcome"])
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual(["succeeded", "failed"], [job.status for job in run.jobs])
 
@@ -2937,14 +3095,14 @@ return results
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)
-            self.assert_workflow_failed_final_error_and_idle(
-                bridge=bridge,
-                events=events,
-                run_id=run_id,
-                marker="bridge partial failure",
-            )
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual("partial", final_event["result"]["executionOutcome"])
+            self.assertEqual("bridge success artifact", final_event["result"]["result"][0]["summary"])
+            self.assertIsNone(final_event["result"]["result"][1])
+            self.assert_bridge_idle_tail(events)
 
-    def test_workflow_approve_provider_429_rate_limit_emits_failed_final_error_and_preserves_artifacts(self):
+    def test_workflow_approve_provider_429_rate_limit_returns_null_and_preserves_artifacts(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
@@ -2969,14 +3127,14 @@ return results
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
             run = bridge.workflow_store.load_run(run_id)
             artifact_dir = Path(run.artifact_dir)
-            self.assertIn("429", run.error)
-            self.assertIn("rate limit", run.error.lower())
+            self.assertEqual("succeeded", run.status)
+            self.assertEqual("partial", run.metadata["executionOutcome"])
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual(["succeeded", "failed"], [job.status for job in run.jobs])
 
@@ -2997,12 +3155,12 @@ return results
             workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
             self.assertIn("agent_completed", workflow_events)
             self.assertIn("agent_failed", workflow_events)
-            self.assert_workflow_failed_final_error_and_idle(
-                bridge=bridge,
-                events=events,
-                run_id=run_id,
-                marker="429",
-            )
+            final_event = next(event for event in events if event["type"] == "workflow_final" and event["runId"] == run_id)
+            self.assertEqual("succeeded", final_event["result"]["status"])
+            self.assertEqual("partial", final_event["result"]["executionOutcome"])
+            self.assertEqual("bridge success before 429", final_event["result"]["result"][0]["summary"])
+            self.assertIsNone(final_event["result"]["result"][1])
+            self.assert_bridge_idle_tail(events)
 
     def test_workflow_stop_after_completed_prefix_cancels_running_child_and_resume_uses_prefix(self):
         agent = FakeAgent()
@@ -3030,7 +3188,7 @@ return { marker: 'GA_STOP_RESUME_DONE', first: first.summary, second: second.sum
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            source_run_id = bridge.workflow_draft(script)
+            source_run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(source_run_id, timeout_seconds=5.0))
             self.assertTrue(runner.second_started.wait(timeout=3.0))
 
@@ -3112,7 +3270,7 @@ return { marker: 'GA_STOP_RESUME_DONE', first: first.summary, second: second.sum
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            source_run_id = bridge.workflow_draft(script)
+            source_run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(source_run_id, timeout_seconds=5.0))
             self.assertTrue(runner.second_started.wait(timeout=3.0))
 
@@ -3210,7 +3368,7 @@ return { marker: 'GA_ARGS_MISS_DONE', summary: result.summary }
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            source_run_id = bridge.workflow_draft(script)
+            source_run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(source_run_id, args={"target": "old"}, timeout_seconds=5.0))
             bridge.wait_for_workflow_idle(source_run_id, timeout=5)
             self.assertFalse(bridge._workflow_threads[source_run_id].is_alive())
@@ -3301,7 +3459,7 @@ return { marker: 'GA_TOOL_CONTEXT_MISS_DONE', summary: result.summary }
                 workflow_root=tmp,
                 workflow_runtime_factory=runtime_factory,
             )
-            source_run_id = bridge.workflow_draft(script)
+            source_run_id = bridge.workflow_draft(_cc_script(script))
             source = bridge.workflow_store.load_run(source_run_id)
             source.metadata["toolContext"] = {"allowedTools": ["Read"], "toolSchemaHash": "schema-v1"}
             bridge.workflow_store.save_run(source)
@@ -3608,7 +3766,7 @@ return { marker: child.summary }
                     **kwargs,
                 ),
             )
-            run_id = bridge.workflow_draft(script)
+            run_id = bridge.workflow_draft(_cc_script(script))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=5.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -4255,6 +4413,105 @@ return { marker: child.summary }
             idle_index = next(i for i, event in enumerate(events) if event.get("type") == "status" and event.get("status") == "idle")
             self.assertLess(assistant_done_index, idle_index)
             self.assertEqual("Main LLM final response", events[assistant_done_index]["text"])
+
+
+class WorkflowToolEntryTest(unittest.TestCase):
+    def _bridge(self, tmp, events):
+        workspace = Path(tmp) / "workspace"
+        workspace.mkdir()
+        store_root = Path(tmp) / "store"
+        agent = FakeAgent()
+        agent.session_id = "session_tool"
+        bridge = GenericAgentBridge(
+            agent_factory=lambda: agent,
+            emit=events.append,
+            workflow_root=store_root,
+            workspace_root=workspace,
+            agent_control=FakeAgentControl(),
+        )
+        return bridge, agent
+
+    def test_launch_from_tool_bypasses_main_agent_busy_and_reuses_ui_path(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge, agent = self._bridge(tmp, events)
+            agent.is_running = True
+            script = """export const meta = { name: 'tool-demo', description: 'tool demo' }
+return { ok: true }
+"""
+            result = bridge.workflow_launch_from_tool(script=script, timeout_seconds=5)
+
+            self.assertEqual("async_launched", result["status"])
+            self.assertEqual("tool-demo", result["workflowName"])
+            bridge.wait_for_workflow_idle(result["runId"], timeout=10)
+            run = bridge.workflow_store.load_run(result["runId"])
+            self.assertEqual("succeeded", run.status)
+            self.assertEqual("workflow_tool", run.metadata.get("launchedBy"))
+            self.assertEqual("inline", run.metadata.get("scriptSource"))
+            event_types = [event.get("type") for event in events]
+            self.assertIn("workflow_run", event_types)
+            self.assertIn("workflow_progress", event_types)
+            self.assertIn("workflow_final", event_types)
+
+    def test_launch_from_tool_rejects_invalid_script_without_creating_run(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge, _agent = self._bridge(tmp, events)
+            result = bridge.workflow_launch_from_tool(script="return Date.now()", timeout_seconds=5)
+
+            self.assertEqual("error", result["status"])
+            self.assertIn("Invalid workflow script", result["error"])
+            self.assertEqual([], bridge.workflow_store.list_runs())
+
+    def test_launch_from_tool_accepts_script_path_and_returned_path(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge, _agent = self._bridge(tmp, events)
+            source = Path(tmp) / "workspace" / "child.js"
+            source.write_text(
+                """export const meta = { name: 'path-demo', description: 'path demo' }
+return { path: true }
+""",
+                encoding="utf-8",
+            )
+            first = bridge.workflow_launch_from_tool(script_path="child.js", timeout_seconds=5)
+            self.assertEqual("async_launched", first["status"])
+            bridge.wait_for_workflow_idle(first["runId"], timeout=10)
+            self.assertEqual("succeeded", bridge.workflow_store.load_run(first["runId"]).status)
+
+            second = bridge.workflow_launch_from_tool(script_path=first["scriptPath"], timeout_seconds=5)
+            self.assertEqual("async_launched", second["status"])
+            bridge.wait_for_workflow_idle(second["runId"], timeout=10)
+            self.assertEqual("succeeded", bridge.workflow_store.load_run(second["runId"]).status)
+
+    def test_launch_from_tool_accepts_named_and_resume_source(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge, _agent = self._bridge(tmp, events)
+            named_script = """export const meta = { name: 'named-demo', description: 'named demo' }
+return { named: true }
+"""
+            bridge.workflow_store.save_named_workflow("named-demo", named_script)
+            first = bridge.workflow_launch_from_tool(name="named-demo", timeout_seconds=5)
+            self.assertEqual("async_launched", first["status"])
+            bridge.wait_for_workflow_idle(first["runId"], timeout=10)
+            first_run = bridge.workflow_store.load_run(first["runId"])
+            self.assertEqual("succeeded", first_run.status)
+            self.assertEqual("named-demo", first_run.metadata.get("namedWorkflow"))
+
+            resumed_script = """export const meta = { name: 'named-demo', description: 'named demo resumed' }
+return { resumed: true }
+"""
+            second = bridge.workflow_launch_from_tool(
+                script=resumed_script,
+                resume_from_run_id=first_run.run_id,
+                timeout_seconds=5,
+            )
+            self.assertEqual("async_launched", second["status"])
+            bridge.wait_for_workflow_idle(second["runId"], timeout=10)
+            second_run = bridge.workflow_store.load_run(second["runId"])
+            self.assertEqual("succeeded", second_run.status)
+            self.assertEqual(first_run.run_id, second_run.metadata.get("resumeFromRunId"))
 
 
 if __name__ == "__main__":

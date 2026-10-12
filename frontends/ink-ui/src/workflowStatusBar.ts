@@ -97,7 +97,14 @@ export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {
         : bar.status === 'degraded' || bar.status === 'partial'
           ? '!'
           : '◌'
-  return [bar.status === 'running' ? 'Enter view · x stop' : 'Enter view', `› ${icon} ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
+  // CC m2000_0xe395211.js renders "Running in background · /workflows to
+  // monitor and save" while a local workflow is in flight. GA keeps its
+  // richer N/M progress line and adds the same /workflows entry point to the
+  // key-hint row, plus the GA-only ``x stop`` shortcut.
+  const controls = bar.status === 'running'
+    ? 'Enter · /workflows · x stop'
+    : 'Enter view'
+  return [controls, `› ${icon} ${bar.name}  ${pieces.filter(Boolean).join(' · ')}`]
 }
 
 export function workflowStatusBarCommandForKey(

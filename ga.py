@@ -741,6 +741,34 @@ class GenericAgentHandler(BaseHandler):
         next_prompt += "\n[SYSTEM TIPS] 已加载 skill。必须按上方 SKILL.md 内容执行；如技能引用相对路径，使用返回的 base_dir。"
         return StepOutcome(result, next_prompt=next_prompt)
 
+    def do_workflow(self, args, response):
+        '''CC-style dynamic workflow tool entry; starts a background run and hands off on completion.'''
+        launcher = getattr(self.parent, "workflow_tool_launcher", None)
+        if not callable(launcher):
+            msg = "workflow tool launcher unavailable; use /workflow <task> instead"
+            yield f"[Warn] {msg}"
+            return StepOutcome({"status": "error", "error": msg}, next_prompt=chr(10))
+        try:
+            payload = launcher(
+                script=args.get("script"),
+                script_path=args.get("scriptPath"),
+                name=args.get("name"),
+                args=args.get("args"),
+                resume_from_run_id=args.get("resumeFromRunId"),
+                timeout_seconds=args.get("timeoutSeconds"),
+            )
+        except Exception as exc:
+            payload = {"status": "error", "error": str(exc)}
+        if not isinstance(payload, dict):
+            payload = {"status": "error", "error": "workflow launcher returned an invalid result"}
+        if payload.get("status") == "async_launched":
+            run_id = str(payload.get("runId") or "")
+            workflow_name = str(payload.get("workflowName") or "workflow")
+            yield f"[Workflow] launched {workflow_name} ({run_id}); use /workflows to monitor."
+        else:
+            yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}"
+        return StepOutcome(payload, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
     def _get_subagent_manager(self):
         manager = getattr(self, "subagent_manager", None)
         if manager is not None:

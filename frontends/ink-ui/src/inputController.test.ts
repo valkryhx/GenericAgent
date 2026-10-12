@@ -296,6 +296,27 @@ test('handleInput parses workflow list and control slash commands', () => {
     value: '',
     command: { type: 'workflow_stop', runId: 'wf_demo', reason: 'user stop' },
   })
+  // CC "save as named workflow" + "run a saved workflow by name" (m1906)
+  assert.deepEqual(handleInput('/workflow save wf_demo demo-flow', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_save', runId: 'wf_demo', name: 'demo-flow' },
+  })
+  assert.deepEqual(handleInput('/workflow save wf_demo demo-flow --overwrite', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_save', runId: 'wf_demo', name: 'demo-flow', overwrite: true },
+  })
+  assert.deepEqual(handleInput('/workflow save wf_demo', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_save', runId: 'wf_demo' },
+  })
+  assert.deepEqual(handleInput('/workflow run demo-flow', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_run_named', name: 'demo-flow' },
+  })
+  assert.deepEqual(handleInput('/workflows saved', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_named_list' },
+  })
   // approve/deny are no longer user-facing slash commands (swallowed, not chat)
   assert.deepEqual(handleInput('/workflow approve wf_demo', '', { return: true }, 'idle', store), {
     value: '',

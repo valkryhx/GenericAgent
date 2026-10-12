@@ -3,6 +3,7 @@
 
 const readline = require('readline');
 const vm = require('vm');
+const { parseWorkflowScript } = require('./workflow_script_contract.js');
 
 let nextRpcId = 1;
 const pending = new Map();
@@ -22,10 +23,6 @@ function rpc(method, params) {
 
 function event(method, params) {
   emit({ type: 'event', method, params: params || {} });
-}
-
-function transformScript(script) {
-  return String(script || '').replace(/\bexport\s+const\s+meta\s*=/, 'const meta =');
 }
 
 function normalizeAgentOptions(options) {
@@ -86,9 +83,24 @@ function normalizeRepairParams(spec) {
 }
 
 async function executeScript(script, args, options) {
+  const parsed = parseWorkflowScript(String(script || ''));
+  if ('error' in parsed) {
+    throw new Error(`Invalid workflow script: ${parsed.error}`);
+  }
   const sandbox = {
     args,
     agent: (prompt, options) => rpc('agent', { prompt, options: normalizeAgentOptions(options) }),
+    workflow: (nameOrRef, workflowArgs) => {
+      const isPlainObject =
+        nameOrRef !== null &&
+        typeof nameOrRef === 'object' &&
+        !Array.isArray(nameOrRef) &&
+        Object.prototype.toString.call(nameOrRef) === '[object Object]';
+      if (typeof nameOrRef !== 'string' && !isPlainObject) {
+        throw new TypeError('workflow() expects a workflow name or a {script|scriptPath|name} object');
+      }
+      return rpc('workflow', { nameOrRef, args: workflowArgs });
+    },
     runPythonUnittest: (workspaceOrSpec, options) =>
       rpc('runPythonUnittest', normalizeTestGateParams(workspaceOrSpec, options)),
     repairAndRetest: async (spec) => {
@@ -124,13 +136,50 @@ async function executeScript(script, args, options) {
     },
     phase: (name) => event('phase', { name }),
     log: (message) => event('log', { message }),
-    parallel: async (items) => Promise.all((items || []).map((item) => (typeof item === 'function' ? item() : item))),
-    pipeline: async (items, ...stages) => {
-      let values = items || [];
-      for (const stage of stages) {
-        values = await Promise.all(values.map((value, index) => stage(value, (items || [])[index], index)));
+    parallel: async (items) => {
+      if (!Array.isArray(items)) {
+        throw new TypeError('parallel() expects an array of functions');
       }
-      return values;
+      if (items.length === 0) return [];
+      for (const item of items) {
+        if (typeof item !== 'function') {
+          throw new TypeError(
+            'parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)',
+          );
+        }
+      }
+      const settled = await Promise.allSettled(
+        items.map((item) => {
+          try {
+            return item();
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        }),
+      );
+      return settled.map((entry) => (entry.status === 'fulfilled' ? entry.value : null));
+    },
+    pipeline: async (items, ...stages) => {
+      if (!Array.isArray(items)) {
+        throw new TypeError('pipeline() expects an array as the first argument');
+      }
+      for (const stage of stages) {
+        if (typeof stage !== 'function') {
+          throw new TypeError('pipeline() stages must be functions: pipeline(items, item => ..., result => ...)');
+        }
+      }
+      if (items.length === 0) return [];
+      const settled = await Promise.allSettled(
+        items.map(async (item, index) => {
+          let value = await item;
+          for (const stage of stages) {
+            if (value === null) break;
+            value = await stage(value, item, index);
+          }
+          return value;
+        }),
+      );
+      return settled.map((entry) => (entry.status === 'fulfilled' ? entry.value : null));
     },
     console: {
       log: (...parts) => event('log', { message: parts.map(String).join(' ') }),
@@ -149,7 +198,9 @@ async function executeScript(script, args, options) {
   const context = vm.createContext(sandbox, {
     codeGeneration: { strings: false, wasm: false },
   });
-  const wrapped = `(async () => {\n${transformScript(script)}\n})()`;
+  const wrapped = `(async () => {
+${parsed.scriptBody}
+})()`;
   const compiled = new vm.Script(wrapped, { filename: 'workflow-script.js' });
   const timeout = Math.max(1, Number(options && options.timeoutMs) || 1000);
   return await compiled.runInContext(context, { timeout });

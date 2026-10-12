@@ -13,6 +13,7 @@ from typing import Iterable
 
 ORCHESTRATION_TOOLS = frozenset(
     {
+        "workflow",
         "spawn_agent",
         "list_agents",
         "wait_agent",

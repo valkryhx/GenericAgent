@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -56,6 +58,29 @@ def build_artifact_ownership_index(run: WorkflowRun) -> dict[str, list[str]]:
             if writer not in bucket:
                 bucket.append(writer)
     return index
+
+
+# A named workflow is the GA analogue of CC's "save as named workflow"
+# (m1906_0xe19cc02.js). CC keeps the saved name as a display string and only
+# ever round-trips it through Workflow({name, args}); GA also has to map it to
+# a file on disk, so the canonical name is slugified to a safe file stem.
+NAMED_WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def normalize_named_workflow_name(name: str) -> str:
+    """Slugify a workflow name into a safe, stable file stem.
+
+    Raises ``ValueError`` when the name cannot produce a usable stem, so a bad
+    name is rejected at save time instead of writing an unreachable file.
+    """
+    text = str(name or "").strip()
+    if not text:
+        raise ValueError("workflow name is required")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-._")
+    slug = slug[:64]
+    if not slug or not NAMED_WORKFLOW_NAME_RE.match(slug):
+        raise ValueError(f"invalid workflow name: {name!r}")
+    return slug
 
 
 class WorkflowStore:
@@ -800,6 +825,76 @@ class WorkflowStore:
     def list_runs(self) -> list[WorkflowRun]:
         run_ids = sorted({path.parent.name for path in self.root.glob("*/workflows/*/state.json")})
         return [self.load_run(run_id) for run_id in run_ids]
+
+    # -- Named workflow library -------------------------------------------
+    #
+    # CC evidence: m1906_0xe19cc02.js saves the run's script under a name taken
+    # from ``meta.name`` (or a slug of the summary) and warns
+    # ``"... already exists. Press Enter again to overwrite, or change the
+    # name."``. GA stores one JSON document per name under
+    # ``<root>/named-workflows/<slug>.json``; ``overwrite`` is the explicit
+    # second press.
+
+    @property
+    def named_workflows_dir(self) -> Path:
+        return self.root / "named-workflows"
+
+    def save_named_workflow(
+        self,
+        name: str,
+        script: str,
+        *,
+        source_run_id: str | None = None,
+        description: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        script = str(script or "")
+        if not script.strip():
+            raise ValueError("workflow script is required")
+        slug = normalize_named_workflow_name(name)
+        directory = self.named_workflows_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{slug}.json"
+        if path.exists() and not overwrite:
+            raise FileExistsError(slug)
+        record = {
+            "name": slug,
+            "requestedName": str(name or "").strip(),
+            "description": (str(description).strip() if description else None),
+            "script": script,
+            "scriptBytes": len(script.encode("utf-8")),
+            "scriptHash": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+            "sourceRunId": str(source_run_id) if source_run_id else None,
+            "savedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        self._write_json(path, record)
+        return {key: value for key, value in record.items() if key != "script"}
+
+    def load_named_workflow(self, name: str) -> dict:
+        slug = normalize_named_workflow_name(name)
+        path = self.named_workflows_dir / f"{slug}.json"
+        if not path.exists():
+            raise FileNotFoundError(slug)
+        data = read_json_retrying(path)
+        if not isinstance(data, dict) or not isinstance(data.get("script"), str):
+            raise ValueError(f"named workflow {slug!r} is corrupt")
+        return data
+
+    def list_named_workflows(self) -> list[dict]:
+        directory = self.named_workflows_dir
+        if not directory.exists():
+            return []
+        records: list[dict] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = read_json_retrying(path)
+            except Exception:
+                continue
+            if not isinstance(data, dict) or not isinstance(data.get("script"), str):
+                continue
+            records.append({key: value for key, value in data.items() if key != "script"})
+        records.sort(key=lambda item: str(item.get("name") or ""))
+        return records
 
     def _preserve_external_kill(self, run: WorkflowRun, artifact_dir: Path) -> None:
         """Carry a `killed` status that landed on disk onto the row about to be written.

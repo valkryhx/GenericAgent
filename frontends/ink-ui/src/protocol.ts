@@ -35,6 +35,9 @@ export type BridgeCommand =
   | { type: 'workflow_detail'; runId: string }
   | { type: 'workflow_progress'; runId: string }
   | { type: 'workflow_stop'; runId: string; reason?: string }
+  | { type: 'workflow_save'; runId: string; name?: string; overwrite?: boolean }
+  | { type: 'workflow_run_named'; name: string; args?: unknown; timeoutSeconds?: number }
+  | { type: 'workflow_named_list' }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -131,6 +134,13 @@ export type WorkflowJob = {
   metadata?: Record<string, unknown>
 }
 
+/** CC-style recovery guidance (m0567 CTn() / <recovery> block). */
+export type WorkflowRecoveryHint = {
+  command: string
+  message: string
+  agentTranscriptsDir?: string
+}
+
 export type WorkflowRun = {
   version?: number
   runId: string
@@ -143,6 +153,18 @@ export type WorkflowRun = {
   resultRef?: string | null
   error?: string | null
   metadata?: Record<string, unknown>
+  recovery?: WorkflowRecoveryHint
+}
+
+/** A saved named workflow (CC m1906 "save as named workflow"). */
+export type NamedWorkflow = {
+  name: string
+  requestedName?: string
+  description?: string | null
+  scriptBytes?: number
+  scriptHash?: string
+  sourceRunId?: string | null
+  savedAt?: string
 }
 
 export type WorkflowEvent = {
@@ -331,12 +353,14 @@ export type BridgeEvent =
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }
-  | { type: 'workflow_runs'; runs: WorkflowRun[] }
+  | { type: 'workflow_runs'; runs: WorkflowRun[]; savedWorkflows?: string[] }
   | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
   | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
   | { type: 'workflow_live'; runId: string; jobs: WorkflowLiveJob[] }
   | { type: 'workflow_event'; event: WorkflowEvent }
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
+  | { type: 'workflow_saved'; workflow: NamedWorkflow; overwritten: boolean }
+  | { type: 'named_workflows'; workflows: NamedWorkflow[] }
   | { type: 'agent_snapshot'; snapshot: AgentSnapshot }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'error'; code: string; message: string; taskId?: number }

@@ -17,7 +17,26 @@ from workflow_child_agent import AgentResult  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
 from workflow_store import WorkflowStore  # noqa: E402
-from workflow_models import WorkflowRun  # noqa: E402
+from workflow_models import WorkflowRun as _WorkflowRun  # noqa: E402
+
+
+_CC_META_PREFIX = "export const meta = { name: 'provider-anomaly-test', description: 'provider anomaly test workflow' }\n"
+
+
+def _cc_script(script):
+    if not isinstance(script, str) or not script:
+        return script
+    if script.lstrip().startswith("export const meta"):
+        return script
+    return _CC_META_PREFIX + script
+
+
+class WorkflowRun(_WorkflowRun):
+    def __init__(self, *args, **kwargs):
+        script = kwargs.get("script")
+        if isinstance(script, str) and script:
+            kwargs["script"] = _cc_script(script)
+        super().__init__(*args, **kwargs)
 
 
 class FakeBackend:
@@ -290,7 +309,7 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
-            run_id = bridge.workflow_draft("return await agent('empty')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('empty')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -304,7 +323,7 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
-            run_id = bridge.workflow_draft("return await agent('missing usage')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('missing usage')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -322,7 +341,7 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
-            run_id = bridge.workflow_draft("return await agent('sdk error')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('sdk error')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -349,7 +368,7 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
-            run_id = bridge.workflow_draft("return await agent('sdk error')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('sdk error')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 
@@ -393,7 +412,7 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as tmp:
             bridge = self.make_bridge(tmp, ProviderAnomalyRunner([result]), events)
-            run_id = bridge.workflow_draft("return await agent('no text')")
+            run_id = bridge.workflow_draft(_cc_script("return await agent('no text')"))
             self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=2.0))
             bridge.wait_for_workflow_idle(run_id, timeout=5)
 

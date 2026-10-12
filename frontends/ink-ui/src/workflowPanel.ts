@@ -102,6 +102,8 @@ export type WorkflowListPanelState = {
   mode: 'list'
   runs: WorkflowRun[]
   selected: number
+  /** Names of saved named workflows (CC m1906 "save as"). */
+  savedWorkflows?: string[]
 }
 
 export type WorkflowListDecision = {
@@ -182,18 +184,20 @@ function mergeLiveJobs(
   return merged
 }
 
-export function workflowListPanelFromRuns(runs: WorkflowRun[]): WorkflowListPanelState {
-  return { mode: 'list', runs, selected: 0 }
+export function workflowListPanelFromRuns(runs: WorkflowRun[], savedWorkflows: string[] = []): WorkflowListPanelState {
+  return { mode: 'list', runs, selected: 0, savedWorkflows }
 }
 
 export function workflowListRows(panel: WorkflowListPanelState): string[] {
   const completed = panel.runs.filter(run => run.status === 'succeeded' || run.status === 'degraded').length
   const completedLabel = `${completed} completed`
+  const saved = (panel.savedWorkflows ?? []).filter(name => typeof name === 'string' && name.trim())
   return [
     'Dynamic workflows',
     completedLabel,
     '',
     ...panel.runs.map((run, index) => workflowListRunRow(run, index === panel.selected)),
+    ...(saved.length > 0 ? [`Saved: ${saved.join(', ')} - /workflow run <name>`] : []),
     'Enter view - Up/Down move - Esc close',
   ]
 }
@@ -622,11 +626,13 @@ export function workflowPanelRows(panel: WorkflowPanelState): string[] {
   const permission = panel.run.permissionProfile || '(default)'
   const jobs = panel.run.jobs?.length ?? 0
   const scriptLines = panel.script.split('\n')
+  // CC keymap: ``s`` saves the run as a named workflow (m1906), while GA keeps
+  // ``x`` as the stop key so the two actions cannot collide.
   const controls = resumeableWorkflowStatuses.has(panel.run.status)
-    ? 'r resume - s stop - Esc close'
+    ? 'r resume - s save - x stop - Esc close'
     : panel.run.status === 'running'
-      ? 's stop - Esc close'
-      : 'Esc close'
+      ? 's save - x stop - Esc close'
+      : 's save - Esc close'
   return [
     `Workflow ${panel.run.runId} - ${panel.run.status}`,
     `Permission: ${permission}`,
@@ -718,9 +724,15 @@ function detailPanelWithScroll(panel: WorkflowAgentDetailPanelState, scrollOffse
 
 function workflowRunControlForKey(run: WorkflowRun, key: InputKey, rawInput: string): WorkflowPanelDecision | null {
   if (key.ctrl || key.meta) return null
-  if (rawInput === 'x' || rawInput === 's') {
+  if (rawInput === 'x') {
     if (run.status !== 'running') return null
     return { command: { type: 'workflow_stop', runId: run.runId, reason: 'stopped from Ink UI' } }
+  }
+  if (rawInput === 's') {
+    // CC m1906: save the run's script under its meta.name (or summary slug).
+    // The host derives the default name; a collision comes back as
+    // ``workflow_name_exists`` and the slash command's ``--overwrite`` retries.
+    return { command: { type: 'workflow_save', runId: run.runId } }
   }
   if (rawInput === 'r' && resumeableWorkflowStatuses.has(run.status)) {
     return { command: { type: 'workflow_resume', runId: run.runId } }

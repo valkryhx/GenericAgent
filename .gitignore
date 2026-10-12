@@ -126,7 +126,8 @@ reflect/*
 
 .claude/
 
-# Node frontends
+# Node runtime + frontends
+node_modules/
 frontends/ink-ui/node_modules/
 frontends/ink-ui/dist/
 dev_ideas/

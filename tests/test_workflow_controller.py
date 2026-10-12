@@ -401,6 +401,34 @@ class WorkflowControllerTest(unittest.TestCase):
             events = controller.store.replay_events(run.run_id)
             self.assertIn("invalid_workflow_script", str(events[-1].payload["issues"]))
 
+    def test_create_planned_run_rejects_nondeterministic_rendered_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = WorkflowDraft(
+                task_text="nondeterministic rendered workflow",
+                context={},
+                classification={"taskType": "research"},
+                plan={"taskType": "research", "phases": [{"title": "Collect", "agents": []}]},
+                validation={"ok": True, "issues": []},
+                script="export const meta = { name: 'nondeterministic', description: 'nondeterministic' }" + chr(10) + "return Date.now()",
+            )
+
+            class Planner:
+                def plan(self, *_args, **_kwargs):
+                    return draft
+
+            controller = WorkflowController(WorkflowStore(root=tmp))
+            run = controller.create_planned_run(
+                session_id="session_test",
+                task_text=draft.task_text,
+                planner=Planner(),
+            )
+
+            self.assertEqual("failed", run.status)
+            self.assertEqual("workflow_plan_rejected", run.error)
+            events = controller.store.replay_events(run.run_id)
+            self.assertIn("invalid_workflow_script", str(events[-1].payload["issues"]))
+            self.assertIn("must be deterministic", str(events[-1].payload["issues"]))
+
     def test_create_planned_run_records_rejected_draft_without_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             controller = WorkflowController(WorkflowStore(root=tmp))
