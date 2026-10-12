@@ -533,3 +533,17 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - `frontends/ink-ui/src/streamCommit.ts` 的 fence 状态机改为按 Markdown 语义匹配 opener/closer 长度，并把 legacy 内联关闭视为 closer；否则它会把嵌套的 ````text` 误判为关闭 5 反引号块，从而在 `[Info]` 的真正 closer 前切段，让下一段以 closer 开头并吞掉 Turn 4。
 - 详细文档：`docs/20261012-ga-ink-workflow-fence-inline-close-fix.md`。
 - 状态（2026-10-12）：已实施；回归覆盖 Python 工具输出 fence、Ink transcript 渲染与 stream-commit fence 状态机。验证：`python -m unittest discover -s tests` 1325 OK（skipped=3），`npm --prefix frontends/ink-ui test` 407 pass，typecheck OK。
+
+### 中途调研 2026-10-12：GA Ink workflow 实测缺陷清点（wait_agent / workspace guard / 并行隔离 / 假成功）
+
+- 触发：用户实测 `/workflow` 并行任务（run `wf_3332887439d547609a91dde829e89a43`）出现两类现象——(1) 编排层 `wait_agent(condition="workflow_terminal", target=<runId>)` 空等 300s timeout；(2) 主代理汇报「qipao.html 未产出」「code_run 子进程被 workspace guard 禁用，只能用 runpy 同进程执行」。
+- 结论：本次清点出 5 个独立缺陷（A~E），**仅记录、未分析根因、未改代码**，待次日分析。
+  - A（bug，已确认根因）：`wait_agent(condition="workflow_terminal")` 是假实现，等价于 `all_terminal` 且只认 subagent task_name，不读 workflow run 终态；传 runId 时对着合成的孤儿 state 空等到 timeout。坐标 `subagent_wait.py:78`、`subagent_manager.py:33/609`、`ga.py:1098`。
+  - B（设计缺陷）：`workflow workspace guard` 无条件禁用 workflow 子代理的所有 `subprocess.*`，子代理无法真实运行/验证产物（如 `python script.py`、`pip`），偏离 CC。坐标 `workflow_workspace_guard.py:74-82`、`assets/code_run_header.py`、`ga.py:64`。
+  - C：并行 workflow `artifact_path_collision`——多个 author 写同一文件，`writeScope` 未有效隔离。证据 `wf_3332.../run.json` 的 `workflowIssues`/`artifactCollisions`。
+  - D：子代理「未产出却上报成功」——声明 artifact 缺失但 job 计 succeeded，缺产物存在性校验。证据 agent_2（qipao.html）。
+  - E：verify 阶段被迫用 `runpy.run_path()` 同进程执行，验证强度打折，且受 guard 波及。
+- 真实 run 证据：`run.json` status=`degraded`；`childSummary` 6/6 terminal；degraded 由 artifact 冲突 + qipao.html 缺失触发；run 实际早已结束（非卡死）。
+- 待办：见独立文档；A 明确是 bug 可先修，B 需先出改造方案，C/D/E 待分析。
+- 详细文档：`docs/20261012-ga-workflow-实测缺陷清点-待分析.md`。
+- 状态（2026-10-12）：**仅落盘，未实施。**
