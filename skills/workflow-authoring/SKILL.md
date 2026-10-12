@@ -26,6 +26,24 @@ A task that would merely benefit from a workflow does **not** count. If the user
 did not opt in, either use `spawn_agent` for one bounded side task or briefly
 explain what a workflow could do and ask whether to run it.
 
+## 1.1 Opt-in flow (direct JS, no JSON planner)
+
+GA follows Claude Code's direct-JS entry: **the main agent is the script
+author.** There is no JSON planning step and no separate planner model. The
+opt-in path is:
+
+1. The user opts in (natural-language request such as "用 workflow 帮我并行调研
+   A、B、C，然后综合验证", a slash opt-in like `/workflow on`, or a request to run
+   a saved workflow).
+2. GA injects a `[WORKFLOW OPT-IN]` reminder into the main agent's turn.
+3. The main agent calls `load_skill('workflow-authoring')`, writes the
+   JavaScript script inline, and calls the `workflow` tool with `script`.
+4. The tool starts the run in the background; `/workflows` tracks it.
+
+Never emit a JSON plan and never write the script to a file first. A task that
+merely sounds multi-step is *not* opt-in: if there is no reminder and the user
+did not ask for a workflow, do not call the `workflow` tool.
+
 ## 2. Tool inputs
 
 - `script` — the inline workflow script. Prefer this for a new workflow. Do not

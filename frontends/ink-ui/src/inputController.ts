@@ -130,6 +130,9 @@ function parseSlashSubmit(
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
   // approve/deny were removed from the product path; swallow them so they are not sent as chat.
   if (/^\/workflow\s+(approve|deny)\b/i.test(trimmed)) return {}
+  // ``/workflow on|off`` toggles session opt-in. The bridge resolves the
+  // activation and answers locally, so the frontend just forwards the line.
+  if (/^\/workflow\s+(on|off)$/i.test(trimmed)) return { command: { type: 'submit', text: trimmed } }
   // CC "save as named workflow" (m1906) + "run a saved workflow by name"
   // (Workflow({name, args})). ``--overwrite`` is the non-modal stand-in for
   // CC's "Press Enter again to overwrite" second press.
@@ -172,9 +175,6 @@ function parseSlashSubmit(
     if (action === 'resume') return { command: { type: 'workflow_resume', runId } }
     return { command: { type: 'workflow_stop', runId, ...(reason ? { reason } : {}) } }
   }
-  // Single start path: /workflow <task> (and legacy /workflow plan <task>)
-  const workflowStart = parseWorkflowStartCommand(trimmed)
-  if (workflowStart) return { command: workflowStart }
   if (trimmed === '/clear') return { action: { type: 'clear' } }
   if (trimmed === '/help') return { action: { type: 'help' } }
   if (trimmed === '/status') return { action: { type: 'status' } }
@@ -185,47 +185,6 @@ function parseSlashSubmit(
     if (skillNames.has(skill)) return { command: { type: 'skill_invoke', skill, args: skillMatch[2] ?? '' } }
   }
   return null
-}
-
-function parseWorkflowStartCommand(trimmed: string): BridgeCommand | null {
-  // Prefer bare /workflow <task>. Accept legacy "/workflow plan <task>" as the same start path.
-  let rest = ''
-  if (trimmed === '/workflow plan' || trimmed.startsWith('/workflow plan ')) {
-    rest = trimmed.slice('/workflow plan'.length).trim()
-  } else if (trimmed.startsWith('/workflow ')) {
-    rest = trimmed.slice('/workflow '.length).trim()
-  } else {
-    return null
-  }
-  if (!rest) {
-    return { type: 'workflow_plan', taskText: '', autoApprove: true }
-  }
-  // Reserved control verbs are handled above; never treat them as free-form tasks.
-  const first = rest.split(/\s+/, 1)[0] || ''
-  if (['list', 'detail', 'resume', 'stop', 'approve', 'deny', 'plan'].includes(first)) {
-    return null
-  }
-  const tokens = rest.split(/\s+/).filter(Boolean)
-  let timeoutSeconds: number | undefined
-  const taskParts: string[] = []
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]
-    // --manual is intentionally ignored: workflows always auto-start.
-    if (token === '--manual') continue
-    if (token === '--timeout') {
-      const rawTimeout = tokens[index + 1]
-      const parsed = rawTimeout ? Number(rawTimeout) : NaN
-      if (Number.isFinite(parsed) && parsed > 0) {
-        timeoutSeconds = parsed
-        index += 1
-        continue
-      }
-    }
-    taskParts.push(token)
-  }
-  const command: BridgeCommand = { type: 'workflow_plan', taskText: taskParts.join(' '), autoApprove: true }
-  if (timeoutSeconds !== undefined) command.timeoutSeconds = timeoutSeconds
-  return command
 }
 
 function insertImagePlaceholdersAtCursor(

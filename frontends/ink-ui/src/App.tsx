@@ -533,7 +533,7 @@ export function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
     '/workflows - list workflow runs',
-    '/workflow [--timeout SECONDS] TASK - plan and run a dynamic workflow (default timeout 900s)',
+    '/workflow on|off - opt this session into dynamic workflow orchestration (the agent then authors a JS workflow script)',
     '/workflow detail|resume|stop RUN_ID - inspect or control workflows',
     '/clear - clear display only',
     '/status - show current frontend status',

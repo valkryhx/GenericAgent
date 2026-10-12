@@ -468,7 +468,7 @@ def _retry_feedback_block(metadata: dict | None) -> str:
 
 
 
-# One line per canonical role (``workflow_planner.CODING_AGENT_ROLES``). A role a
+# One line per canonical workflow role. A role a
 # plan can declare but that gets no instruction is a role the child has to
 # invent, which is how output shapes drifted between runs. Keep every entry to
 # what the role must produce and what counts as evidence; the drift guard in

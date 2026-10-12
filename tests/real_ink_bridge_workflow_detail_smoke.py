@@ -100,15 +100,16 @@ def main() -> int:
             events = []
             with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
                 bridge = GenericAgentBridge(agent_factory=FakeAgent, emit=events.append, workflow_root=tmp)
-                os.environ["GA_WORKFLOW_PLANNER_MODE"] = "prompt_guided"
-                os.environ["GA_WORKFLOW_PLANNER_CONFIG"] = CONFIG_NAME
-                os.environ["GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS"] = os.environ.get("GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS", "2")
-                run_id = bridge.workflow_plan(
-                    "规划一个低风险只读 review workflow：并行 1 个 agent 检查 UI 数据契约，然后 1 个 agent 汇总。必须包含边界文字：不要读取 mykey.py、mykey.json、mcp.json；不要提交。不要写代码，不要执行工具，不要使用 schemaRef。",
-                    context={"constraints": ["不要读取 mykey.py、mykey.json、mcp.json", "不要提交", "只读规划，不执行代码修改", "每个 agent prompt 必须包含安全边界"]},
-                    auto_approve=False,
-                    timeout_seconds=20,
+                # Direct-JS entry (Claude Code model): the model authors the
+                # script itself; there is no JSON planner. ``workflow_draft``
+                # creates the run without executing it so the detail panel can
+                # be inspected first.
+                script = (
+                    "export const meta = { name: 'ui-detail-smoke', description: 'plan a read-only review workflow' }" + chr(10)
+                    + "phase('Review')" + chr(10)
+                    + "return await agent('检查 UI 数据契约；不要读取 mykey.py、mykey.json、mcp.json；不要提交。', { label: 'ui-contract-review', phase: 'Review' })" + chr(10)
                 )
+                run_id = bridge.workflow_draft(script)
                 bridge.workflow_detail(run_id)
                 time.sleep(0.05)
             detail = [event for event in events if event.get("type") == "workflow_detail" and event.get("run", {}).get("runId") == run_id][-1]
@@ -119,12 +120,12 @@ def main() -> int:
                 {
                     "runId": run_id,
                     "status": run.get("status"),
-                    "plannerMode": (run.get("metadata") or {}).get("plannerMode"),
+                    "launchedBy": (run.get("metadata") or {}).get("launchedBy"),
                     "workflowTaskType": (run.get("metadata") or {}).get("workflowTaskType"),
                     "draftPresent": isinstance(draft, dict),
                     "progressPresent": isinstance(progress, dict),
-                    "draftPlanName": ((draft or {}).get("plan") or {}).get("meta", {}).get("name") if isinstance(draft, dict) else None,
-                    "validationOk": ((draft or {}).get("validation") or {}).get("ok") if isinstance(draft, dict) else None,
+                    "draftPresent": isinstance(draft, dict),
+                    "scriptPresent": bool(run.get("script")),
                     "progressEntries": len((progress or {}).get("workflowProgress") or []) if isinstance(progress, dict) else None,
                     "progressIsNullForAwaitingApproval": progress is None,
                 }

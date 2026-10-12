@@ -580,7 +580,7 @@ class WorkflowRuntime:
                 scheduler.run,
                 args,
             )
-            from workflow_planner import validate_rendered_workflow_script
+            from workflow_script_validation import validate_rendered_workflow_script
 
             preflight = validate_rendered_workflow_script(script)
             if not preflight.get("ok"):

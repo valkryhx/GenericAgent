@@ -326,42 +326,27 @@ test('handleInput parses workflow list and control slash commands', () => {
   })
 })
 
-test('handleInput parses single /workflow start path (auto plan+run)', () => {
+test('handleInput treats /workflow on|off as session opt-in and /workflow <task> as chat', () => {
   const store = createPasteStore()
 
+  assert.deepEqual(handleInput('/workflow on', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'submit', text: '/workflow on' },
+  })
+  assert.deepEqual(handleInput('/workflow off', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'submit', text: '/workflow off' },
+  })
+  // The old JSON-planner start path is gone: a bare /workflow <task> is not a
+  // command any more, so it falls through to an ordinary chat submit. The host
+  // still injects the workflow reminder because the task text is opt-in shaped.
   assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
+    command: { type: 'submit', text: '/workflow 调研 workflow UI' },
   })
-  // legacy /workflow plan still maps to the same auto-start path
   assert.deepEqual(handleInput('/workflow plan 调研 workflow UI', '', { return: true }, 'idle', store), {
     value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
-  })
-  // --manual is ignored; workflows always auto-start
-  assert.deepEqual(handleInput('/workflow --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
-  })
-  assert.deepEqual(handleInput('/workflow --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
-  })
-  assert.deepEqual(handleInput('/workflow plan --manual --timeout 120 调研 workflow UI', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
-  })
-  assert.deepEqual(handleInput('/workflow plan --timeout 120 --manual 调研 workflow UI', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true, timeoutSeconds: 120 },
-  })
-  assert.deepEqual(handleInput('/workflow 调研 workflow UI', '', { return: true }, 'idle', store, new Set(['workflow'])), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '调研 workflow UI', autoApprove: true },
-  })
-  assert.deepEqual(handleInput('/workflow plan', '', { return: true }, 'idle', store), {
-    value: '',
-    command: { type: 'workflow_plan', taskText: '', autoApprove: true },
+    command: { type: 'submit', text: '/workflow plan 调研 workflow UI' },
   })
 })
 

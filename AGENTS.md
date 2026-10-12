@@ -490,3 +490,30 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 建议实施批次：① 可观测性(H17/H18/H19) → ② 入口(H5/H1/H2) → ③ 单 agent(H7) → ④ 引擎(H12/H13/H15) → ⑤ UI(H22/H23/H24/H26) → ⑥ 校验(H27/H28)。
 - 详细文档：`docs/20261012-ga-dynamic-workflow-可继续对齐CC能力清单-调研补充.md`。
 - 实施记录：待创建（按批次落地后补 `docs/20261012-ga-dynamic-workflow-实施记录-*.md`）。
+
+### 中途调研 2026-10-12：去掉 JSON Planner，改走 CC 直写 JS 主路径
+
+- 触发：用户实测 `/workflow` planner 路径两次产出坏 JSON（`planner_response_unparsable`，run `wf_44b2bc5ff8c9407782a64983d57a5712` → `failed` / `workflow_plan_rejected`）；用户决定**按 CC 改**：模型直写 JS，不再用 JSON 计划，也不兼容现有 GA planner。
+- 结论：GA 有两条入口，**只有 `workflow` 工具（C3）是 CC 主路径**（模型直写 JS）；`/workflow <task>` + semantic activation 走的 **JSON planner 是 GA 特有脆点**，应整体移除。
+- 结构性原因（换模型治不了根）：
+  1. CC 从不要求模型产大 JSON —— 模型直接写 JS，只解析开头一小段纯字面量 `meta`（`Fy()`），其余交给 acorn/VM；
+  2. GA LLM 层无结构化输出（全仓无 `response_format` / json mode）；
+  3. `parse_json_object()` 太简陋（只去 ``` 围栏 + 找第一个 `{`，不修尾逗号/注释/截断）；
+  4. 无截断检测（不看 `finish_reason`）；
+  5. repair 重试看不到原文（`previousPlan={}`，`raw_outputs` 只在内存）；
+  6. planner 另起一套 LLM 调用，和主 agent 脚本作者不是同一上下文。
+- 目标架构（对齐 CC）：`opt-in（/workflow <task> | 显式请求 | activation 命中）→ 注入 opt-in 提醒 → 主 agent 直写 JS → 调 workflow 工具 → 后台跑`。**opt-in 只负责"告知模型可用 workflow"，脚本作者永远是主 agent。**
+- 删除：`workflow_planner.py` 的 planner/plan/render 部分（`WorkflowPlanner`/`LLMWorkflowPlanner`/`NativeWorkflowPlannerClient`/`validate_workflow_plan`/`render_workflow_plan`/`_planner_prompt`/`parse_json_object` 等）、`workflow_controller.create_planned_run`、`ink_bridge.workflow_plan*`/`_make_workflow_planner`/`_submit_recommended_workflow`、UI 的 `workflow_plan` 命令、`workflow_planned`/`workflow_plan_rejected` 事件。
+- 保留（不要删）：`validate_rendered_workflow_script` + `_workflow_script_contract_preflight`（C3/嵌套在用，建议迁到独立模块）、`workflow_script_contract.js`、`workflow_determinism.py`、`workflow_launch_from_tool`、`create_draft`/`workflow_draft`、runtime/scheduler/store、`/workflows` UI、`workflow_activation.py`、`skills/workflow-authoring/SKILL.md`、权限/路径收口。
+- 实施顺序（不可颠倒）：批次0 迁出脚本契约 → 批次1 新入口（`submit_workflow_opt_in` + 提醒）→ 批次2 删 planner → 批次3 收尾（skill/文档/全量测试）。
+- 验收：`/workflow <task>` 不再产生 `workflow_planned`/`plan.md`；主 agent 收到提醒并能调 `workflow` 工具（`launchedBy == "workflow_tool"`）；弱模型（deepseek-flash）实测不再因 JSON 解析失败而 failed。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**；B1 `budget` 仍暂缓。
+- 详细方案：`docs/20261012-ga-dynamic-workflow-直写JS入口改造方案.md`。
+- **状态（2026-10-12）：已全部实施完成。** 批次 0~3 全部落地：脚本契约迁到
+  `workflow_script_validation.py`；`submit()` 注入 `[WORKFLOW OPT-IN]` 且不再 hijack；
+  `workflow_planner.py` / `create_planned_run` / `ink_bridge.workflow_plan*` / UI 的
+  `workflow_plan` 命令 / `workflow_planned`+`workflow_plan_rejected` 事件全部删除；
+  `/workflow on|off` 作为 session opt-in 保留，`/workflows` 列表/详情/控制保留。
+  验证：`python -m unittest discover -s tests` **1324 OK (skipped=3)**；
+  `npm --prefix frontends/ink-ui run typecheck` OK；`npm test` **405 pass / 0 fail**。
+- 实施记录：`docs/20261012-ga-dynamic-workflow-实施记录-直写JS入口.md`。

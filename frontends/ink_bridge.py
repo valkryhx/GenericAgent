@@ -224,7 +224,6 @@ class GenericAgentBridge:
         workflow_root: str | os.PathLike[str] | None = None,
         workspace_root: str | os.PathLike[str] | None = None,
         workflow_runtime_factory: Callable[..., Any] | None = None,
-        workflow_planner_factory: Callable[[], Any] | None = None,
         agent_control: Any | None = None,
     ) -> None:
         self.agent_factory = agent_factory
@@ -260,14 +259,16 @@ class GenericAgentBridge:
         self._workflow_threads: dict[str, threading.Thread] = {}
         self._workflow_handoff_lock = threading.Lock()
         self._workflow_handed_off: set[str] = set()
+        # Bridge-scoped session opt-in (``/workflow on|off``); per-turn opt-in is
+        # still stateless and resolved from the request text.
+        with backend_output_redirect():
+            from workflow_activation import WorkflowActivationState
+
+        self._workflow_activation = WorkflowActivationState()
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
         self._mcp_watch_lock = threading.Lock()
         self._mcp_watch_thread: threading.Thread | None = None
-        self._workflow_planning_lock = threading.Lock()
-        self._workflow_planning = False
-        self._workflow_planning_thread: threading.Thread | None = None
         self.workflow_runtime_factory = workflow_runtime_factory
-        self.workflow_planner_factory = workflow_planner_factory
         with backend_output_redirect():
             from workflow_controller import WorkflowController
             from workflow_store import WorkflowStore
@@ -305,22 +306,42 @@ class GenericAgentBridge:
         if not text.strip() and not images:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
-        with self._workflow_planning_lock:
-            workflow_planning = self._workflow_planning
-        if getattr(self.agent, "is_running", False) or self._is_consuming() or workflow_planning:
-            self.emit({"type": "error", "code": "busy", "message": "agent or workflow planner is running"})
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return -1
+        raw_text = text
         if not images:
-            from workflow_activation import resolve_workflow_activation
+            # CC-style opt-in: an explicit multi-agent request only *informs* the
+            # main agent that it may author a workflow script with the ``workflow``
+            # tool. GA no longer auto-plans; the main agent is the script author
+            # (Claude Code's direct-JS model). A merely workflow-friendly task is
+            # not opt-in, so a ``recommended`` verdict does nothing special.
+            from workflow_activation import workflow_opt_in_reminder
 
-            activation = resolve_workflow_activation(text)
-            if activation.action == "recommended":
-                return self._submit_recommended_workflow(text, activation)
+            activation = self._workflow_activation.handle(text)
+            if activation.action == "requested":
+                stripped = raw_text.strip()
+                # ``/workflow on`` (and the per-turn ``/workflow <task>`` prefix)
+                # are opt-in markers, not part of the request: inject the CC-style
+                # reminder and hand the model the task text without the prefix.
+                if stripped.lower() == "/workflow on":
+                    self.emit({"type": "status", "status": "idle"})
+                    self.emit({"type": "system", "text": "Dynamic workflow session mode enabled: the agent will author a JS workflow script for multi-step requests."})
+                    return 0
+                if stripped.lower().startswith("/workflow"):
+                    text = activation.task_text
+                if text.strip():
+                    text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
+            elif raw_text.strip().lower() == "/workflow off":
+                self.emit({"type": "status", "status": "idle"})
+                self.emit({"type": "system", "text": "Dynamic workflow session mode disabled."})
+                return 0
         if not self._auto_compact_if_needed(text):
             return -1
         self._task_seq += 1
         task_id = self._task_seq
-        visible_text = text if display_text is None else str(display_text)
+        # The reminder is model-facing only: the transcript keeps the raw request.
+        visible_text = str(display_text) if display_text is not None else raw_text
         self._rewind_snapshots[task_id] = self._snapshot_agent_state()
         self._rewind_snapshots[task_id]["text"] = visible_text
         self.emit({"type": "user", "taskId": task_id, "text": visible_text})
@@ -339,117 +360,6 @@ class GenericAgentBridge:
         )
         self._consume_thread.start()
         return task_id
-
-    def _submit_recommended_workflow(self, task_text: str, activation) -> int:
-        with self._workflow_planning_lock:
-            if self._workflow_planning:
-                self.emit({"type": "error", "code": "busy", "message": "workflow planner is running"})
-                return -1
-            self._workflow_planning = True
-        self._task_seq += 1
-        task_id = self._task_seq
-        self._rewind_snapshots[task_id] = self._snapshot_agent_state()
-        self._rewind_snapshots[task_id]["text"] = task_text
-        self.emit({"type": "user", "taskId": task_id, "text": task_text})
-        self.emit({"type": "status", "status": "running", "taskId": task_id})
-        self.emit({"type": "activity", "label": "Planning workflow"})
-        thread = threading.Thread(
-            target=self._run_recommended_workflow,
-            args=(task_text, activation),
-            daemon=True,
-            name=f"ga-ink-workflow-plan-{task_id}",
-        )
-        self._workflow_planning_thread = thread
-        thread.start()
-        return task_id
-
-    def _run_recommended_workflow(self, task_text: str, activation) -> None:
-        try:
-            self.workflow_plan(
-                task_text,
-                context={"activation": {
-                    "mode": activation.mode,
-                    "action": activation.action,
-                    "confidence": activation.confidence,
-                    "matchedSignals": list(activation.matched_signals),
-                    "reason": activation.reason,
-                    "requiresFanout": activation.requires_fanout,
-                    "requiresPhases": activation.requires_phases,
-                }},
-                auto_approve=True,
-                _activation_internal=True,
-            )
-        finally:
-            with self._workflow_planning_lock:
-                self._workflow_planning = False
-
-    def workflow_plan_async(
-        self,
-        task_text: str,
-        *,
-        context: dict | None = None,
-        auto_approve: bool = True,
-        args: Any = None,
-        timeout_seconds: float | None = None,
-    ) -> int:
-        """Plan a workflow off the JSONL command thread.
-
-        ``run_jsonl_loop`` is a single-threaded stdin loop. Running the planner
-        (a real LLM call) inline in it meant the UI saw nothing until planning
-        finished and no other command -- stop, progress, detail, mcp_status --
-        could be processed meanwhile. Return immediately and let a worker
-        thread plan, exactly like ``_submit_recommended_workflow``.
-        """
-        if getattr(self.agent, "is_running", False) or self._is_consuming():
-            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
-            return -1
-        text = str(task_text or "")
-        if not text.strip():
-            self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
-            return -1
-        with self._workflow_planning_lock:
-            if self._workflow_planning:
-                self.emit({"type": "error", "code": "busy", "message": "workflow planner is running"})
-                return -1
-            self._workflow_planning = True
-        self.emit({"type": "status", "status": "running"})
-        self.emit({"type": "activity", "label": "Planning workflow"})
-        thread = threading.Thread(
-            target=self._run_planned_workflow,
-            args=(text, context, auto_approve, args, timeout_seconds),
-            daemon=True,
-            name="ga-ink-workflow-plan",
-        )
-        self._workflow_planning_thread = thread
-        thread.start()
-        return 1
-
-    def _run_planned_workflow(
-        self,
-        task_text: str,
-        context: dict | None,
-        auto_approve: bool,
-        args: Any,
-        timeout_seconds: float | None,
-    ) -> None:
-        try:
-            # ``_activation_internal`` because this thread owns the
-            # ``_workflow_planning`` flag it just set.
-            self.workflow_plan(
-                task_text,
-                context=context if isinstance(context, dict) else {},
-                auto_approve=bool(auto_approve),
-                args=args,
-                timeout_seconds=timeout_seconds,
-                _activation_internal=True,
-            )
-        except Exception as exc:  # pragma: no cover - defensive, workflow_plan reports its own errors
-            self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
-            self.emit({"type": "activity", "label": None})
-            self.emit({"type": "status", "status": "idle"})
-        finally:
-            with self._workflow_planning_lock:
-                self._workflow_planning = False
 
     def stop(self) -> None:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
@@ -807,76 +717,6 @@ class GenericAgentBridge:
             self.emit({"type": "activity", "label": None})
             self.emit({"type": "status", "status": "idle"})
 
-    def workflow_plan(
-        self,
-        task_text: str,
-        *,
-        context: dict | None = None,
-        auto_approve: bool = True,
-        args: Any = None,
-        timeout_seconds: float | None = None,
-        _activation_internal: bool = False,
-    ) -> str:
-        if getattr(self.agent, "is_running", False) or self._is_consuming() or (self._workflow_planning and not _activation_internal):
-            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
-            return ""
-        task_text = str(task_text or "")
-        if not task_text.strip():
-            self.emit({"type": "error", "code": "workflow_empty_task", "message": "workflow taskText is required"})
-            return ""
-        effective_timeout = self._effective_workflow_timeout(timeout_seconds)
-        try:
-            session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
-            with backend_output_redirect():
-                planner = self._make_workflow_planner()
-                # Every workflow_plan command is an explicit user opt-in: the ink
-                # UI only sends it for "/workflow <task>" and strips the prefix, so
-                # the planner cannot see the opt-in in the task text. Without this
-                # an execution task whose wording missed the planner keyword lists
-                # fell through to the planner-only template and the run did none of
-                # the work (real case: wf_622266234f1345359d4e5f999758b922).
-                plan_context = dict(context) if isinstance(context, dict) else {}
-                plan_context.setdefault("activation", {
-                    "action": "requested",
-                    "mode": "explicit",
-                    "confidence": 1.0,
-                    "reason": "explicit /workflow command",
-                })
-                run = self.workflow_controller.create_planned_run(
-                    session_id=session_id,
-                    task_text=task_text,
-                    planner=planner,
-                    context=plan_context,
-                    auto_approve=bool(auto_approve),
-                    workspace_path=str(self.workspace_root),
-                )
-            self._emit_agent_read_model()
-            self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
-            self._emit_workflow_events(run.run_id)
-        except Exception as exc:
-            self.emit({"type": "error", "code": "workflow_plan_failed", "message": str(exc)})
-            self.emit({"type": "activity", "label": None})
-            self.emit({"type": "status", "status": "idle"})
-            return ""
-        if run.status != "running":
-            self.emit({"type": "activity", "label": None})
-            if run.status in {"succeeded", "degraded", "failed", "cancelled", "killed", "interrupted"}:
-                self.emit({"type": "workflow_final", "runId": run.run_id, "result": self._workflow_final_payload(run)})
-                if not self._queue_workflow_handoff(run):
-                    self.emit({"type": "status", "status": "idle"})
-            else:
-                self.emit({"type": "status", "status": "idle"})
-            return run.run_id
-        thread = threading.Thread(
-            target=self._run_workflow_runtime,
-            args=(run.run_id, args, effective_timeout, None),
-            daemon=True,
-            name=f"ga-ink-workflow-{run.run_id}",
-        )
-        self._workflow_threads[run.run_id] = thread
-        thread.start()
-        return run.run_id
-
     def workflow_draft(self, script: str) -> str:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
@@ -1059,7 +899,7 @@ class GenericAgentBridge:
                 raise ValueError("workflow requires script, scriptPath, name, or resumeFromRunId")
             if not workflow_script.strip():
                 raise ValueError("workflow script is empty")
-            from workflow_planner import validate_rendered_workflow_script
+            from workflow_script_validation import validate_rendered_workflow_script
 
             preflight = validate_rendered_workflow_script(workflow_script)
             if not preflight.get("ok"):
@@ -1077,6 +917,10 @@ class GenericAgentBridge:
                     "workflowTaskType": "dynamic_workflow",
                     "launchedBy": "workflow_tool",
                     "scriptSource": source_kind,
+                    # ``_workflow_handoff_payload`` quotes the originating request
+                    # back to the main agent; the model-authored script has no
+                    # separate taskText draft to read it from.
+                    "originalTask": str(meta.get("description") or summary or ""),
                 })
                 if requested_name:
                     run.metadata["namedWorkflow"] = source_name
@@ -1478,23 +1322,6 @@ class GenericAgentBridge:
             jobs.append(entry)
         return jobs
 
-    def _make_workflow_planner(self):
-        if self.workflow_planner_factory is not None:
-            return self.workflow_planner_factory()
-        with backend_output_redirect():
-            from workflow_planner import build_workflow_planner_from_env
-            from workflow_llm import binding_from_agent
-
-            # Prefer main-session /model profile when agent is available.
-            agent = self.agent
-            try:
-                binding = binding_from_agent(agent) if agent is not None else None
-            except Exception:
-                binding = None
-            if binding is not None:
-                return build_workflow_planner_from_env(profile_name=binding.profile_name)
-            return build_workflow_planner_from_env()
-
     def _effective_workflow_timeout(self, timeout_seconds: float | None) -> float:
         """Resolve product timeout: explicit value wins, else 900s (15 min)."""
         if timeout_seconds is None:
@@ -1709,10 +1536,10 @@ class GenericAgentBridge:
     def _assign_run_workspace(self, run) -> bool:
         """Give an unassigned run its own workspace directory. Returns success.
 
-        Draft and resumed runs bypass ``create_planned_run``, which is where the
-        planned path assigns the per-run workspace. Assigning it here keeps one
-        rule for every entry point: a run's deliverables never share a directory
-        with another run's.
+        Every direct-JS entry point (inline script, scriptPath, named workflow,
+        resume, and nested ``workflow()``) routes through here. Assigning the
+        per-run workspace in one place keeps one rule for every entry point: a
+        run's deliverables never share a directory with another run's.
         """
         from workflow_workspace import create_run_workspace, workspace_metadata
 
@@ -1875,8 +1702,10 @@ class GenericAgentBridge:
 
     def _workflow_handoff_payload(self, run) -> str:
         metadata = run.metadata if isinstance(run.metadata, dict) else {}
-        draft = self._workflow_artifact_payload(run, metadata.get('workflowDraftRef'))
-        task_text = str((draft or {}).get('taskText') or '')
+        # The JSON-planner draft no longer exists: the model-authored script is
+        # the plan. The originating request is carried on run metadata by the
+        # ``workflow`` tool entry, with the workflow name as a last resort.
+        task_text = str(metadata.get('originalTask') or metadata.get('workflowName') or '')
         if len(task_text.encode('utf-8')) > 8192:
             task_text = task_text.encode('utf-8')[:8000].decode('utf-8', errors='ignore') + ' …[task truncated]'
 
@@ -2461,23 +2290,6 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.skill_invoke(str(command.get("skill") or ""), str(command.get("args") or ""))
         elif cmd_type == "compact":
             bridge.compact(str(command.get("instructions") or ""))
-        elif cmd_type == "workflow_plan":
-            raw_timeout = command.get("timeoutSeconds") or command.get("timeout_seconds")
-            timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
-            auto_approve = command.get("autoApprove")
-            if auto_approve is None:
-                auto_approve = command.get("auto_approve")
-            if auto_approve is None:
-                auto_approve = True
-            # Off the stdin loop: planning is a real LLM call and used to
-            # block every later command (and the first workflow UI update).
-            bridge.workflow_plan_async(
-                str(command.get("taskText") or command.get("task_text") or ""),
-                context=command.get("context") if isinstance(command.get("context"), dict) else {},
-                auto_approve=bool(auto_approve),
-                args=command.get("args"),
-                timeout_seconds=timeout_seconds,
-            )
         elif cmd_type == "workflow_draft":
             bridge.workflow_draft(str(command.get("script") or ""))
         elif cmd_type == "workflow_approve":

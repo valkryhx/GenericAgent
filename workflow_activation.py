@@ -17,8 +17,9 @@ class WorkflowActivationDecision:
     plan_only: bool = False
 
 
+_WORKFLOW_MENTION = re.compile(r"(?:\b(?:use|using|via|through)\s+(?:a\s+|the\s+)?workflows?\b|\bwith\s+(?:a\s+|the\s+)?workflows?\b|用\s*workflow|使用\s*workflow|走\s*workflow|按\s*workflow)", re.I)
 _PLAN_ONLY = re.compile(r"(?:\u53ea\u89c4\u5212|\u4ec5\u89c4\u5212|\u4e0d\u8981\u6267\u884c|\u4e0d\u5b9e\u65bd|\bplan\s+only\b|\bdo\s+not\s+execute\b)", re.I)
-_EXPLICIT_FANOUT = re.compile(r"(?:\bmulti[- ]?agent\b|\bagent\s+team\b|\bsubagents?\b|\bparallel\s+agents?\b|\u591a\u667a\u80fd\u4f53|\u591a\u4e2a\u5b50\u4ee3\u7406|\u5b50\u4ee3\u7406\u5e76\u884c)", re.I)
+_EXPLICIT_FANOUT = re.compile(r"(?:multi[- ]?agent|agent\s+team|subagents?|parallel\s+agents?|多智能体|多个子代理|子代理并行|并行调研|并行调查|并行分析)", re.I)
 _SEARCH = re.compile(r"(?:\bsearch\b|\bresearch\b|\blook\s+up\b|\u641c\u7d22|\u8c03\u7814|\u67e5\u627e|\u67e5\u8d44\u6599|\u6536\u96c6\u6765\u6e90)", re.I)
 _ARTIFACT = re.compile(r"(?:\bwrite\b|\bcreate\b|\bgenerate\b|\bsave\b|\bproduce\b|\u751f\u6210|\u5199\u5165|\u5199\u4e00\u4e2a|\u521b\u5efa|\u4fdd\u5b58|\u8f93\u51fa)", re.I)
 _VERIFY = re.compile(r"(?:\bverify\b|\bvalidate\b|\btest\b|\bcheck\b|\u9a8c\u8bc1|\u6821\u9a8c|\u68c0\u67e5|\u6d4b\u8bd5)", re.I)
@@ -47,6 +48,9 @@ def resolve_workflow_activation(task_text: str, *, session_enabled: bool = False
         return _decision("explicit", "requested", task, confidence=1.0, signals=("slash_workflow",), reason="explicit /workflow command", fanout=fanout, phases=True)
     if plan_only:
         return _decision("none", "none", text, reason="planning-only language suppresses execution activation", plan_only=True)
+    if _WORKFLOW_MENTION.search(text):
+        fanout = bool(_EXPLICIT_FANOUT.search(text))
+        return _decision("explicit", "requested", text, confidence=1.0, signals=("workflow_mention",), reason="explicit natural-language workflow request", fanout=fanout, phases=True)
     if _EXPLICIT_FANOUT.search(text):
         return _decision("explicit", "requested", text, confidence=1.0, signals=("explicit_fanout",), reason="explicit multi-agent request", fanout=True, phases=True)
     signals = []
@@ -87,3 +91,29 @@ class WorkflowActivationState:
             self.enabled = False
             return _decision("none", "none", "", confidence=1.0, reason="workflow session mode disabled")
         return resolve_workflow_activation(text, session_enabled=self.enabled)
+
+
+def workflow_opt_in_reminder(decision: WorkflowActivationDecision) -> str:
+    """Build the CC-style opt-in reminder injected ahead of an explicit request.
+
+    Mirrors Claude Code's ``ultracode`` system-reminder: it only tells the model
+    that the user opted into dynamic workflow orchestration, so the model may
+    author a workflow script and call the ``workflow`` tool. It never plans the
+    script itself -- the main agent is the script author (direct-JS model).
+    """
+
+    reason = str(getattr(decision, "reason", "") or "explicit workflow request")
+    signals = ", ".join(str(s) for s in (getattr(decision, "matched_signals", ()) or ()))
+    detail = reason if not signals else f"{reason}（signals: {signals}）"
+    return (
+        "[WORKFLOW OPT-IN]\n"
+        f"用户已明确选择 dynamic workflow 编排（{detail}）。\n"
+        "请：\n"
+        "1. 先调用 load_skill('workflow-authoring') 读取脚本契约；\n"
+        "2. 直接写一个以纯字面量 export const meta = { name, description, phases? } 开头的\n"
+        "   JavaScript 编排脚本；\n"
+        "3. 用 workflow 工具（script 字段，内联传入）启动它；\n"
+        "4. 不要产出 JSON 计划，不要先把脚本写进文件；\n"
+        "5. 只有当本提醒存在时才这样做（opt-in 由用户给出，不是你自己推断的）。\n"
+        "[/WORKFLOW OPT-IN]"
+    )

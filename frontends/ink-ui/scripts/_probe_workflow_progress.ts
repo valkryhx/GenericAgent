@@ -55,7 +55,7 @@ rl.on('line', line => {
       // Kick off the workflow, then immediately fire a second command. If the
       // loop is blocked by planning, the second reply cannot arrive early.
       mark('plan_sent')
-      send({ type: 'workflow_plan', taskText: TASK, autoApprove: true })
+      send({ type: 'submit', text: TASK })
       probeSent = true
       send({ type: 'mcp_status' })
     }

@@ -20,7 +20,7 @@ rl.on('line', line => {
   let ev: any; try { ev = JSON.parse(line) } catch { return }
   if (ev.type === 'ready') {
     child.stdin.write(JSON.stringify({type:'mcp_watch_start'})+NL)
-    child.stdin.write(JSON.stringify({type:'workflow_plan', taskText: TASK, autoApprove: true})+NL)
+    child.stdin.write(JSON.stringify({type:'submit', text: TASK})+NL)
     return
   }
   if (ev.type === 'workflow_run') {

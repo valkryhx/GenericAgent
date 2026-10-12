@@ -8,6 +8,21 @@
 
 ---
 
+## 变更记录
+
+- **2026-10-12（后补，最高优先级）**：JSON Planner 路径**已整体移除**，GA 改为与 CC 一致的
+  **直写 JS** 单一入口。本文件中所有提到 `workflow_planner.py`、`WorkflowPlan(JSON)`、
+  `validate_workflow_plan()`、`render_workflow_plan()`、`create_planned_run()`、`/workflow <task>`
+  的内容均为**历史方案描述，不再代表当前实现**。
+  - 现状：opt-in（自然语言 opt-in / `/workflow on` / 运行已保存 workflow）→ 注入
+    `[WORKFLOW OPT-IN]` 提醒 → 主 agent 直写 JS → `workflow` 工具启动后台 run。
+  - 脚本契约检查迁到 `workflow_script_validation.py`（`validate_rendered_workflow_script`）。
+  - 删除：`workflow_planner.py`、`workflow_controller.create_planned_run`、
+    `ink_bridge.workflow_plan*`/`_submit_recommended_workflow`/`_make_workflow_planner`、
+    UI 的 `workflow_plan` 命令、`workflow_planned`/`workflow_plan_rejected` 事件。
+  - 详细方案：`docs/20261012-ga-dynamic-workflow-直写JS入口改造方案.md`；
+    实施记录：`docs/20261012-ga-dynamic-workflow-实施记录-直写JS入口.md`。
+
 ## 0. 结论先行
 
 GA 的 dynamic workflow 主干已经建成，且大部分能力与 Claude Code（下称 CC）对齐。
@@ -31,7 +46,7 @@ GA 的 dynamic workflow 主干已经建成，且大部分能力与 Claude Code�
 ### 1.1 两条生成路径（关键差异）
 
 - **CC**：模型**直接写 JS 编排脚本** → `Fy()` 解析（meta 第一条 + 纯字面量）→ `LKt()` 确定性检查 → `vm.Script` 执行。
-- **GA**：模型写 **WorkflowPlan(JSON)** → `validate_workflow_plan()` → `render_workflow_plan()` 渲染成 JS → `workflow_js_worker.js` 执行。
+- ~~**GA（旧）**：模型写 WorkflowPlan(JSON) → validate_workflow_plan() → render_workflow_plan() 渲染成 JS → workflow_js_worker.js 执行。~~ **已于 2026-10-12 移除**：GA 现与 CC 一致，模型直接写 JS。
 
 GA 的 plan 路径更受限、更安全（无循环/条件/动态 fan-out），但**语义要对齐 CC**。
 GA 同时保留了 `WorkflowController.create_draft(session_id, script)` 的 **raw script** 路径——这条路径必须补齐 CC 的契约与确定性检查。

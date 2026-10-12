@@ -116,7 +116,7 @@ class RealWorkflowWaitBarrierE2E(unittest.TestCase):
                 timeout_seconds=900,
             ).run(run, args={
                 'workspacePath': str(workspace),
-                'sourcePath': str(REPO / 'workflow_planner.py'),
+                'sourcePath': str(REPO / 'workflow_script_validation.py'),
                 'mcpInstruction': instruction,
             })
             loaded = store.load_run(run.run_id)

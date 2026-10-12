@@ -28,7 +28,6 @@ from ink_bridge import (  # noqa: E402
 )
 from workflow_child_agent import AgentResult, FakeChildAgentRunner  # noqa: E402
 from workflow_models import WorkflowJob, WorkflowRun  # noqa: E402
-from workflow_planner import WorkflowDraft  # noqa: E402
 from workflow_runtime import WorkflowRuntime  # noqa: E402
 from workflow_scheduler import SchedulerConfig  # noqa: E402
 from workflow_store import build_artifact_ownership_index  # noqa: E402
@@ -148,118 +147,6 @@ class StopThenResumeRunner:
         self.cancelled_job_ids.append(job.job_id)
         if job.job_id == "agent_2":
             self.second_cancelled_once = True
-
-
-class PlannedRunFakeRuntime:
-    started_run_ids = []
-    last_timeout_seconds = None
-
-    def __init__(self, *, store, timeout_seconds=10.0):
-        self.store = store
-        self.timeout_seconds = timeout_seconds
-        self.__class__.last_timeout_seconds = timeout_seconds
-
-    def run(self, run, *, args=None, resume_from_run_id=None):
-        from workflow_models import WorkflowEvent
-
-        self.__class__.started_run_ids.append(run.run_id)
-        self.store.append_event(
-            run,
-            WorkflowEvent(
-                run_id=run.run_id,
-                session_id=run.session_id,
-                event_type="workflow_log",
-                sequence=max((event.sequence for event in self.store.replay_events(run.run_id)), default=0) + 1,
-                payload={"message": "planned runtime saw args", "args": args},
-            ),
-        )
-        payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True, "args": args}}
-        run.jobs.append(
-            WorkflowJob(
-                job_id="agent_1",
-                prompt="planned runtime fake agent",
-                status="succeeded",
-                phase="Plan",
-                metadata={"label": "planner"},
-            )
-        )
-        run.status = "succeeded"
-        self.store.write_final_result(run, payload)
-        self.store.save_run(run)
-        self.store.write_workflow_progress(run)
-        return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
-
-
-class SlowProgressFakeRuntime(PlannedRunFakeRuntime):
-    """Writes progress snapshots over time, then settles like the real runtime."""
-
-    def __init__(self, *, store, timeout_seconds=10.0, steps=8, delay=0.3):
-        super().__init__(store=store, timeout_seconds=timeout_seconds)
-        self.steps = steps
-        self.delay = delay
-
-    def run(self, run, *, args=None, resume_from_run_id=None):
-        from workflow_models import WorkflowEvent
-
-        self.__class__.started_run_ids.append(run.run_id)
-        for index in range(1, self.steps + 1):
-            time.sleep(self.delay)
-            job = WorkflowJob(
-                job_id=f"agent_{index}",
-                prompt=f"step {index}",
-                status="succeeded",
-                phase="Work",
-                metadata={"label": f"worker-{index}"},
-            )
-            run.jobs.append(job)
-            self.store.save_run(run)
-            self.store.write_workflow_progress(run)
-        payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True}}
-        run.status = "succeeded"
-        self.store.write_final_result(run, payload)
-        self.store.save_run(run)
-        self.store.write_workflow_progress(run)
-        return type("RuntimeResult", (), {"run": run, "result": payload["result"]})()
-
-
-def make_workflow_plan_draft(task_text="计划任务", *, ok=True, planner_mode="prompt_guided", task_type="planning"):
-    plan = {
-        "taskType": task_type,
-        "meta": {"name": "planned-bridge-demo", "description": "Bridge planned workflow demo"},
-        "phases": [
-            {
-                "title": "Plan",
-                "agents": [
-                    {
-                        "label": "planner",
-                        "prompt": "不要读取 mykey.py、mykey.json、mcp.json；不要提交。制定计划。",
-                        "dependsOn": [],
-                    }
-                ],
-            }
-        ],
-        "schemas": {},
-        "artifacts": ["plan"],
-        "constraints": ["no_secret_files", "no_git_commit"],
-    }
-    return WorkflowDraft(
-        task_text=task_text,
-        context={"plannerMode": planner_mode},
-        classification={"taskType": task_type},
-        plan=plan,
-        validation={"ok": ok, "issues": [] if ok else [{"code": "missing_phase"}], "mode": "rejected" if not ok else planner_mode},
-        script="export const meta = { name: 'planned-bridge-demo', description: 'Bridge planned workflow demo' }\nphase('Plan')\nreturn await agent('不要读取 mykey.py、mykey.json、mcp.json；不要提交。制定计划。', { label: 'planner', phase: 'Plan' })" if ok else "",
-    )
-
-
-class FakeWorkflowPlanner:
-    def __init__(self, draft):
-        self.draft = draft
-        self.calls = []
-
-    def plan(self, task_text, context=None):
-        self.calls.append((task_text, copy.deepcopy(context or {})))
-        return self.draft
 
 
 class FakeAgent:
@@ -460,29 +347,44 @@ class InkBridgeTest(unittest.TestCase):
             events,
         )
 
-    def test_submit_routes_high_confidence_multi_step_request_to_workflow(self):
+    def test_submit_leaves_semantic_multi_step_request_to_the_main_agent(self):
+        """A merely workflow-friendly task must not hijack the main agent.
+
+        Claude Code's direct-JS model never auto-plans: only an explicit opt-in
+        injects the workflow reminder. A ``recommended`` semantic verdict is not
+        opt-in, so the request reaches the main agent verbatim.
+        """
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
         task = "先搜索多个来源，再生成 HTML 文件并验证"
-        started = threading.Event()
-        calls = []
 
-        def start_workflow(task_text, **kwargs):
-            calls.append((task_text, kwargs))
-            started.set()
-            return "wf_auto"
-
-        bridge.workflow_plan = start_workflow
         task_id = bridge.submit(task)
-        self.assertTrue(started.wait(1))
-        bridge._workflow_planning_thread.join(timeout=1)
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
 
         self.assertEqual(1, task_id)
-        self.assertEqual([], agent.prompts)
-        self.assertEqual(task, calls[0][0])
-        self.assertEqual("recommended", calls[0][1]["context"]["activation"]["action"])
+        self.assertEqual([(task, "user", [])], agent.prompts)
+        self.assertNotIn("WORKFLOW OPT-IN", agent.prompts[0][0])
         self.assertTrue(any(event.get("type") == "user" and event.get("text") == task for event in events))
+
+    def test_submit_injects_opt_in_reminder_for_explicit_workflow_request(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        task_id = bridge.submit("用 workflow 帮我并行调研 A、B、C，然后综合验证")
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertEqual(1, task_id)
+        submitted = agent.prompts[0][0]
+        self.assertIn("WORKFLOW OPT-IN", submitted)
+        self.assertIn("workflow-authoring", submitted)
+        self.assertIn("用 workflow 帮我并行调研 A、B、C，然后综合验证", submitted)
+        # The model-facing reminder must not leak into the user transcript.
+        user_event = next(event for event in events if event.get("type") == "user")
+        self.assertEqual("用 workflow 帮我并行调研 A、B、C，然后综合验证", user_event["text"])
 
     def test_submit_forwards_images_to_put_task(self):
         agent = FakeAgent()
@@ -557,7 +459,7 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual(-1, result)
         self.assertEqual([("first", "user", [])], agent.prompts)
-        self.assertEqual({"type": "error", "code": "busy", "message": "agent or workflow planner is running"}, events[-1])
+        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
 
     def test_submit_can_drive_resume_agent_tool_through_frontend_bridge(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1561,126 +1463,6 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual("status", events[1]["type"])
 
 
-    def test_workflow_plan_creates_auto_approved_run_and_starts_runtime(self):
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        PlannedRunFakeRuntime.started_run_ids = []
-        draft = make_workflow_plan_draft(task_text="规划 bridge workflow", task_type="planning")
-        planner = FakeWorkflowPlanner(draft)
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            run_id = bridge.workflow_plan(
-                "规划 bridge workflow",
-                context={"source": "test"},
-                auto_approve=True,
-                args={"value": 42},
-                timeout_seconds=2,
-            )
-            bridge.wait_for_workflow_idle(run_id, timeout=2)
-
-            self.assertTrue(run_id.startswith("wf_"))
-            planned_task, planned_context = planner.calls[0]
-            self.assertEqual("规划 bridge workflow", planned_task)
-            self.assertEqual("test", planned_context["source"])
-            # The ink UI strips the "/workflow " prefix before planning, so the
-            # explicit opt-in has to travel in the context. Without it the
-            # planner fell back to the planner-only template and the run did none
-            # of the work (real case: wf_622266234f1345359d4e5f999758b922).
-            self.assertEqual("requested", planned_context["activation"]["action"])
-            self.assertEqual("explicit", planned_context["activation"]["mode"])
-            self.assertEqual([run_id], PlannedRunFakeRuntime.started_run_ids)
-            run_events = [event for event in events if event["type"] == "workflow_run"]
-            self.assertGreaterEqual(len(run_events), 2)
-            self.assertEqual("running", run_events[0]["run"]["status"])
-            self.assertEqual("workflow-draft.json", run_events[0]["run"]["metadata"]["workflowDraftRef"])
-            self.assertEqual("prompt_guided", run_events[0]["run"]["metadata"]["plannerMode"])
-            self.assertEqual("planning", run_events[0]["run"]["metadata"]["workflowTaskType"])
-            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
-            self.assertIn("workflow_planned", workflow_events)
-            self.assertIn("workflow_started", workflow_events)
-            self.assertIn("workflow_log", workflow_events)
-            final_event = next(event for event in events if event["type"] == "workflow_final")
-            self.assertEqual("succeeded", final_event["result"]["status"])
-            self.assertEqual({"ok": True, "args": {"value": 42}}, final_event["result"]["result"])
-            progress_events = [event for event in events if event["type"] == "workflow_progress"]
-            self.assertTrue(progress_events)
-            self.assertEqual(run_id, progress_events[-1]["progress"]["runId"])
-            self.assertEqual("succeeded", progress_events[-1]["progress"]["status"])
-            event_types = [event["type"] for event in events]
-            # Progress now starts as soon as the run is planned, so the run event
-            # no longer precedes the first progress snapshot.
-            self.assertLess(event_types.index("workflow_progress"), event_types.index("workflow_final"))
-            self.assertEqual(2.0, PlannedRunFakeRuntime.last_timeout_seconds)
-
-    def test_workflow_plan_default_timeout_is_900_seconds_when_omitted(self):
-        from frontends.ink_bridge import DEFAULT_WORKFLOW_TIMEOUT_SECONDS
-
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        PlannedRunFakeRuntime.started_run_ids = []
-        PlannedRunFakeRuntime.last_timeout_seconds = None
-        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="默认超时"))
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            run_id = bridge.workflow_plan("默认超时")
-            bridge.wait_for_workflow_idle(run_id, timeout=2)
-
-            self.assertTrue(run_id.startswith("wf_"))
-            self.assertEqual([run_id], PlannedRunFakeRuntime.started_run_ids)
-            self.assertEqual(float(DEFAULT_WORKFLOW_TIMEOUT_SECONDS), PlannedRunFakeRuntime.last_timeout_seconds)
-            self.assertEqual(900.0, PlannedRunFakeRuntime.last_timeout_seconds)
-
-    def test_workflow_plan_streams_progress_while_the_runtime_is_still_running(self):
-        """The Ink panel must not sit at "0/0 agents done" until the run ends.
-
-        Regression: ``_run_workflow_runtime`` only emitted an activity label and
-        a single progress snapshot after the runtime returned, so the workflow
-        status bar showed no agents and no movement for the whole run.
-        """
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        SlowProgressFakeRuntime.started_run_ids = []
-        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="流式进度"))
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_runtime_factory=lambda **kwargs: SlowProgressFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            run_id = bridge.workflow_plan("流式进度", timeout_seconds=10)
-            bridge.wait_for_workflow_idle(run_id, timeout=10)
-
-        progress_events = [
-            event["progress"] for event in events
-            if event["type"] == "workflow_progress" and event["progress"]["status"] == "running"
-        ]
-        # At least one running-state snapshot must arrive before the final
-        # succeeded snapshot, and agent counts must grow while the run is live.
-        self.assertGreaterEqual(len(progress_events), 2)
-        counts = [len(progress.get("workflowProgress") or []) for progress in progress_events]
-        self.assertGreater(max(counts), min(counts))
-        self.assertGreaterEqual(max(counts), 2)
-
     def test_workflow_handoff_carries_workspace_relative_artifact_paths(self):
         """The handoff must hand the GA agent real paths, not plan labels.
 
@@ -2190,34 +1972,6 @@ class InkBridgeTest(unittest.TestCase):
         self.assertIn("resultRef", instruction)
         self.assertIn("transcriptRef", instruction)
 
-    def test_concurrent_runs_do_not_share_a_workspace_directory(self):
-        agent = FakeAgent()
-        agent.session_id = "session_parallel"
-        events = []
-        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="并行"))
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp) / "temp"
-            base.mkdir()
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=str(Path(tmp) / "runs"),
-                workspace_root=str(base),
-                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            first_id = bridge.workflow_plan("并行一", timeout_seconds=5)
-            second_id = bridge.workflow_plan("并行二", timeout_seconds=5)
-            bridge.wait_for_workflow_idle(first_id, timeout=5)
-            bridge.wait_for_workflow_idle(second_id, timeout=5)
-
-            first = bridge.workflow_store.load_run(first_id)
-            second = bridge.workflow_store.load_run(second_id)
-
-        self.assertNotEqual(first.metadata["workspacePath"], second.metadata["workspacePath"])
-        self.assertEqual(str(base.resolve()), first.metadata["workspaceBasePath"])
-
     def test_workflow_handoff_artifact_refs_survive_size_compaction(self):
         agent = FakeAgent()
         agent.session_id = "session_handoff_big"
@@ -2262,114 +2016,13 @@ class InkBridgeTest(unittest.TestCase):
         self.assertIn("synthesis_report.md", payload)
         self.assertLessEqual(len(payload.encode("utf-8")), 64 * 1024)
 
-    def test_workflow_plan_can_create_awaiting_approval_run_when_auto_approve_false(self):
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        PlannedRunFakeRuntime.started_run_ids = []
-        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="规划但等待审批"))
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            run_id = bridge.workflow_plan("规划但等待审批", auto_approve=False)
-
-            self.assertTrue(run_id.startswith("wf_"))
-            self.assertEqual([], PlannedRunFakeRuntime.started_run_ids)
-            run_event = next(event for event in events if event["type"] == "workflow_run")
-            self.assertEqual("awaiting_approval", run_event["run"]["status"])
-            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
-            self.assertEqual(["workflow_planned", "workflow_approval_requested"], workflow_events)
-
-    def test_workflow_plan_emits_rejected_plan_without_runtime(self):
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        PlannedRunFakeRuntime.started_run_ids = []
-        planner = FakeWorkflowPlanner(make_workflow_plan_draft(task_text="坏计划", ok=False, planner_mode="prompt_guided_rejected"))
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_runtime_factory=lambda **kwargs: PlannedRunFakeRuntime(**kwargs),
-                workflow_planner_factory=lambda: planner,
-            )
-
-            run_id = bridge.workflow_plan("坏计划")
-
-            self.assertTrue(run_id.startswith("wf_"))
-            self.assertEqual([], PlannedRunFakeRuntime.started_run_ids)
-            run_event = next(event for event in events if event["type"] == "workflow_run")
-            self.assertEqual("failed", run_event["run"]["status"])
-            self.assertEqual("workflow_plan_rejected", run_event["run"]["error"])
-            workflow_events = [event["event"]["type"] for event in events if event["type"] == "workflow_event"]
-            self.assertEqual(["workflow_planned", "workflow_plan_rejected"], workflow_events)
-            final_event = next((event for event in events if event["type"] == "workflow_final"), None)
-            self.assertIsNotNone(final_event, "rejected plans must emit a terminal workflow_final event")
-            self.assertEqual("failed", final_event["result"]["status"])
-            self.assertEqual("workflow_plan_rejected", final_event["result"]["error"])
-
-    def test_workflow_detail_includes_workflow_progress_and_draft_when_available(self):
-        agent = FakeAgent()
-        agent.session_id = "session_workflow"
-        events = []
-        draft = make_workflow_plan_draft(task_text="规划 detail 数据契约")
-        planner = FakeWorkflowPlanner(draft)
-        with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_planner_factory=lambda: planner,
-            )
-            run_id = bridge.workflow_plan("规划 detail 数据契约", auto_approve=False)
-            run = bridge.workflow_store.load_run(run_id)
-            run.jobs.append(
-                WorkflowJob(
-                    job_id="agent_1",
-                    prompt="不要读取 mykey.py、mykey.json、mcp.json；不要提交。制定计划。",
-                    status="succeeded",
-                    phase="Plan",
-                    metadata={"label": "planner"},
-                )
-            )
-            bridge.workflow_store.save_run(run)
-            bridge.workflow_store.write_workflow_progress(run)
-            events.clear()
-
-            bridge.workflow_detail(run_id)
-
-            detail = next(event for event in events if event["type"] == "workflow_detail")
-            self.assertEqual("workflow-draft.json", detail["run"]["metadata"]["workflowDraftRef"])
-            self.assertEqual("规划 detail 数据契约", detail["draft"]["taskText"])
-            self.assertEqual("planned-bridge-demo", detail["draft"]["plan"]["meta"]["name"])
-            self.assertTrue(detail["draft"]["validation"]["ok"])
-            self.assertEqual(run_id, detail["progress"]["runId"])
-            self.assertEqual("session_workflow", detail["progress"]["sessionId"])
-            self.assertEqual("planner", detail["progress"]["workflowProgress"][0]["label"])
-            self.assertEqual("Plan", detail["progress"]["workflowProgress"][0]["phaseTitle"])
-            self.assertNotIn("transcriptEvents", json.dumps(detail, ensure_ascii=False))
-
     def test_workflow_progress_emits_current_progress_without_detail_payload(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
         events = []
-        draft = make_workflow_plan_draft(task_text="规划 live progress")
-        planner = FakeWorkflowPlanner(draft)
         with tempfile.TemporaryDirectory() as tmp:
-            bridge = GenericAgentBridge(
-                agent_factory=lambda: agent,
-                emit=events.append,
-                workflow_root=tmp,
-                workflow_planner_factory=lambda: planner,
-            )
-            run_id = bridge.workflow_plan("规划 live progress", auto_approve=False)
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run_id = bridge.workflow_draft('export const meta = { name: "live-progress" }' + chr(10) + 'return { ok: true }')
             run = bridge.workflow_store.load_run(run_id)
             run.status = "running"
             run.jobs.append(
@@ -4127,94 +3780,6 @@ return { marker: child.summary }
         bridge.workflow_deny.assert_called_once_with("wf_1", reason="no")
         bridge.workflow_stop.assert_called_once_with("wf_1", reason="user")
 
-    def test_jsonl_loop_dispatches_workflow_plan_command(self):
-        stdin = io.StringIO(
-            json.dumps({
-                "type": "workflow_plan",
-                "taskText": "规划 JSONL workflow",
-                "context": {"source": "jsonl"},
-                "autoApprove": False,
-                "args": {"x": 1},
-                "timeoutSeconds": 4,
-            }) + "\n"
-            + json.dumps({"type": "shutdown"}) + "\n"
-        )
-        stdout = io.StringIO()
-
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
-            bridge = bridge_cls.return_value
-            bridge.emit.side_effect = make_stdout_emitter(stdout)
-            run_jsonl_loop(stdin, stdout)
-
-        # The planner is a real LLM call, so the stdin loop hands it to a
-        # worker thread instead of blocking every later command on it.
-        bridge.workflow_plan_async.assert_called_once_with(
-            "规划 JSONL workflow",
-            context={"source": "jsonl"},
-            auto_approve=False,
-            args={"x": 1},
-            timeout_seconds=4.0,
-        )
-
-    def test_jsonl_loop_does_not_block_on_workflow_planning(self):
-        sleep_seconds = 0.6
-        seen: list[str] = []
-
-        class SlowPlanBridge:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def emit(self, event):
-                pass
-
-            def workflow_plan_async(self, task_text, **kwargs):
-                seen.append("plan_async")
-
-                def _slow():
-                    time.sleep(sleep_seconds)
-                    seen.append("plan_done")
-
-                threading.Thread(target=_slow, daemon=True).start()
-                return 1
-
-            def mcp_status(self):
-                seen.append("mcp_status")
-
-            def stop(self):
-                pass
-
-        nl = chr(10)
-        stdin = io.StringIO(
-            json.dumps({"type": "workflow_plan", "taskText": "慢规划"}) + nl
-            + json.dumps({"type": "mcp_status"}) + nl
-            + json.dumps({"type": "shutdown"}) + nl
-        )
-        stdout = io.StringIO()
-        started = time.monotonic()
-        with patch("ink_bridge.GenericAgentBridge", SlowPlanBridge):
-            run_jsonl_loop(stdin, stdout)
-        elapsed = time.monotonic() - started
-
-        # The loop must not wait for planning to finish before the next command.
-        self.assertLess(elapsed, sleep_seconds / 2)
-        self.assertEqual(["plan_async", "mcp_status"], seen)
-
-    def test_default_workflow_planner_factory_uses_env_builder(self):
-        agent = FakeAgent()
-        events = []
-        sentinel = object()
-        with patch("workflow_planner.build_workflow_planner_from_env", return_value=sentinel) as builder:
-            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
-
-            planner = bridge._make_workflow_planner()
-
-        self.assertIs(sentinel, planner)
-        # Bridge now forwards main-session /model profile when available.
-        self.assertEqual(1, builder.call_count)
-        kwargs = builder.call_args.kwargs if builder.call_args else {}
-        if kwargs:
-            self.assertIn("profile_name", kwargs)
-
     def test_bridge_script_can_import_agentmain_when_run_from_repo_root(self):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
@@ -4248,17 +3813,9 @@ return { marker: child.summary }
                     session_id="session_handoff",
                     script="return {}",
                     status="succeeded",
-                    metadata={"workflowDraftRef": "workflow-draft.json"},
+                    metadata={"originalTask": "Research and summarize the topic for the user"},
                 )
             )
-            draft = WorkflowDraft(
-                task_text="Research and summarize the topic for the user",
-                classification={},
-                plan={},
-                validation={"ok": True},
-                script=run.script,
-            )
-            bridge.workflow_store.write_workflow_draft(run, draft)
             job = WorkflowJob(job_id="agent_1", status="succeeded", result_ref="agents/agent_1/result.json")
             run.jobs = [job]
             bridge.workflow_store.write_agent_result(
@@ -4299,17 +3856,9 @@ return { marker: child.summary }
                     session_id="session_handoff_limit",
                     script="return {}",
                     status="succeeded",
-                    metadata={"workflowDraftRef": "workflow-draft.json"},
+                    metadata={"originalTask": "original task"},
                 )
             )
-            draft = WorkflowDraft(
-                task_text="original task",
-                classification={},
-                plan={},
-                validation={"ok": True},
-                script=run.script,
-            )
-            bridge.workflow_store.write_workflow_draft(run, draft)
             for index in range(8):
                 job = WorkflowJob(job_id=f"agent_{index}", status="succeeded")
                 bridge.workflow_store.write_agent_result(

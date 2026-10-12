@@ -7,7 +7,7 @@ from pathlib import Path
 
 from workflow_child_agent import FakeChildAgentRunner
 from workflow_models import WorkflowRun
-from workflow_planner import validate_rendered_workflow_script
+from workflow_script_validation import validate_rendered_workflow_script
 from workflow_runtime import WorkflowRuntime
 from workflow_scheduler import SchedulerConfig
 from workflow_store import WorkflowStore

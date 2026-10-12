@@ -157,22 +157,18 @@ async function main(): Promise<number> {
       && event.tools.some(tool => tool.function?.name === EXPECTED_MCP_TOOL)
     )), 180_000)
 
-    // Two legitimate activation routes reach the same planner:
-    //   * an explicit `/workflow <task>` line becomes the `workflow_plan` bridge command;
-    //   * plain task text becomes `submit`, and the host's activation resolver
-    //     decides from the task signals (search + artifact + synthesis, ...).
-    // The harness must accept either; asserting only on `submit` made an
-    // explicit `/workflow` run look like a hang.
+    // Direct-JS entry (Claude Code model): every workflow request is an ordinary
+    // ``submit``. The host injects the opt-in reminder when the text is
+    // workflow-shaped, and the model authors the script and calls the
+    // ``workflow`` tool itself. There is no ``workflow_plan`` command any more.
     const submitBefore = commands.filter(command => command.type === 'submit').length
-    const planBefore = commands.filter(command => command.type === 'workflow_plan').length
     await typeInput(stdin, TASK)
     await waitFor('workflow activation command', () => (
       commands.filter(command => command.type === 'submit').length > submitBefore
-      || commands.filter(command => command.type === 'workflow_plan').length > planBefore
     ), 20_000)
-    await waitFor('autonomous workflow started or planner failed', () => (
+    await waitFor('autonomous workflow started or failed', () => (
       state.workflows.some(run => run.status === 'running' || run.status === 'succeeded' || run.status === 'failed')
-      || events.some(event => event.type === 'error' && event.code.startsWith('workflow_plan'))
+      || events.some(event => event.type === 'error')
     ), WORKFLOW_START_TIMEOUT_MS)
     const runId = state.workflows.at(-1)?.runId
     assert.ok(runId, 'workflow run id was not projected into Ink state')
@@ -181,10 +177,18 @@ async function main(): Promise<number> {
     const run = state.workflows.find(item => item.runId === runId)
     assert.equal(run?.status, 'succeeded', `workflow ended ${run?.status}: ${run?.error || ''}`)
     assert.ok(run?.artifactDir, 'workflow artifact directory missing')
-    const draft = JSON.parse(await readFile(path.join(run.artifactDir!, 'workflow-draft.json'), 'utf8')) as {
+    // The direct-JS entry stores the model-authored script, not a JSON planner
+    // draft. When the run has no ``workflow-draft.json`` the plan-shape checks
+    // below do not apply; the execution/artifact checks still run.
+    let draft: {
       plan?: { phases?: Array<{ agents?: Array<Record<string, unknown>> }> ; executionContract?: { artifacts?: Array<{path?: string; writer?: string}> } }
+    } | null = null
+    try {
+      draft = JSON.parse(await readFile(path.join(run.artifactDir!, 'workflow-draft.json'), 'utf8')) as typeof draft
+    } catch {
+      draft = null
     }
-    const agents = (draft.plan?.phases || []).flatMap(phase => phase.agents || [])
+    const agents = (draft?.plan?.phases || []).flatMap(phase => phase.agents || [])
     const byLabel = new Map(agents.map(agent => [String(agent.label || ''), agent]))
     const parallelResearch = agents.filter(agent => {
       const tools = Array.isArray(agent.requiredTools) ? agent.requiredTools.map(String) : []
@@ -193,7 +197,7 @@ async function main(): Promise<number> {
     const taskIsLiuGuoliang = /刘国梁|liu\s*guoliang/i.test(TASK)
     const taskNeedsFiveResearchAgents = /5个subagent|五个subagent|5个子代理|五个子代理/i.test(TASK)
     const expectedResearchCount = taskNeedsFiveResearchAgents ? 5 : taskIsLiuGuoliang ? 2 : undefined
-    if (expectedResearchCount !== undefined) {
+    if (draft !== null && expectedResearchCount !== undefined) {
       assert.equal(parallelResearch.length, expectedResearchCount, `expected exactly ${expectedResearchCount} Tavily research agents, got ${parallelResearch.length}`)
       const persistedRun = JSON.parse(await readFile(path.join(run.artifactDir!, 'run.json'), 'utf8')) as {
         jobs?: Array<{jobId?: string; metadata?: {label?: string}}> 
@@ -314,9 +318,10 @@ async function main(): Promise<number> {
     summary.error = String(error).replaceAll(REPO, '<repo>').slice(0, 1200)
     summary.runStatuses = state.workflows.map(run => ({ runId: run.runId, status: run.status, error: run.error }))
     const failedRunId = state.workflows.at(-1)?.runId
-    const rejected = state.workflowEvents.find(event => event.runId === failedRunId && event.type === 'workflow_plan_rejected')
-    const issues = Array.isArray(rejected?.payload?.issues) ? rejected.payload.issues as Array<{ code?: string }> : []
-    summary.validationIssueCodes = issues.map(issue => String(issue.code || 'unknown'))
+    // Direct-JS entry has no ``workflow_plan_rejected`` event; a failed run now
+    // reports its error on the run record itself.
+    const failedRun = state.workflows.find(run => run.runId === failedRunId)
+    summary.validationIssueCodes = failedRun?.error ? [String(failedRun.error)] : []
     summary.events = [...new Set(events.map(event => event.type))]
     summary.bridgeErrors = events.filter(event => event.type === 'error').map(event => ({ code: event.code, message: safeError(event.message) }))
     summary.uiError = safeError(state.error)

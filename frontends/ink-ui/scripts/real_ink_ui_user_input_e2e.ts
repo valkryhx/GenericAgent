@@ -321,7 +321,11 @@ async function main(): Promise<number> {
         '这是规划/验证任务，不要执行代码，不要读写敏感文件，不要 git commit。',
       ].join(' ')
       await typeUserInput(stdin, `/workflow ${workflowTask}`)
-      await waitFor('workflow plan command', () => commands.some(command => command.type === 'workflow_plan' && command.taskText === workflowTask), 20_000)
+      // Direct-JS entry: ``/workflow <task>`` is no longer a planner command.
+      // The frontend forwards the natural-language opt-in as an ordinary
+      // ``submit``; the host injects the workflow reminder and the model
+      // authors the script itself.
+      await waitFor('workflow submit command', () => commands.some(command => command.type === 'submit' && command.text.includes(workflowTask)), 20_000)
       await waitFor('workflow final event', () => events.some(event => event.type === 'workflow_final'), 420_000)
 
       const finalEvent = lastEventOfType(events, 'workflow_final')

@@ -86,25 +86,23 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             events = []
             with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-                os.environ["GA_WORKFLOW_PLANNER_MODE"] = "prompt_guided"
-                os.environ["GA_WORKFLOW_PLANNER_CONFIG"] = CONFIG_NAME
-                os.environ["GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS"] = os.environ.get("GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS", "2")
                 bridge = GenericAgentBridge(agent_factory=FakeAgent, emit=events.append, workflow_root=tmp)
-                run_id = bridge.workflow_plan(
-                    "规划一个低风险只读 review workflow：1 个 agent 检查 workflow overview UI 数据契约，1 个 agent 汇总。必须包含边界文字：不要读取 mykey.py、mykey.json、mcp.json；不要提交。不要写代码，不要执行工具，不要使用 schemaRef。",
-                    context={"constraints": ["不要读取 mykey.py、mykey.json、mcp.json", "不要提交", "只读规划", "每个 agent prompt 必须包含安全边界"]},
-                    auto_approve=False,
-                    timeout_seconds=20,
+                script = (
+                    "export const meta = { name: 'overview-export-smoke', description: 'read-only review workflow' }" + chr(10)
+                    + "phase('Review')" + chr(10)
+                    + "const a = await agent('检查 workflow overview UI 数据契约；不要读取 mykey.py、mykey.json、mcp.json；不要提交。', { label: 'contract-review', phase: 'Review' })" + chr(10)
+                    + "return await agent('汇总上面的检查结果；不要写代码。', { label: 'synthesis', phase: 'Review' })" + chr(10)
                 )
+                run_id = bridge.workflow_draft(script)
                 bridge.workflow_detail(run_id)
             detail = [event for event in events if event.get("type") == "workflow_detail" and event.get("run", {}).get("runId") == run_id][-1]
-            if not isinstance(detail.get("draft"), dict) or not detail["draft"].get("validation", {}).get("ok"):
-                summary.update({"error": "real planner did not produce valid draft", "runId": run_id, "status": detail.get("run", {}).get("status")})
+            if not detail.get("script"):
+                summary.update({"error": "workflow script missing from detail payload", "runId": run_id, "status": detail.get("run", {}).get("status")})
                 print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
                 return 3
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(sanitize(detail), ensure_ascii=False, indent=2), encoding="utf-8")
-            phases = ((detail.get("draft") or {}).get("plan") or {}).get("phases") or []
+            phases = []
             summary.update({"passed": True, "runId": run_id, "phaseCount": len(phases), "status": detail.get("run", {}).get("status")})
             print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
             return 0

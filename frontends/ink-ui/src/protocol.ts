@@ -27,7 +27,6 @@ export type BridgeCommand =
   | { type: 'skill_invoke'; skill: string; args: string }
   | { type: 'compact'; instructions: string }
   | { type: 'workflow_draft'; script: string }
-  | { type: 'workflow_plan'; taskText: string; context?: Record<string, unknown>; autoApprove?: boolean; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_resume'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_deny'; runId: string; reason?: string }

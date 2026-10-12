@@ -66,7 +66,7 @@ class RealSubagentWaitTerminalE2E(unittest.TestCase):
         report = {"profile": profile, "waitPredicates": [], "waitReturnCount": 0, "duplicateSpawnCount": 0}
         started = time.monotonic()
         try:
-            first = manager.spawn_agent(f"wait_a_{suffix}", "读取 workflow_planner.py，列出两个边界条件。只读，不调用工具。回答包含 WAIT_A_DONE。", llm_no=llm_no, parent_session_id=suffix, permission_profile="read_only", fork_turns="none")
+            first = manager.spawn_agent(f"wait_a_{suffix}", "读取 workflow_script_validation.py，列出两个边界条件。只读，不调用工具。回答包含 WAIT_A_DONE。", llm_no=llm_no, parent_session_id=suffix, permission_profile="read_only", fork_turns="none")
             names.append(first.task_name)
             early = manager.wait_agents(names, timeout_s=0, wait_condition="all_terminal")
             report["waitReturnCount"] += 1
@@ -81,7 +81,7 @@ class RealSubagentWaitTerminalE2E(unittest.TestCase):
             self.assertEqual("completed", state_a.turn_status)
             self.assertIn("WAIT_A_DONE", Path(state_a.final_output_path).read_text(encoding="utf-8", errors="replace"))
 
-            second = manager.spawn_agent(f"wait_b_{suffix}", "读取 workflow_planner.py，列出两个不同边界条件。只读，不调用工具。回答包含 WAIT_B_DONE。", llm_no=llm_no, parent_session_id=suffix, permission_profile="read_only", fork_turns="none")
+            second = manager.spawn_agent(f"wait_b_{suffix}", "读取 workflow_script_validation.py，列出两个不同边界条件。只读，不调用工具。回答包含 WAIT_B_DONE。", llm_no=llm_no, parent_session_id=suffix, permission_profile="read_only", fork_turns="none")
             names.append(second.task_name)
             all_done = manager.wait_agents(names, timeout_s=900, wait_condition="all_terminal")
             report["waitReturnCount"] += 1

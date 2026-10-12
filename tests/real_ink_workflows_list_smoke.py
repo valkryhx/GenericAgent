@@ -91,16 +91,12 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             events = []
             with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-                os.environ["GA_WORKFLOW_PLANNER_MODE"] = "prompt_guided"
-                os.environ["GA_WORKFLOW_PLANNER_CONFIG"] = CONFIG_NAME
-                os.environ["GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS"] = os.environ.get("GA_WORKFLOW_PLANNER_REPAIR_ATTEMPTS", "2")
                 bridge = GenericAgentBridge(agent_factory=FakeAgent, emit=events.append, workflow_root=tmp)
-                run_id = bridge.workflow_plan(
-                    "规划一个低风险只读 workflow list UI 检查计划。边界：不要读取 mykey.py、mykey.json、mcp.json；不要提交。不要写代码。",
-                    context={"constraints": ["不要读取 mykey.py、mykey.json、mcp.json", "不要提交", "只读规划"]},
-                    auto_approve=False,
-                    timeout_seconds=20,
+                script = (
+                    "export const meta = { name: 'ui-list-smoke', description: 'read-only workflow list UI check' }" + chr(10)
+                    + "return { ok: true }" + chr(10)
                 )
+                run_id = bridge.workflow_draft(script)
                 bridge.workflow_list()
             runs_event = [event for event in events if event.get("type") == "workflow_runs"][-1]
             run_ids = [run.get("runId") for run in runs_event.get("runs") or []]
@@ -111,7 +107,7 @@ def main() -> int:
                     "listedRunCount": len(runs_event.get("runs") or []),
                     "runListed": run_id in run_ids,
                     "listedStatus": listed.get("status") if listed else None,
-                    "listedPlannerMode": (listed.get("metadata") or {}).get("plannerMode") if listed else None,
+                    "listedLaunchedBy": (listed.get("metadata") or {}).get("launchedBy") if listed else None,
                     "listedTaskType": (listed.get("metadata") or {}).get("workflowTaskType") if listed else None,
                 }
             )
