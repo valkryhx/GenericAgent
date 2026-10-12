@@ -19,6 +19,16 @@ GenericAgent 是一个紧凑的 Python 项目。核心运行时代码位于仓�
 
 使用 Python 3.10-3.13。代码应保持紧凑、可读，并贴合现有文件风格。优先使用自解释的函数和变量，少写解释性注释。避免过宽的 `try/except`，重要错误应清晰暴露。模块、函数和变量使用 `snake_case`，类名使用 `PascalCase`。新增模块应靠近功能边界，例如 UI 适配放在 `frontends/`，可选集成放在 `plugins/`。
 
+## 行尾与文件编码（统一 LF）
+
+仓库文本文件统一 **LF**（入库 + 检出），由仓库内 `.gitattributes`（`* text=auto eol=lf`）声明、`.editorconfig` 兜底；只影响本仓库。
+
+- **编辑/生成任何文本文件都直接写成 LF（`\n`），不要 CRLF。**
+- 例外：`.bat` / `.cmd` / `.ps1` 保持 CRLF；`.sh` 保持 LF；二进制（`.png` / `.jpg` / `.gif` / `.pdf` 等）不做转换。
+- **看到 `git status` 报 ` M` 但 `git diff` 为空时，先怀疑行尾**（stat 缓存假象）——`git checkout -- <file>` 或 `git add` 一下即可，**不要展开排查、不要反复重写**，那是纯 token 浪费。
+- 程序化写文件的坑（实测）：**Python `open(p,"w")` 在 Windows 会把 `\n` 翻成 `\r\n`** → 用 `open(p,"w",newline="\n")`（或写二进制）；Node `fs.writeFileSync` 默认原样写，确保字符串里是 `\n`。
+- 快速校验（期望 0）：`grep -c $'\r' <file>`
+
 ## 测试指南
 
 测试使用标准库 `unittest`。测试文件命名为 `test_*.py`，放在 `tests/`。新增前端或适配器行为时，应 stub 外部服务，避免依赖真实 API 凭据。提交前运行 `python -m unittest discover -s tests`，修复 bug 时补充聚焦的回归测试。

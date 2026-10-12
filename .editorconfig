@@ -1,0 +1,14 @@
+# 让编辑器/IDE 默认写 LF（配合 .gitattributes 的 * text=auto eol=lf）。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
