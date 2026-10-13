@@ -476,6 +476,16 @@ class WorkflowRuntime:
         options = params.get("options") or {}
         if not isinstance(options, dict):
             raise TypeError("agent options must be a plain object")
+        isolation = options.get("isolation")
+        if isolation is not None:
+            normalized_isolation = str(isolation).strip().lower()
+            if normalized_isolation != "worktree":
+                # Align with Claude Code: agent({isolation}) only accepts
+                # "worktree" in this build; "remote"/anything else is rejected.
+                raise RuntimeError(
+                    "agent({isolation:'" + str(isolation) + "'}) is not available in this build"
+                )
+            options = {**options, "isolation": "worktree"}
         label = options.get("label")
         if label is not None and not isinstance(label, str):
             raise TypeError("agent option label must be a string")

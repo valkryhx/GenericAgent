@@ -8,8 +8,10 @@ when_to_use: Before writing or editing a dynamic workflow script, or when the us
 
 This skill is the GA-localized version of Claude Code 2.1.283's
 `workflow-authoring-reference.md`. It describes **only the APIs GA actually
-supports**. Do not invent CC-only fields such as `budget`, `model`, `effort`,
-`isolation: "remote"`, `agentType`, `disallowedTools`, or `bashCommandClamp`.
+supports**. GA supports `isolation: "worktree"` (see §4). Do not invent other
+CC-only fields such as `budget`, `model`, `effort`, `agentType`,
+`disallowedTools`, or `bashCommandClamp`, and do not use `isolation: "remote"`
+(cloud/session isolation is out of scope).
 
 ## 1. When to call the `workflow` tool
 
@@ -122,6 +124,12 @@ GA-supported options:
 - `requiredTools` — array of concrete GA tool names the agent should use.
 - `dependsOn` — array of upstream labels.
 - `retryPolicy` — `{ maxAttempts: 1..3, backoffMs, retryableErrors }`.
+- `isolation` — `"worktree"` only. Runs the child in its own private directory
+  instead of the shared workspace, so parallel writers cannot collide. The
+  child's outputs are collected back into the shared workspace at their
+  workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use it
+  ONLY when two or more agents write files in parallel and would otherwise
+  overwrite each other. Prefer passing values (via `schema`) over writing files.
 
 Use GA tool names in prompts, not CC names: `file_read`, `file_write`,
 `file_patch`, `code_run`, `web_scan`, `web_execute_js`, `load_skill`,
@@ -240,6 +248,12 @@ const repaired = await repairAndRetest({
   source is still missing.
 - **No silent caps** — if the workflow samples, truncates, or skips work, call
   `log()` and include that fact in the final result.
+- **Pass values, don't share files** — make analyze / research / verify stages
+  return structured values via `schema` and let `parallel()` / `pipeline()`
+  carry them forward. Only producing stages write files. When two or more
+  producing stages must write files in parallel, give them
+  `isolation: "worktree"` so each writes in its own directory; never rely on two
+  agents writing the same shared path and hope the last write wins.
 
 Scale the fan-out to what the user asked for. A quick review gets a small number
 of finders and one verify pass. A comprehensive audit gets a larger finder pool,
@@ -261,8 +275,9 @@ result is non-empty.
 Upstream reference: `D:\git_codes\claudecode283_hack\claudecode283\extracted\workflow-authoring-reference.md`
 (Claude Code 2.1.283). This file localizes the parts that GA implements. GA
 supports CC's one-level `workflow()` nested API (a nested workflow cannot itself
-call `workflow()`). GA does not implement `budget`, `isolation`, `model`,
-`effort`, `agentType`, `disallowedTools`, or `bashCommandClamp`. GA's
+call `workflow()`). GA supports `isolation: "worktree"` (per-agent private
+directory; see §4) and does not implement `budget`, `model`, `effort`,
+`agentType`, `disallowedTools`, or `bashCommandClamp`. GA's
 `runPythonUnittest` and `repairAndRetest` are GA-specific additions.
 Cloud/session isolation (`isolation: "remote"`) is out of scope:
 **复刻时暂时不需要参考 claudecode 云端会话的实现**.

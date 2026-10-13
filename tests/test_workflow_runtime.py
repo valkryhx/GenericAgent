@@ -263,6 +263,46 @@ return {summary: result.summary}
             self.assertEqual(expected, loaded.metadata["workspacePath"])
             self.assertEqual(expected, loaded.jobs[0].metadata["workspacePath"])
 
+    def test_runtime_accepts_worktree_isolation_option(self):
+        # Mirrors Claude Code agent({isolation:'worktree'}): the option survives
+        # the RPC whitelist and reaches the child job's metadata.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('write an isolated file', {label: 'writer', isolation: 'worktree'})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertEqual("worktree", runner.started_jobs[0].metadata["options"]["isolation"])
+            self.assertEqual("worktree", runner.started_jobs[0].metadata["options"].get("isolation"))
+
+    def test_runtime_rejects_unknown_isolation_option(self):
+        # Anything other than "worktree" is refused up front, matching Claude
+        # Code where the remote path exists but is unreachable in this build.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('isolate me', {isolation: 'remote'})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+
+            with self.assertRaisesRegex(RuntimeError, "is not available in this build"):
+                runtime.run(run, args={"workspacePath": str(workspace)})
+
     def test_execution_contract_requires_recorded_required_tool_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

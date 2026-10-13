@@ -1,7 +1,7 @@
 # GA workflow 多 agent 冲突优化方案：对齐 CC「worktree 隔离 + 值传递」
 
 - 日期：2026-10-13
-- 状态：**方案（未实施）**
+- 状态：**阶段 1-3 已实施**（实施记录：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md`）；阶段 4 待办。
 - 目标：把 GA workflow 的多 agent 协作冲突，从「事后检测」改为「从源头避免」，对齐 Claude Code 2.1.283 dynamic workflow。
 - 关联缺陷：C（`artifact_path_collision` 归属误判）、B/E（workspace guard 禁 subprocess）
 - 上游证据仓库：`D:\git_codes\claudecode283_hack`（CC 2.1.283 源码 + 剖析文档）

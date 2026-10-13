@@ -119,6 +119,48 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
 
             self.assertEqual(str(workspace.resolve()), runner._child_cwd(job))
 
+    def test_isolation_uses_private_cwd_and_collects_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_iso",
+                prompt="write an isolated file",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "options": {"isolation": "worktree"},
+                },
+            )
+            runner = NativeGPTChildAgentRunner()
+
+            cwd = runner._child_cwd(job)
+            # The isolated cwd is a private directory, not the shared workspace.
+            self.assertNotEqual(str(workspace.resolve()), cwd)
+            self.assertTrue(Path(cwd).is_dir())
+
+            # A file written in the isolated dir is collected back into the
+            # shared workspace at the same workspace-relative path.
+            isolated_file = Path(cwd) / "sub" / "out.py"
+            isolated_file.parent.mkdir(parents=True, exist_ok=True)
+            isolated_file.write_text("print('hi')" + chr(10), encoding="utf-8")
+            runner._collect_isolated_artifacts(job, cwd, ["sub/out.py"])
+            self.assertTrue((workspace / "sub" / "out.py").is_file())
+
+    def test_non_isolated_job_uses_shared_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_plain",
+                prompt="write a relative file",
+                metadata={"runId": "wf_test", "workspacePath": str(workspace)},
+            )
+            runner = NativeGPTChildAgentRunner()
+
+            self.assertEqual(str(workspace.resolve()), runner._child_cwd(job))
+            self.assertIsNone(runner._job_isolation(job))
+
     def test_child_agent_system_prompt_includes_optional_skill_listing(self):
         runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
 

@@ -571,4 +571,17 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 结论：GA 要抄的不是「更好的冲突检测」，而是 CC 的**从源头避免**——(a) 值传递为默认，(b) 并行写文件时给每个 agent 独立工作目录（worktree/子目录）。
 - 待办：见独立方案文档；阶段 0 先修归属误判，阶段 1 给 workflow `agent()` 加 `isolation`，阶段 2 值传递默认化，阶段 3 提示词/文档。
 - 详细方案：`docs/20261013-ga-workflow-多agent冲突-对齐CC-worktree隔离与值传递.md`。
-- 状态（2026-10-13）：**仅落盘方案，未实施。**
+- 状态（2026-10-13）：**阶段 1-3 已实施，全量测试通过**（见实施记录）。
+
+#### 实施结果（2026-10-13，阶段 1-3）
+
+- **阶段 1**：workflow `agent()` 支持 `isolation:"worktree"`——runtime 白名单校验（其余抛「not available in this build」）；
+  `workflow_child_agent` 新增 `_job_isolation`/`_shared_workspace`/`_isolated_workspace`/`_collect_isolated_artifacts`，
+  `_child_cwd` 隔离时返回私有目录 `temp/workflow_child_agents/<runId>/<jobId>`，diff 落在私有目录、产物回收回共享 workspace。
+- **阶段 2**：`job.metadata["artifactConfidence"]`（exact/declared/inferred）——隔离或 wave 唯一 job = exact；
+  并发且声明路径 = declared；并发且未声明 = inferred。`_record_artifact_collisions` 只对**≥2 可信生产者**报
+  `artifactCollisions`；并发未声明同路径降级为**不 degrade** 的 `unverifiedWrites`。
+- **阶段 3**：`skills/workflow-authoring/SKILL.md` 增补 `isolation` 选项、`Pass values, don't share files` 模式、边界修订。
+- **测试**：`tests.test_workflow_*` 全绿（scheduler/workspace/store 109、child/runtime/integration 等 174、全量 discover 1331 OK）。
+- **实施记录**：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md`。
+- **未做**：阶段 4（受控 subprocess 解缺陷 B/E）、隔离目录清理、`artifactOwnership` 按置信度过滤、隐式默认隔离；`isolation:"remote"` 不做（**复刻时暂时不需要参考 claudecode 云端会话的实现**）。

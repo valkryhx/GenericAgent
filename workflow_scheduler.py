@@ -1326,6 +1326,55 @@ class AgentScheduler:
         self.store.save_run(self.run)
         self._append("state_mutation_observed", job, {"toolNames": observed})
 
+    @staticmethod
+    def _job_isolation(job: WorkflowJob) -> str:
+        """Return the job's validated isolation mode (``"worktree"``) or ``""``.
+
+        Mirrors Claude Code's ``agent({isolation:'worktree'})``. The value is
+        whitelisted at RPC time, so a non-empty result is always ``"worktree"``.
+        """
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        raw = (options or {}).get("isolation")
+        if raw is None:
+            return ""
+        return str(raw).strip().lower()
+
+    def _declared_write_paths(self, job: WorkflowJob, workspace: str) -> set[str]:
+        """Workspace-relative paths the job promised in ``writeScope``/``deliverables``.
+
+        A declared path is trustworthy attribution even in a shared workspace:
+        the job said it would write it, so seeing it in the diff is not another
+        sibling's file. Paths that were never declared are only ever
+        ``inferred`` and never base a collision on.
+        """
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        root = Path(workspace)
+        declared: set[str] = set()
+        for key in ("writeScope", "deliverables"):
+            raw = (options or {}).get(key) or []
+            if isinstance(raw, str):
+                raw = [raw]
+            for item in raw:
+                try:
+                    declared.add(normalize_workspace_relative(str(item), root))
+                except (WorkspacePathError, OSError, TypeError, ValueError):
+                    continue
+        return declared
+
+    def _wave_sibling_count(self, job: WorkflowJob) -> int:
+        """How many jobs share this job's wave (including itself).
+
+        A wave runs its jobs concurrently. A job that is alone in its wave has
+        an unpollutable workspace diff: every sibling that could have written a
+        file during its window is in a *different* wave. A job that shares its
+        wave can see a sibling's file in its own before/after diff, so its
+        undeclared attribution is only inferred.
+        """
+        wave = (job.metadata or {}).get("wave")
+        return sum(1 for item in self.run.jobs if (item.metadata or {}).get("wave") == wave)
+
     def _record_observed_artifacts(self, job: WorkflowJob, result: AgentResult) -> None:
         """Record the workspace-relative files a child actually wrote.
 
@@ -1355,15 +1404,39 @@ class AgentScheduler:
         # knows both facts at once; deriving the owner later would mean reading
         # tool names again, which is the enumeration this design removed.
         writer = str(job.metadata.get("label") or job.job_id)
+        isolated = self._job_isolation(job) == "worktree"
+        # A shared workspace only pollutes a diff when the job runs concurrently
+        # with a sibling (same wave). An isolated child always diffs its own
+        # private directory, and a lone job in its wave has no concurrent
+        # sibling, so both give an exact attribution.
+        contended = (not isolated) and self._wave_sibling_count(job) > 1
+        declared = self._declared_write_paths(job, workspace)
         existing = workspace_writes_with_writer(job.metadata.get("observedArtifacts"))
         merged = {entry["path"]: entry for entry in existing}
+        confidence_map = dict(job.metadata.get("artifactConfidence") or {})
         for ref in written:
             entry = merged.setdefault(ref, {"path": ref, "writer": writer})
             if not entry.get("writer"):
                 entry["writer"] = writer
+            if not contended:
+                confidence_map[ref] = "exact"
+            elif ref in declared:
+                # The job promised this path in writeScope/deliverables, so
+                # seeing it in the diff is not a concurrent sibling's file.
+                confidence_map[ref] = "declared"
+            else:
+                # Contended and undeclared: this path may be a concurrent
+                # sibling's file caught in this job's diff. It is recorded for
+                # transparency but must not seed a collision.
+                confidence_map.setdefault(ref, "inferred")
         job.metadata["observedArtifacts"] = [merged[ref] for ref in written if ref in merged] + [
             entry for ref, entry in merged.items() if ref not in set(written)
         ]
+        job.metadata["artifactConfidence"] = {
+            ref: confidence_map[ref]
+            for ref in (entry["path"] for entry in job.metadata["observedArtifacts"])
+            if ref in confidence_map
+        }
         self._record_artifact_collisions(job)
         # Persist the run-level ``path -> writers`` index. Jobs that run in a
         # child process keep no in-process handoff dict, so consumers read this
@@ -1414,38 +1487,61 @@ class AgentScheduler:
         """
 
         owners: dict[str, list[str]] = {}
+        trusted_writers: dict[str, set[str]] = {}
+        declared_paths: set[str] = set()
         verifying: set[str] = set()
         for item in self.run.jobs:
             metadata = item.metadata if isinstance(item.metadata, dict) else {}
             if self._is_verification_job(metadata):
                 verifying.add(str(metadata.get("label") or item.job_id))
+            confidence_map = metadata.get("artifactConfidence") if isinstance(metadata.get("artifactConfidence"), dict) else {}
             for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
                 writer = entry.get("writer") or item.job_id
                 bucket = owners.setdefault(entry["path"], [])
                 if writer not in bucket:
                     bucket.append(writer)
+                confidence = str(confidence_map.get(entry["path"]) or "exact").strip() or "exact"
+                if confidence == "inferred":
+                    continue
+                trusted_writers.setdefault(entry["path"], set()).add(writer)
+                if confidence == "declared":
+                    declared_paths.add(entry["path"])
         shared = {path: writers for path, writers in owners.items() if len(writers) > 1}
         if not shared:
             return
         collisions: dict[str, list[str]] = {}
         side_effects: dict[str, list[str]] = {}
+        unverified: dict[str, list[str]] = {}
         for path, writers in shared.items():
             # Only *producing* writers can collide with each other. One producer
             # plus a verifier that ran the artifact is the normal verify flow,
             # not two producers silently overwriting each other.
             producers = [writer for writer in writers if writer not in verifying]
-            if len(producers) > 1:
+            trusted_producers = [writer for writer in producers if writer in trusted_writers.get(path, set())]
+            if len(trusted_producers) > 1:
                 collisions[path] = writers
+            elif len(producers) > 1:
+                # Two or more producers share the path, but at most one claim is
+                # trustworthy (isolated diff or a declared path). This is the
+                # shared-workspace diff pollution Claude Code sidesteps with
+                # worktree isolation: the extra "writer" is usually a concurrent
+                # sibling's file seen in this job's diff, not a real overwrite.
+                # Recorded for transparency, never used to degrade the run.
+                unverified[path] = writers
             else:
                 side_effects[path] = writers
         metadata = dict(self.run.metadata) if isinstance(self.run.metadata, dict) else {}
         issues = list(metadata.get("workflowIssues") or [])
         for path, writers in sorted(collisions.items()):
+            # "declared" when a promised path in a shared workspace is involved;
+            # "exact" when every trusted claim came from an isolated child diff.
+            confidence = "declared" if path in declared_paths else "exact"
             issue = {
                 "code": "artifact_path_collision",
                 "message": f"{path} was written by multiple jobs: {', '.join(writers)}",
                 "path": path,
                 "writers": writers,
+                "confidence": confidence,
             }
             if not any(isinstance(item, dict) and item.get("code") == issue["code"] and item.get("path") == path for item in issues):
                 issues.append(issue)
@@ -1454,11 +1550,15 @@ class AgentScheduler:
             metadata["artifactCollisions"] = {path: writers for path, writers in sorted(collisions.items())}
         if side_effects:
             metadata["verificationSideEffects"] = {path: writers for path, writers in sorted(side_effects.items())}
+        if unverified:
+            metadata["unverifiedWrites"] = {path: writers for path, writers in sorted(unverified.items())}
         self.run.metadata = metadata
         if collisions:
             self._append("artifact_collision", job, {"collisions": metadata["artifactCollisions"]})
         if side_effects:
             self._append("verification_side_effect", job, {"paths": metadata["verificationSideEffects"]})
+        if unverified:
+            self._append("unverified_write", job, {"paths": metadata["unverifiedWrites"]})
 
     def _append_permission_events_from_result(self, job: WorkflowJob, result: AgentResult) -> None:
         for event in result.transcript_events:

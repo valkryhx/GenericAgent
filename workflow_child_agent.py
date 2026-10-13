@@ -756,6 +756,8 @@ class NativeGPTChildAgentRunner:
         usage = copy.deepcopy(getattr(client, "last_usage_tokens", None) or getattr(getattr(client, "backend", None), "last_usage_tokens", None) or {})
         tool_summary = self._build_tool_summary(transcript_events)
         written = diff_workspace(workspace_before, snapshot_workspace(workspace_root))
+        if written and self._job_isolation(job) == "worktree":
+            self._collect_isolated_artifacts(job, workspace_root, written)
         if written:
             tool_summary["writtenPaths"] = written[:64]
         return output, usage, tool_summary
@@ -968,7 +970,48 @@ class NativeGPTChildAgentRunner:
             "deniedTools": denied,
         }
 
+    def _job_isolation(self, job) -> str | None:
+        """Return a job's validated isolation mode (``worktree``) or ``None``.
+
+        Mirrors Claude Code's ``agent({isolation:'worktree'})``. The value is
+        whitelisted at RPC time (anything else is rejected there), so a non-None
+        result here is always ``"worktree"``.
+        """
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        if not isinstance(options, dict):
+            return None
+        raw = options.get("isolation")
+        if raw is None:
+            return None
+        normalized = str(raw).strip().lower()
+        return normalized or None
+
+    def _shared_workspace(self, job) -> str | None:
+        """The run-wide shared workspace, or ``None`` when the run has none."""
+        workspace_path = job.metadata.get("workspacePath")
+        if not isinstance(workspace_path, str) or not workspace_path.strip():
+            return None
+        return str(Path(workspace_path).expanduser().resolve())
+
+    def _isolated_workspace(self, job) -> str:
+        """A private per-job working directory outside the shared workspace.
+
+        GA's analogue of Claude Code's per-agent git worktree: each isolated
+        writer gets its own directory, so its before/after diff can never
+        attribute another job's file to it. Keyed by run id *and* job id so two
+        concurrent runs that both register ``agent_1`` never share a directory.
+        """
+        run_id = ""
+        if isinstance(job.metadata, dict):
+            run_id = str(job.metadata.get("runId") or "")
+        base = Path(os.path.dirname(os.path.abspath(__file__))) / "temp" / "workflow_child_agents"
+        workspace = base / run_id / str(job.job_id) if run_id else base / str(job.job_id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return str(workspace.resolve())
+
     def _child_cwd(self, job) -> str:
+        if self._job_isolation(job) == "worktree":
+            return self._isolated_workspace(job)
         workspace_path = job.metadata.get("workspacePath")
         if workspace_path is not None:
             if not isinstance(workspace_path, str) or not workspace_path.strip():
@@ -977,9 +1020,31 @@ class NativeGPTChildAgentRunner:
             if not workspace.is_dir():
                 raise ValueError("job workspacePath must be an existing directory")
             return str(workspace)
-        workspace = Path(os.path.dirname(os.path.abspath(__file__))) / "temp" / "workflow_child_agents" / str(job.job_id)
-        workspace.mkdir(parents=True, exist_ok=True)
-        return str(workspace.resolve())
+        return self._isolated_workspace(job)
+
+    def _collect_isolated_artifacts(self, job, isolated_root, written) -> None:
+        """Copy an isolated child's outputs back into the shared run workspace.
+
+        Isolation gives each agent its own working directory so parallel writers
+        never collide. The run's declared artifacts still have to land in the
+        shared workspace, so the diffed files are copied back at the same
+        workspace-relative path. A genuine same-path write by two jobs still
+        surfaces as an artifact collision downstream.
+        """
+        shared = self._shared_workspace(job)
+        if not shared:
+            return
+        import shutil
+        for rel in written:
+            src = Path(isolated_root) / rel
+            if not src.is_file():
+                continue
+            dst = Path(shared) / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            except OSError:
+                continue
 
     def _permission_profile(self, job) -> str:
         return job.metadata.get("permissionProfile") or DEFAULT_PERMISSION_PROFILE
@@ -1013,9 +1078,15 @@ class NativeGPTChildAgentRunner:
             "workspacePolicy: project-temp-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
             "toolBoundary: the host already removed every tool outside this profile from your tool list; "
             "work with what you have instead of trying to reconstruct a missing tool by hand.",
-            "sharedWorkspace: the root agent and every other job in this run share this workspace; touch only "
-            "the paths assigned to you, never revert or rewrite another job's output, and never assume another "
-            "job's file is yours to change.",
+            (
+                "isolatedWorkspace: you have your own private working directory for this job; other jobs cannot "
+                "see or overwrite your files. Write each artifact at its declared workspace-relative path and it "
+                "will be collected into the shared workspace."
+                if self._job_isolation(job) == "worktree"
+                else "sharedWorkspace: the root agent and every other job in this run share this workspace; touch only "
+                "the paths assigned to you, never revert or rewrite another job's output, and never assume another "
+                "job's file is yours to change."
+            ),
             "handoff: your final answer is read by the scheduler and by downstream agents, not by the end user. "
             "State objective -> what you did -> machine-observed evidence (command, exit code, path) -> "
             "artifacts (workspace-relative paths) -> blockers. Do not paste raw transcripts.",

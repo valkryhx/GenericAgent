@@ -358,13 +358,19 @@ class WorkflowSchedulerTest(unittest.TestCase):
             self.assertEqual([{"path": "report.md", "writer": job.job_id}], job.metadata["observedArtifacts"])
 
     def test_a_path_written_by_two_jobs_is_recorded_as_a_collision(self):
-        """A silent overwrite must become a visible, recorded fact."""
+        """A silent overwrite of a *declared* path is a visible, recorded fact.
+
+        Attribution is only trustworthy when the job is isolated or the path was
+        promised in writeScope/deliverables. Two jobs that both declare the same
+        path are a real conflict; the shared-diff pollution case is covered by
+        test_undeclared_shared_writes_are_not_a_hard_collision.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
             scheduler.args = {"workspacePath": str(workspace)}
-            first = scheduler.register_agent(prompt="research", label="Research")
-            second = scheduler.register_agent(prompt="synthesize", label="Synthesis")
+            first = scheduler.register_agent(prompt="research", label="Research", options={"writeScope": ["report.md"]})
+            second = scheduler.register_agent(prompt="synthesize", label="Synthesis", options={"writeScope": ["report.md"]})
 
             scheduler._record_observed_artifacts(first, AgentResult(
                 job_id=first.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
@@ -381,6 +387,51 @@ class WorkflowSchedulerTest(unittest.TestCase):
             # Ownership is per job, so both jobs still name themselves the writer.
             self.assertEqual([{"path": "report.md", "writer": "Research"}], first.metadata["observedArtifacts"])
             self.assertEqual([{"path": "report.md", "writer": "Synthesis"}], second.metadata["observedArtifacts"])
+
+    def test_undeclared_shared_writes_are_not_a_hard_collision(self):
+        """Two concurrent producers writing the same undeclared path is exactly
+        the shared-workspace diff pollution Claude Code avoids with worktree
+        isolation. It must be recorded, but it must not degrade the run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="research", label="Research")
+            second = scheduler.register_agent(prompt="synthesize", label="Synthesis")
+
+            scheduler._record_observed_artifacts(first, AgentResult(
+                job_id=first.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+            ))
+            scheduler._record_observed_artifacts(second, AgentResult(
+                job_id=second.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+            ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertNotIn("artifactCollisions", loaded.metadata or {})
+            self.assertEqual({"report.md": ["Research", "Synthesis"]}, loaded.metadata["unverifiedWrites"])
+            codes = [issue["code"] for issue in loaded.metadata.get("workflowIssues") or []]
+            self.assertNotIn("artifact_path_collision", codes)
+            self.assertIn("unverified_write", self.event_types(store))
+
+    def test_isolated_jobs_sharing_a_path_are_a_collision(self):
+        """With isolation the diff is per-job, so two writers of one path is a
+        genuine overwrite even without an explicit writeScope declaration."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            first = scheduler.register_agent(prompt="a", label="A", options={"isolation": "worktree"})
+            second = scheduler.register_agent(prompt="b", label="B", options={"isolation": "worktree"})
+
+            for job in (first, second):
+                scheduler._record_observed_artifacts(job, AgentResult(
+                    job_id=job.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["report.md"]},
+                ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual({"report.md": ["A", "B"]}, loaded.metadata["artifactCollisions"])
+            self.assertEqual("exact", loaded.metadata["workflowIssues"][0]["confidence"])
+            self.assertNotIn("unverifiedWrites", loaded.metadata)
 
     def test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision(self):
         """Verifying by executing the artifact must not degrade the run.
