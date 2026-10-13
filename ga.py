@@ -14,6 +14,8 @@ _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generator
+from workflow_workspace import WorkspacePathError
+from subagent_wait import is_workflow_run_id
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -457,7 +459,25 @@ class GenericAgentHandler(BaseHandler):
             ret = StepOutcome({"status": "error", "path_acl": decision.to_dict()}, next_prompt="\n")
             _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
             return ret
-        return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+        try:
+            return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+        except WorkspacePathError as exc:
+            # A tool argument that names no valid workspace path must be a
+            # recoverable tool error, never a fatal job failure. do_file_read
+            # (unlike file_write/file_patch) resolved its path outside any guard,
+            # so a child that passed the workspace root itself aborted the whole
+            # job with 'path must name a workspace child'. Returning a normal
+            # error lets the model retry with a correct path.
+            yield f"[PathACL] invalid path: {exc}" + chr(10)
+            ret = StepOutcome(
+                {"status": "error", "msg": f"invalid workspace path: {exc}"},
+                next_prompt=(
+                    "路径无效或不在工作区内。请改用工作区内的相对文件路径"
+                    "（例如 eight_queens.py），不要传入工作区根目录本身。" + chr(10)
+                ),
+            )
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
 
     def _check_workspace_path_access(self, tool_name, args):
         """Host-side path ACL, evaluated before the tool executes.
@@ -772,6 +792,35 @@ class GenericAgentHandler(BaseHandler):
         else:
             yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}\n"
         return StepOutcome(payload, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _bind_workflow_wait_resolver(self, manager):
+        """Give the manager the workflow-store resolver owned by the frontend.
+
+        Without it, a ``wf_<id>`` target falls through to the subagent state
+        machine and is answered by a synthesised, never-terminal state (GA
+        defect A). The resolver lives on the agent because the bridge binds it
+        there (``ink_bridge._bind_agent``); headless agents simply have none and
+        keep the subagent-only behaviour.
+        """
+        resolver = getattr(self.parent, "workflow_run_resolver", None)
+        if callable(resolver):
+            manager.workflow_run_resolver = resolver
+        return manager
+
+    @staticmethod
+    def _unknown_workflow_targets(targets, manager):
+        """Workflow-shaped ids with no run behind them, so the wait fails fast."""
+        unknown = []
+        for target in targets or []:
+            text = str(target or '').strip()
+            if not is_workflow_run_id(text):
+                continue
+            try:
+                if manager.resolve_workflow_run(text) is None:
+                    unknown.append(text)
+            except Exception:
+                unknown.append(text)
+        return unknown
 
     def _get_subagent_manager(self):
         manager = getattr(self, "subagent_manager", None)
@@ -1133,6 +1182,21 @@ class GenericAgentHandler(BaseHandler):
             args.get("condition") or args.get("wait_condition") or args.get("waitCondition") or "event"
         ).strip().lower()
         manager = self._get_subagent_manager()
+        manager = self._bind_workflow_wait_resolver(manager)
+        unknown_runs = self._unknown_workflow_targets(targets, manager)
+        if unknown_runs:
+            msg = "workflow run not found: " + ", ".join(unknown_runs)
+            yield f"[Warn] {msg}\n"
+            return StepOutcome(
+                {
+                    "status": "error",
+                    "condition": wait_condition,
+                    "error": msg,
+                    "unknown_workflow_runs": unknown_runs,
+                    "hint": "A workflow run id is wf_<32 hex>. Check /workflows for the real runId; do not retry the same id.",
+                },
+                next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+            )
         yield f"[Action] Waiting for subagent update ({timeout_s:g}s, condition={wait_condition}).\n"
         result = manager.wait_agents(
             targets=targets,
@@ -1189,6 +1253,15 @@ class GenericAgentHandler(BaseHandler):
             max_output_chars = 8000
         max_output_chars = max(1000, min(max_output_chars, 50000))
         manager = self._get_subagent_manager()
+        manager = self._bind_workflow_wait_resolver(manager)
+        unknown_runs = self._unknown_workflow_targets([target], manager)
+        if unknown_runs:
+            msg = "workflow run not found: " + ", ".join(unknown_runs)
+            yield f"[Warn] {msg}\n"
+            return StepOutcome(
+                {"status": "error", "msg": msg, "unknown_workflow_runs": unknown_runs},
+                next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+            )
         try:
             state = manager.read_agent(target)
             payload = self._subagent_state_payload(state, include_output=not bool(artifact_id), max_output_chars=max_output_chars)

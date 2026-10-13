@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_child_agent import AgentResult, ChildAgentRunner, FakeChildAgentRunner, bounded_structured_summary
+from workflow_child_agent import (
+    AgentResult,
+    ChildAgentRunner,
+    FakeChildAgentRunner,
+    bounded_structured_summary,
+    loads_json_answer,
+)
 from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from workflow_store import WorkflowStore, build_artifact_ownership_index
 from workflow_workspace import (
@@ -202,10 +208,7 @@ def _coerce_structured_text_payload(payload):
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
-        try:
-            parsed = json.loads(text)
-        except (TypeError, json.JSONDecodeError):
-            continue
+        parsed = loads_json_answer(text)
         if isinstance(parsed, (dict, list)):
             return parsed
     return payload

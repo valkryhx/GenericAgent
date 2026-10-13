@@ -27,6 +27,7 @@ if PROJECT_DIR not in sys.path:
 
 from sensitive_redaction import sanitize, redact_sensitive_text
 from workflow_store import build_artifact_ownership_index
+from subagent_wait import workflow_run_is_terminal
 from workflow_workspace import (
     WorkspacePathError,
     artifact_ownership_index,
@@ -300,6 +301,10 @@ class GenericAgentBridge:
             agent.inc_out = True
             agent.verbose = True
         agent.workflow_tool_launcher = self.workflow_launch_from_tool
+        # wait_agent(condition="workflow_terminal") resolves a run id through this
+        # bridge-owned store; without it a run id is answered by an orphan subagent
+        # state that never reaches a terminal status (GA defect A).
+        agent.workflow_run_resolver = self._resolve_workflow_run_info
         # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
         try:
             runtime = getattr(agent, "permission_runtime", None)
@@ -1460,6 +1465,48 @@ class GenericAgentBridge:
         except Exception as exc:
             self._agent_errors["control"] = redact_sensitive_text(str(exc))
 
+    def _resolve_workflow_run_info(self, run_id: str) -> dict[str, Any] | None:
+        """Authoritative run status for wait_agent(condition="workflow_terminal").
+
+        The bridge owns the workflow store, so it answers with the same durable
+        record /workflows renders. An unknown run id returns None and the wait tool
+        fails fast, instead of synthesising a never-terminal subagent state.
+        """
+        run_id = str(run_id or '').strip()
+        if not run_id:
+            return None
+        try:
+            run = self.workflow_store.load_run(run_id)
+        except Exception:
+            return None
+        status = getattr(run, 'status', None)
+        thread = getattr(self, '_workflow_threads', {}).get(run_id)
+        if thread is not None and not thread.is_alive() and not workflow_run_is_terminal(status):
+            # The launcher thread died without writing a terminal status (process kill,
+            # unhandled crash outside the runtime's try/except). Report 'stale' so the
+            # wait returns instead of blocking the main agent forever.
+            status = 'stale'
+        artifact_dir = getattr(run, 'artifact_dir', None)
+        artifact_path = os.fspath(artifact_dir) if artifact_dir else None
+        result_ref = None
+        updated_at = None
+        if artifact_path:
+            candidate = Path(artifact_path) / 'final-result.json'
+            if candidate.is_file():
+                result_ref = str(candidate)
+            state_path = Path(artifact_path) / 'state.json'
+            try:
+                updated_at = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(state_path.stat().st_mtime))
+            except OSError:
+                updated_at = None
+        return {
+            'status': status,
+            'error': getattr(run, 'error', None),
+            'artifactDir': artifact_path,
+            'updatedAt': updated_at,
+            'resultRef': result_ref,
+        }
+
     def _workflow_run_payload(self, run) -> dict[str, Any]:
         data = run.to_dict()
         data.pop("script", None)
@@ -1742,6 +1789,17 @@ class GenericAgentBridge:
         run_workspace = self._run_workspace_root(run)
         base_workspace = run_metadata.get("workspaceBasePath")
         collisions = run_metadata.get("artifactCollisions")
+        failed_jobs = [
+            {
+                'jobId': job.job_id,
+                'label': (job.metadata or {}).get('label') if isinstance(job.metadata, dict) else None,
+                'phase': job.phase,
+                'status': job.status,
+                'error': redact_sensitive_text(str(job.error)) if job.error else None,
+            }
+            for job in (run.jobs or [])
+            if job.status not in {'succeeded', 'cached', 'skipped'}
+        ]
         handoff = {
             'runId': run.run_id,
             'status': run.status,
@@ -1757,6 +1815,20 @@ class GenericAgentBridge:
             'workspacePath': run_workspace,
             'workspaceBasePath': str(base_workspace) if base_workspace else run_workspace,
         }
+        if failed_jobs:
+            # CC evidence (dynamic-workflow-internals.md 8.3/8.4): the completion
+            # notification carries the agent <failures> list, so a degraded run is
+            # never reported as a clean success.
+            handoff['failedJobs'] = failed_jobs
+        journal_path = None
+        if run.artifact_dir:
+            candidate_journal = Path(os.fspath(run.artifact_dir)) / 'journal.jsonl'
+            if candidate_journal.is_file():
+                journal_path = str(candidate_journal)
+        if journal_path:
+            # CC 8.3 diagnostics: point the reader at the per-agent journal BEFORE
+            # it diagnoses, so an empty finalResult is not mistaken for 'no work'.
+            handoff['journalRef'] = journal_path
         if isinstance(collisions, dict) and collisions:
             # Two jobs wrote the same path, so the later write won. The reader
             # must know the file may not represent the earlier job's output.
@@ -1801,6 +1873,9 @@ class GenericAgentBridge:
             "treat that file as possibly not reflecting the earlier writer, and do not assume every job's output survived. "
             "`verificationSideEffects` lists paths a verification job touched while running the artifact under "
             "test: that is the same deliverable re-generated by the check, not a second output. "
+            "Per-agent results: read `journalRef` (journal.jsonl) — one {\"type\":\"result\"} line per completed "
+            "agent with its full return value; if `finalResult` is empty or unexpected, read it BEFORE diagnosing. "
+            "`failedJobs` lists the jobs that did not succeed. "
             "Transcript files are references only and are not included here.\n\n"
             f'<workflow_handoff>\n{serialized}\n</workflow_handoff>'
         )

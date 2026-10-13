@@ -7,7 +7,13 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from workflow_child_agent import LiveJobTelemetry, NativeGPTChildAgentRunner, bounded_structured_summary
+from workflow_child_agent import (
+    LiveJobTelemetry,
+    NativeGPTChildAgentRunner,
+    bounded_structured_summary,
+    loads_json_answer,
+    parse_json_answer,
+)
 from workflow_models import WorkflowJob
 
 
@@ -1285,6 +1291,29 @@ class LiveJobTelemetryTest(unittest.TestCase):
         self.assertIn("never revert or rewrite another job's output", prompt)
         self.assertIn("handoff:", prompt)
         self.assertIn("not by the end user", prompt)
+
+
+class StructuredAnswerExtractionTest(unittest.TestCase):
+    """A schema answer wrapped in a summary block must still validate."""
+
+    def test_trailing_comma_object_is_recovered(self):
+        answer = (
+            "<summary>done</summary>" + chr(10) + chr(10)
+            + '{"file": "eight_queens.py", "ok": true, "reason": "92 solutions",}'
+        )
+        parsed = parse_json_answer(answer)
+        self.assertIsInstance(parsed, dict)
+        self.assertEqual("eight_queens.py", parsed["file"])
+        self.assertTrue(parsed["ok"])
+
+    def test_prose_array_is_not_mistaken_for_the_payload(self):
+        answer = '{"file": "x.py", "ok": true, "reason": "cols [0,4,7,5]", }'
+        parsed = parse_json_answer(answer)
+        self.assertIsInstance(parsed, dict)
+        self.assertEqual("x.py", parsed["file"])
+
+    def test_commas_inside_strings_are_preserved(self):
+        self.assertEqual({"a": "x,}", "b": 1}, loads_json_answer('{"a": "x,}", "b": 1}'))
 
 
 if __name__ == "__main__":

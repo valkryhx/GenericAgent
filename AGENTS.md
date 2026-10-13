@@ -768,3 +768,54 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   全量 discover **1381 OK (skipped=3)**。
 - 文档：`docs/20261013-ga-workflow-隐式隔离误伤verify-对齐CC.md`。
 - 状态（2026-10-13）：**已实施**。
+
+### 缺陷 A（2026-10-13，复现并修复）：`wait_agent(condition="workflow_terminal")` 假实现 →「有失败就一直卡住」
+
+- 触发：用户实测「workflow 有执行失败就一直卡住」。主代理发
+  `wait_agent {condition:"workflow_terminal", target:"wf_9af50ac554fd43cc9f9d25cc467cd43b", timeout_seconds:600}`，
+  该 run 早已 `status=degraded` 收尾（19:57），wait 却空等到 timeout，反复重发 → 永久卡住。
+  证据：`temp/model_responses/model_responses_297593.txt`。
+- 根因（缺陷 A 的完整链）：`subagent_wait.py:78` 把 `workflow_terminal` 当 `all_terminal` 别名，只按 **subagent 状态机**判定；
+  `subagent_manager.probe_agent()` 把 `wf_<32hex>` 当 task_name，读 `temp/<runId>/state.json` 找不到就**合成**非终态
+  （`turn_status=running`/`process_status=exited`），无人推进 → 永不满足。真实终态在
+  `temp/sessions/<sid>/workflows/<runId>/state.json` 的 `status`，wait 完全不读。
+- CC 对照（`claudecode283/extracted/dynamic-workflow-internals.md` §8.3/8.4）：run 是后台任务，工具立即返回、**不轮询**；
+  结束时 `RTn()` 发 `<task-notification>`（`priority:"next"`）唤醒主 agent，`<status>` 只有 completed/failed/killed，
+  另带 `<failures>` + `<diagnostics>`（journal.jsonl，「先读再诊断」）。
+- 修复：
+  - `subagent_wait.py`：新增 `is_workflow_run_id` / `workflow_run_is_terminal` / `workflow_run_turn_status`
+    （`degraded/partial → completed` 终态，raw status 存 `completion_status`）。
+  - `subagent_manager.py`：`SubagentManager(..., workflow_run_resolver=None)` + `_workflow_target_state`；
+    `probe_agent`/`read_agent` 前置解析 runId（命中即返回，**不落盘**，不再造孤儿 state）；默认解析器读
+    `temp/sessions/*/workflows/<runId>/state.json`。
+  - `ga.py`：`do_wait_agent`/`do_read_agent_result` 注入 `agent.workflow_run_resolver`，未知 runId **立即报错**（带 hint，禁止重试同一 id）。
+  - `frontends/ink_bridge.py`：`_bind_agent` 绑 `agent.workflow_run_resolver = self._resolve_workflow_run_info`
+    （store 权威；**launcher 线程已死且非终态 → 报 `stale`** 兜底，避免僵尸 run 永久阻塞）；
+    handoff 补 `failedJobs`（= CC `<failures>`）+ `journalRef` + 「先读 journal 再诊断」提示。
+  - `assets/tools_schema*.json`：`workflow_terminal` 语义 + `workflow` 工具描述补「后台任务/完成唤醒/终态集合」。
+- 测试：`tests/test_workflow_wait_terminal.py`（12 例）；**对真实卡住的 run 复验** `satisfied=True, terminal_targets=[wf_9af…]`；
+  回归 `test_ink_bridge + test_ga_subagent_tools + test_workflow_wait_terminal` → **168 OK**。
+- 文档：`docs/20261013-ga-workflow-等待run终态-对齐CC.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-13）：**已实施**。
+
+### 缺陷 H（2026-10-13）：verify 的 JSON 答案「尾逗号 + 数组误判」→ schema 假失败
+
+- 触发：run `wf_9af50ac554fd43cc9f9d25cc467cd43b` 的 `verify:queens`（agent_6）**答对了**却报
+  `schema_validation_failed: missing required field: file/ok/reason`。
+- 根因：(a) 答案 JSON 带**尾逗号** `, }` → `json.loads` 失败；(b) `parse_json_answer` 兜底「取第一个 `[` 到最后一个 `]`」
+  抓到 reason 里的数组 `[0,4,7,5,2,6,1,3]` → payload 变 `{"result":[...]}` → 缺必需字段。
+- 修复：`workflow_child_agent.py` 新增 `_strip_trailing_commas()` / `loads_json_answer()`（容忍 `}`/`]` 前尾逗号、保留字符串内逗号），
+  `parse_json_answer` 与 `workflow_scheduler._coerce_structured_text_payload` 改用它。
+- 测试：`tests/test_workflow_child_agent.py::StructuredAnswerExtractionTest`（3 例）。
+- 状态（2026-10-13）：**已实施**。
+
+### 缺陷 I（2026-10-13）：verifier 传坏路径直接把 job 打死
+
+- 触发：同一 run 的 `verify:html_text`（agent_7）把**工作区根目录本身**当文件传给 `file_read`，
+  `resolve_workspace_child` 抛 `WorkspacePathError: path must name a workspace child`，
+  `do_file_read` 把 `_get_abs_path` 放在 try 之外 → 异常冒到子代理主循环 → job `failed`。
+- 修复：`ga.py` 顶部 `from workflow_workspace import WorkspacePathError`；`GenericAgentHandler.dispatch` 末尾包
+  `try/except WorkspacePathError` → 返回**可恢复**工具错误，子代理可自我纠正而不是整个 job 失败。
+- 测试：`tests/test_workflow_child_path_recovery.py`（2 例）。
+- 状态（2026-10-13）：**已实施**。

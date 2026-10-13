@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 
 
@@ -93,4 +94,75 @@ def evaluate_wait_condition(states, condition):
         result_refs=result_refs,
         recommended_next_action=next_action,
         reason="wait predicate satisfied" if satisfied else "waiting for remaining targets or persisted results",
-    )
+    )# --- Workflow runs as waitable entities -------------------------------------
+# A dynamic-workflow run (``wf_<32 hex>``) is not a subagent: it has no
+# ``temp/<task_name>/state.json`` and no OS process. Before this module grew the
+# helpers below, ``wait_agent(condition="workflow_terminal", target=<runId>)``
+# silently fell back to the subagent state machine, which synthesised a
+# never-terminal state (``turn_status="running"``, ``process_status="exited"``)
+# and waited out the whole timeout. That is GA defect A.
+#
+# CC evidence (``claudecode283/extracted/dynamic-workflow-internals.md`` 8.3/8.4):
+# a workflow run has exactly one terminal outcome and the main agent is woken by
+# a ``task-notification`` when it lands; there is no polling wait. GA keeps a
+# ``workflow_terminal`` predicate, so it must resolve the run's real status.
+
+
+WORKFLOW_RUN_ID_RE = re.compile(r"^wf_[0-9a-f]{32}$")
+
+# ``degraded``/``partial`` are terminal: the run finished, some jobs failed.
+WORKFLOW_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        "succeeded",
+        "completed",
+        "degraded",
+        "partial",
+        "failed",
+        "cancelled",
+        "canceled",
+        "killed",
+        "interrupted",
+        "closed",
+        "stale",
+    }
+)
+
+_WORKFLOW_RUN_TURN_STATUS = {
+    "draft": "pending",
+    "awaiting_approval": "pending",
+    "queued": "pending",
+    "pending": "pending",
+    "running": "running",
+    "succeeded": "completed",
+    "completed": "completed",
+    "closed": "completed",
+    "cached": "completed",
+    "degraded": "completed",
+    "partial": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "killed": "killed",
+    "interrupted": "interrupted",
+    "stale": "stale",
+}
+
+
+def is_workflow_run_id(value):
+    """True when ``value`` looks like a dynamic-workflow run id (``wf_`` + 32 hex)."""
+    return bool(WORKFLOW_RUN_ID_RE.match(str(value or "").strip().lower()))
+
+
+def workflow_run_is_terminal(status):
+    return str(status or "").strip().lower() in WORKFLOW_TERMINAL_RUN_STATUSES
+
+
+def workflow_run_turn_status(status):
+    """Project a workflow run status onto the subagent ``turn_status`` vocabulary.
+
+    ``degraded`` maps to ``completed`` on purpose: the run is finished and its
+    partial result is authoritative. The raw run status travels separately as
+    ``completion_status`` so a reader can still tell success from partial.
+    """
+    return _WORKFLOW_RUN_TURN_STATUS.get(str(status or "").strip().lower(), "running")
+

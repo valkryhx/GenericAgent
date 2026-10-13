@@ -365,6 +365,64 @@ def _json_answer_candidates(text: str):
                 yield segment[start:end + 1]
 
 
+def _strip_trailing_commas(text: str) -> str:
+    """Drop commas that sit just before a closing brace/bracket, outside strings.
+
+    Models routinely emit an object whose last member is followed by a comma.
+    ``json.loads`` rejects that, and the schema gate then failed an
+    otherwise-correct answer (a verifier reported "missing required field: file"
+    even though it had returned the field). Only structural commas are touched;
+    commas inside string values are preserved. Built with ``chr`` so no literal
+    backslash appears in this source.
+    """
+    backslash = chr(92)
+    quote = chr(34)
+    whitespace = " " + chr(9) + chr(13) + chr(10)
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    length = len(text)
+    for index, char in enumerate(text):
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == backslash:
+                escaped = True
+            elif char == quote:
+                in_string = False
+            continue
+        if char == quote:
+            in_string = True
+            out.append(char)
+            continue
+        if char == ",":
+            look = index + 1
+            while look < length and text[look] in whitespace:
+                look += 1
+            if look < length and text[look] in "}]":
+                continue
+        out.append(char)
+    return "".join(out)
+
+
+def loads_json_answer(text):
+    """``json.loads`` that also tolerates a trailing comma before ``}`` / ``]``."""
+    if not isinstance(text, str):
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        pass
+    repaired = _strip_trailing_commas(text)
+    if repaired != text:
+        try:
+            return json.loads(repaired)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def parse_json_answer(text: str):
     """Return the JSON value a schema-constrained child produced, else ``None``.
 
@@ -376,10 +434,7 @@ def parse_json_answer(text: str):
         candidate = candidate.strip()
         if not candidate:
             continue
-        try:
-            parsed = json.loads(candidate)
-        except (TypeError, ValueError):
-            continue
+        parsed = loads_json_answer(candidate)
         if isinstance(parsed, (dict, list)):
             return parsed
     return None

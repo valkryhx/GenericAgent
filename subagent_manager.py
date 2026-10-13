@@ -15,7 +15,12 @@ from subagent_registry import SubagentRegistry, _default_process_identity
 from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
-from subagent_wait import evaluate_wait_condition
+from subagent_wait import (
+    evaluate_wait_condition,
+    is_workflow_run_id,
+    workflow_run_is_terminal,
+    workflow_run_turn_status,
+)
 
 
 ROUND_END_MARKER = "[ROUND END]"
@@ -234,7 +239,7 @@ class SubagentManager:
     STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
     STARTUP_HANDSHAKE_POLL_S = 0.05
 
-    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None):
+    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None):
         self.root_dir = Path(root_dir or Path(__file__).resolve().parent)
         self.temp_dir = self.root_dir / "temp"
         from subagent_registry import resolve_tree_limits_from_env
@@ -261,6 +266,10 @@ class SubagentManager:
         self.worktree_creator = worktree_creator
         self.worktree_runner = worktree_runner
         self.repo_dir = Path(__file__).resolve().parent
+        # Optional ``run_id -> info dict | None`` resolver so a dynamic-workflow run id can
+        # be waited on like a subagent (GA defect A). The Ink bridge injects the
+        # workflow-store-backed resolver; the default reads the durable run state.json.
+        self.workflow_run_resolver = workflow_run_resolver
 
     AGENT_PATH_ENV = "GA_SUBAGENT_AGENT_PATH"
 
@@ -597,6 +606,9 @@ class SubagentManager:
         )
 
     def read_agent(self, target):
+        workflow_state = self._workflow_target_state(target)
+        if workflow_state is not None:
+            return workflow_state
         task_name = self._task_name_from_target(target)
         task_dir = self.temp_dir / task_name
         state_path = task_dir / "state.json"
@@ -605,6 +617,88 @@ class SubagentManager:
         atomic_write_json(state_path, refreshed)
         self._write_registry_entry(task_name, refreshed, task_dir)
         return self._agent_state_from_dict(task_name, task_dir, refreshed)
+
+    # -- Workflow runs as waitable entities (GA defect A) ------------------
+
+    def _workflow_resolver(self):
+        return self.workflow_run_resolver or self._default_workflow_run_resolver
+
+    def _default_workflow_run_resolver(self, run_id):
+        """Read a run's durable status without importing the workflow store.
+
+        The store keeps runs at ``<root>/<sessionId>/workflows/<runId>/state.json``
+        (``root`` defaults to ``temp/sessions``), which is a stable on-disk
+        contract, so a bare manager can still answer without the bridge.
+        """
+        if not is_workflow_run_id(run_id):
+            return None
+        sessions = self.temp_dir / "sessions"
+        for name in ("state.json", "run.json"):
+            for path in sorted(sessions.glob(f"*/workflows/{run_id}/{name}")):
+                data = read_json_or_none(path) or {}
+                if not data:
+                    continue
+                result_ref = path.parent / "final-result.json"
+                return {
+                    "status": data.get("status"),
+                    "error": data.get("error"),
+                    "artifactDir": str(path.parent),
+                    "updatedAt": data.get("updated_at"),
+                    "resultRef": str(result_ref) if result_ref.exists() else None,
+                }
+        return None
+
+    @staticmethod
+    def _workflow_info_value(info, *names):
+        for name in names:
+            if isinstance(info, dict) and name in info:
+                return info.get(name)
+            if hasattr(info, name):
+                return getattr(info, name)
+        return None
+
+    def _workflow_state_from_info(self, run_id, info):
+        status = self._workflow_info_value(info, "status", "runStatus", "run_status")
+        terminal = workflow_run_is_terminal(status)
+        artifact_dir = self._workflow_info_value(info, "artifactDir", "artifact_dir") or str(self.temp_dir / run_id)
+        result_ref = self._workflow_info_value(info, "resultRef", "result_ref")
+        if not terminal:
+            result_ref = None
+        return AgentState(
+            task_name=run_id,
+            agent_path=f"/root/{run_id}",
+            pid=None,
+            task_dir=str(artifact_dir),
+            turn_status=workflow_run_turn_status(status),
+            # ``exited`` is a *terminal* process status in the wait vocabulary, so a
+            # running run must report ``alive`` or the wait loop treats every poll as
+            # a state change and spins.
+            process_status="exited" if terminal else "alive",
+            round=0,
+            output_path=None,
+            final_output_path=str(result_ref) if result_ref else None,
+            result_status="available" if result_ref else "pending",
+            result_ref=str(result_ref) if result_ref else None,
+            completion_status=str(status) if status else None,
+            updated_at=self._workflow_info_value(info, "updatedAt", "updated_at"),
+            last_error=self._workflow_info_value(info, "error"),
+            artifact_dir=str(artifact_dir),
+            background=True,
+        )
+
+    def _workflow_target_state(self, target):
+        """Return a state for a dynamic-workflow run id, or ``None`` for a plain subagent."""
+        run_id = str(target or "").strip().lower()
+        if not is_workflow_run_id(run_id):
+            return None
+        info = self._workflow_resolver()(run_id)
+        if not info:
+            return None
+        return self._workflow_state_from_info(run_id, info)
+
+    def resolve_workflow_run(self, run_id):
+        """Public probe used by the wait tool to fail fast on an unknown run id."""
+        return self._workflow_target_state(run_id)
 
     def probe_agent(self, target):
         """Same derived status as ``read_agent``, without writing anything.
@@ -615,6 +709,9 @@ class SubagentManager:
         Observing must not write; the write only happens once a wait actually has something to
         report, via read_agent.
         """
+        workflow_state = self._workflow_target_state(target)
+        if workflow_state is not None:
+            return workflow_state
         task_name = self._task_name_from_target(target)
         task_dir = self.temp_dir / task_name
         raw = read_json_or_none(task_dir / "state.json") or {}

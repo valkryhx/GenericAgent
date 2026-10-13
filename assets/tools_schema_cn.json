@@ -102,7 +102,7 @@
     "parameters": {"type": "object", "properties": {
       "target": {"type": "string", "description": "可选 task_name 或 /root/task_name；省略表示等待任意 live agent"},
       "targets": {"type": "array", "items": {"type": "string"}, "description": "可选非空 task_name 列表；优先于 target"},
-      "condition": {"type": "string", "enum": ["event", "turn_terminal", "process_terminal", "all_terminal", "result_available", "workflow_terminal"], "description": "等待谓词：event 只观察更新；terminal 谓词等待生命周期结束；result_available 等待结果引用持久化", "default": "event"},
+      "condition": {"type": "string", "enum": ["event", "turn_terminal", "process_terminal", "all_terminal", "result_available", "workflow_terminal"], "description": "等待谓词：event 只观察更新；terminal 谓词等待生命周期结束；result_available 等待结果引用持久化。workflow_terminal 等待 dynamic workflow 的 runId（wf_ 加 32 位十六进制）进入终态（succeeded/degraded/failed/killed）；未知 runId 直接报错。", "default": "event"},
       "since_event_seq": {"type": "integer", "description": "可选事件游标；只返回该序号之后的子智能体 event-bus 事件"},
       "timeout_seconds": {"type": "number", "description": "等待超时时间（秒）", "default": 30}}}
   }},
@@ -222,7 +222,7 @@
     "type": "function",
     "function": {
       "name": "workflow",
-      "description": "执行一个确定性的 dynamic workflow JavaScript 脚本，用多个子 agent 编排复杂任务。工作流在后台运行：本工具立即返回 runId，完成后会给主 agent 排入一条 <workflow_handoff> 消息。用 /workflows 查看实时进度、详情、停止、保存或重跑工作流。只有用户明确选择多 agent 编排时才调用：用户说了“用 workflow / 跑一个 workflow / fan out agents / 用 subagent 编排”，或调用了要求运行 workflow 的 skill/slash command，或点名某个已保存 workflow。仅仅“这个任务适合 workflow”不算 opt-in。写脚本前先 load_skill 加载 `workflow-authoring`，它是 workflow 编写参考。每个脚本必须以纯字面量 `export const meta = { name, description, phases? }` 作为第一条语句，且必须确定性：不可用 Date.now()、Math.random()、无参 new Date()。新脚本用 `script` 内联传入，不要先写文件；迭代用 `scriptPath`；恢复用 `resumeFromRunId`；跑已保存 workflow 用 `name`。",
+      "description": "执行一个确定性的 dynamic workflow JavaScript 脚本，用多个子 agent 编排复杂任务。工作流在后台运行：本工具立即返回 runId，完成后会给主 agent 排入一条 <workflow_handoff> 消息。用 /workflows 查看实时进度、详情、停止、保存或重跑工作流。只有用户明确选择多 agent 编排时才调用：用户说了“用 workflow / 跑一个 workflow / fan out agents / 用 subagent 编排”，或调用了要求运行 workflow 的 skill/slash command，或点名某个已保存 workflow。仅仅“这个任务适合 workflow”不算 opt-in。写脚本前先 load_skill 加载 `workflow-authoring`，它是 workflow 编写参考。每个脚本必须以纯字面量 `export const meta = { name, description, phases? }` 作为第一条语句，且必须确定性：不可用 Date.now()、Math.random()、无参 new Date()。新脚本用 `script` 内联传入，不要先写文件；迭代用 `scriptPath`；恢复用 `resumeFromRunId`；跑已保存 workflow 用 `name`。workflow run 是后台任务：本工具立即返回 runId，run 结束后会排入一条 <workflow_handoff> 消息唤醒你，因此不必轮询。若确实要阻塞，用 wait_agent 的 condition=workflow_terminal 与 target=<runId>；run 进入终态（succeeded/degraded/failed/killed）即立即返回。",
       "parameters": {
         "type": "object",
         "properties": {
