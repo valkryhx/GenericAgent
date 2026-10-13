@@ -226,3 +226,25 @@ Subprocess execution is blocked by the workspace guard (PermissionError: workflo
 ## 6. 相关文档索引
 
 - `docs/20261009-ga-workflow-stability-stepcode-borrow.md`（guard / 路径 ACL /
+
+---
+
+## 7. 追加缺陷 F（2026-10-13 已定位并修复）
+
+> 与 A~E 不同：F 是**次日之后**（2026-10-13）新测出来的，已当次定位根因并修复，故在此追加记录。
+
+### F. `/new` 后 `workflow` 工具报「workflow tool launcher unavailable」
+
+- **现象**：用户在「最近一次测试」里已 `/workflow on`（opt-in 生效），但主代理调用 `workflow` 工具后返回
+  `workflow tool launcher unavailable`，Turn 3 起主代理放弃编排、改为本地直做。
+- **证据坐标**：
+  - `temp/sessions/session_263293057ec6440999915216adcabd15.jsonl`（2026-10-13 19:14，本 run 未启动）。
+  - 同进程更早：`temp/sessions/session_84c43011de614948af2be86ead5ca0e9.jsonl`（19:13:32，仅 `session_start`）。
+  - 两个 session 文件、相隔约 44s ⇒ 19:14:16 通过 `new_session` 换了一个新 agent。
+- **根因**：`frontends/ink_bridge.py` 的 `workflow_tool_launcher` 只在 `__init__` 绑到 `self.agent`；
+  `new_session()` 用 `self.agent = self.agent_factory()` 换 agent 时**没重新绑定**。
+  模型可见 `workflow` 工具由 handler 从 `parent.workflow_tool_launcher` 取（`ga.py:750`）→ 新 agent 取不到 → 报错。
+- **触发条件**：任何 `/new` / `/reset` 之后的会话。
+- **修复**：新增 `GenericAgentBridge._bind_agent(agent)`（设 `inc_out`/`verbose`/`workflow_tool_launcher`/permission emit），
+  `__init__` 与 `new_session` 均改调它。
+- **回归**：`tests/test_ink_bridge.py::InkBridgeTest::test_new_session_rebinds_workflow_tool_launcher`；全量 discover **1379 OK (skipped=3)**。

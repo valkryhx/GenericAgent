@@ -233,23 +233,11 @@ class GenericAgentBridge:
         # appeared next to agentmain.py. The canonical root is the project's
         # gitignored temp/ directory.
         self.workspace_root = resolve_workspace_root(workspace_root or default_workspace_root())
-        with backend_output_redirect():
-            self.agent = self.agent_factory()
-            self.agent.inc_out = True
-            self.agent.verbose = True
-        # The model-visible workflow tool is dispatched from the agent's handler.
-        # The bridge owns run creation, so expose the launcher on the agent
-        # object that the handler receives as ``parent``.
-        self.agent.workflow_tool_launcher = self.workflow_launch_from_tool
         raw_emit = emit or make_stdout_emitter(sys.stdout)
         self.emit = lambda event: raw_emit(sanitize(event))
-        # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
-        try:
-            runtime = getattr(self.agent, "permission_runtime", None)
-            if runtime is not None and hasattr(runtime, "set_emit"):
-                runtime.set_emit(self.emit)
-        except Exception:
-            pass
+        with backend_output_redirect():
+            self.agent = self.agent_factory()
+        self._bind_agent(self.agent)
         self._task_seq = 0
         # 自动压缩熔断器：连续失败 N 次后本 session 停用自动压缩，避免摘要模型宕机
         # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
@@ -297,6 +285,28 @@ class GenericAgentBridge:
         self._agent_snapshot_fingerprint: str | None = None
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
+
+    def _bind_agent(self, agent: Any) -> None:
+        """Attach the bridge-owned hooks to whichever agent currently runs turns.
+
+        The model-visible ``workflow`` tool is dispatched from the agent's
+        handler, which receives the agent object as ``parent``; the bridge owns
+        run creation, so the launcher must live on the *current* agent. Every
+        path that swaps ``self.agent`` (``__init__`` and ``new_session``) must
+        call this, otherwise ``do_workflow`` degrades to
+        "workflow tool launcher unavailable".
+        """
+        with backend_output_redirect():
+            agent.inc_out = True
+            agent.verbose = True
+        agent.workflow_tool_launcher = self.workflow_launch_from_tool
+        # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
+        try:
+            runtime = getattr(agent, "permission_runtime", None)
+            if runtime is not None and hasattr(runtime, "set_emit"):
+                runtime.set_emit(self.emit)
+        except Exception:
+            pass
 
     def _run_agent(self) -> None:
         with backend_output_redirect():
@@ -397,14 +407,7 @@ class GenericAgentBridge:
             pass
         with backend_output_redirect():
             self.agent = self.agent_factory()
-            self.agent.inc_out = True
-            self.agent.verbose = True
-        try:
-            runtime = getattr(self.agent, "permission_runtime", None)
-            if runtime is not None and hasattr(runtime, "set_emit"):
-                runtime.set_emit(self.emit)
-        except Exception:
-            pass
+        self._bind_agent(self.agent)
         self._task_seq = 0
         self._rewind_snapshots.clear()
         self._consume_thread = None

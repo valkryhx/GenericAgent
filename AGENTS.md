@@ -732,3 +732,22 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   并注明 `FINDINGS_SCHEMA`/`VERDICT_SCHEMA` 由作者定义。
 - 详细文档：`docs/20261013-ga-workflow-verify-提示词方法论-对齐CC.md` §6。
 - 状态（2026-10-13）：**已实施**。
+
+### 缺陷 F（2026-10-13）：`/new` 后 `workflow` 工具报「launcher unavailable」
+
+- 触发：用户「最近一次测试 我开了 workflow on」，却在 Turn 3 看到
+  `The workflow launcher isn't available in this environment (workflow tool launcher unavailable)`。
+- 现象坐标：`temp/sessions/session_263293057ec6440999915216adcabd15.jsonl`（2026-10-13 19:14，workflow 未启动）；
+  同一进程里更早还有 `session_84c43011de614948af2be86ead5ca0e9.jsonl`（19:13:32，仅 `session_start`）——
+  即 19:14:16 又新建了一个 agent（`new_session` 路径）。
+- 根因（已最小复现）：`frontends/ink_bridge.py` 里 `workflow_tool_launcher` 只在 `__init__` 绑定到 `self.agent`；
+  `new_session()` 用 `self.agent = self.agent_factory()` **换掉了 agent，却没有重新绑定 launcher**。
+  而模型可见的 `workflow` 工具由 handler 从 `parent.workflow_tool_launcher` 取（`ga.py:750`），
+  于是新 agent 上取不到 → `do_workflow` 返回 `workflow tool launcher unavailable`。
+  触发条件：**任何 `/new`（或 `/reset`）之后的会话**。
+- 澄清：opt-in（`/workflow on`）与 workflow 工具本身都没问题，坏的是「换 agent 时漏挂 launcher」这一处绑定。
+- 修复：抽出 `GenericAgentBridge._bind_agent(agent)`（设 `inc_out` / `verbose` / `workflow_tool_launcher` / permission emit），
+  `__init__` 与 `new_session` 都改调它，消除「两处换 agent、只一处挂 hook」的漂移。
+- 测试：`tests/test_ink_bridge.py::InkBridgeTest::test_new_session_rebinds_workflow_tool_launcher`（新增）；
+  全量 discover **1379 OK (skipped=3)**。
+- 状态（2026-10-13）：**已实施**。

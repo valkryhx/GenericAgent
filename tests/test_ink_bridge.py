@@ -671,6 +671,20 @@ class InkBridgeTest(unittest.TestCase):
             {"type": "status", "status": "idle"},
         ], new_session_events)
 
+    def test_new_session_rebinds_workflow_tool_launcher(self):
+        # Regression: /new swaps self.agent; the model-visible workflow tool reads
+        # parent.workflow_tool_launcher from the *current* agent, so the bridge must
+        # re-bind it or do_workflow degrades to "workflow tool launcher unavailable".
+        agents = [FakeAgent(), FakeAgent()]
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agents.pop(0), emit=events.append)
+
+        self.assertTrue(callable(getattr(bridge.agent, "workflow_tool_launcher", None)))
+
+        bridge.new_session()
+
+        self.assertTrue(callable(getattr(bridge.agent, "workflow_tool_launcher", None)))
+
     def test_new_session_is_rejected_while_agent_is_running(self):
         agent = FakeAgent()
         events = []
