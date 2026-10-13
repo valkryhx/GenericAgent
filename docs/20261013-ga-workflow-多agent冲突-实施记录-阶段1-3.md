@@ -129,7 +129,10 @@ python -m unittest discover -s tests -p "test_*.py"                             
 
 1. ~~**阶段 4（可选）**：隔离目录 + 允许受控 subprocess，解决缺陷 B/E。~~ → **已完成**，
    见 `docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md`。
-2. **隔离目录清理**：当前不删私有目录（便于排查、避免递归删除风险）；后续可按「unchanged 自动移除」对齐 CC。
+2. ~~**隔离目录清理**~~ → **已完成**（对齐 CC「worktree is auto-removed if unchanged」）：
+   默认无改动删、有改动保留（`GA_WORKFLOW_ISOLATION_KEEP=changed`，另 `always`/`never`）；
+   带守卫的 `_remove_isolated_workspace`；TTL 兜底 `prune_isolated_workspaces()`（`GA_WORKFLOW_ISOLATION_TTL_HOURS`，默认 168h）；
+   见 `docs/20261013-ga-workflow-隔离目录清理方案.md` 与下方 §5.2。
 3. ~~**run 级归属索引 `artifactOwnership` 未按置信度过滤**。~~ → **已完成**，见 §5.1。
 4. **提示词默认值**：GA 目前仍需 workflow 作者显式声明 `writeScope`/`isolation`；未做「未声明则自动隔离」的隐式默认
    （避免在单写者常见场景下引入无谓开销）。
@@ -153,6 +156,27 @@ python -m unittest discover -s tests -p "test_*.py"                             
 
 **测试**：`tests/test_workflow_workspace.py`（3 例：丢 inferred / 保留 lone inferred / 缺省 exact）、
 `tests/test_workflow_scheduler.py::test_ownership_index_drops_inferred_claims_in_a_real_run`。全量 discover **1344 OK (skipped=3)**。
+
+---
+
+### 5.2 补充（隔离目录清理，对齐 CC auto-removed if unchanged）
+
+**动机**：阶段 1-3 的私有目录 `temp/workflow_child_agents/<runId>/<jobId>` 从不删除 → 无限增长。
+
+**CC 证据**（仓库 `D:\git_codes\claudecode283_hack`）：
+- 工具描述 `modules/m1502_0xdb4a986.js`：`the worktree is auto-removed if unchanged`。
+- 实现 `reconstructed/deminified/m0511_0xcd25473.js:855-1013` `getWorktreeResult()`：无改动→移除；有改动→保留 + `Agent worktree kept at: <path>`；边界情况一律保留。
+- 移除动作 `reconstructed/deminified/m0319_0xc61d343.js:80-170`：`git worktree remove --force`，删前有守卫（非主 worktree/非他机/无 reparse point/路径完好）→ fail-closed。
+
+**实现**（`workflow_child_agent.py`）：
+- env `GA_WORKFLOW_ISOLATION_KEEP` = `changed`(默认，对齐 CC) / `always` / `never`；非法值回退 `changed`。
+- `_isolated_workspace_base()` / `_isolated_workspace_path()`；base 可用 env `GA_WORKFLOW_CHILD_AGENTS_ROOT` 覆盖（测试友好）。
+- `_remove_isolated_workspace(job)`：四重守卫（严格在 base 之下、叶子 == jobId、父 == runId、非 symlink、是目录）+ `shutil.rmtree`，失败只吞掉；删后清空 runId 空壳。
+- `_maybe_cleanup_isolated_workspace(job, written)` + `_finalize_isolated_workspace(job, tool_summary)`：在 `_run_job` 成功路径、**产物回收之后**调用；保留时写 `tool_summary["keptWorkspacePath"]`。
+- 模块级 `prune_isolated_workspaces()`（TTL 兜底，默认 168h，`0`=关），`start()` 限频（≥600s）调用；兼容 `<runId>/<jobId>` 与裸 `<jobId>` 两种形态。
+- 非隔离但无共享 workspace 的 fallback 私有目录同样纳入（无产物即删）。
+
+**测试**：`tests/test_workflow_isolation_cleanup.py`（12 例：unchanged 删 / changed 默认留 + `keptWorkspacePath` / `never` / `always` / 非法值回退 / 非隔离不动 / 拒 base 外路径 / 拒 `..` 穿越 / 拒 symlink / TTL 删旧留新 / TTL=0 关 / base env 覆盖）。全量 discover 见提交。
 
 ---
 

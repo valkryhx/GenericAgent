@@ -20,6 +20,120 @@ from workflow_tool_profiles import (
 )
 
 
+_PRUNE_INTERVAL_SECONDS = 600.0
+_last_prune_at = 0.0
+
+
+def _isolated_workspace_base_root() -> Path:
+    """Root directory that holds every private workflow-child workspace.
+
+    Overridable via ``GA_WORKFLOW_CHILD_AGENTS_ROOT`` (tests point it at a tmp
+    dir so they never touch the real repo ``temp/``). This is GA's analogue of
+    Claude Code's ``.claude/worktrees/`` container: one fixed, host-owned root,
+    which is exactly what lets a recursive cleanup be safe.
+    """
+    override = os.environ.get("GA_WORKFLOW_CHILD_AGENTS_ROOT")
+    if override and override.strip():
+        return Path(override).expanduser()
+    return Path(os.path.dirname(os.path.abspath(__file__))) / "temp" / "workflow_child_agents"
+
+
+def _guarded_remove_tree(target: Path, base: Path) -> bool:
+    """Best-effort recursive delete of a private child directory (fail-closed).
+
+    Mirrors the guards Claude Code runs before ``git worktree remove --force``:
+    the target must resolve *strictly* under ``base``, must be a real directory,
+    and must not be a symlink / reparse point (a link could escape the root).
+    Any failure returns ``False`` and never raises.
+    """
+    import shutil
+
+    try:
+        base_resolved = Path(base).resolve()
+        resolved = Path(target).resolve()
+    except OSError:
+        return False
+    if resolved == base_resolved or not resolved.is_relative_to(base_resolved):
+        return False
+    if Path(target).is_symlink():
+        return False
+    if not Path(target).is_dir():
+        return False
+    try:
+        shutil.rmtree(target)
+    except OSError:
+        return False
+    return True
+
+
+def prune_isolated_workspaces(
+    ttl_hours: float | None = None,
+    *,
+    base: Path | None = None,
+    now: float | None = None,
+) -> int:
+    """Remove private child workspaces older than ``ttl_hours`` (GA bound).
+
+    Claude Code only *warns* that kept worktrees grow without bound; GA is a
+    long-running local agent, so it also sweeps stale directories. ``ttl_hours``
+    defaults to ``GA_WORKFLOW_ISOLATION_TTL_HOURS`` (168 = 7 days); ``<= 0``
+    disables pruning. Returns how many directories were removed. Never raises.
+    """
+    if ttl_hours is None:
+        raw = os.environ.get("GA_WORKFLOW_ISOLATION_TTL_HOURS", "168")
+        try:
+            ttl_hours = float(raw)
+        except (TypeError, ValueError):
+            ttl_hours = 168.0
+    if ttl_hours <= 0:
+        return 0
+    root = Path(base) if base is not None else _isolated_workspace_base_root()
+    if not root.is_dir():
+        return 0
+    cutoff = (now if now is not None else time.time()) - float(ttl_hours) * 3600.0
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return 0
+    removed = 0
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        # Two on-disk shapes: <runId>/<jobId> (nested) or a bare <jobId>.
+        try:
+            with os.scandir(entry.path) as scan:
+                children = [child for child in scan if child.is_dir(follow_symlinks=False)]
+        except OSError:
+            children = []
+        if children:
+            # A per-run container: prune each stale job dir, keep fresh ones,
+            # then drop the container if nothing is left inside it.
+            for child in children:
+                try:
+                    if child.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                except OSError:
+                    continue
+                if _guarded_remove_tree(Path(child.path), root):
+                    removed += 1
+            try:
+                Path(entry.path).rmdir()
+            except OSError:
+                pass
+        else:
+            try:
+                if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            if _guarded_remove_tree(Path(entry.path), root):
+                removed += 1
+    return removed
+
+
 class ChildAgentRunner(Protocol):
     def start(self, job) -> None: ...
     def poll(self, job) -> AgentResult | None: ...
@@ -544,6 +658,7 @@ class NativeGPTChildAgentRunner:
         self._telemetry_sink = sink if callable(sink) else None
 
     def start(self, job) -> None:
+        self._maybe_prune_isolated_workspaces()
         executable, is_tool_client, llm_meta = self._new_executable()
         target = getattr(executable, "backend", executable)
         if self.max_tokens is not None and hasattr(target, "max_tokens"):
@@ -662,6 +777,9 @@ class NativeGPTChildAgentRunner:
             transcript_events.append({"type": "assistant", "text": answer})
             if usage:
                 transcript_events.append({"type": "token_usage", "tokenUsage": usage})
+            # CC parity: clean up / keep the private child workspace now that the
+            # tool job has collected its artifacts back into the shared workspace.
+            self._finalize_isolated_workspace(job, tool_summary)
             payload = self._build_success_payload(job, answer)
             result = AgentResult(
                 job_id=job.job_id,
@@ -1000,6 +1118,18 @@ class NativeGPTChildAgentRunner:
             return None
         return str(Path(workspace_path).expanduser().resolve())
 
+    def _isolated_workspace_base(self) -> Path:
+        """Root that holds every private child workspace (env-overridable)."""
+        return _isolated_workspace_base_root()
+
+    def _isolated_workspace_path(self, job) -> Path:
+        """The private directory a job *would* use, without creating it."""
+        run_id = ""
+        if isinstance(job.metadata, dict):
+            run_id = str(job.metadata.get("runId") or "")
+        base = self._isolated_workspace_base()
+        return base / run_id / str(job.job_id) if run_id else base / str(job.job_id)
+
     def _isolated_workspace(self, job) -> str:
         """A private per-job working directory outside the shared workspace.
 
@@ -1008,13 +1138,109 @@ class NativeGPTChildAgentRunner:
         attribute another job's file to it. Keyed by run id *and* job id so two
         concurrent runs that both register ``agent_1`` never share a directory.
         """
+        workspace = self._isolated_workspace_path(job)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return str(workspace.resolve())
+
+    @staticmethod
+    def _isolated_workspace_keep_policy() -> str:
+        """``changed`` (default, CC parity) / ``always`` / ``never``.
+
+        ``changed`` mirrors Claude Code exactly: an unchanged private directory
+        is auto-removed, a changed one is kept. ``always``/``never`` are GA
+        knobs; an unrecognized value falls back to ``changed`` instead of
+        failing a run over a typo.
+        """
+        policy = str(os.environ.get("GA_WORKFLOW_ISOLATION_KEEP", "")).strip().lower()
+        return policy if policy in {"changed", "always", "never"} else "changed"
+
+    def _remove_isolated_workspace(self, job) -> bool:
+        """Delete a job's private directory after a guarded safety check.
+
+        Fail-closed, like Claude Code's guarded ``git worktree remove``: the path
+        is recomputed here (never trusted from a caller), must resolve strictly
+        under the fixed private root, must be named after this run/job, and must
+        be a real directory (not a symlink/reparse point). Cleanup is best-effort
+        and must never change a job's result, so failures are swallowed.
+        """
+        import shutil
+
+        target = self._isolated_workspace_path(job)
+        try:
+            base = self._isolated_workspace_base().resolve()
+            resolved = target.resolve()
+        except OSError:
+            return False
+        # 1) strictly inside the private root (never the root itself).
+        if resolved == base or not resolved.is_relative_to(base):
+            return False
+        # 2) the leaf must be this job's id; the parent must be this run's id.
+        if resolved.name != str(job.job_id):
+            return False
         run_id = ""
         if isinstance(job.metadata, dict):
             run_id = str(job.metadata.get("runId") or "")
-        base = Path(os.path.dirname(os.path.abspath(__file__))) / "temp" / "workflow_child_agents"
-        workspace = base / run_id / str(job.job_id) if run_id else base / str(job.job_id)
-        workspace.mkdir(parents=True, exist_ok=True)
-        return str(workspace.resolve())
+        if run_id:
+            if resolved.parent != base / run_id:
+                return False
+        elif resolved.parent != base:
+            return False
+        # 3) refuse symlinks / reparse points (a link could point outside).
+        if target.is_symlink():
+            return False
+        # 4) only ever delete a directory.
+        if not target.is_dir():
+            return False
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            return False
+        # Tidy an empty per-run parent so no empty shells accumulate.
+        if run_id:
+            try:
+                resolved.parent.rmdir()
+            except OSError:
+                pass
+        return True
+
+    def _maybe_cleanup_isolated_workspace(self, job, written) -> str | None:
+        """Apply the keep policy; return the kept path when the dir survives.
+
+        Aligns with Claude Code's "worktree is auto-removed if unchanged": with
+        the default ``changed`` policy an unchanged private directory is removed
+        and a changed one is kept. Artifacts are already collected back into the
+        shared workspace, so keeping is for inspection -- exactly like CC's
+        ``Agent worktree kept at: <path>`` message.
+        """
+        policy = self._isolated_workspace_keep_policy()
+        if policy == "never" or (not written and policy == "changed"):
+            self._remove_isolated_workspace(job)
+            return None
+        keep_path = self._isolated_workspace_path(job)
+        return str(keep_path.resolve()) if keep_path.is_dir() else None
+
+    def _finalize_isolated_workspace(self, job, tool_summary) -> None:
+        """Clean up (or keep) a job's private workspace once it has settled."""
+        if not self._child_cwd_is_private(job):
+            return
+        written = []
+        if isinstance(tool_summary, dict):
+            written = [str(item) for item in (tool_summary.get("writtenPaths") or [])]
+        kept = self._maybe_cleanup_isolated_workspace(job, written)
+        if kept and isinstance(tool_summary, dict):
+            tool_summary["keptWorkspacePath"] = kept
+
+    def _maybe_prune_isolated_workspaces(self) -> None:
+        """Sweep stale private workspaces, at most once per interval."""
+        global _last_prune_at
+        now = time.time()
+        if now - _last_prune_at < _PRUNE_INTERVAL_SECONDS:
+            return
+        _last_prune_at = now
+        try:
+            prune_isolated_workspaces()
+        except Exception:
+            pass
 
     def _child_cwd(self, job) -> str:
         if self._job_isolation(job) == "worktree":
@@ -1028,6 +1254,13 @@ class NativeGPTChildAgentRunner:
                 raise ValueError("job workspacePath must be an existing directory")
             return str(workspace)
         return self._isolated_workspace(job)
+
+    def _child_cwd_is_private(self, job) -> bool:
+        """True when the job cwd is a private dir (isolation or no workspace)."""
+        if self._job_isolation(job) == "worktree":
+            return True
+        workspace_path = job.metadata.get("workspacePath")
+        return not (isinstance(workspace_path, str) and workspace_path.strip())
 
     def _collect_isolated_artifacts(self, job, isolated_root, written) -> None:
         """Copy an isolated child's outputs back into the shared run workspace.

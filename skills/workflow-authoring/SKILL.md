@@ -130,6 +130,11 @@ GA-supported options:
   workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use it
   ONLY when two or more agents write files in parallel and would otherwise
   overwrite each other. Prefer passing values (via `schema`) over writing files.
+  The private directory follows CC's cleanup rule -- it is auto-removed if
+  unchanged, and a changed one is kept for inspection. Tune with
+  `GA_WORKFLOW_ISOLATION_KEEP` (`changed` default / `always` / `never`); stale
+  directories are swept after `GA_WORKFLOW_ISOLATION_TTL_HOURS` (default 168h,
+  `0` disables). A kept path is reported as `keptWorkspacePath` in the handoff.
 - `bashCommandClamp` — array of command-form rules. Each entry is either a bare
   command prefix (`"python"`, `"git status"`) or Claude Code's
   `Bash(<command or prefix>)` form (`"Bash(git status:*)"`; the `Bash(...)`

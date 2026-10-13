@@ -619,3 +619,35 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - CC 脚本的 `bashCommandClamp` 可原样迁移；resume 缓存键基于归一化值。
 - 测试：`tests.test_workflow_workspace_guard` 新增 `NormalizeBashCommandClampTest`（6 例）+ runtime 2 例；全量 discover **见提交**。
 - 记录：`docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md` §4/§6。
+
+#### 中途调研 2026-10-13：隔离目录清理（对齐 CC「worktree is auto-removed if unchanged」）
+
+- 触发：阶段 1-3 给 GA 加了 `isolation:"worktree"` 私有目录 `temp/workflow_child_agents/<runId>/<jobId>`，
+  但**从不删除**（阶段 1 刻意留白）。用户问「隔离目录清理是要怎么做」。
+- 上游证据（仓库 `D:\git_codes\claudecode283_hack`）：
+  - 工具描述 `claudecode283/modules/m1502_0xdb4a986.js`：`isolation:'worktree' ... the worktree is auto-removed if unchanged`。
+  - 实现 `reconstructed/deminified/m0511_0xcd25473.js:855-1013` 的 `getWorktreeResult()`：**无改动→移除**（outcome `removed`）；
+    **有改动→保留**并打 `Agent worktree kept at: <path>`、返回 `worktreePath/worktreeBranch`；hook-based / 后台 owner 等边界一律保留。
+  - 移除动作 `reconstructed/deminified/m0319_0xc61d343.js:80-170`：`git worktree remove --force`，删前有一串守卫（非主 worktree、非他机、无 reparse point、路径完好）→ fail-closed。
+  - CC 承认保留的 worktree 会无限增长（`m0357_0xc63ba04.js:39113`），只提示用户手动 `git worktree remove/prune`。
+- GA 差异：GA 已把产物**回收**到共享 workspace（`_collect_isolated_artifacts`），私有目录对功能非必需；保留它的价值是排查（如 agent_2 未产出 qipao.html）。
+- 设计（详见方案文档）：
+  - env `GA_WORKFLOW_ISOLATION_KEEP` = `changed`(默认，对齐 CC) / `always` / `never`。
+  - 带守卫的 `_remove_isolated_workspace`（限定 base 之下、名字匹配 runId/jobId、拒 symlink；失败只 warning）。
+  - 清理在 `_collect_isolated_artifacts` **之后**；保留时写 `tool_summary["keptWorkspacePath"]`。
+  - 额外 TTL 兜底 `prune_isolated_workspaces()`（env `GA_WORKFLOW_ISOLATION_TTL_HOURS`，默认 168h，0=关）。
+  - env `GA_WORKFLOW_CHILD_AGENTS_ROOT` 覆盖 base（测试友好）。
+- 详细文档：`docs/20261013-ga-workflow-隔离目录清理方案.md`。
+- 状态（2026-10-13）：**已实施**（见下方实施结果）。
+
+#### 实施结果（2026-10-13，隔离目录清理）
+
+- env：`GA_WORKFLOW_ISOLATION_KEEP`（`changed` 默认，对齐 CC / `always` / `never`）；
+  `GA_WORKFLOW_ISOLATION_TTL_HOURS`（默认 168h，`0`=关）；`GA_WORKFLOW_CHILD_AGENTS_ROOT` 覆盖 base。
+- `workflow_child_agent.py`：`_isolated_workspace_base/_path`、`_remove_isolated_workspace`（四重守卫 fail-closed）、
+  `_maybe_cleanup_isolated_workspace`、`_finalize_isolated_workspace`、`_maybe_prune_isolated_workspaces`；
+  模块级 `prune_isolated_workspaces()`；`start()` 限频（≥600s）清扫。
+- 清理在 `_run_job` 成功路径、产物回收**之后**；保留时写 `tool_summary["keptWorkspacePath"]`（对齐 CC `kept at`）。
+- `skills/workflow-authoring/SKILL.md` 增补隔离目录清理语义 + 三个 env。
+- 测试：`tests/test_workflow_isolation_cleanup.py`（12 例）；全量 discover 见提交。
+- 记录：`docs/20261013-ga-workflow-隔离目录清理方案.md`、`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md` §5.2。
