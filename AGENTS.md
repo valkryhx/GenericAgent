@@ -848,6 +848,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 保留：文本解析 + `_apply_schema_contract` 作为**回退**（弱模型不调工具时仍可用）。
 - 测试：新增 `tests/test_workflow_structured_output.py`（10 例）；`test_workflow_child_agent` 旧措辞断言同步更新；
   回归 `child_agent+structured_output+permissions+scheduler+runtime+integration+capability_preflight+permission_policy` → **277 OK**。
+- 端到端自测（真实 tool loop）：`test_workflow_child_agent.StructuredOutputEndToEndTest`（3 例，真实 `agent_runner_loop` + `StubToolClient`）→ **3 OK**；focused 回归 `child_agent+structured_output+permissions+scheduler+wait_terminal` → **154 OK**。
 - 文档：`docs/20261013-ga-workflow-结构化输出-对齐CC-StructuredOutput工具.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-13）：**已实施**。
