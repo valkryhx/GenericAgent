@@ -751,3 +751,20 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 测试：`tests/test_ink_bridge.py::InkBridgeTest::test_new_session_rebinds_workflow_tool_launcher`（新增）；
   全量 discover **1379 OK (skipped=3)**。
 - 状态（2026-10-13）：**已实施**。
+
+### 缺陷 G（2026-10-13）：隐式默认隔离误伤 verify（`execute` 被当成写者）
+
+- 触发：用户实测「workflow 一直卡住，`verify:html_time` 前有 `!`」。
+- run：`wf_a56df8bc24af434090851d96d31745d1`（`session_419bf66b10924881a5223e66c4bc71e8`）。
+- `!` 语义：`frontends/ink-ui/src/workflowPanel.ts:226` —— `degraded|partial → '!'`（该 job 降级）。
+- 根因：`workflow_tool_profiles.declares_writes` 的写者集合含 `execute`（`WRITE_CAPABILITIES={"file_write","execute"}`），
+  于是 5 个 verify job（`capabilities:["file_read","execute"]`、无 writeScope）也被判为写者 → 隐式隔离 →
+  cwd 落到**私有空目录**（`temp/workflow_child_agents/<runId>/<jobId>/`），看不到 author 在共享 workspace 的产物 →
+  满盘找文件（agent_7 烧 9+ 轮）→ 降级 → run `degraded`。
+- CC 对照：CC 只隔离**写者**；读/验证者读共享（已合并）工作区。GA 的隔离目录是空目录，隔离读者=致盲。
+- 修复：拆 `MUTATING_CAPABILITIES={"file_write","execute"}` 与 `FILE_WRITE_CAPABILITIES={"file_write"}`；
+  `declares_writes` 改用后者 —— **裸 `execute`/`code_run` 不再触发隔离**。author 仍隔离，verify 回到共享工作区。
+- 测试：`tests/test_workflow_implicit_isolation.py`（改 `test_bare_execute_is_not_a_writer`，新增 `test_parallel_verifier_is_not_isolated`）；
+  全量 discover **1381 OK (skipped=3)**。
+- 文档：`docs/20261013-ga-workflow-隐式隔离误伤verify-对齐CC.md`。
+- 状态（2026-10-13）：**已实施**。

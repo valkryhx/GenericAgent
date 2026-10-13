@@ -244,16 +244,29 @@ def format_capability_classes(language: str = "en", separator: str = "、") -> s
     return separator.join(names)
 
 
-WRITE_CAPABILITIES = frozenset({"file_write", "execute"})
+# Capability classes that *may* mutate the workspace. ``execute`` can write
+# files as a side effect, so it belongs here for ownership/attribution.
+MUTATING_CAPABILITIES = frozenset({"file_write", "execute"})
+# The narrower set that qualifies a job as an *isolatable* writer. A bare
+# ``execute``/``code_run`` declaration must NOT isolate a job: a verifier or
+# runner that only reads and executes has to keep the shared workspace cwd so it
+# can see the artifacts its siblings authored. Isolating it into an empty
+# private directory made verifiers hunt the whole filesystem and degrade.
+FILE_WRITE_CAPABILITIES = frozenset({"file_write"})
 
 
 def declares_writes(options: dict | None) -> bool:
-    """True when a job's options say it will mutate the workspace.
+    """True when a job declares an *explicit* file-write surface.
 
-    Single source of truth for "is this a writer?", used by implicit default
-    isolation. A job counts as a writer when it declares a non-empty
-    ``writeScope``/``deliverables``, declares a ``file_write``/``execute``
-    capability, or names a mutating/execute tool in ``requiredTools``.
+    Single source of truth for the implicit default-isolation trigger. A job
+    counts as an isolatable writer only when it declares a non-empty
+    ``writeScope``/``deliverables``, a ``file_write`` capability, or names a
+    file-writing tool in ``requiredTools``.
+
+    A bare ``execute``/``code_run`` declaration deliberately does **not** count.
+    ``execute`` can technically write files, but a reader/runner (a verifier, a
+    test runner) that only executes must stay in the shared workspace to observe
+    its siblings' artifacts; only an explicit file-write surface is isolated.
     """
     options = options if isinstance(options, dict) else {}
     for key in ("writeScope", "deliverables"):
@@ -265,13 +278,13 @@ def declares_writes(options: dict | None) -> bool:
     declared = options.get("capabilities") or []
     if isinstance(declared, str):
         declared = [declared]
-    if any(str(item).strip().lower() in WRITE_CAPABILITIES for item in declared):
+    if any(str(item).strip().lower() in FILE_WRITE_CAPABILITIES for item in declared):
         return True
     required = options.get("requiredTools") or []
     if isinstance(required, str):
         required = [required]
     for tool in required:
-        if tool_capabilities(str(tool)) & WRITE_CAPABILITIES:
+        if tool_capabilities(str(tool)) & FILE_WRITE_CAPABILITIES:
             return True
     return False
 

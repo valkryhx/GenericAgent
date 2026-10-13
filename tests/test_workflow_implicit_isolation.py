@@ -33,13 +33,22 @@ class DeclaresWritesTest(unittest.TestCase):
         self.assertTrue(declares_writes({"deliverables": ["out/report.md"]}))
         self.assertTrue(declares_writes({"writeScope": "a.py"}))
 
-    def test_declared_write_or_execute_capability_makes_a_writer(self):
+    def test_declared_file_write_capability_makes_a_writer(self):
         self.assertTrue(declares_writes({"capabilities": ["file_write"]}))
-        self.assertTrue(declares_writes({"capabilities": ["execute"]}))
 
-    def test_required_mutating_tool_makes_a_writer(self):
+    def test_required_file_write_tool_makes_a_writer(self):
         self.assertTrue(declares_writes({"requiredTools": ["file_write"]}))
-        self.assertTrue(declares_writes({"requiredTools": ["code_run"]}))
+
+    def test_bare_execute_is_not_a_writer(self):
+        # A verifier/runner declares file_read + execute (and code_run) but no
+        # file-write surface; it must NOT be isolated or it cannot see siblings.
+        self.assertFalse(declares_writes({"capabilities": ["execute"]}))
+        self.assertFalse(declares_writes({"requiredTools": ["code_run"]}))
+        self.assertFalse(
+            declares_writes(
+                {"capabilities": ["file_read", "execute"], "requiredTools": ["code_run", "file_read"]}
+            )
+        )
 
     def test_read_only_job_is_not_a_writer(self):
         self.assertFalse(declares_writes({}))
@@ -89,6 +98,18 @@ class ImplicitIsolationSchedulerTest(unittest.TestCase):
     def test_parallel_non_writer_is_not_isolated(self):
         scheduler, _store, _run = self.make_scheduler()
         job = scheduler.register_agent(prompt="research", label="r1", options={}, parallel_batch=3)
+        scheduler.tick()
+        self.assertIsNone(self.isolation(job))
+        self.assertNotIn("isolationReason", job.metadata)
+
+    def test_parallel_verifier_is_not_isolated(self):
+        scheduler, _store, _run = self.make_scheduler()
+        job = scheduler.register_agent(
+            prompt="verify a.py",
+            label="verify:a",
+            options={"capabilities": ["file_read", "execute"], "requiredTools": ["code_run", "file_read"]},
+            parallel_batch=5,
+        )
         scheduler.tick()
         self.assertIsNone(self.isolation(job))
         self.assertNotIn("isolationReason", job.metadata)
