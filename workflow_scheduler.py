@@ -135,6 +135,15 @@ def normalize_agent_options(options: dict | None) -> dict:
     return dict(options)
 
 
+def _normalize_parallel_batch(value) -> int | None:
+    """Coerce a worker-reported parallel() batch size to a positive int (>1)."""
+    try:
+        batch = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return batch if batch and batch > 1 else None
+
+
 def resolve_job_permission_profile(run_profile: str, options: dict | None) -> str:
     """Pick the effective tool policy for one child agent.
 
@@ -257,7 +266,7 @@ class AgentScheduler:
     def _new_job_id(self, call_index: int) -> str:
         return f"{self.job_id_prefix}agent_{call_index + 1}"
 
-    def register_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None) -> WorkflowJob:
+    def register_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, parallel_batch: int | None = None) -> WorkflowJob:
         options = normalize_agent_options(options)
         wave, wave_error = self._resolve_wave(options)
         max_allowed, reason = self._agent_limit(wave=wave)
@@ -281,6 +290,9 @@ class AgentScheduler:
         metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
         metadata["wave"] = wave
         metadata["dependsOn"] = [str(item) for item in (options.get("dependsOn") or []) if str(item)]
+        batch = _normalize_parallel_batch(parallel_batch)
+        if batch:
+            metadata["parallelBatch"] = batch
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
@@ -297,7 +309,7 @@ class AgentScheduler:
         self.store.write_workflow_progress(self.run)
         return job
 
-    def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None) -> WorkflowJob:
+    def register_cached_agent(self, *, prompt: str, label: str | None = None, options: dict | None = None, result: AgentResult, source_run_id: str | None = None, source_job_id: str | None = None, parallel_batch: int | None = None) -> WorkflowJob:
         options = normalize_agent_options(options)
         wave, wave_error = self._resolve_wave(options)
         max_allowed, reason = self._agent_limit(wave=wave)
@@ -324,6 +336,9 @@ class AgentScheduler:
         metadata["retryPolicy"] = normalize_retry_policy(metadata["options"].get("retryPolicy"))
         metadata["wave"] = wave
         metadata["dependsOn"] = [str(item) for item in (options.get("dependsOn") or []) if str(item)]
+        batch = _normalize_parallel_batch(parallel_batch)
+        if batch:
+            metadata["parallelBatch"] = batch
         if workspace_path:
             metadata["workspacePath"] = workspace_path
         job = WorkflowJob(
@@ -521,6 +536,37 @@ class AgentScheduler:
             target = resolve_workspace_child(raw, Path(workspace))
             target.parent.mkdir(parents=True, exist_ok=True)
 
+    def _apply_implicit_isolation(self, job: WorkflowJob) -> None:
+        """Auto-isolate a parallel writer that did not declare ``isolation``.
+
+        Mirrors Claude Code's enforced isolation for parallel/background
+        sessions (m0357_0xc63ba04.js:34126 / 64417): a job that runs alongside
+        siblings and mutates files gets its own private directory even when the
+        author forgot ``isolation:"worktree"``. An explicit ``isolation`` value
+        (``worktree`` or ``none``) always wins, and a serial run is never
+        auto-isolated because there is nothing to collide with.
+        """
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        if (options or {}).get("isolation") is not None:
+            return
+        if int(self.config.max_concurrent or 1) <= 1:
+            return
+        batch = _normalize_parallel_batch(metadata.get("parallelBatch"))
+        if not batch:
+            return
+        from workflow_tool_profiles import declares_writes
+
+        if not declares_writes(options):
+            return
+        metadata["options"] = {**options, "isolation": "worktree"}
+        metadata["isolationReason"] = "implicit-parallel-writer"
+        self._append(
+            "agent_isolated",
+            job,
+            {"reason": "implicit-parallel-writer", "parallelBatch": batch},
+        )
+
     def _start_queued_jobs(self) -> None:
         if self._stopping:
             return
@@ -537,6 +583,7 @@ class AgentScheduler:
             retry_not_before = float(retry_policy.get("retryNotBefore") or 0)
             if retry_not_before > time.time():
                 continue
+            self._apply_implicit_isolation(job)
             job.status = "running"
             retry_policy = normalize_retry_policy(retry_policy)
             retry_policy["attempts"] += 1

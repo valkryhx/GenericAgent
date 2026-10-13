@@ -584,7 +584,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **阶段 3**：`skills/workflow-authoring/SKILL.md` 增补 `isolation` 选项、`Pass values, don't share files` 模式、边界修订。
 - **测试**：`tests.test_workflow_*` 全绿（scheduler/workspace/store 109、child/runtime/integration 等 174、全量 discover 1331 OK）。
 - **实施记录**：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md`。
-- **未做**：阶段 4（受控 subprocess 解缺陷 B/E）、隔离目录清理、`artifactOwnership` 按置信度过滤、隐式默认隔离；`isolation:"remote"` 不做（**复刻时暂时不需要参考 claudecode 云端会话的实现**）。
+- **未做**：阶段 4（受控 subprocess 解缺陷 B/E）、隔离目录清理、`artifactOwnership` 按置信度过滤、隐式默认隔离 → 均已做；`isolation:"remote"` 不做（**复刻时暂时不需要参考 claudecode 云端会话的实现**）。
 
 #### 补充（2026-10-13，阶段 2b：归属索引按置信度过滤）
 
@@ -651,3 +651,39 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - `skills/workflow-authoring/SKILL.md` 增补隔离目录清理语义 + 三个 env。
 - 测试：`tests/test_workflow_isolation_cleanup.py`（12 例）；全量 discover 见提交。
 - 记录：`docs/20261013-ga-workflow-隔离目录清理方案.md`、`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md` §5.2。
+
+#### 中途调研 2026-10-13：隐式默认隔离（implicit default isolation）定义与 GA 落点
+
+- 触发：用户确认「隐式默认隔离可做」。先澄清两个易混概念，再记录 GA 实现落点（先落盘再实施）。
+- **隐式默认隔离** = 隔离**何时**生效：作者不写 `isolation` 时 GA 也自动隔离（仅并行写者场景）。
+  - CC 对照（仓库 `D:\git_codes\claudecode283_hack`）：`m0357_0xc63ba04.js:34126-34127`（未隔离的后台会话改共享 checkout 被**直接拒绝**，
+    可用 `"worktree":{"bgIsolation":"none"}` 关）、`m0357:64417`（EnterWorktree 提示「file edits in the shared checkout are rejected until you isolate」）、
+    `m0464_0xcc31217.js:1864`（内置 agent 不隔离，子代理按需）。
+  - 结论：CC **不是给所有 agent 建 worktree**，而是「**对并行/后台会话强制先隔离**」。GA 类比 = 并发写者默认隔离。
+- **OS 级隔离** = 隔离**靠什么**强制：由 OS/容器内核强制，而非 GA 的进程内 guard。
+  - CC 对照：sandbox-runtime（macOS seatbelt / Linux-WSL bubblewrap / Windows 需 Git Bash，`m0357:134643`、`m0357:40474`）
+    + 文件系统 deny/mask + 网络 allowlist + 凭据遮蔽 + TLS 终止（`m0052_0xbfaae5d.js` schema）。
+  - GA 现状：`workflow_workspace_guard` 是进程内 monkeypatch，**是引导不是安全边界** → 本轮不做。
+- **GA 实现落点（本轮）**：
+  - 并发信号：`parallel()`/`pipeline()` 在 `workflow_js_worker.js` 里用 `Promise.allSettled(items.map(item=>item()))` **同步**发出整批 `agent()` RPC；
+    worker 会带上 `parallel: <batchSize>` 提示（模块级 `parallelGroup`）。
+  - 调度：`workflow_scheduler.register_agent`(@260) 记 `metadata["parallelBatch"]`；`_start_queued_jobs`(@524) 起跑前调 `_apply_implicit_isolation`。
+  - 规则：作者未声明 `isolation` ∧ 是写者（声明 `writeScope`/`deliverables` 或 `capabilities` 含 `file_write`/`execute`）
+    ∧ `parallelBatch >= 2` ∧ `max_concurrent > 1` → 自动 `isolation:"worktree"`，
+    记 `metadata["isolationReason"]="implicit-parallel-writer"` + 事件 `agent_isolated`。
+  - 逃生口：`isolation:"none"`（显式关；runtime 白名单扩到 `{worktree, none}`）。
+  - **竞态事实（关键）**：host 循环是 `tick()`(起跑) → `_next_message()`(读一条)，所以「按瞬时 wave 兄弟数」判定会在 A 起跑之后才读到 B，
+    **不可靠**；因此改用 worker 的 `parallel` 批次提示（确定性）。
+- 详细文档：`docs/20261013-ga-workflow-隐式默认隔离方案.md`。
+- 状态（2026-10-13）：**已实施**。
+
+#### 实施结果（2026-10-13，隐式默认隔离）
+
+- `workflow_js_worker.js`：模块级 `parallelGroup`；`agent()` 的 rpc 带 `parallel: <batchSize>`；`parallel()`/`pipeline()` 在 `items.map` 前后设置/复原。
+- `workflow_runtime.py`：agent RPC 读 `params["parallel"]` → `register_agent(..., parallel_batch=...)`；`isolation` 白名单扩到 `{worktree, none}`。
+- `workflow_scheduler.py`：`register_agent`/`register_cached_agent` 记 `metadata["parallelBatch"]`；`_apply_implicit_isolation(job)` 在 `_start_queued_jobs` 起跑前调用。
+  规则：未声明 `isolation` ∧ 写者（`declares_writes`）∧ `parallelBatch>=2` ∧ `max_concurrent>1` → `isolation:"worktree"` + `metadata["isolationReason"]="implicit-parallel-writer"` + 事件 `agent_isolated`。
+- `workflow_tool_profiles.py`：新增 `declares_writes(options)`（单一实现）。
+- `skills/workflow-authoring/SKILL.md`：文档化隐式默认隔离 + `isolation:"none"`。
+- 测试：`tests/test_workflow_implicit_isolation.py`（13 例，含 2 例真跑 node worker 的端到端）；全量 discover 见提交。
+- 记录：`docs/20261013-ga-workflow-隐式默认隔离方案.md`。

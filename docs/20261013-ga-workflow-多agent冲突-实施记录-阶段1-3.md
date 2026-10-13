@@ -134,8 +134,9 @@ python -m unittest discover -s tests -p "test_*.py"                             
    带守卫的 `_remove_isolated_workspace`；TTL 兜底 `prune_isolated_workspaces()`（`GA_WORKFLOW_ISOLATION_TTL_HOURS`，默认 168h）；
    见 `docs/20261013-ga-workflow-隔离目录清理方案.md` 与下方 §5.2。
 3. ~~**run 级归属索引 `artifactOwnership` 未按置信度过滤**。~~ → **已完成**，见 §5.1。
-4. **提示词默认值**：GA 目前仍需 workflow 作者显式声明 `writeScope`/`isolation`；未做「未声明则自动隔离」的隐式默认
-   （避免在单写者常见场景下引入无谓开销）。
+4. ~~**提示词默认值 / 隐式默认隔离**~~ → **已完成**（对齐 CC「并行/后台会话强制先隔离」）：
+   未声明 `isolation` 的**并行写者**（`parallel()`/`pipeline()` 批次 + 声明 `writeScope`/`deliverables`/写能力）自动 `isolation:"worktree"`；
+   逃生口 `isolation:"none"`；`max_concurrent=1` 不隔离。见 `docs/20261013-ga-workflow-隐式默认隔离方案.md`。
 5. **CC 云端会话**：`isolation:"remote"` 明确不做，**复刻时暂时不需要参考 claudecode 云端会话的实现**。
 
 ### 5.1 补充（阶段 2b）：归属索引按置信度过滤

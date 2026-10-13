@@ -124,12 +124,19 @@ GA-supported options:
 - `requiredTools` — array of concrete GA tool names the agent should use.
 - `dependsOn` — array of upstream labels.
 - `retryPolicy` — `{ maxAttempts: 1..3, backoffMs, retryableErrors }`.
-- `isolation` — `"worktree"` only. Runs the child in its own private directory
-  instead of the shared workspace, so parallel writers cannot collide. The
-  child's outputs are collected back into the shared workspace at their
-  workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use it
-  ONLY when two or more agents write files in parallel and would otherwise
+- `isolation` — `"worktree"` or `"none"`. `"worktree"` runs the child in its own
+  private directory instead of the shared workspace, so parallel writers cannot
+  collide. The child's outputs are collected back into the shared workspace at
+  their workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use
+  it ONLY when two or more agents write files in parallel and would otherwise
   overwrite each other. Prefer passing values (via `schema`) over writing files.
+  **Implicit default isolation:** you usually do NOT need to write this. A job
+  spawned from `parallel()`/`pipeline()` that mutates files (declares
+  `writeScope`/`deliverables`, or a `file_write`/`execute` capability) is
+  auto-isolated when the run allows concurrency, mirroring Claude Code's
+  enforced isolation for parallel sessions. Set `isolation: "none"` to opt out
+  when you know the shared workspace is safe for that job (CC's
+  `bgIsolation: "none"`); set `isolation: "worktree"` to force it.
   The private directory follows CC's cleanup rule -- it is auto-removed if
   unchanged, and a changed one is kept for inspection. Tune with
   `GA_WORKFLOW_ISOLATION_KEEP` (`changed` default / `always` / `never`); stale
@@ -290,7 +297,8 @@ Upstream reference: `D:\git_codes\claudecode283_hack\claudecode283\extracted\wor
 (Claude Code 2.1.283). This file localizes the parts that GA implements. GA
 supports CC's one-level `workflow()` nested API (a nested workflow cannot itself
 call `workflow()`). GA supports `isolation: "worktree"` (per-agent private
-directory) and `bashCommandClamp` (per-agent subprocess command scoping; see §4),
+directory), implicit default isolation for parallel writers, and `bashCommandClamp`
+(per-agent subprocess command scoping; see §4),
 and does not implement `budget`, `model`, `effort`, `agentType`, or
 `disallowedTools`. GA's
 `runPythonUnittest` and `repairAndRetest` are GA-specific additions.

@@ -8,6 +8,11 @@ const { parseWorkflowScript } = require('./workflow_script_contract.js');
 let nextRpcId = 1;
 const pending = new Map();
 let nextRepairGroup = 1;
+// Set while parallel()/pipeline() synchronously emit their batch of agent()
+// calls, so each rpc can carry the batch size. GA uses it for implicit
+// default isolation (a parallel writer is auto-isolated); see
+// docs/20261013-ga-workflow-隐式默认隔离方案.md.
+let parallelGroup = null;
 
 function emit(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
@@ -89,7 +94,8 @@ async function executeScript(script, args, options) {
   }
   const sandbox = {
     args,
-    agent: (prompt, options) => rpc('agent', { prompt, options: normalizeAgentOptions(options) }),
+    agent: (prompt, options) =>
+      rpc('agent', { prompt, options: normalizeAgentOptions(options), parallel: parallelGroup }),
     workflow: (nameOrRef, workflowArgs) => {
       const isPlainObject =
         nameOrRef !== null &&
@@ -148,15 +154,22 @@ async function executeScript(script, args, options) {
           );
         }
       }
-      const settled = await Promise.allSettled(
-        items.map((item) => {
-          try {
-            return item();
-          } catch (error) {
-            return Promise.reject(error);
-          }
-        }),
-      );
+      const previousGroup = parallelGroup;
+      parallelGroup = items.length;
+      let settled;
+      try {
+        settled = await Promise.allSettled(
+          items.map((item) => {
+            try {
+              return item();
+            } catch (error) {
+              return Promise.reject(error);
+            }
+          }),
+        );
+      } finally {
+        parallelGroup = previousGroup;
+      }
       return settled.map((entry) => (entry.status === 'fulfilled' ? entry.value : null));
     },
     pipeline: async (items, ...stages) => {
@@ -169,16 +182,23 @@ async function executeScript(script, args, options) {
         }
       }
       if (items.length === 0) return [];
-      const settled = await Promise.allSettled(
-        items.map(async (item, index) => {
-          let value = await item;
-          for (const stage of stages) {
-            if (value === null) break;
-            value = await stage(value, item, index);
-          }
-          return value;
-        }),
-      );
+      const previousGroup = parallelGroup;
+      parallelGroup = items.length;
+      let settled;
+      try {
+        settled = await Promise.allSettled(
+          items.map(async (item, index) => {
+            let value = await item;
+            for (const stage of stages) {
+              if (value === null) break;
+              value = await stage(value, item, index);
+            }
+            return value;
+          }),
+        );
+      } finally {
+        parallelGroup = previousGroup;
+      }
       return settled.map((entry) => (entry.status === 'fulfilled' ? entry.value : null));
     },
     console: {

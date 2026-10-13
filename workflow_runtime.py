@@ -479,13 +479,26 @@ class WorkflowRuntime:
         isolation = options.get("isolation")
         if isolation is not None:
             normalized_isolation = str(isolation).strip().lower()
-            if normalized_isolation != "worktree":
-                # Align with Claude Code: agent({isolation}) only accepts
-                # "worktree" in this build; "remote"/anything else is rejected.
+            if normalized_isolation == "worktree":
+                options = {**options, "isolation": "worktree"}
+            elif normalized_isolation == "none":
+                # Explicit opt-out of implicit default isolation. Mirrors
+                # Claude Code's `"worktree": {"bgIsolation": "none"}`: the
+                # author asserts the shared workspace is safe for this job.
+                options = {**options, "isolation": "none"}
+            else:
+                # Align with Claude Code: "remote"/anything else is rejected.
                 raise RuntimeError(
                     "agent({isolation:'" + str(isolation) + "'}) is not available in this build"
                 )
-            options = {**options, "isolation": "worktree"}
+        # The worker marks agent() calls made inside parallel()/pipeline() with
+        # the batch size; the scheduler uses it to implicitly isolate parallel
+        # writers (see docs/20261013-ga-workflow-隐式默认隔离方案.md).
+        parallel_batch = params.get("parallel")
+        try:
+            parallel_batch = int(parallel_batch) if parallel_batch is not None else None
+        except (TypeError, ValueError):
+            parallel_batch = None
         clamp = options.get("bashCommandClamp")
         if clamp is not None:
             # Mirror CC: validate and normalize the clamp at spawn time. CC's
@@ -552,11 +565,12 @@ class WorkflowRuntime:
                 result=cached["result"],
                 source_run_id=cached.get("sourceRunId"),
                 source_job_id=cached.get("sourceJobId"),
+                parallel_batch=parallel_batch,
             )
             if process is not None:
                 self._send(process, {"type": "rpc_result", "id": int(message.get("id")), "ok": True, "value": scheduler.downstream_result(job)})
             return
-        job = scheduler.register_agent(prompt=prompt, label=label, options=options)
+        job = scheduler.register_agent(prompt=prompt, label=label, options=options, parallel_batch=parallel_batch)
         pending_rpc_jobs[int(message.get("id"))] = job
 
     def _handle_nested_workflow_rpc(

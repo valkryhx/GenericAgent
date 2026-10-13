@@ -244,6 +244,38 @@ def format_capability_classes(language: str = "en", separator: str = "、") -> s
     return separator.join(names)
 
 
+WRITE_CAPABILITIES = frozenset({"file_write", "execute"})
+
+
+def declares_writes(options: dict | None) -> bool:
+    """True when a job's options say it will mutate the workspace.
+
+    Single source of truth for "is this a writer?", used by implicit default
+    isolation. A job counts as a writer when it declares a non-empty
+    ``writeScope``/``deliverables``, declares a ``file_write``/``execute``
+    capability, or names a mutating/execute tool in ``requiredTools``.
+    """
+    options = options if isinstance(options, dict) else {}
+    for key in ("writeScope", "deliverables"):
+        raw = options.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return True
+        if isinstance(raw, (list, tuple, set, frozenset)) and any(str(item).strip() for item in raw):
+            return True
+    declared = options.get("capabilities") or []
+    if isinstance(declared, str):
+        declared = [declared]
+    if any(str(item).strip().lower() in WRITE_CAPABILITIES for item in declared):
+        return True
+    required = options.get("requiredTools") or []
+    if isinstance(required, str):
+        required = [required]
+    for tool in required:
+        if tool_capabilities(str(tool)) & WRITE_CAPABILITIES:
+            return True
+    return False
+
+
 def effective_tool_profile(options: dict | None) -> tuple[str, frozenset[str] | None]:
     """Resolve ``(profile_name, denied_capabilities)`` for one agent packet.
 
