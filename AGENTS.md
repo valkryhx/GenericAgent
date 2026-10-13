@@ -586,6 +586,15 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **实施记录**：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md`。
 - **未做**：阶段 4（受控 subprocess 解缺陷 B/E）、隔离目录清理、`artifactOwnership` 按置信度过滤、隐式默认隔离；`isolation:"remote"` 不做（**复刻时暂时不需要参考 claudecode 云端会话的实现**）。
 
+#### 补充（2026-10-13，阶段 2b：归属索引按置信度过滤）
+
+- 动机：阶段 2 让**冲突判定**忽略 `inferred`，但 run 级 `artifactOwnership` 仍收录全部 `observedArtifacts` → handoff 仍误标「谁写的」。
+- 设计（不误删正确归属）：路径**同时有可信归属**（exact/declared）时才丢弃其 `inferred`；**只有 inferred 的路径保留**（单写者未声明的常见场景不误删）。
+- 实现：新增 `workflow_workspace.artifact_ownership_index(jobs)` 为唯一实现；`workflow_store.build_artifact_ownership_index`、
+  `workflow_scheduler._artifact_owners_for`、`frontends/ink_bridge._workflow_job_artifact_owners` 均改调它。旧数据无 confidence → 默认 `exact`，向后兼容。
+- 测试：workspace 3 例 + scheduler 1 例；全量 discover **1344 OK (skipped=3)**。
+- 记录：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md` §5.1。
+
 #### 实施结果（2026-10-13，阶段 4 / 缺陷 B·E：受控 subprocess）
 
 - 触发：缺陷 B（guard 全禁 subprocess）与 E（verify 被迫 runpy）。CC 的做法是 `bashCommandClamp`

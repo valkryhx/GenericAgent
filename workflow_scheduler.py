@@ -14,6 +14,7 @@ from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_wor
 from workflow_store import WorkflowStore, build_artifact_ownership_index
 from workflow_workspace import (
     WorkspacePathError,
+    artifact_ownership_index,
     normalize_workspace_relative,
     observed_artifact_paths,
     resolve_workspace_child,
@@ -748,14 +749,7 @@ class AgentScheduler:
         diff time, so this only unions it across the run -- no tool-name
         inference and no new bookkeeping.
         """
-        owners: dict[str, list[str]] = {}
-        for item in self.run.jobs:
-            metadata = item.metadata if isinstance(item.metadata, dict) else {}
-            for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
-                writer = entry.get("writer") or item.job_id
-                bucket = owners.setdefault(entry["path"], [])
-                if writer not in bucket:
-                    bucket.append(writer)
+        owners = artifact_ownership_index(self.run.jobs)
         return {ref: owners[ref] for ref in refs if ref in owners}
 
 

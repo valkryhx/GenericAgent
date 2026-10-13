@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from workflow_workspace import (
     WorkspacePathError,
+    artifact_ownership_index,
     create_run_workspace,
     observed_artifact_owners,
     observed_artifact_paths,
@@ -174,6 +175,34 @@ class ObservedArtifactShapeTest(unittest.TestCase):
             entries,
         )
         self.assertEqual(["a.md", "b.md"], observed_artifact_paths(entries))
+
+    def test_ownership_index_drops_inferred_claims_when_a_trusted_writer_exists(self):
+        # A concurrent sibling's file caught in a shared-workspace diff is
+        # "inferred"; once a trusted writer claims the path, the inferred claim
+        # is dropped so the index does not mislabel the owner.
+        from types import SimpleNamespace
+
+        jobs = [
+            SimpleNamespace(job_id="agent_1", metadata={"observedArtifacts": [{"path": "a.py", "writer": "author:a"}], "artifactConfidence": {"a.py": "declared"}}),
+            SimpleNamespace(job_id="agent_2", metadata={"observedArtifacts": [{"path": "a.py", "writer": "author:b"}], "artifactConfidence": {"a.py": "inferred"}}),
+        ]
+        self.assertEqual({"a.py": ["author:a"]}, artifact_ownership_index(jobs))
+
+    def test_ownership_index_keeps_a_lone_inferred_writer(self):
+        from types import SimpleNamespace
+
+        jobs = [
+            SimpleNamespace(job_id="agent_1", metadata={"observedArtifacts": [{"path": "b.py", "writer": "author:b"}], "artifactConfidence": {"b.py": "inferred"}}),
+        ]
+        self.assertEqual({"b.py": ["author:b"]}, artifact_ownership_index(jobs))
+
+    def test_ownership_index_defaults_missing_confidence_to_exact(self):
+        from types import SimpleNamespace
+
+        jobs = [
+            SimpleNamespace(job_id="agent_1", metadata={"observedArtifacts": [{"path": "c.py", "writer": "w"}]}),
+        ]
+        self.assertEqual({"c.py": ["w"]}, artifact_ownership_index(jobs))
 
     def test_owners_map_lists_every_writer_for_a_shared_path(self):
         owners = observed_artifact_owners([

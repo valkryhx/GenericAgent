@@ -33,7 +33,7 @@ def copy_token_usage(value) -> dict:
     return copy.deepcopy(value) if isinstance(value, dict) else {}
 
 
-from workflow_workspace import workspace_writes_with_writer
+from workflow_workspace import artifact_ownership_index, workspace_writes_with_writer
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
@@ -47,17 +47,7 @@ def build_artifact_ownership_index(run: WorkflowRun) -> dict[str, list[str]]:
     It never re-infers a writer from a tool name: the writer is recorded once,
     at workspace-diff time, and this only unions it across the run.
     """
-    index: dict[str, list[str]] = {}
-    for job in getattr(run, "jobs", None) or []:
-        metadata = job.metadata if isinstance(job.metadata, dict) else {}
-        for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
-            writer = entry.get("writer") or getattr(job, "job_id", "") or ""
-            if not writer:
-                continue
-            bucket = index.setdefault(entry["path"], [])
-            if writer not in bucket:
-                bucket.append(writer)
-    return index
+    return artifact_ownership_index(getattr(run, "jobs", None) or [])
 
 
 # A named workflow is the GA analogue of CC's "save as named workflow"

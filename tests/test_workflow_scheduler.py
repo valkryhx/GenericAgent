@@ -433,6 +433,25 @@ class WorkflowSchedulerTest(unittest.TestCase):
             self.assertEqual("exact", loaded.metadata["workflowIssues"][0]["confidence"])
             self.assertNotIn("unverifiedWrites", loaded.metadata)
 
+    def test_ownership_index_drops_inferred_claims_in_a_real_run(self):
+        """The run ownership index keeps the trusted writer and drops the
+        inferred one, so the handoff does not mislabel a sibling's file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            scheduler, store, run = self.make_scheduler(run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.args = {"workspacePath": str(workspace)}
+            declarer = scheduler.register_agent(prompt="a", label="Declared", options={"writeScope": ["shared.md"]})
+            other = scheduler.register_agent(prompt="b", label="Undeclared")
+
+            for job in (declarer, other):
+                scheduler._record_observed_artifacts(job, AgentResult(
+                    job_id=job.job_id, status="succeeded", payload={}, tool_summary={"writtenPaths": ["shared.md"]},
+                ))
+
+            loaded = store.load_run(run.run_id)
+            self.assertEqual({"shared.md": ["Declared"]}, loaded.metadata["artifactOwnership"])
+            self.assertNotIn("artifactCollisions", loaded.metadata or {})
+
     def test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision(self):
         """Verifying by executing the artifact must not degrade the run.
 

@@ -174,6 +174,46 @@ def observed_artifact_owners(entries) -> dict[str, list[str]]:
             bucket.append(writer)
     return owners
 
+
+def artifact_ownership_index(jobs) -> dict[str, list[str]]:
+    """Union per-job diff-time writers into a run-level ``path -> writers`` index.
+
+    Attribution confidence decides which claims survive. A job records the
+    confidence of each observed path in ``metadata["artifactConfidence"]``
+    (``exact`` / ``declared`` / ``inferred``). When a path has at least one
+    *trusted* writer (an isolated or declared claim), the low-confidence
+    ``inferred`` claims for that path are dropped: they are usually a concurrent
+    sibling's file caught in this job's shared-workspace diff. When a path has
+    only inferred claims, they are kept -- a lone inferred writer is the best
+    available guess (the real but undeclared writer).
+
+    Legacy entries with no recorded confidence default to ``exact`` (trusted),
+    so old run state keeps loading unchanged.
+    """
+    order: list[str] = []
+    trusted: dict[str, list[str]] = {}
+    inferred: dict[str, list[str]] = {}
+
+    def add(bucket: dict[str, list[str]], path: str, writer: str) -> None:
+        if path not in order:
+            order.append(path)
+        writers = bucket.setdefault(path, [])
+        if writer and writer not in writers:
+            writers.append(writer)
+
+    for job in jobs or []:
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        confidence_map = metadata.get("artifactConfidence") if isinstance(metadata.get("artifactConfidence"), dict) else {}
+        job_id = str(getattr(job, "job_id", "") or "")
+        for entry in workspace_writes_with_writer(metadata.get("observedArtifacts")):
+            writer = entry.get("writer") or job_id
+            if not writer:
+                continue
+            confidence = str(confidence_map.get(entry["path"]) or "exact").strip() or "exact"
+            add(inferred if confidence == "inferred" else trusted, entry["path"], writer)
+
+    return {path: (trusted.get(path) or inferred.get(path) or []) for path in order}
+
 def _is_absolute_like(raw: str) -> bool:
     value = str(raw).strip().replace("\\", "/")
     return bool(value.startswith("/") or value.startswith("//") or (len(value) >= 2 and value[1] == ":"))

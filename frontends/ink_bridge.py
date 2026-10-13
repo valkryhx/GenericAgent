@@ -29,6 +29,7 @@ from sensitive_redaction import sanitize, redact_sensitive_text
 from workflow_store import build_artifact_ownership_index
 from workflow_workspace import (
     WorkspacePathError,
+    artifact_ownership_index,
     default_workspace_root,
     observed_artifact_paths,
     resolve_workspace_child,
@@ -1632,21 +1633,15 @@ class GenericAgentBridge:
         the same information for jobs that ran in a child process and therefore
         kept no local ``handoff`` dict.
         """
-        owners: dict[str, list[str]] = {}
-        recorded = (run.metadata or {}).get("artifactOwnership")
-        if isinstance(recorded, dict):
-            for ref, writers in recorded.items():
-                if isinstance(writers, (list, tuple)):
-                    owners[str(ref)] = [str(writer) for writer in writers]
-        for job in run.jobs or []:
-            metadata = job.metadata if isinstance(job.metadata, dict) else {}
-            for entry in workspace_writes_with_writer(metadata.get('observedArtifacts')):
-                writer = entry.get('writer') or str(getattr(job, 'job_id', '') or '')
-                if not writer:
-                    continue
-                bucket = owners.setdefault(entry['path'], [])
-                if writer not in bucket:
-                    bucket.append(writer)
+        owners = artifact_ownership_index(run.jobs or [])
+        if not owners:
+            recorded = (run.metadata or {}).get("artifactOwnership")
+            if isinstance(recorded, dict):
+                owners = {
+                    str(ref): [str(writer) for writer in writers]
+                    for ref, writers in recorded.items()
+                    if isinstance(writers, (list, tuple))
+                }
         return {ref: owners[ref] for ref in refs if ref in owners}
 
 

@@ -127,13 +127,32 @@ python -m unittest discover -s tests -p "test_*.py"                             
 
 ## 5. 未做 / 后续（不属本批范围）
 
-1. **阶段 4（可选）**：隔离目录 + 允许受控 subprocess，解决缺陷 B/E（guard 全禁 subprocess 导致 verify 只能 `runpy`）。
+1. ~~**阶段 4（可选）**：隔离目录 + 允许受控 subprocess，解决缺陷 B/E。~~ → **已完成**，
+   见 `docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md`。
 2. **隔离目录清理**：当前不删私有目录（便于排查、避免递归删除风险）；后续可按「unchanged 自动移除」对齐 CC。
-3. **run 级归属索引 `artifactOwnership` 未按置信度过滤**：仍收录全部 `observedArtifacts`（保证单写者 handoff 质量），
-   只在**冲突判定**处使用置信度。若后续要让 handoff 也忽略 `inferred`，需评估下游消费者（`ink_bridge.py` 等）。
+3. ~~**run 级归属索引 `artifactOwnership` 未按置信度过滤**。~~ → **已完成**，见 §5.1。
 4. **提示词默认值**：GA 目前仍需 workflow 作者显式声明 `writeScope`/`isolation`；未做「未声明则自动隔离」的隐式默认
    （避免在单写者常见场景下引入无谓开销）。
 5. **CC 云端会话**：`isolation:"remote"` 明确不做，**复刻时暂时不需要参考 claudecode 云端会话的实现**。
+
+### 5.1 补充（阶段 2b）：归属索引按置信度过滤
+
+**动机**：阶段 2 让**冲突判定**忽略了 `inferred`，但 run 级归属索引 `artifactOwnership` 仍收录全部
+`observedArtifacts`——于是 handoff 仍会宣称「`newton_method.py` 由 `author:eight_queens` 写」（它没写）。修冲突解决了
+「假 degraded」，但「谁写的」标签仍误导。
+
+**设计（避免误删正确归属）**：不「一律删 inferred」，而是——当一个路径**同时有可信归属**（exact/declared）时，
+才丢弃该路径上的 `inferred` 声明；**只有 inferred 的路径保留**（单个 inferred 很可能就是真实但未声明的写者）。
+- wf_3332：`newton_method.py` 的真实作者声明过（declared）→ 只丢 `eight_queens` 等多余 inferred，保住正确作者。
+- 单写者未声明：只有一个 inferred → 保留，不误删。
+
+**实现**：新增 `workflow_workspace.artifact_ownership_index(jobs)` 作为唯一实现；三处消费者改为调用它——
+`workflow_store.build_artifact_ownership_index`（持久化索引 + progress）、`workflow_scheduler._artifact_owners_for`
+（job handoff）、`frontends/ink_bridge._workflow_job_artifact_owners`（Ink handoff）。旧数据无 confidence → 默认
+`exact`（可信），向后兼容。
+
+**测试**：`tests/test_workflow_workspace.py`（3 例：丢 inferred / 保留 lone inferred / 缺省 exact）、
+`tests/test_workflow_scheduler.py::test_ownership_index_drops_inferred_claims_in_a_real_run`。全量 discover **1344 OK (skipped=3)**。
 
 ---
 
