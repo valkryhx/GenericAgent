@@ -796,6 +796,11 @@ class NativeGPTChildAgentRunner:
             "permissionPolicyVersion": version,
         }
         handler.workflow_permission_event_callback = lambda event: transcript_events.append(copy.deepcopy(event))
+        # Mirror CC's per-spawn bashCommandClamp: the guard installed by code_run
+        # scopes this child's subprocess commands to these declared forms.
+        bash_clamp = (job.metadata.get("options") or {}).get("bashCommandClamp")
+        if isinstance(bash_clamp, list):
+            handler.workflow_bash_clamp = [str(item) for item in bash_clamp if str(item).strip()]
 
         def before(tool_name, args, response):
             transcript_events.append({

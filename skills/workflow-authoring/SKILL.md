@@ -8,9 +8,9 @@ when_to_use: Before writing or editing a dynamic workflow script, or when the us
 
 This skill is the GA-localized version of Claude Code 2.1.283's
 `workflow-authoring-reference.md`. It describes **only the APIs GA actually
-supports**. GA supports `isolation: "worktree"` (see §4). Do not invent other
-CC-only fields such as `budget`, `model`, `effort`, `agentType`,
-`disallowedTools`, or `bashCommandClamp`, and do not use `isolation: "remote"`
+supports**. GA supports `isolation: "worktree"` and `bashCommandClamp` (see
+§4). Do not invent other CC-only fields such as `budget`, `model`, `effort`,
+`agentType`, or `disallowedTools`, and do not use `isolation: "remote"`
 (cloud/session isolation is out of scope).
 
 ## 1. When to call the `workflow` tool
@@ -130,6 +130,13 @@ GA-supported options:
   workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use it
   ONLY when two or more agents write files in parallel and would otherwise
   overwrite each other. Prefer passing values (via `schema`) over writing files.
+- `bashCommandClamp` — array of command-prefix strings, e.g.
+  `["python", "pytest", "git status"]`. When set, the child's `code_run`
+  subprocesses are restricted to commands whose leading tokens match one of the
+  prefixes; a command with shell structure the clamp cannot verify (substitution,
+  control flow, redirection) is denied, and a malformed clamp refuses the spawn.
+  Mirrors CC's `agent({bashCommandClamp})`. Use it to let a verify agent actually
+  run the artifacts without opening up arbitrary shell.
 
 Use GA tool names in prompts, not CC names: `file_read`, `file_write`,
 `file_patch`, `code_run`, `web_scan`, `web_execute_js`, `load_skill`,
@@ -276,8 +283,9 @@ Upstream reference: `D:\git_codes\claudecode283_hack\claudecode283\extracted\wor
 (Claude Code 2.1.283). This file localizes the parts that GA implements. GA
 supports CC's one-level `workflow()` nested API (a nested workflow cannot itself
 call `workflow()`). GA supports `isolation: "worktree"` (per-agent private
-directory; see §4) and does not implement `budget`, `model`, `effort`,
-`agentType`, `disallowedTools`, or `bashCommandClamp`. GA's
+directory) and `bashCommandClamp` (per-agent subprocess command scoping; see §4),
+and does not implement `budget`, `model`, `effort`, `agentType`, or
+`disallowedTools`. GA's
 `runPythonUnittest` and `repairAndRetest` are GA-specific additions.
 Cloud/session isolation (`isolation: "remote"`) is out of scope:
 **复刻时暂时不需要参考 claudecode 云端会话的实现**.

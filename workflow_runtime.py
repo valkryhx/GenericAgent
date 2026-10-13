@@ -486,6 +486,25 @@ class WorkflowRuntime:
                     "agent({isolation:'" + str(isolation) + "'}) is not available in this build"
                 )
             options = {**options, "isolation": "worktree"}
+        clamp = options.get("bashCommandClamp")
+        if clamp is not None:
+            # Mirror CC: a malformed clamp is refused at spawn time rather than
+            # running the child un-clamped (fail-closed).
+            malformed = not isinstance(clamp, list) or any(
+                (not isinstance(item, str)) or item == "" or item != item.strip()
+                for item in clamp
+            )
+            if malformed:
+                detail = (
+                    "an array with non-string, empty, or whitespace-padded entries"
+                    if isinstance(clamp, list)
+                    else type(clamp).__name__
+                )
+                raise RuntimeError(
+                    "agent() opts.bashCommandClamp must be an array of non-empty strings; got "
+                    + detail
+                    + ". Refusing the spawn rather than running it un-clamped."
+                )
         label = options.get("label")
         if label is not None and not isinstance(label, str):
             raise TypeError("agent option label must be a string")

@@ -585,3 +585,19 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **测试**：`tests.test_workflow_*` 全绿（scheduler/workspace/store 109、child/runtime/integration 等 174、全量 discover 1331 OK）。
 - **实施记录**：`docs/20261013-ga-workflow-多agent冲突-实施记录-阶段1-3.md`。
 - **未做**：阶段 4（受控 subprocess 解缺陷 B/E）、隔离目录清理、`artifactOwnership` 按置信度过滤、隐式默认隔离；`isolation:"remote"` 不做（**复刻时暂时不需要参考 claudecode 云端会话的实现**）。
+
+#### 实施结果（2026-10-13，阶段 4 / 缺陷 B·E：受控 subprocess）
+
+- 触发：缺陷 B（guard 全禁 subprocess）与 E（verify 被迫 runpy）。CC 的做法是 `bashCommandClamp`
+  （per-spawn 收窄 shell 命令形式，fail-closed）——证据 `m0869_0xd12567a.js:667/1771-1782/2073-2075`、
+  `m0357_0xc63ba04.js:110968-112051`、`m0052_0xbfaae5d.js:189-190`。
+- **改动**：`workflow_workspace_guard.py` 重写子进程策略——默认**允许**（cwd 限定 workspace + 灾难命令 denylist）；
+  设 `bashCommandClamp` 则只放行匹配形式（带 shell 结构 → 拒绝，fail-closed）；`GA_WORKFLOW_GUARD_STRICT=1` 恢复全禁。
+  `ga.py code_run` 新增 `bash_clamp` → 环境变量 `GA_WORKFLOW_BASH_CLAMP`；`do_code_run` 透传；
+  `workflow_child_agent._build_handler` 挂 `handler.workflow_bash_clamp`；`workflow_runtime` 校验 `bashCommandClamp` 形状。
+  路径守卫不变。`os.system`/`os.popen` 一并纳入策略（旧 guard 其实已被它们绕过）。
+- **安全取舍**：允许子进程后，子进程文件访问不再受 in-process 路径守卫约束——guard 是「尽力而为的引导」，
+  **不是安全边界**（与 CC 对 VM 沙箱的定位一致）。更严用 clamp 或 strict。
+- **测试**：`tests.test_workflow_workspace_guard`（重写 8 例）、runtime/child-agent 新增用例；全量 discover **1340 OK (skipped=3)**。
+- **实施记录**：`docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md`。
+- **未做**：clamp 用 GA 前缀语法（非 CC 的 `Bash(...)`）；OS 级隔离；verify 真实运行的强制契约。

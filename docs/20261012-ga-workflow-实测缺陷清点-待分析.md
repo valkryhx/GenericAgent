@@ -44,10 +44,10 @@
 | 编号 | 名称 | 类型 | 严重度（初判） | 状态 |
 | --- | --- | --- | --- | --- |
 | A | `wait_agent(condition="workflow_terminal")` 假实现，空等 timeout | Bug | 高 | 根因已确认，待修 |
-| B | `workflow workspace guard` 全禁 `subprocess`，子代理无法真实运行代码 | 设计缺陷 | 高 | 待分析/出方案 |
+| B | `workflow workspace guard` 全禁 `subprocess`，子代理无法真实运行代码 | 设计缺陷 | 高 | ✅ 已修（阶段 4，见 `docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md`） |
 | C | 并行 workflow `artifact_path_collision`，`writeScope` 未隔离 | Bug | 高 | 待分析 |
 | D | 子代理「未产出却上报成功」，缺 artifact 存在性校验 | Bug | 高 | 待分析 |
-| E | verify 被迫 `runpy` 同进程执行，验证强度打折 | 设计缺陷 | 中 | 待分析（与 B 相关） |
+| E | verify 被迫 `runpy` 同进程执行，验证强度打折 | 设计缺陷 | 中 | ✅ 已缓解（阶段 4：子代理默认可跑 subprocess；真实运行契约待强化） |
 
 ---
 

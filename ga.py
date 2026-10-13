@@ -54,7 +54,7 @@ def _stop_requested(stop_signal):
     is_set = getattr(stop_signal, "is_set", None)
     return bool(is_set()) if callable(is_set) else bool(stop_signal)
 
-def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, workspace_root=None):
+def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, workspace_root=None, bash_clamp=None):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
@@ -109,6 +109,10 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
             child_env["GA_CODE_RUN_ROOT"] = script_dir
         if workspace_root:
             child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
+            if bash_clamp:
+                # Mirror CC's agent({bashCommandClamp}): the guard scopes the
+                # child's subprocess commands to these declared forms.
+                child_env["GA_WORKFLOW_BASH_CLAMP"] = json.dumps([str(item) for item in bash_clamp])
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -574,7 +578,7 @@ class GenericAgentHandler(BaseHandler):
                     except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
-        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, workspace_root=self.workspace_root)
+        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, workspace_root=self.workspace_root, bash_clamp=getattr(self, "workflow_bash_clamp", None))
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
     

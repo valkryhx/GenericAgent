@@ -161,6 +161,43 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertEqual(str(workspace.resolve()), runner._child_cwd(job))
             self.assertIsNone(runner._job_isolation(job))
 
+    def test_build_handler_carries_bash_command_clamp(self):
+        runner = NativeGPTChildAgentRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_clamp",
+                prompt="run the tests",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "options": {"bashCommandClamp": ["python", "pytest"]},
+                },
+            )
+            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+                handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
+            self.assertEqual(["python", "pytest"], handler.workflow_bash_clamp)
+
+    def test_build_handler_without_clamp_leaves_it_unset(self):
+        runner = NativeGPTChildAgentRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_noclamp",
+                prompt="x",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                },
+            )
+            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+                handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
+            self.assertFalse(getattr(handler, "workflow_bash_clamp", None))
+
     def test_child_agent_system_prompt_includes_optional_skill_listing(self):
         runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
 

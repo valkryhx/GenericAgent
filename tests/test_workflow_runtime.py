@@ -286,6 +286,43 @@ return {summary: result.summary}
             self.assertEqual("worktree", runner.started_jobs[0].metadata["options"]["isolation"])
             self.assertEqual("worktree", runner.started_jobs[0].metadata["options"].get("isolation"))
 
+    def test_runtime_accepts_bash_command_clamp(self):
+        # Mirrors CC agent({bashCommandClamp}): the option survives the RPC and
+        # reaches the child job's metadata.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('run tests', {label: 'tester', bashCommandClamp: ['pytest', 'python']})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertEqual(["pytest", "python"], runner.started_jobs[0].metadata["options"]["bashCommandClamp"])
+
+    def test_runtime_rejects_malformed_bash_command_clamp(self):
+        for bad in ("pytest", [""], [" pytest "], [1], {"rule": "pytest"}):
+            with tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                workspace = Path(tmp) / "workspace"
+                workspace.mkdir()
+                script = """
+const result = await agent('run tests', {bashCommandClamp: __CLAMP__})
+return {summary: result.summary}
+""".replace("__CLAMP__", json.dumps(bad))
+                run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+                runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+                with self.assertRaisesRegex(RuntimeError, "bashCommandClamp"):
+                    runtime.run(run, args={"workspacePath": str(workspace)})
+
     def test_runtime_rejects_unknown_isolation_option(self):
         # Anything other than "worktree" is refused up front, matching Claude
         # Code where the remote path exists but is unreachable in this build.
