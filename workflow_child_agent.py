@@ -800,7 +800,9 @@ class NativeGPTChildAgentRunner:
         # scopes this child's subprocess commands to these declared forms.
         bash_clamp = (job.metadata.get("options") or {}).get("bashCommandClamp")
         if isinstance(bash_clamp, list):
-            handler.workflow_bash_clamp = [str(item) for item in bash_clamp if str(item).strip()]
+            from workflow_workspace_guard import normalize_bash_command_clamp
+
+            handler.workflow_bash_clamp = normalize_bash_command_clamp(bash_clamp)
 
         def before(tool_name, args, response):
             transcript_events.append({

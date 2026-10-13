@@ -9,6 +9,37 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from workflow_workspace_guard import normalize_bash_command_clamp
+
+
+class NormalizeBashCommandClampTest(unittest.TestCase):
+    def test_bare_prefixes_pass_through(self):
+        self.assertEqual(["python", "pytest"], normalize_bash_command_clamp(["python", "pytest"]))
+
+    def test_cc_bash_rules_are_unwrapped_and_wildcard_stripped(self):
+        self.assertEqual(
+            ["git status", "npm run test"],
+            normalize_bash_command_clamp(["Bash(git status)", "Bash(npm run test:*)"]),
+        )
+
+    def test_mixed_forms(self):
+        self.assertEqual(["python", "git"], normalize_bash_command_clamp(["python", "Bash(git:*)"]))
+
+    def test_non_bash_tool_is_rejected(self):
+        with self.assertRaises(ValueError):
+            normalize_bash_command_clamp(["Edit(x)"])
+
+    def test_empty_padded_or_inert_entries_are_rejected(self):
+        for bad in ["", " python ", "Bash()", "Bash( x )", "Bash(*)"]:
+            with self.assertRaises(ValueError):
+                normalize_bash_command_clamp([bad])
+
+    def test_non_list_and_non_string_entries_are_rejected(self):
+        with self.assertRaises(ValueError):
+            normalize_bash_command_clamp("python")
+        with self.assertRaises(ValueError):
+            normalize_bash_command_clamp([1])
+
 
 class WorkflowWorkspaceGuardTest(unittest.TestCase):
     def _run(self, workspace: Path, expression: str, extra_env: dict | None = None):

@@ -488,21 +488,18 @@ class WorkflowRuntime:
             options = {**options, "isolation": "worktree"}
         clamp = options.get("bashCommandClamp")
         if clamp is not None:
-            # Mirror CC: a malformed clamp is refused at spawn time rather than
-            # running the child un-clamped (fail-closed).
-            malformed = not isinstance(clamp, list) or any(
-                (not isinstance(item, str)) or item == "" or item != item.strip()
-                for item in clamp
-            )
-            if malformed:
-                detail = (
-                    "an array with non-string, empty, or whitespace-padded entries"
-                    if isinstance(clamp, list)
-                    else type(clamp).__name__
-                )
+            # Mirror CC: validate and normalize the clamp at spawn time. CC's
+            # "Bash(<prefix>)" rules are accepted alongside GA's bare prefixes;
+            # the normalized command prefixes are stored back so the child and
+            # its guard never see the raw form. A malformed clamp is refused
+            # rather than running the child un-clamped (fail-closed).
+            from workflow_workspace_guard import normalize_bash_command_clamp
+
+            try:
+                options = {**options, "bashCommandClamp": normalize_bash_command_clamp(clamp)}
+            except ValueError as exc:
                 raise RuntimeError(
-                    "agent() opts.bashCommandClamp must be an array of non-empty strings; got "
-                    + detail
+                    "agent() opts.bashCommandClamp is invalid: " + str(exc)
                     + ". Refusing the spawn rather than running it un-clamped."
                 )
         label = options.get("label")

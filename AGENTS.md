@@ -609,4 +609,13 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   **不是安全边界**（与 CC 对 VM 沙箱的定位一致）。更严用 clamp 或 strict。
 - **测试**：`tests.test_workflow_workspace_guard`（重写 8 例）、runtime/child-agent 新增用例；全量 discover **1340 OK (skipped=3)**。
 - **实施记录**：`docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md`。
-- **未做**：clamp 用 GA 前缀语法（非 CC 的 `Bash(...)`）；OS 级隔离；verify 真实运行的强制契约。
+- **未做**：OS 级隔离；verify 真实运行的强制契约。
+
+#### 补充（2026-10-13，阶段 4b：clamp 兼容 CC 的 `Bash(...)` 写法）
+
+- `bashCommandClamp` 现在同时接受 CC 的 `Bash(<命令或前缀>)` 形式（剥壳 + 去尾部 `:*`/`*` 通配）与 GA 裸前缀；
+  新增纯函数 `workflow_workspace_guard.normalize_bash_command_clamp(entries)`，在 `workflow_runtime` 的 agent RPC 处
+  **校验并归一化**（存回归一化后的前缀），`_build_handler` 复用同一函数。非 `Bash` 工具名 / 空内容 / 内部空白 / inert → 拒绝 spawn（fail-closed）。
+- CC 脚本的 `bashCommandClamp` 可原样迁移；resume 缓存键基于归一化值。
+- 测试：`tests.test_workflow_workspace_guard` 新增 `NormalizeBashCommandClampTest`（6 例）+ runtime 2 例；全量 discover **见提交**。
+- 记录：`docs/20261013-ga-workflow-受控subprocess-实施记录-阶段4.md` §4/§6。

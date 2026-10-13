@@ -66,7 +66,8 @@ guard 的子进程策略改为三分支（`workflow_workspace_guard._build_subpr
 | `ga.py` `code_run(..., bash_clamp=None)` | 新增参数；`workspace_root` 时把 clamp 写进 `GA_WORKFLOW_BASH_CLAMP` 环境变量。 |
 | `ga.py` `GenericAgentHandler.do_code_run` | 透传 `bash_clamp=getattr(self, "workflow_bash_clamp", None)`。 |
 | `workflow_child_agent.py` `_build_handler` | 从 `job.metadata["options"]["bashCommandClamp"]` 取字符串数组，挂到 `handler.workflow_bash_clamp`。 |
-| `workflow_runtime.py` `_handle_rpc`（agent 分支） | 校验 `bashCommandClamp`：必须是非空字符串数组，否则 `RuntimeError("... Refusing the spawn rather than running it un-clamped.")`（对齐 CC fail-closed）。 |
+| `workflow_runtime.py` `_handle_rpc`（agent 分支） | 用 `normalize_bash_command_clamp` 校验并**归一化** `bashCommandClamp`，把归一化后的前缀存回 options；非法写法 `RuntimeError("... Refusing the spawn rather than running it un-clamped.")`（对齐 CC fail-closed）。 |
+| `workflow_workspace_guard.py` `normalize_bash_command_clamp(entries)` | 接受 CC 的 `Bash(<命令或前缀>)` 形式（剥壳 + 去尾部 `:*`/`*` 通配）与 GA 裸前缀；非 `Bash` 工具名 / 空内容 / 内部空白 / inert（归一化后为空）→ 抛 `ValueError`。 |
 | `skills/workflow-authoring/SKILL.md` | 文档化 `bashCommandClamp`（§4 选项表 / 边界修订）。 |
 
 > `code_run_header.py` 无需改：它已 `install(root)`；策略从环境变量读。
@@ -98,8 +99,9 @@ guard 的子进程策略改为三分支（`workflow_workspace_guard._build_subpr
 
 1. **verify 的「真实运行」契约**：现在 verify 子代理可以用 `code_run` 跑 `subprocess`（默认允许），
    不再需要 `runpy` 妥协；但「如何声明/校验一次真实执行」仍由工作流作者与 `requiredToolEvidence` 决定，未新增强制项。
-2. **clamp 规则的语法**：GA 用「命令前缀字符串数组」（如 `["python","pytest","git status"]`），
-   未采用 CC 的 `Bash(<前缀>)` 包裹语法（GA 无独立 Bash 工具，code_run 即执行面）。
+2. ~~**clamp 规则的语法**：GA 未采用 CC 的 `Bash(<前缀>)` 包裹语法。~~ → **已支持**：
+   `normalize_bash_command_clamp` 同时接受 CC 的 `Bash(<命令或前缀>)`（含 `:*`/`*` 通配）与 GA 裸前缀，
+   CC 脚本的 `bashCommandClamp` 可原样迁移。
 3. **OS 级隔离**（容器/沙箱）未做；如需真正安全边界，应在宿主侧用 OS 隔离，而非 in-process guard。
 4. **CC 云端会话**：不涉及，**复刻时暂时不需要参考 claudecode 云端会话的实现**。
 

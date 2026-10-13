@@ -130,13 +130,15 @@ GA-supported options:
   workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use it
   ONLY when two or more agents write files in parallel and would otherwise
   overwrite each other. Prefer passing values (via `schema`) over writing files.
-- `bashCommandClamp` — array of command-prefix strings, e.g.
-  `["python", "pytest", "git status"]`. When set, the child's `code_run`
-  subprocesses are restricted to commands whose leading tokens match one of the
-  prefixes; a command with shell structure the clamp cannot verify (substitution,
-  control flow, redirection) is denied, and a malformed clamp refuses the spawn.
-  Mirrors CC's `agent({bashCommandClamp})`. Use it to let a verify agent actually
-  run the artifacts without opening up arbitrary shell.
+- `bashCommandClamp` — array of command-form rules. Each entry is either a bare
+  command prefix (`"python"`, `"git status"`) or Claude Code's
+  `Bash(<command or prefix>)` form (`"Bash(git status:*)"`; the `Bash(...)`
+  wrapper and a trailing `:*` / `*` wildcard are stripped). When set, the child's
+  `code_run` subprocesses are restricted to commands whose leading tokens match
+  one of the rules; a command with shell structure the clamp cannot verify
+  (substitution, control flow, redirection) is denied, and a malformed entry
+  refuses the spawn. Use it to let a verify agent actually run the artifacts
+  without opening up arbitrary shell.
 
 Use GA tool names in prompts, not CC names: `file_read`, `file_write`,
 `file_patch`, `code_run`, `web_scan`, `web_execute_js`, `load_skill`,

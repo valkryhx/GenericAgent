@@ -87,6 +87,55 @@ def _matches_rule(argv, rule_tokens) -> bool:
     return True
 
 
+# Claude Code's per-spawn clamp rules are written as "Bash(<command or prefix>)"
+# permission rules; the tool name is case-sensitive. GA also accepts a bare
+# command prefix, so a CC-authored clamp migrates unchanged.
+_CC_BASH_RULE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)[(](.*)[)]$")
+
+
+def normalize_bash_command_clamp(entries) -> list[str]:
+    """Normalize a ``bashCommandClamp`` option into GA command-prefix rules.
+
+    Accepts Claude Code's ``Bash(<command or prefix>)`` rule form (with an
+    optional trailing ``:*`` / ``*`` prefix wildcard, e.g. ``Bash(npm run
+    test:*)`` -> ``npm run test``) as well as GA's bare command-prefix form
+    (``"python"``). Raises ``ValueError`` on any malformed entry so the caller
+    can refuse the spawn (fail-closed), matching CC.
+    """
+    if not isinstance(entries, (list, tuple)):
+        raise ValueError("bashCommandClamp must be an array of strings")
+    rules: list[str] = []
+    for raw in entries:
+        if not isinstance(raw, str):
+            raise ValueError("bashCommandClamp entries must be strings")
+        text = raw
+        if text == "" or text != text.strip():
+            raise ValueError("bashCommandClamp entries must be non-empty with no surrounding whitespace")
+        match = _CC_BASH_RULE_RE.match(text)
+        if match:
+            tool, inner = match.group(1), match.group(2)
+            if tool != "Bash":
+                raise ValueError(
+                    "bashCommandClamp entry " + repr(text)
+                    + " must be a 'Bash(<command or prefix>)' rule; got tool " + repr(tool)
+                )
+            if inner == "" or inner != inner.strip():
+                raise ValueError(
+                    "bashCommandClamp entry " + repr(text) + " must have non-empty, unpadded rule content"
+                )
+            if inner.endswith(":*"):
+                inner = inner[:-2]
+            elif inner.endswith("*"):
+                inner = inner[:-1]
+            inner = inner.strip()
+            if inner == "":
+                raise ValueError("bashCommandClamp entry " + repr(text) + " is inert (no command prefix)")
+            rules.append(inner)
+        else:
+            rules.append(text)
+    return rules
+
+
 def _build_subprocess_check(root: Path):
     """Build the subprocess policy checker from the process environment."""
     strict = str(os.environ.get("GA_WORKFLOW_GUARD_STRICT") or "").strip().lower() in {

@@ -340,6 +340,42 @@ return {summary: result.summary}
             with self.assertRaisesRegex(RuntimeError, "is not available in this build"):
                 runtime.run(run, args={"workspacePath": str(workspace)})
 
+    def test_runtime_normalizes_cc_bash_rules(self):
+        # A CC-authored clamp ("Bash(<prefix>)") migrates unchanged: it is
+        # unwrapped and its wildcard stripped before it reaches the child.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('run tests', {label: 'tester', bashCommandClamp: ['Bash(git status:*)', 'python']})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertEqual(["git status", "python"], runner.started_jobs[0].metadata["options"]["bashCommandClamp"])
+
+    def test_runtime_rejects_non_bash_cc_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('x', {bashCommandClamp: ['Edit(x)']})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            with self.assertRaisesRegex(RuntimeError, "bashCommandClamp"):
+                runtime.run(run, args={"workspacePath": str(workspace)})
+
     def test_execution_contract_requires_recorded_required_tool_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
