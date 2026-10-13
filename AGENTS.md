@@ -687,3 +687,34 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - `skills/workflow-authoring/SKILL.md`：文档化隐式默认隔离 + `isolation:"none"`。
 - 测试：`tests/test_workflow_implicit_isolation.py`（13 例，含 2 例真跑 node worker 的端到端）；全量 discover 见提交。
 - 记录：`docs/20261013-ga-workflow-隐式默认隔离方案.md`。
+
+#### 中途调研 2026-10-13：verify 的「提示词方法论」路线（对齐 CC）
+
+- 触发：用户决定 GA 也走 CC 的 verify 路线（**prompt 层方法论**，不做宿主强制的「真实运行」契约），并检查提示词是否要改。
+- CC 事实（仓库 `D:\git_codes\claudecode283_hack`）：
+  - `docs/20261012-复刻dynamic-workflow指南.md` §10.2：CC **没有**独立于 LLM 的验收器；
+    「脚本 return 什么，最终结果就是什么」；唯一对抗「看起来对但实际错」的是 **prompt 层方法论**（概率性缓解，非验证器）。
+  - `claudecode283/extracted/workflow-authoring-reference.md:112-126` 给出确切配方：
+    - **Adversarial verify**：N 个独立 skeptic，每个被要求 **REFUTE**，`Default to refuted=true if uncertain`；≥多数 refute 则 kill。
+    - **Perspective-diverse verify**：不同 lens（correctness/security/perf/repro）。
+    - **Judge panel** / **loop-until-dry**（**dedup vs `seen`，不是 `confirmed`**，否则不收敛）/ **multi-modal sweep** / **completeness critic** / **no silent caps**。
+    - **「DEFAULT TO pipeline()」** + barrier smell test（只有 stage N 需要 stage N-1 **全体**时才用 barrier）。
+- GA 现状：`skills/workflow-authoring/SKILL.md` §5 已覆盖大部分质量模式
+  （adversarial / perspective-diverse / judge panel / loop-until-dry / multi-modal sweep / completeness critic / no silent caps）。
+- **差距（本次补）**：(1) 缺「DEFAULT TO pipeline()」+ barrier smell test；(2) loop-until-dry 缺 dedup-vs-`seen` 陷阱；
+  (3) 缺 adversarial-refuter 的**具体配方**（prompt 文本 + 多数阈值 + fail-closed 默认）；(4) 子代理 `verification` role 是「验证」口吻而非「**对抗式反驳**」；
+  (5) `review` role 缺「先反驳每个 finding」。
+- 详细文档：`docs/20261013-ga-workflow-verify-提示词方法论-对齐CC.md`。
+- 状态（2026-10-13）：**已实施**。
+
+#### 实施结果（2026-10-13，verify 提示词方法论）
+
+- `skills/workflow-authoring/SKILL.md`：
+  - §4 pipeline 增「**Default to `pipeline()`**」+ barrier smell test（只有 stage N 需要 stage N-1 全体才用 barrier）。
+  - §5 Adversarial verify 补 CC 的**具体配方**（`Try to refute: <claim>. Default to refuted=true if uncertain.` + ≥2/3 阈值）。
+  - §5 Loop until dry 补「dedup vs `seen`，不是 `confirmed`，否则不收敛」。
+- `workflow_child_agent.ROLE_INSTRUCTIONS`：
+  - `verification` → 对抗式（主动反驳、不只确认）+ 无证据/不确定即 `verificationPassed=false`。
+  - `review` → 报告前先对抗式反驳每个 finding，站不住的丢掉。
+- 测试：`tests/test_workflow_child_agent.py::LiveJobTelemetryTest::test_verification_and_review_roles_are_adversarial`（1 例）；全量 discover **1378 OK (skipped=3)**。
+- 记录：`docs/20261013-ga-workflow-verify-提示词方法论-对齐CC.md`。

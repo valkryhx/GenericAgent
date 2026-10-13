@@ -176,6 +176,16 @@ stages: item A can reach stage 2 while item B is still in stage 1. A `null`
 value short-circuits that item's remaining stages. A stage that throws makes
 that item `null` without stopping other items.
 
+**Default to `pipeline()`.** Only reach for a barrier (two `parallel()` calls
+around a plain-code transform) when stage N genuinely needs *all* of stage N-1
+together — e.g. dedup/merge across the full result set, an early exit when the
+total is zero, or a stage whose prompt references "the other findings". A barrier
+is **not** justified by "I want to flatten/map/filter first" (do that inside a
+stage), "the stages are conceptually separate", or "it's cleaner code" — barrier
+latency is real. Smell test: if you wrote `await parallel(...)` → pure
+`transform(...)` → `await parallel(...)`, that middle transform does not need the
+barrier; rewrite it as one pipeline with the transform inside a stage.
+
 ```js
 const results = await pipeline(
   dimensions,
@@ -253,8 +263,14 @@ const repaired = await repairAndRetest({
 ## 5. Patterns that improve complex-task quality
 
 - **Adversarial verify** — spawn independent skeptics for each important
-  finding, prompt them to refute it, and keep it only when enough skeptics fail
-  to refute.
+  finding, prompt each to REFUTE it, and keep it only when enough skeptics fail
+  to refute. Make the refuter fail-closed — unsure means refuted:
+  ```js
+  const votes = await parallel(Array.from({ length: 3 }, () => () =>
+    agent(`Try to refute: ${claim}. Default to refuted=true if uncertain.`,
+          { schema: VERDICT })))
+  const survives = votes.filter(Boolean).filter(v => !v.refuted).length >= 2
+  ```
 - **Perspective-diverse verify** — give each verifier a distinct lens
   (correctness, security, performance, reproducibility) instead of N identical
   copies.
@@ -263,6 +279,8 @@ const repaired = await repairAndRetest({
   runners-up.
 - **Loop until dry** — for unknown-size discovery, keep searching until several
   consecutive rounds return no new findings. Add a hard iteration cap.
+  Dedup against everything **seen**, not against the **confirmed** set: otherwise
+  a finding a judge rejected reappears every round and the loop never converges.
 - **Multi-modal sweep** — use different search angles in parallel so one angle's
   blind spot is covered by another.
 - **Completeness critic** — end with an agent that asks what modality, claim, or

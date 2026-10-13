@@ -1247,6 +1247,31 @@ class LiveJobTelemetryTest(unittest.TestCase):
                 self.assertIn(f"role: {role}", prompt)
                 self.assertIn(expected, prompt)
 
+    def test_verification_and_review_roles_are_adversarial(self):
+        """Verify/review must try to refute, not just confirm.
+
+        Claude Code ships no host-side verifier; it relies on prompt-level
+        adversarial verify. The child role instructions must carry that stance.
+        """
+        runner = NativeGPTChildAgentRunner()
+        verification = runner._build_prompt(
+            WorkflowJob(
+                job_id="agent_1",
+                prompt="do the assigned job",
+                metadata={"runId": "wf_test", "options": {"role": "verification"}},
+            )
+        )
+        self.assertIn("try to refute", verification)
+        self.assertIn("verificationPassed=false", verification)
+        review = runner._build_prompt(
+            WorkflowJob(
+                job_id="agent_2",
+                prompt="do the assigned job",
+                metadata={"runId": "wf_test", "options": {"role": "review"}},
+            )
+        )
+        self.assertIn("adversarially verify each finding", review)
+
     def test_child_prompt_carries_shared_workspace_and_handoff_contract(self):
         job = WorkflowJob(
             job_id="agent_1",
