@@ -83,3 +83,48 @@ completeness critic / no silent caps / pass-values-don't-share-files。
 **已实施**：上表 1-5 全部落盘到 `skills/workflow-authoring/SKILL.md` 与 `workflow_child_agent.py`。
 测试：新增 `tests/test_workflow_child_agent.py::LiveJobTelemetryTest::test_verification_and_review_roles_are_adversarial`；
 role 文本变更不破坏既有 drift guard（它只断言 role 键与部分 role 的子串）。全量 discover **1378 OK (skipped=3)**。
+
+---
+
+## 6. 补充：`review-changes` canonical 示例（2026-10-13）
+
+### 6.1 它是什么 / 用在哪（CC）
+
+`review-changes` **不是一个能跑的内置 workflow**，而是嵌在 **Workflow 工具描述**里的**教学模板**——
+模型每次拿到 Workflow 工具都会读到，并照抄这个形状。证据：
+
+- 全仓 grep：`review-changes` **只出现在 `claudecode283/modules/m1502_0xdb4a986.js`**（= Workflow 工具描述）。
+- 落点：`claudecode283/extracted/workflow-tool-description.md:16-40`（标题为 "The canonical multi-stage pattern"）、
+  `workflow-authoring-reference.md:10`（把它当作 **Review** 类任务的范式）。
+- CC 只会从 `.claude/workflows/` 加载**用户保存**的 workflow（`m0868_0xd1234ad.js` `loadWorkflowsDir`），
+  `/workflows` 列表里可保存 / 再跑；`review-changes` 本身不是内置命令。
+
+### 6.2 canonical 形态（CC 原文要点）
+
+```js
+export const meta = { name: 'review-changes', description: '...', phases: [{ title: 'Review' }, { title: 'Verify' }] }
+const DIMENSIONS = [{ key: 'bugs', prompt: '...' }, { key: 'perf', prompt: '...' }]
+const results = await pipeline(
+  DIMENSIONS,
+  d => agent(d.prompt, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS_SCHEMA }),
+  review => parallel(review.findings.map(f => () =>
+    agent(`Adversarially verify: ${f.title}`, { label: `verify:${f.file}`, phase: 'Verify', schema: VERDICT_SCHEMA })
+      .then(v => ({ ...f, verdict: v }))
+  )),
+)
+const confirmed = results.flat().filter(Boolean).filter(f => f.verdict?.isReal)
+return { confirmed }
+// Dimension 'bugs' findings verify while dimension 'perf' is still reviewing. No wasted wall-clock.
+```
+
+它把三件事焊在一起：**pipeline 默认**（无 barrier）+ **对抗式 verify**（`Adversarially verify`）+ **schema 结构化判定**（`verdict.isReal` 过滤）。
+
+### 6.3 GA 的改动
+
+GA **已有**等价物但偏弱：`skills/workflow-authoring/SKILL.md` §3 的 `meta` 示例就叫 `review-changes`，
+§4 的 pipeline 示例是**简化版**（缺 schema / 对抗式 verify / verdict 过滤 / wall-clock 说明）。
+
+**本次**：把 §4 的 pipeline 示例升级为上面 CC 的 canonical 完整形态，并注明
+`FINDINGS_SCHEMA` / `VERDICT_SCHEMA` 由**作者定义**（GA 不内置这两个 schema；`VERDICT` 需含 `isReal`）。
+
+> 不改宿主：仍然只是提示词层（§2 的路线）。GA 的 `/workflows` 支持保存/再跑，与 CC 的 `.claude/workflows/` 对应。

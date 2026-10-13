@@ -718,3 +718,17 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - `review` → 报告前先对抗式反驳每个 finding，站不住的丢掉。
 - 测试：`tests/test_workflow_child_agent.py::LiveJobTelemetryTest::test_verification_and_review_roles_are_adversarial`（1 例）；全量 discover **1378 OK (skipped=3)**。
 - 记录：`docs/20261013-ga-workflow-verify-提示词方法论-对齐CC.md`。
+
+#### 补充 2026-10-13：把 review-changes canonical 示例补进 SKILL
+
+- 触发：用户确认「好」——把 GA 的 `review-changes` 示例升级成 CC 的**完整 canonical 形态**。
+- CC 事实（仓库 `D:\git_codes\claudecode283_hack`）：
+  - `review-changes` 全仓**只出现在 `modules/m1502_0xdb4a986.js`**（= Workflow 工具描述）——它是**教学模板**，不是内置可跑 workflow。
+  - 位置：`claudecode283/extracted/workflow-tool-description.md:16-40`（canonical multi-stage pattern）、`workflow-authoring-reference.md:10`（Review 范式引用）。
+  - CC 只在 `.claude/workflows/` 加载**用户保存**的 workflow（`m0868_0xd1234ad.js` `loadWorkflowsDir`）。
+- GA 现状：`skills/workflow-authoring/SKILL.md` §3 的 `meta` 示例已叫 `review-changes`；§4 的 pipeline 示例是**简化版**——
+  缺 `schema`、`Adversarially verify`、`.then(v => ({...f, verdict:v}))`、`verdict.isReal` 过滤，以及「no wasted wall-clock」说明。
+- 改动：把 §4 pipeline 示例升级为 CC 的 canonical 完整形态（补 schema + 对抗式 verify + verdict 过滤 + wall-clock 注释），
+  并注明 `FINDINGS_SCHEMA`/`VERDICT_SCHEMA` 由作者定义。
+- 详细文档：`docs/20261013-ga-workflow-verify-提示词方法论-对齐CC.md` §6。
+- 状态（2026-10-13）：**已实施**。

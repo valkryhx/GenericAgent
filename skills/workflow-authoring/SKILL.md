@@ -186,14 +186,23 @@ latency is real. Smell test: if you wrote `await parallel(...)` → pure
 `transform(...)` → `await parallel(...)`, that middle transform does not need the
 barrier; rewrite it as one pipeline with the transform inside a stage.
 
+Canonical multi-stage pattern (the `review-changes` shape): pipeline by default,
+each dimension's findings verify as soon as that dimension finishes — no wasted
+wall-clock. `FINDINGS_SCHEMA` and `VERDICT_SCHEMA` are JSON Schemas you define;
+the verdict must carry an `isReal` field.
+
 ```js
+const DIMENSIONS = [{ key: 'bugs', prompt: '...' }, { key: 'perf', prompt: '...' }]
 const results = await pipeline(
-  dimensions,
-  d => agent(d.prompt, { label: `review:${d.key}`, phase: 'Review' }),
+  DIMENSIONS,
+  d => agent(d.prompt, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS_SCHEMA }),
   review => parallel(review.findings.map(f => () =>
-    agent(`Verify: ${f.title}`, { label: `verify:${f.key}`, phase: 'Verify' })
+    agent(`Adversarially verify: ${f.title}`, { label: `verify:${f.file}`, phase: 'Verify', schema: VERDICT_SCHEMA })
+      .then(v => ({ ...f, verdict: v }))
   )),
 )
+const confirmed = results.flat().filter(Boolean).filter(f => f.verdict?.isReal)
+return { confirmed }
 ```
 
 ### `phase(name)` and `log(message)`
