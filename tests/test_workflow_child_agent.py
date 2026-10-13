@@ -1318,5 +1318,84 @@ class StructuredAnswerExtractionTest(unittest.TestCase):
         self.assertEqual({"a": "x,}", "b": 1}, loads_json_answer('{"a": "x,}", "b": 1}'))
 
 
+
+class StructuredOutputEndToEndTest(unittest.TestCase):
+    """Full child plumbing: a real tool loop whose model calls structured_output.
+
+    This is the self-test for the CC-parity change: the schema is delivered as a
+    ``structured_output`` tool, the model calls it, and the *tool-call value* --
+    not a parsed text answer -- becomes the job payload.
+    """
+
+    SCHEMA = {
+        "type": "object",
+        "properties": {"file": {"type": "string"}, "ok": {"type": "boolean"}},
+        "required": ["file", "ok"],
+    }
+
+    def wait_for_result(self, runner, job, timeout=3.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = runner.poll(job)
+            if result is not None:
+                return result
+            time.sleep(0.01)
+        self.fail("runner did not finish in time")
+
+    def _tools(self):
+        return [{"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}]
+
+    def _job(self):
+        return WorkflowJob(
+            job_id="agent_so",
+            prompt="verify the file",
+            metadata={"runId": "wf_so", "options": {"schema": self.SCHEMA}},
+        )
+
+    def _run(self, client):
+        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=self._tools)
+        job = self._job()
+        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            runner.start(job)
+            return self.wait_for_result(runner, job)
+
+    def test_tool_call_value_becomes_the_payload(self):
+        client = StubToolClient([
+            StubToolResponse("", [StubToolCall("structured_output", {"file": "a.py", "ok": True}, id="so1")]),
+        ])
+        result = self._run(client)
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual("a.py", result.payload["file"])
+        self.assertTrue(result.payload["ok"])
+        advertised = {(tool.get("function") or {}).get("name") for tool in client.tools_seen[0]}
+        self.assertIn("structured_output", advertised)
+
+    def test_invalid_call_is_rejected_then_corrected_in_the_same_turn(self):
+        client = StubToolClient([
+            StubToolResponse("", [StubToolCall("structured_output", {"file": "a.py"}, id="bad")]),
+            StubToolResponse("", [StubToolCall("structured_output", {"file": "a.py", "ok": False}, id="good")]),
+        ])
+        result = self._run(client)
+        self.assertEqual("succeeded", result.status)
+        self.assertFalse(result.payload["ok"])
+        rejections = [
+            event for event in result.transcript_events
+            if event.get("type") == "tool_result"
+            and event.get("toolName") == "structured_output"
+            and isinstance(event.get("data"), dict)
+            and event["data"].get("status") == "error"
+        ]
+        self.assertTrue(rejections, "the invalid first call must be rejected with a tool error")
+
+    def test_text_json_answer_still_works_as_fallback(self):
+        client = StubToolClient([
+            StubToolResponse('{"file": "a.py", "ok": true}'),
+        ])
+        result = self._run(client)
+        self.assertEqual("succeeded", result.status)
+        self.assertEqual("a.py", result.payload["file"])
+
+
+
 if __name__ == "__main__":
     unittest.main()

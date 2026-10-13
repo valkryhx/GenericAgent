@@ -115,6 +115,7 @@ function pe(e={},n=()=>{}){return Ft({...e, isMcp:!1, isEnabled(){return!0}, isC
 - `_load_tools_schema` 集成复验：object schema job 工具数 +1 且含 `structured_output`；无 schema job 不含。
 - 回归：`test_workflow_child_agent + test_workflow_structured_output + test_workflow_permissions + test_workflow_scheduler` → **139 OK**；
   `test_workflow_child_agent/permissions/scheduler/runtime/integration/capability_preflight/structured_output/permission_policy` → **277 OK**（改前 1 例旧措辞断言已同步更新）。
+- **端到端自测（真实 tool loop）**：`tests/test_workflow_child_agent.py` 新增 `StructuredOutputEndToEndTest`（3 例），用真实 `agent_runner_loop` + `StubToolClient` 驱动：模型调 `structured_output` 时 payload 直接是该对象、工具表含该工具；非法调用当轮被拒（tool_result status=error）→ 第二轮改对即 succeeded；纯文本 JSON 仍可回退。实测 `python -m unittest tests.test_workflow_child_agent.StructuredOutputEndToEndTest` → **3 OK**。
 
 ---
 
