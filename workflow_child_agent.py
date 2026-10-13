@@ -584,6 +584,8 @@ def bounded_structured_summary(text, limit: int = HANDOFF_SUMMARY_LIMIT, *, ref:
     return f"{cut.rstrip()}\n…[{marker}]"
 
 
+STRUCTURED_OUTPUT_TOOL = "structured_output"
+
 def _declared_schema(options: dict | None):
     schema = (options or {}).get("schema") if isinstance(options, dict) else None
     return schema if isinstance(schema, dict) and schema else None
@@ -607,7 +609,7 @@ def _structured_output_contract(options: dict | None) -> str:
     return "\n".join([
         "",
         "<workflow-structured-output>",
-        "Return exactly one JSON value matching this JSON Schema. Do not wrap it in Markdown fences or add commentary.",
+        "Return your final answer by calling the structured_output tool exactly once -- the tool's input schema defines the required shape. Do your work first, then call structured_output; do NOT put your answer in a text response (the script reads ONLY the tool call). If validation fails, read the error and call structured_output again with a corrected shape. After a successful call, end your turn.",
         serialized[:32_000],
         "</workflow-structured-output>",
     ])
@@ -835,7 +837,7 @@ class NativeGPTChildAgentRunner:
             # CC parity: clean up / keep the private child workspace now that the
             # tool job has collected its artifacts back into the shared workspace.
             self._finalize_isolated_workspace(job, tool_summary)
-            payload = self._build_success_payload(job, answer)
+            payload = self._build_success_payload(job, answer, structured=state.get("structuredOutput"))
             result = AgentResult(
                 job_id=job.job_id,
                 status="succeeded",
@@ -926,6 +928,8 @@ class NativeGPTChildAgentRunner:
             with self._lock:
                 if state.get("handler") is handler:
                     state["handler"] = None
+        with self._lock:
+            state["structuredOutput"] = getattr(handler, "workflow_structured_output", None)
         usage = copy.deepcopy(getattr(client, "last_usage_tokens", None) or getattr(getattr(client, "backend", None), "last_usage_tokens", None) or {})
         tool_summary = self._build_tool_summary(transcript_events)
         written = diff_workspace(workspace_before, snapshot_workspace(workspace_root))
@@ -962,6 +966,8 @@ class NativeGPTChildAgentRunner:
         )
         handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
         handler.workflow_permission_policy = ToolPermissionPolicy(profile=profile, options=copy.deepcopy(job.metadata.get("options") or {}))
+        # The child must be able to call ``structured_output`` for a schema job.
+        handler.workflow_output_schema = _declared_schema(job.metadata.get("options") or {})
         handler.workflow_permission_context = {
             "runId": job.metadata.get("runId"),
             "jobId": job.job_id,
@@ -1084,6 +1090,40 @@ class NativeGPTChildAgentRunner:
         self.last_capability_snapshot = _build_capability_snapshot(tools, mcp_discovery)
         return copy.deepcopy(tools)
 
+    def _with_structured_output_tool(self, tools, options):
+        """Append the CC-style ``structured_output`` tool for a schema-constrained job.
+
+        CC evidence (m0869): ``agent({schema})`` forces the child to call a
+        ``StructuredOutput`` tool whose input schema IS the requested schema; the
+        script then reads ONLY that tool call. Validation lives at the tool-call
+        layer, so a wrong shape is rejected and the model retries inside its turn.
+        GA used to only *ask* for JSON in the final text and parse it host-side,
+        which is what made a correct answer fail schema validation (defect H).
+
+        Only object-rooted schemas are injected: the provider rejects a non-object
+        tool input schema, and CC refuses those up front (lint reason
+        ``root_not_object``). Non-object schemas keep the text contract + fallback.
+        """
+        schema = _declared_schema(options)
+        if not isinstance(schema, dict) or not schema:
+            return tools
+        if str(schema.get("type") or "") != "object":
+            return tools
+        if any(_tool_name(tool) == STRUCTURED_OUTPUT_TOOL for tool in tools or []):
+            return tools
+        return list(tools or []) + [{
+            "type": "function",
+            "function": {
+                "name": STRUCTURED_OUTPUT_TOOL,
+                "description": (
+                    "Return your final response in the requested structured format. You MUST "
+                    "call this tool exactly once at the end of your response to provide the "
+                    "structured output."
+                ),
+                "parameters": copy.deepcopy(schema),
+            },
+        }]
+
     def _load_tools_schema(self, job=None):
         """Return the tool schema one job may see.
 
@@ -1107,7 +1147,7 @@ class NativeGPTChildAgentRunner:
             return tools
         profile_name, denied = effective_tool_profile(metadata.get("options") or {})
         self.last_job_tool_profile = profile_name
-        return filter_schema_for_denied(tools, denied)
+        return self._with_structured_output_tool(filter_schema_for_denied(tools, denied), metadata.get("options") or {})
 
     def _build_system_prompt(self) -> str:
         """Compose the child prompt the same way the root agent does.
@@ -1439,7 +1479,7 @@ class NativeGPTChildAgentRunner:
         return "\n".join(lines)
 
     @staticmethod
-    def _build_success_payload(job, answer: str) -> dict:
+    def _build_success_payload(job, answer: str, structured=None) -> dict:
         """Shape the child payload the host validates.
 
         A schema-constrained job must expose its JSON answer at the payload root,
@@ -1450,7 +1490,9 @@ class NativeGPTChildAgentRunner:
         options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
         ref = getattr(job, "result_ref", None)
         if _declared_schema(options):
-            parsed = parse_json_answer(answer)
+            # CC parity: when the child actually called ``structured_output``, that
+            # validated tool-call object IS the answer -- no text parsing needed.
+            parsed = structured if isinstance(structured, (dict, list)) else parse_json_answer(answer)
             if isinstance(parsed, dict):
                 payload = dict(parsed)
                 payload.setdefault("summary", bounded_structured_summary(text, ref=ref))

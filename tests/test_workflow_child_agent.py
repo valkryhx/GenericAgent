@@ -480,11 +480,13 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
 
         self.assertIn("<workflow-structured-output>", prompt)
         self.assertIn("</workflow-structured-output>", prompt)
-        self.assertIn("Return exactly one JSON value", prompt)
+        # CC parity: the contract now points at the StructuredOutput tool call,
+        # not at a free-text JSON answer.
+        self.assertIn("structured_output tool exactly once", prompt)
+        self.assertIn("reads ONLY the tool call", prompt)
         self.assertIn('"sources"', prompt)
         self.assertIn('"claims"', prompt)
         self.assertIn('"risks"', prompt)
-        self.assertIn("Do not wrap it in Markdown", prompt)
 
     def test_child_prompt_omits_structured_output_contract_without_schema(self):
         job = WorkflowJob(job_id="agent_1", prompt="just summarize", metadata={"runId": "wf_test"})

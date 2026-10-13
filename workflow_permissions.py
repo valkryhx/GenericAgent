@@ -24,7 +24,7 @@ EVIDENCE_ROLES = frozenset({"verification", "review"})
 MUTATING_TOOL_NAMES = frozenset({"file_write", "file_patch"})
 EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
 DENIED_READ_ONLY_STATIC_TOOLS = MUTATING_TOOL_NAMES | EXECUTE_TOOL_NAMES
-ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({"file_read", "web_scan", "no_tool", "ask_user", "load_skill"})
+ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({"file_read", "web_scan", "no_tool", "ask_user", "load_skill", "structured_output"})
 READ_ONLY_NAME_PREFIXES = ("read", "list", "get", "scan", "search", "show", "status", "inspect", "query", "fetch")
 READ_ONLY_NAME_PARTS = ("_read", "_list", "_get", "_scan", "_search", "_show", "_status", "_query", "_fetch")
 

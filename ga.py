@@ -793,6 +793,34 @@ class GenericAgentHandler(BaseHandler):
             yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}\n"
         return StepOutcome(payload, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
+    def do_structured_output(self, args, response):
+        '''CC-style StructuredOutput tool: the child's validated final answer.
+
+        CC evidence (m0869): with a schema, the child is forced to call a
+        ``StructuredOutput`` tool whose input schema IS the requested schema, and
+        the script reads ONLY that tool call. Validation sits at the tool-call
+        layer, so a wrong shape is rejected and the model retries inside its turn.
+        Returning ``next_prompt=None`` ends the child's turn with this value, which
+        the runner reads as the structured answer (no text parsing).
+        '''
+        payload = {key: value for key, value in (args or {}).items() if not str(key).startswith("_")}
+        schema = getattr(self, "workflow_output_schema", None)
+        if isinstance(schema, dict) and schema:
+            from workflow_scheduler import validate_agent_payload_against_schema
+
+            issues = validate_agent_payload_against_schema(payload, schema)
+            if issues:
+                detail = "; ".join(issues[:12])
+                msg = "Output does not match required schema: " + detail
+                yield f"[Schema] structured_output rejected: {detail}\n"
+                return StepOutcome(
+                    {"status": "error", "error": msg, "issues": issues[:12]},
+                    next_prompt="\n" + msg + "\nCall structured_output again with a corrected shape; do not put your answer in a text response.\n",
+                )
+        self.workflow_structured_output = payload
+        yield "[Schema] structured output accepted.\n"
+        return StepOutcome({"status": "ok", "structured_output": payload}, next_prompt=None)
+
     def _bind_workflow_wait_resolver(self, manager):
         """Give the manager the workflow-store resolver owned by the frontend.
 

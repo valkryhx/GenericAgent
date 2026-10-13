@@ -819,3 +819,35 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   `try/except WorkspacePathError` → 返回**可恢复**工具错误，子代理可自我纠正而不是整个 job 失败。
 - 测试：`tests/test_workflow_child_path_recovery.py`（2 例）。
 - 状态（2026-10-13）：**已实施**。
+
+### 中途调研 + 实施 2026-10-13：结构化输出对齐 CC（StructuredOutput 工具，取代文本 JSON 解析）
+
+- 触发：用户质疑「GA 要求 workflow 产物是 JSON 是否科学？CC 也这么核验产物吗？」
+- **结论：不是。** CC 从不解析自由文本 JSON：
+  - schema 约束的是 **agent 的返回值**，**不是磁盘上的产物文件**（产物就是普通文件，无 JSON 校验）；
+  - 有 schema 时，CC 强制子 agent 调用 **`StructuredOutput` 工具**（工具 input schema 就是用户 schema），
+    **校验在工具调用层**，形状错 → 模型**当轮重试**；脚本拿到的是**已校验对象，无需解析**；
+  - 无 schema 时返回值就是**纯文本字符串**。
+- CC 证据（仓库 `D:/git_codes/claudecode283_hack`）：
+  - `claudecode283/modules/m0227_0xc482590.js`：`bi="StructuredOutput"`；`pe(...)` 定义（`endsTurn:!0`、
+    `inputSchema=inputJSONSchema`、ajv 校验 `"Output does not match required schema: …"`）；lint `ze`（`root_not_object`/`missing_type`/`schema too large`）。
+  - `claudecode283/modules/m0869_0xd12567a.js`：有 schema 的 system prompt `Jr`/`Vr`（"MUST call the StructuredOutput tool exactly once …
+    the script reads ONLY the tool call"）；无 schema 的 `jr`（"final text returned verbatim"）；结构化值以 `attachment.type==="structured_output"` 回收；
+    `structuredOutputAttempts`；retry cap `Kn` + `"StructuredOutput retry cap exceeded"`。
+  - `claudecode283/extracted/workflow-authoring-reference.md:37,46`（"no parsing needed" / "validation happens at the tool-call layer so the model retries on mismatch"）。
+- GA 现状（改前）：`options.schema` → 提示词要求把 JSON 写进**最终文本** → 宿主 `parse_json_answer` 解析 →
+  解析失败即 job `failed`（**缺陷 H 的根因**）。
+- 修复（对齐 CC）：
+  - `workflow_child_agent.py`：`STRUCTURED_OUTPUT_TOOL` + `_with_structured_output_tool`（object 根 schema 时向子 agent 追加
+    `structured_output` 工具，`parameters`=该 schema）；`_build_handler` 设 `handler.workflow_output_schema`；
+    `_run_tool_job` 回收 `handler.workflow_structured_output`；`_build_success_payload(..., structured=...)` 优先用工具调用值；
+    `_structured_output_contract` 改为 CC 口径（"调用 structured_output 工具恰好一次，脚本只读该工具调用"）。
+  - `ga.py`：`do_structured_output`——校验通过则存值并 `next_prompt=None` **结束该轮**，不通过则返回错误 + 重试提示（当轮改）。
+  - `workflow_permissions.py`：`structured_output` 进 `ALLOWED_READ_ONLY_STATIC_TOOLS`（read_only/verify 档可用）。
+  - `skills/workflow-authoring/SKILL.md`：`schema` 说明改为 CC 口径，并**禁止**写「请返回 JSON」这类提示词。
+- 保留：文本解析 + `_apply_schema_contract` 作为**回退**（弱模型不调工具时仍可用）。
+- 测试：新增 `tests/test_workflow_structured_output.py`（10 例）；`test_workflow_child_agent` 旧措辞断言同步更新；
+  回归 `child_agent+structured_output+permissions+scheduler+runtime+integration+capability_preflight+permission_policy` → **277 OK**。
+- 文档：`docs/20261013-ga-workflow-结构化输出-对齐CC-StructuredOutput工具.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-13）：**已实施**。

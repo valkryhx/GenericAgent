@@ -111,7 +111,11 @@ GA-supported options:
 - `label` — display label. Use a stable, descriptive label.
 - `phase` — progress group. Prefer this over the global `phase()` call inside
   `parallel()` or `pipeline()` stages.
-- `schema` — JSON Schema for structured output.
+- `schema` — JSON Schema for structured output (object-rooted). The child is
+  given a `structured_output` tool whose input schema is this schema and must
+  call it once; the call is validated at the tool-call layer (the model retries
+  on mismatch) and `agent()` returns that object. It is NOT a request to emit
+  JSON as free text, so do not write prompts that ask the child to "return JSON".
 - `fallback` — `"text"` to degrade to text when schema validation fails.
 - `role` — one of `understanding`, `research`, `contract`, `tests`,
   `implementation`, `verification`, `review`, `repair`, `summary`, `synthesis`.
