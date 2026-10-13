@@ -852,3 +852,36 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 文档：`docs/20261013-ga-workflow-结构化输出-对齐CC-StructuredOutput工具.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-13）：**已实施**。
+
+### 中途调研 2026-10-13：CC dynamic workflow 是异步的；GA Ink「输入框锁死 / 查看卡顿」根因
+
+- 触发：用户实测 GA Ink 跑 workflow 时「输入框无法输入新内容」且「按回车想看 workflow 执行很卡」，并问
+  CC 的 dynamic workflow 是否异步。
+- CC 结论（异步 = 是）：
+  - `m1569_0xdceb889.js @65948 call()` 立即返回 `{status:"async_launched", taskId, runId, ...}`；
+    工具定义 `backgrounding:"never"`（`@61381`）——自己起后台任务，不走普通后台化通道。
+  - `m0869_0xd12567a.js @81169 kSt()` 是后台 async IIFE，`Io()` `@78839` 在 Node `vm` 里跑脚本。
+  - `@70281` 工具结果文案「Workflow launched in background … You will be notified when it completes」→
+    主 agent 的回合**可以结束**，不阻塞。
+  - `m0567_0xcdd6311.js @5824 RTn()` 用 `task-notification`（`mode:"task-notification"`、`priority:"next"`）
+    作为下一条用户消息唤醒主 agent；`BV()` 原子 claim 去重。
+  - `m2000_0xe395211.js` 状态行「Running in background · /workflows to monitor and save」是**旁路提示**，
+    composer 不锁；`/workflows`（`m1075`）是独立对话框。
+- GA 现状：
+  - **异步已对齐**：`workflow_launch_from_tool`（`frontends/ink_bridge.py:861`）起后台线程、立即返回
+    `{"status":"async_launched", ...}`（`:982`）。
+  - **差异 A（现象 1 根因）**：`_run_workflow_runtime`（`:1164`）emit 全局
+    `{"type":"status","status":"running"}`（`:1169`）→ Ink 隐藏光标（`App.tsx:1661`）、
+    Enter 不提交（`inputController.ts:362`）；handoff 又让会话从启动到 agent 答完整段保持 running。
+  - **差异 B（现象 2 根因）**：`workflow_list/detail/progress` 仍在 JSONL stdin 线程**同步**执行
+    （`ink_bridge.py:1063/1078/1099`，派发 `:2392/2394/2396`）；状态条只在 `input.trim()===''` 时
+    接管 Enter（`App.tsx:1416`）→ 草稿非空时按 Enter 看 workflow **静默无反应**；
+    `_watch_workflow_progress`（`:1247`）0.25s 一轮的 `workflow_live`/`workflow_progress`/`agent_snapshot`
+    触发 Ink 全树 re-render，并与子 agent 线程争 GIL。
+  - **差异 C**：`append_event`（`workflow_store.py:121`）每次追加整读 `journal.jsonl` 求 max sequence（O(n²)）。
+- 对齐方向（待实施）：① workflow 不再占用会话 running，改发独立 background-task 事件；
+  ② Enter 永远能打开 workflow 面板；③ 查看路径移出命令线程 + `load_run`/`replay_events` 加 mtime+size 缓存；
+  ④ 事件→帧节流（对齐 Codex `schedule_frame()`）。
+- 详细文档：`docs/20261013-ga-workflow-异步执行与Ink输入卡顿-对齐CC.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-13）：**调研已落盘，代码改动待实施**。
