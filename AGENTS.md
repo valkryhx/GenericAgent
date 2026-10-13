@@ -547,3 +547,28 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 待办：见独立文档；A 明确是 bug 可先修，B 需先出改造方案，C/D/E 待分析。
 - 详细文档：`docs/20261012-ga-workflow-实测缺陷清点-待分析.md`。
 - 状态（2026-10-12）：**仅落盘，未实施。**
+
+### 中途调研 2026-10-13：CC workflow 的多 agent 冲突处理 = worktree 隔离 + 值传递（不靠冲突检测）
+
+- 触发：用户要求研究 CC 2.1.283 dynamic workflow 如何减少多 agent 协作冲突，并出 GA 优化方案。
+- 上游证据（仓库 `D:\git_codes\claudecode283_hack`）：
+  - CC 作者参考 `claudecode283/extracted/workflow-authoring-reference.md:37`：
+    `opts.isolation:'worktree'` 让 agent 在**全新 git worktree** 里跑，`auto-removed if unchanged`，
+    **EXPENSIVE (~200-500ms + 磁盘/agent)，仅在并行改文件会冲突时才用**。
+  - 源码 `claudecode283/modules/m0869_0xd12567a.js` @57526：`else if(ve?.isolation==="worktree"){let E=g?`${g}-${M}`:`wf-${M}`;Je=await vt(E,{...})}` → `worktreePath:fn` 传给 child；默认 `Je=null`（不开，共享 cwd）；内置 web-fetch agent 强制忽略 worktree。
+  - worktree 模块 `m0531_0xcd4d7c8.js`：`.claude/worktrees/`、`worktree_created`/`worktree_kept`/`worktree_removed`。
+  - **CC 全仓无 `artifactCollision`/`artifactOwnership` 概念**（grep 命中 0）——冲突检测是 GA 自创。
+  - CC 默认形态：`agent()` 返回**值**（文本或 schema 校验对象），`parallel()`/`pipeline()` 传**值**，天然无冲突。
+- GA 现状与根因（本次确认）：
+  - workflow `agent()` **不支持 `isolation`**（`workflow_runtime.py:476` 只读 label/requiredTools/capabilities）。
+  - 并行 child 共享同一 workspace（`workflow_child_agent.py:971 _child_cwd` 返回 run 的共享 `workspacePath`），
+    每个 child 对**共享 workspace** 做 before/after diff（`workflow_child_agent.py:733-758`）→ 并行窗口重叠 →
+    **别人的文件被算到自己头上** → 假 `artifact_path_collision`（`workflow_scheduler.py:1409 _record_artifact_collisions`）。
+  - 实测证据：run `wf_3332887439d547609a91dde829e89a43`，`author:eight_queens` 被归属写了 `newton_method.py`/`primes_1_100.py`（实际没写），
+    但文件内容正确（未真覆盖）——证明是**归属误判**而非真覆盖。
+  - GA 已有可复用件：`subagent_worktree.create_subagent_worktree/remove_subagent_worktree`（Agent 工具 `isolation:"worktree"` 在用，`ga.py:30 _resolve_subagent_isolation`）；
+    `workflow_child_agent._child_cwd` 已有 per-job 目录 fallback（`temp/workflow_child_agents/<jobId>`）；workflow 已有 `schema` 值传递（`workflow_scheduler.py:156 validate_agent_payload_against_schema`）。
+- 结论：GA 要抄的不是「更好的冲突检测」，而是 CC 的**从源头避免**——(a) 值传递为默认，(b) 并行写文件时给每个 agent 独立工作目录（worktree/子目录）。
+- 待办：见独立方案文档；阶段 0 先修归属误判，阶段 1 给 workflow `agent()` 加 `isolation`，阶段 2 值传递默认化，阶段 3 提示词/文档。
+- 详细方案：`docs/20261013-ga-workflow-多agent冲突-对齐CC-worktree隔离与值传递.md`。
+- 状态（2026-10-13）：**仅落盘方案，未实施。**
