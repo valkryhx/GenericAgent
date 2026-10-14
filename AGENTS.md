@@ -1075,3 +1075,26 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 详细文档：`docs/20261014-ga-workflow-会话模式寒暄误触发-修复.md`。
 - 状态（2026-10-14）：**已实施，focused 测试通过**。
+
+### 方案 2026-10-14：GA Agent Team 复刻（对齐 Claude Code 2.1.283）
+
+- 目标：把 CC 的 **Agent Team**（协调者 lead + 具名 teammate + 名字寻址消息 + 共享任务板）复刻进 GA，
+  让多 agent 协作从「父代理派活、子代理各干各的」升级为「lead + teammate 在共享任务板上认领、用名字互发消息」。
+- **充分借鉴 CC 设计**，不自行发明；云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- CC 源码调研（证据源在 `D:\git_codes\claudecode283_hack`）：`docs/20261014-复刻agent-team指南.md`
+  （本仓库也有一份副本）；另见 `claudecode283/extracted/agent-team-internals.md`、
+  `reconstructed/deminified-agent-team/`、`claudecode283/extracted/hooks-internals.md`。
+- **GA 现状：已有大半**（别重造）—— `spawn_agent`（具名）、`send_message`/`followup_task`、
+  `SubagentMailbox`（TRIGGER_TURN/QUEUE_ONLY + 去重 + 回执）、父收件箱、`SubagentRegistry`
+  （`registry.json` + lock，≈ CC team 文件）、`SubagentEventBus`、`subagent_worktree`（隔离）、
+  `subagent_capabilities`（能力边界）、`subagent_prompts`（root/child hint）。
+- **差距（要补的 5 件）**：G1 共享任务板（最高，无 `TaskCreate/Get/Update/List`）；
+  G2 teammate 无法自主协作（`ORCHESTRATION_TOOLS` 把 `send_message`/任务工具从子代理剥离）；
+  G3 无 team/lead 身份；G4 提示词非 coordinator/teammate 模型；G5 通知格式未对齐。
+- **实施顺序（不可颠倒）**：P0 任务板 `subagent_tasks.py` + 4 工具 → P1 team/lead 身份（复用 registry）
+  → P2 放开 teammate 的 `send_message` + 任务工具（**仍禁 `spawn_agent` 递归**）→ P3 coordinator/teammate
+  提示词 → P4 通知对齐 `<task-notification>` + 防伪前置。
+- **不变量**：能力≠授权（teammate 只在显式要求/SOP 下起）；子代理不再递归 fan-out；值传递（teammate 看不到
+  lead 对话）；任务「真的完成」才置 completed；`TeamCreate`/`TeamDelete` **不做**（本 build 无定义，隐式单例团队）。
+- 详细方案：`docs/20261014-ga-agent-team-复刻实施方案.md`。
+- 状态（2026-10-14）：**方案已落盘，待实施**（尚未改代码）。
