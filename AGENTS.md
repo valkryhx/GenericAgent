@@ -1053,3 +1053,25 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 详细文档：`docs/20261014-ga-workflow-进度计数修复-与workflows详情美化.md`。
 - 状态（2026-10-14）：**已实施，focused 测试通过**。
+
+### 修复 2026-10-14：会话模式（standing opt-in）不再对寒暄轮自动编排（对齐 CC ultracode）
+
+- 触发：用户开过 `/workflow on` 后只输入 `wondeful!`（口语致谢），GA 却重新启动了一轮 workflow 编排。
+- 证据：`temp/sessions/session_23910f598e26450f9683b238a1c54c44.jsonl`（2026-10-14）turn 3 用户实际只打
+  `wondeful!`，却被包成 `[WORKFLOW OPT-IN]`（reason=`explicit session workflow mode`）→ turn 4 又一次 `workflow_handoff`。
+- 根因：`workflow_activation.py::resolve_workflow_activation()` 的 **session 分支**只要 `session_enabled` 就无条件
+  返回 `session/requested`，任何消息（含寒暄）都被注入 `workflow_opt_in_reminder()` → 主代理去直写脚本、启动 workflow。
+- CC 对照（`claudecode283/extracted/workflow-authoring-reference.md:16`，**Ultracode** 段）：
+  standing opt-in「author and run a workflow for **every substantive task** … **Solo only on conversational
+  turns or trivial mechanical edits.**」→ GA 漏了「寒暄轮不编排」这条 gate。
+- 修复（`workflow_activation.py`）：session 分支先判 `_is_conversational_turn(text)`，命中则返回 `none/none`；
+  新增 `_is_conversational_turn` / `_has_task_signal` / `_CONVERSATIONAL_WORDS`（英文 ack + 中文客套词）/
+  `_TASK_TOKENS`（重构/优化/修复/refactor/fix…）/ `_CJK`。判定保守：短 CJK 词一律交给模型，避免误杀「重构」类真任务。
+  **只作用于 session 分支**——显式 `/workflow <task>`、自然语言 `用 workflow …`、`_EXPLICIT_FANOUT`、semantic
+  分支都在 gate 之前返回，行为不变。
+- 测试（focused）：`tests/test_workflow_activation.py` 新增 3 例 → `pytest tests/test_workflow_activation.py -q`
+  **7 passed, 6 subtests**；`pytest tests/test_ink_bridge.py -q -k "opt_in or workflow"` **73 passed, 53 deselected**。
+- 不变量：**能力 ≠ 授权**；session opt-in 只对 substantive task 生效，寒暄轮 solo 回应。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 详细文档：`docs/20261014-ga-workflow-会话模式寒暄误触发-修复.md`。
+- 状态（2026-10-14）：**已实施，focused 测试通过**。

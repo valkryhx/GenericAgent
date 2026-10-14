@@ -29,5 +29,23 @@ class WorkflowActivationTest(unittest.TestCase):
         self.assertEqual('none', state.handle('generate report').action)
 
 
+    def test_session_mode_ignores_conversational_turns(self):
+        state = WorkflowActivationState()
+        state.handle('/workflow on')
+        for text in ('wondeful!', 'wonderful', '\u597d\u7684', 'thanks'):
+            with self.subTest(text=text):
+                decision = state.handle(text)
+                self.assertEqual(('none', 'none'), (decision.mode, decision.action))
+
+    def test_session_mode_still_orchestrates_substantive_tasks(self):
+        state = WorkflowActivationState()
+        state.handle('/workflow on')
+        for text in ('generate report', '\u91cd\u6784\u8fd9\u4e2a\u6a21\u5757'):
+            with self.subTest(text=text):
+                self.assertEqual('requested', state.handle(text).action)
+
+    def test_explicit_slash_workflow_unaffected_by_conversational_gate(self):
+        decision = resolve_workflow_activation('/workflow generate report')
+        self.assertEqual(('explicit', 'requested'), (decision.mode, decision.action))
 if __name__ == '__main__':
     unittest.main()

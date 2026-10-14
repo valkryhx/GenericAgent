@@ -27,6 +27,59 @@ _SYNTHESIZE = re.compile(r"(?:\bsynthesi[sz]e\b|\bcombine\b|\bcompare\b|\u7efc\u
 _MULTI_STEP = re.compile(r"(?:\bthen\b|\bafter\b|\bfirst\b|\bfinally\b|\u7136\u540e|\u518d|\u4e4b\u540e|\u6700\u540e|\u5e76|\u540c\u65f6)", re.I)
 
 
+_CONVERSATIONAL_WORDS = frozenset({
+    # English acknowledgements / pleasantries
+    "hi", "hello", "hey", "thanks", "thankyou", "thx", "ty", "ok", "okay", "yes", "yep",
+    "no", "nope", "cool", "nice", "great", "good", "awesome", "perfect", "wonderful",
+    "wondeful", "brilliant", "excellent", "amazing", "beautiful", "lovely", "wow",
+    "hmm", "lgtm", "done", "gotit", "understood", "ack", "np", "welcome", "cheers",
+    "sure", "yay", "please", "continue", "go", "y", "n",
+    # Chinese acknowledgements / pleasantries
+    "\u4f60\u597d", "\u60a8\u597d", "\u55e8", "\u54c8\u55bd", "\u8c22\u8c22", "\u591a\u8c22", "\u611f\u8c22",
+    "\u597d\u7684", "\u597d", "\u53ef\u4ee5", "\u884c", "\u55ef", "\u6536\u5230", "\u660e\u767d", "\u4e86\u89e3",
+    "\u4e0d\u9519", "\u5f88\u68d2", "\u68d2", "\u8d5e", "\u5b8c\u7f8e", "\u5389\u5bb3", "\u725b",
+    "\u54c8\u54c8", "\u8f9b\u82e6\u4e86", "\u592a\u68d2\u4e86", "\u5e72\u5f97\u597d", "\u505a\u5f97\u4e0d\u9519",
+})
+
+_TASK_TOKENS = frozenset({
+    "\u91cd\u6784", "\u4f18\u5316", "\u4fee\u590d", "\u5b9e\u73b0", "\u5f00\u53d1", "\u8bbe\u8ba1",
+    "\u90e8\u7f72", "\u8fc1\u79fb", "\u6392\u67e5",
+    "refactor", "optimize", "fix", "implement", "migrate", "debug",
+})
+
+_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _has_task_signal(text: str) -> bool:
+    return bool(
+        _SEARCH.search(text)
+        or _ARTIFACT.search(text)
+        or _VERIFY.search(text)
+        or _SYNTHESIZE.search(text)
+    )
+
+
+def _is_conversational_turn(text: str) -> bool:
+    """True for pure acknowledgements / pleasantries that must not auto-orchestrate.
+
+    Mirrors Claude Code's ultracode rule: a standing opt-in authors a workflow for
+    every *substantive* task, but stays solo on conversational turns.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    core = "".join(ch for ch in raw.lower() if ch.isalnum())
+    if not core:
+        return True
+    if core in _CONVERSATIONAL_WORDS:
+        return True
+    if core in _TASK_TOKENS:
+        return False
+    if len(core) <= 16 and not _CJK.search(core) and not _has_task_signal(raw):
+        return True
+    return False
+
+
 def _decision(mode: str, action: str, task: str, *, confidence: float = 0.0,
               signals: tuple[str, ...] = (), reason: str = "", fanout: bool = False,
               phases: bool = False, plan_only: bool = False) -> WorkflowActivationDecision:
@@ -70,6 +123,9 @@ def resolve_workflow_activation(task_text: str, *, session_enabled: bool = False
                          signals=tuple(signals), reason="multi-step task spans independent action classes",
                          fanout=len(signals) >= 3, phases=True)
     if session_enabled:
+        if _is_conversational_turn(text):
+            return _decision("none", "none", text, confidence=0.0, signals=tuple(signals),
+                             reason="conversational turn: standing workflow mode does not auto-orchestrate chat")
         return _decision("session", "requested", text, confidence=0.95,
                          signals=tuple(signals), reason="explicit session workflow mode", fanout=True, phases=True)
     return _decision("none", "none", text, confidence=0.0, signals=tuple(signals), reason="insufficient independent workflow signals")
