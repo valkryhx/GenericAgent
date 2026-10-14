@@ -279,3 +279,81 @@ test('App keeps workflow panel keys out of the composer', async () => {
     timers.forEach(timer => clearTimeout(timer))
   }
 })
+
+test('App opens the workflow panel with Enter while a running turn holds a draft', async () => {
+  const timers: NodeJS.Timeout[] = []
+  const sent: BridgeCommand[] = []
+  const stdin = new FakeReadStream()
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0))
+    timers.push(setTimeout(() => onEvent({
+      type: 'workflow_run',
+      run: {
+        runId: 'wf_busy',
+        sessionId: 'session',
+        status: 'running',
+        metadata: { workflowName: 'busy-demo' },
+        jobs: [{ jobId: 'agent_1', status: 'running' }],
+      },
+    }), 10))
+    // A turn is running, so Enter would otherwise just "keep the draft".
+    timers.push(setTimeout(() => onEvent({ type: 'status', status: 'running' }), 20))
+    return {
+      send(command: BridgeCommand) {
+        sent.push(command)
+        if (command.type === 'workflow_detail') {
+          timers.push(setTimeout(() => onEvent({
+            type: 'workflow_detail',
+            run: { runId: command.runId, sessionId: 'session', status: 'running', jobs: [] },
+            script: 'return 1',
+            events: [],
+            draft: {
+              taskText: 'busy',
+              classification: {},
+              plan: { meta: { name: 'busy-demo' }, phases: [{ title: 'One', agents: [{ label: 'a1' }] }] },
+              validation: { ok: true },
+            },
+            progress: null,
+          }), 0))
+        }
+      },
+      stop() {
+        timers.forEach(timer => clearTimeout(timer))
+      },
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    const bar = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('agents done'))
+    assert.match(bar, /Enter · \/workflows · x stop/)
+
+    // Type a draft. While a turn is running Enter never submits, so the status
+    // bar must claim it to open the panel instead of silently doing nothing.
+    stdin.push('d')
+    await delay(60)
+    stdin.push('\r')
+    const panel = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('› ✓ One'))
+    assert.match(panel, /› ✓ One/)
+    assert.equal(sent.some(command => command.type === 'submit'), false)
+    assert.equal(sent.some(command => command.type === 'workflow_detail' && command.runId === 'wf_busy'), true)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+  }
+})

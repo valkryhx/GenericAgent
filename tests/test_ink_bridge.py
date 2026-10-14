@@ -237,7 +237,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge_patch.start()
         self.addCleanup(bridge_patch.stop)
 
-    def test_workflow_refresh_emits_common_records_and_events_alongside_legacy_workflow_events(self):
+    def test_workflow_control_command_emits_common_records_and_events_alongside_legacy_workflow_events(self):
         agent = FakeAgent()
         events = []
         control = FakeAgentControl()
@@ -295,7 +295,10 @@ class InkBridgeTest(unittest.TestCase):
                 ),
             ]
 
-            bridge.workflow_detail(run_id)
+            # A workflow *control* command (deny/stop/draft) still publishes the
+            # generic read model; the read-only detail path must not (see
+            # test_workflow_detail_does_not_publish_heavy_agent_read_model).
+            bridge.workflow_deny(run_id, reason="test")
 
         snapshots = [event for event in events if event["type"] == "agent_snapshot"]
         self.assertTrue(snapshots)
@@ -308,6 +311,41 @@ class InkBridgeTest(unittest.TestCase):
         serialized = json.dumps(snapshots[-1], ensure_ascii=False)
         self.assertNotIn("prompt", serialized)
         self.assertNotIn("transcriptEvents", serialized)
+
+    def test_workflow_detail_does_not_publish_heavy_agent_read_model(self):
+        # CC parity / perf: opening the workflow panel must not pay the generic
+        # agent read model (list_records + events_since over a shared store: ~1.3 s
+        # and ~1.6 MB per call). The panel is fed by the workflow_detail event.
+        agent = FakeAgent()
+        events = []
+        control = FakeAgentControl()
+        control.records = [
+            AgentRecord(
+                execution_id="process-agent:run-process:/root/worker",
+                engine="process",
+                record_kind="process_agent",
+                status="running",
+                run_id="run-process",
+                capabilities=AgentCapabilities(actions=frozenset({"read", "events"})),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                agent_control=control,
+            )
+            run_id = bridge.workflow_draft("return 1")
+            events.clear()
+            bridge.workflow_detail(run_id)
+            bridge.workflow_list()
+            bridge.workflow_progress(run_id)
+
+        self.assertTrue(any(event["type"] == "workflow_detail" for event in events))
+        self.assertTrue(any(event["type"] == "workflow_runs" for event in events))
+        self.assertFalse(any(event["type"] == "agent_snapshot" for event in events))
+        self.assertFalse(any(event["type"] == "agent_event" for event in events))
     def test_encode_event_writes_compact_json_line(self):
         line = encode_event({"type": "assistant_delta", "text": "你好\nworld"})
 
@@ -2450,8 +2488,9 @@ class InkBridgeTest(unittest.TestCase):
             self.assertEqual("missing_ref", final_event["result"]["artifactError"])
             error_event = next(event for event in events if event["type"] == "error" and event["code"] == "workflow_run_failed")
             self.assertEqual("boom", error_event["message"])
-            self.assertEqual({"type": "activity", "label": None}, events[-2])
-            self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+            # CC alignment (2026-10-14): the background workflow must not flip the
+            # global session status; that flip is what locked the Ink composer.
+            self.assertFalse(any(event.get("type") == "status" for event in events))
 
     def assert_workflow_failed_final_error_and_idle(
         self,
@@ -2500,8 +2539,60 @@ class InkBridgeTest(unittest.TestCase):
         return workflow_events_by_run
 
     def assert_bridge_idle_tail(self, events):
-        self.assertEqual({"type": "activity", "label": None}, events[-2])
-        self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+        # CC alignment (2026-10-14): a dynamic workflow is a *background task* and
+        # must never flip the global session status — that flip is exactly what
+        # locked the Ink composer ("Running · Enter keeps draft") for the whole run.
+        # The session status is owned solely by the agent loop (submit / handoff),
+        # so a workflow run must leave no status events behind.
+        self.assertFalse(
+            any(event.get("type") == "status" for event in events),
+            msg="background workflow leaked a session status flip: %r" % (events[-3:],),
+        )
+
+    def test_background_workflow_never_flips_global_session_status(self):
+        """CC alignment: a running workflow must not lock the Ink composer.
+
+        The workflow thread must publish no ``status`` event at all; the session
+        status is owned by the agent loop (submit / handoff). Regression guard for
+        "input box locked while a workflow runs".
+        """
+        agent = FakeAgent()
+        agent.session_id = "session_workflow"
+        events = []
+        gate = threading.Event()
+
+        class BlockingRuntime:
+            def __init__(self, *, store, timeout_seconds=10.0):
+                self.store = store
+
+            def run(self, run, *, args=None, resume_from_run_id=None):
+                gate.wait(timeout=5)
+                run.status = "succeeded"
+                self.store.write_final_result(
+                    run,
+                    {"runId": run.run_id, "status": "succeeded", "result": {"ok": True}},
+                )
+                self.store.save_run(run)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                workflow_runtime_factory=lambda **kwargs: BlockingRuntime(**kwargs),
+            )
+            run_id = bridge.workflow_draft("return { ok: true }")
+            self.assertTrue(bridge.workflow_approve(run_id, timeout_seconds=5.0))
+            deadline = time.time() + 3
+            while time.time() < deadline and not any(
+                e.get("type") == "workflow_run" and e["run"]["runId"] == run_id for e in events
+            ):
+                time.sleep(0.01)
+            time.sleep(0.3)  # let a (buggy) background status flip show up
+            self.assertFalse(any(e.get("type") == "status" for e in events))
+            gate.set()
+            bridge.wait_for_workflow_idle(run_id, timeout=5)
+            self.assertFalse(any(e.get("type") == "status" for e in events))
 
     def test_workflow_approve_timeout_emits_failed_final_error_and_idle(self):
         agent = FakeAgent()

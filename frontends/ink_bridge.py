@@ -61,11 +61,11 @@ _WORKFLOW_HANDOFF_MAX_BYTES = 64 * 1024
 # Product default for /workflow without --timeout. WorkflowRuntime itself still
 # defaults to 10s for unit tests that construct it directly.
 DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 900.0
-# The progress watcher publishes agent events/snapshots only this often while a
-# workflow runs; the durable progress payload still goes out on every change.
-_AGENT_READ_MODEL_MIN_INTERVAL = 1.0
 # Live per-job telemetry files written by running children.
 _LIVE_TELEMETRY_RELATIVE = os.path.join("agents", "*", "live.json")
+# How many trailing journal events the workflow detail payload carries. The panel
+# derives everything from run/draft/progress; the tail is only for the raw view.
+_WORKFLOW_DETAIL_EVENT_TAIL = 50
 
 
 def _backend_log_path() -> str:
@@ -276,7 +276,15 @@ class GenericAgentBridge:
             agent_control = UnifiedAgentControl(
                 [
                     ProcessSubagentAdapter(process_manager),
-                    WorkflowChildAdapter(self.workflow_store, self.workflow_controller),
+                    # Scope the agent read model to the live session (CC keeps the
+                    # workflow view per session). Unscoped, temp/sessions grew without
+                    # bound and every workflow_detail/list/progress paid seconds of
+                    # list_records+events_since work (the "Enter to view is laggy" bug).
+                    WorkflowChildAdapter(
+                        self.workflow_store,
+                        self.workflow_controller,
+                        session_id_provider=lambda: getattr(self.agent, "session_id", None),
+                    ),
                 ]
             )
         self.agent_control = agent_control
@@ -960,7 +968,6 @@ class GenericAgentBridge:
         except Exception as exc:
             return {"status": "error", "error": redact_sensitive_text(str(exc))}
 
-        self._emit_agent_read_model()
         self.emit({"type": "workflow_run", "run": self._workflow_run_payload(run)})
         self._emit_workflow_events(run.run_id)
         try:
@@ -986,7 +993,11 @@ class GenericAgentBridge:
             "transcriptDir": os.path.join(artifact_dir, "agents"),
             "scriptPath": os.path.join(artifact_dir, "script.js"),
             "workspacePath": str((run.metadata or {}).get("workspacePath") or self.workspace_root),
-            "message": "Workflow launched in the background; use /workflows to monitor progress.",
+            "message": (
+                "Workflow launched in background. You will be notified when it completes; "
+                "do not block waiting (no wait_agent) -- report the launch and end your turn. "
+                "Use /workflows to monitor."
+            ),
         }
 
     def _read_workflow_tool_script_path(self, raw_path: str) -> str:
@@ -1063,7 +1074,10 @@ class GenericAgentBridge:
     def workflow_list(self) -> None:
         try:
             runs = self._list_workflow_runs()
-            self._emit_agent_read_model()
+            # CC parity / perf: the workflow list+detail panels are fed by these
+            # events, not by the generic agent read model. Emitting it here cost
+            # ~1.3 s + ~1.6 MB per keypress (list_records/events_since over the
+            # whole store), which is what made "Enter to view" feel frozen.
             self.emit({
                 "type": "workflow_runs",
                 "runs": [self._workflow_run_payload(run) for run in runs],
@@ -1079,10 +1093,13 @@ class GenericAgentBridge:
         try:
             with backend_output_redirect():
                 run = self.workflow_store.load_run(str(run_id or ""))
-                events = self.workflow_store.replay_events(run.run_id)
+                # The panel is built from run/draft/progress (workflowOverviewFromDetail
+                # never reads ``events``); CC's detail view reads agent transcripts on
+                # demand (m1460). Ship only a bounded tail instead of the whole journal
+                # so a long run cannot push a multi-hundred-KB frame on every Enter.
+                events = self.workflow_store.replay_events(run.run_id)[-_WORKFLOW_DETAIL_EVENT_TAIL:]
                 draft = self._workflow_artifact_payload(run, run.metadata.get("workflowDraftRef"))
                 progress = self._workflow_artifact_payload(run, "workflow-progress.json")
-            self._emit_agent_read_model()
             self.emit(
                 {
                     "type": "workflow_detail",
@@ -1112,7 +1129,6 @@ class GenericAgentBridge:
             if progress is None:
                 self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
                 return
-            self._emit_agent_read_model()
             self.emit({"type": "workflow_progress", "progress": progress})
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_progress_failed", "message": str(exc)})
@@ -1162,12 +1178,16 @@ class GenericAgentBridge:
             thread.join(timeout=timeout)
 
     def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
-        handoff_queued = False
         watch_stop = threading.Event()
         watcher = None
         try:
-            self.emit({"type": "status", "status": "running"})
-            self.emit({"type": "activity", "label": f"Running workflow {run_id}"})
+            # CC alignment (m1569 @65948 call() returns async_launched; m2000 renders
+            # "Running in background · /workflows to monitor and save"): a dynamic
+            # workflow is a *background task*. It must never flip the global session
+            # status, or the Ink composer locks ("Running · Enter keeps draft") for the
+            # whole run. "Running in background" is rendered from the
+            # workflow_run / workflow_progress events (the workflow status bar).
+            #
             # Progress is durable on disk, so poll it while the runtime blocks.
             # Without this the Ink panel sits at "0/0 agents done" for the whole
             # run and only updates once the runtime returns.
@@ -1199,9 +1219,8 @@ class GenericAgentBridge:
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
             self.workflow_progress(run_id)
-            self._emit_agent_read_model()
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
-            handoff_queued = self._queue_workflow_handoff(current)
+            self._queue_workflow_handoff(current)
         except Exception as exc:
             watch_stop.set()
             try:
@@ -1232,17 +1251,13 @@ class GenericAgentBridge:
                 self._emit_workflow_events(run_id)
                 self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
                 self.workflow_progress(run_id)
-                self._emit_agent_read_model()
                 self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
-                handoff_queued = self._queue_workflow_handoff(current)
+                self._queue_workflow_handoff(current)
             except Exception:
                 pass
             self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
         finally:
             watch_stop.set()
-            self.emit({"type": "activity", "label": None})
-            if not handoff_queued:
-                self.emit({"type": "status", "status": "idle"})
 
     def _watch_workflow_progress(self, run_id: str, stop: threading.Event, *, interval: float = 0.25) -> None:
         """Publish workflow-progress snapshots until the run settles.
@@ -1263,7 +1278,6 @@ class GenericAgentBridge:
         progress_path = os.path.join(artifact_dir, "workflow-progress.json")
         last_progress_signature: tuple[int, int] | None = None
         last_live_fingerprint: str | None = None
-        last_read_model_at = 0.0
         while not stop.wait(interval):
             progress: dict[str, Any] | None = None
             signature = _file_signature(progress_path)
@@ -1276,16 +1290,11 @@ class GenericAgentBridge:
                 live = None
             if progress is None and live is None:
                 continue
-            now = time.monotonic()
-            # Agent events are cheap and drive the agent list; the full snapshot
-            # serialization is not, so it is rate-limited independently of the
-            # progress payload.
-            if progress is not None or now - last_read_model_at >= _AGENT_READ_MODEL_MIN_INTERVAL:
-                last_read_model_at = now
-                try:
-                    self._emit_agent_read_model()
-                except Exception:
-                    pass
+            # The generic agent read model (list_records + events_since over the
+            # whole store) is deliberately NOT published here: it cost ~1.3 s and
+            # ~1.6 MB per call and the workflow panel does not use it. The panel is
+            # fed by workflow_progress + workflow_live below, exactly like CC's
+            # detail view (which reads agent transcripts on demand, m1460).
             if live is not None:
                 last_live_fingerprint = live_fingerprint
                 try:
@@ -1896,6 +1905,11 @@ class GenericAgentBridge:
             prompt = self._workflow_handoff_payload(run)
             self._task_seq += 1
             display_queue = self.agent.put_task(prompt, source='workflow_handoff', images=[])
+            # The workflow itself is a background task, but the *handoff* (the main
+            # agent answering with the workflow result) is a real agent turn: emit
+            # the same running/idle pair a user submit does, so the composer locks
+            # only while the agent is actually generating the final answer.
+            self.emit({"type": "status", "status": "running", "taskId": self._task_seq})
             self._consume_thread = threading.Thread(
                 target=self._consume_display_queue,
                 args=(self._task_seq, display_queue),
@@ -1974,15 +1988,20 @@ class GenericAgentBridge:
             payload["artifactSize"] = artifact_size
         return sanitize(payload)
 
+    def _current_session_id(self) -> str | None:
+        value = str(getattr(self.agent, "session_id", "") or "").strip()
+        return value or None
+
     def _list_workflow_runs(self):
-        root = self.workflow_store.root
+        # CC's ``/workflows`` is per session (m1906: "No dynamic workflows in this
+        # session."). temp/sessions is shared by every GA session, so an unscoped
+        # scan both diverged from CC and loaded every historical run on each call.
         runs = []
         with backend_output_redirect():
-            for state_path in root.glob("*/workflows/*/state.json"):
-                try:
-                    runs.append(self.workflow_store.load_run(state_path.parent.name))
-                except Exception:
-                    pass
+            try:
+                runs = list(self.workflow_store.list_runs(session_id=self._current_session_id()))
+            except Exception:
+                runs = []
         runs.sort(key=lambda run: str(run.run_id))
         return runs
 

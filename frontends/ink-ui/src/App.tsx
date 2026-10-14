@@ -1413,11 +1413,22 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         return
       }
     }
-    if (showWorkflowStatusBar && workflowStatusBar && input.trim() === '') {
+    if (showWorkflowStatusBar && workflowStatusBar) {
       const command = workflowStatusBarCommandForKey(workflowStatusBar, key, rawInput)
       if (command) {
-        bridgeRef.current?.send(command)
-        return
+        // The status bar is a background-workflow entry point, so it must stay
+        // reachable while the run is in flight:
+        //  - empty composer: Enter opens the panel, `x` stops the run (as before);
+        //  - composer has a draft AND a turn is running/stopping: Enter would be a
+        //    no-op ("keeps draft"), so use it to open the panel instead of doing
+        //    nothing;
+        //  - composer has a draft and the session is idle: Enter submits the draft,
+        //    and single-letter keys are ordinary text — never steal them.
+        const statusBusy = state.status === 'running' || state.status === 'stopping'
+        if (input.trim() === '' || (key.return && statusBusy)) {
+          bridgeRef.current?.send(command)
+          return
+        }
       }
     }
     if (key.upArrow) {

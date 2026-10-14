@@ -708,8 +708,19 @@ class WorkflowStore:
             raise FileNotFoundError(run_id)
         return matches[0]
 
-    def list_runs(self) -> list[WorkflowRun]:
-        run_ids = sorted({path.parent.name for path in self.root.glob("*/workflows/*/state.json")})
+    def list_runs(self, *, session_id: str | None = None) -> list[WorkflowRun]:
+        """List runs, optionally scoped to one session.
+
+        CC keeps the workflow history per session (``/workflows`` shows
+        "No dynamic workflows in this session."), and ``temp/sessions`` is
+        shared by every GA session, so an unscoped ``list_runs`` grows without
+        bound and made the Ink agent read model (``list_records`` /
+        ``events_since``) take seconds per call. Callers that only care about
+        the live session must pass ``session_id``.
+        """
+        scope = str(session_id or "").strip()
+        pattern = f"{scope}/workflows/*/state.json" if scope else "*/workflows/*/state.json"
+        run_ids = sorted({path.parent.name for path in self.root.glob(pattern)})
         return [self.load_run(run_id) for run_id in run_ids]
 
     # -- Named workflow library -------------------------------------------

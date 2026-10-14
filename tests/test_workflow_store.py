@@ -106,6 +106,31 @@ class WorkflowStoreTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.read_agent_transcript_events(run_b, "../state.json")
 
+    def test_list_runs_scopes_to_session_when_requested(self):
+        # CC keeps the workflow view per session (m1906: "No dynamic workflows in
+        # this session."). temp/sessions is shared by every GA session, so an
+        # unscoped list both diverges from CC and grows without bound -- it made
+        # the Ink agent read model take seconds per call.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            store.create_run(WorkflowRun(run_id="wf_a1", session_id="session_a", script=""))
+            store.create_run(WorkflowRun(run_id="wf_a2", session_id="session_a", script=""))
+            store.create_run(WorkflowRun(run_id="wf_b1", session_id="session_b", script=""))
+
+            self.assertEqual(
+                ["wf_a1", "wf_a2"],
+                [run.run_id for run in store.list_runs(session_id="session_a")],
+            )
+            self.assertEqual(
+                ["wf_b1"],
+                [run.run_id for run in store.list_runs(session_id="session_b")],
+            )
+            self.assertEqual(
+                ["wf_a1", "wf_a2", "wf_b1"],
+                [run.run_id for run in store.list_runs()],
+            )
+            self.assertEqual([], store.list_runs(session_id="session_missing"))
+
     def test_transcript_reader_sees_events_beyond_legacy_64k_head_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

@@ -885,3 +885,32 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 详细文档：`docs/20261013-ga-workflow-异步执行与Ink输入卡顿-对齐CC.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-13）：**调研已落盘，代码改动待实施**。
+
+### 实施结果 2026-10-14：workflow 对齐 CC「异步 background task」（方案 1–4 全部落地）
+
+依据：`docs/20261013-ga-workflow-异步执行与Ink输入卡顿-对齐CC.md` §5（四项对齐方案）。
+CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§7.5/§8/§9.2；
+`m1569 @65948 call()` 返回 `async_launched`；`m2000` 渲染「Running in background · /workflows to monitor and save」（旁路提示，不锁 composer）。
+
+1. **workflow 不再占用会话 running 状态**（方案 1）
+   - `frontends/ink_bridge.py::_run_workflow_runtime`：删除开头的全局 `status:running` + `activity` emit；删除 `finally` 里的 `activity:None` + `status:idle`（只留 `watch_stop.set()`）；删除 `handoff_queued` 变量。
+   - `_queue_workflow_handoff`：在 `put_task` 之后、`thread.start()` 之前新增 `status:running`（handoff 是真实 agent turn，此时才锁 composer；`_consume_display_queue` 末尾会 emit idle）。
+   - 效果：workflow 运行期 Ink composer 不再锁死，输入框可正常输入/提交。
+2. **Enter 永远能打开 workflow 面板**（方案 2）
+   - `frontends/ink-ui/src/App.tsx`（~1416）状态条按键块：空输入 → Enter 开面板；有草稿且 turn running/stopping → Enter 也开面板；有草稿且 idle → Enter 提交草稿（单字母不抢）。
+3. **查看路径移出重活**（方案 3，本会话最大发现）
+   - 实测根因：`workflow_detail` 原要 7.5–16.8s、emit 2.3 MB（`agent_snapshot` 1.63 MB 来自扫全仓 629 条记录 + 108 run；`workflow_detail` 687 KB）。
+   - `workflow_store.list_runs(*, session_id=None)` 新增按 session 作用域 glob（`f"{scope}/workflows/*/state.json"`）。
+   - `agent_control_workflow.WorkflowChildAdapter` 新增 `session_id_provider`，`_runs()` 走 scoped。
+   - `ink_bridge`：`workflow_list/detail/progress/launch_from_tool/_run_workflow_runtime` 移除 `_emit_agent_read_model()`；`_watch_workflow_progress` 删除 read-model 与节流常量；`workflow_detail.events` 改为 `replay_events(...)[-_WORKFLOW_DETAIL_EVENT_TAIL:]`（=50）。
+   - 实测（108 run 的 store，仅 1 个属该 session）：detail 7565–16853ms/2.3MB → **120–144ms/585KB**；list 1525ms/710KB → **85ms/439KB**；progress → **25ms/44KB**。
+4. **提示词侧「启动后结束回合」**（方案 4）
+   - `ga.py::do_workflow` yield 文案改为「launched ... in the background ... do not wait ... end your turn」。
+   - `ink_bridge.workflow_launch_from_tool` 返回 message 同步 CC 口径（含 do not block waiting (no wait_agent)）。
+   - `skills/workflow-authoring/SKILL.md` 新增「Do not block on the run」段落。
+
+- 测试（focused，全绿）：`tests.test_ink_bridge` + `test_workflow_store` + `test_agent_control_workflow` → **159 OK**；`npx tsc --noEmit` exit 0；`workflowList.app.test.ts` → 4 pass。
+- 新增测试：`test_background_workflow_never_flips_global_session_status`、`test_workflow_detail_does_not_publish_heavy_agent_read_model`、`test_list_runs_scopes_to_session_when_requested`、`App opens the workflow panel with Enter while a running turn holds a draft`。
+- 详细文档：`docs/20261014-ga-workflow-异步background-task-实施记录.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-14）：**已实施**。

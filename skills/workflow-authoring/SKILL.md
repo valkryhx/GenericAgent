@@ -64,6 +64,14 @@ Exactly one source is required: `script`, `scriptPath`, `name`, or
 The tool returns immediately with `status: "async_launched"` and a `runId`. The
 workflow continues in the background. When it finishes, GA queues a
 `<workflow_handoff>` message for the main agent. Use `/workflows` to watch live
+
+**Do not block on the run.** After `workflow` returns `async_launched`, report
+the launch in one line and **end your turn**. Do not call `wait_agent` (or poll
+`/workflows`) to wait for the run to finish. GA uses Claude Code's background-task
+model (`m2000`: "Running in background · /workflows to monitor and save"): the
+session stays free for the user while the run proceeds, and a `<workflow_handoff>`
+message wakes you automatically when it completes. Blocking the turn with
+`wait_agent` locks the Ink composer for the whole run.
 progress, inspect a run, stop it, save it, or run a saved workflow again.
 
 ## 3. Script contract

@@ -71,13 +71,33 @@ def _artifact_ref(ref: str | None, *, artifact_type: str) -> tuple[ArtifactRef, 
 class WorkflowChildAdapter:
     engine = "workflow"
 
-    def __init__(self, store: WorkflowStore, controller=None):
+    def __init__(self, store: WorkflowStore, controller=None, session_id_provider=None):
         self.store = store
         self.controller = controller
+        # CC scopes the workflow/agent view to the current session
+        # ("No dynamic workflows in this session."). ``temp/sessions`` is shared
+        # by every GA session, so scanning it unscoped made ``list_records`` /
+        # ``events_since`` take seconds once a few runs had accumulated. The
+        # provider is a callable (not a value) so a session swap (``/new``) is
+        # picked up without rebuilding the adapter.
+        self.session_id_provider = session_id_provider
+
+    def _session_id(self) -> str | None:
+        provider = self.session_id_provider
+        if provider is None:
+            return None
+        try:
+            value = str(provider() or "").strip()
+        except Exception:
+            return None
+        return value or None
+
+    def _runs(self) -> list[WorkflowRun]:
+        return self.store.list_runs(session_id=self._session_id())
 
     def list_records(self, *, include_terminal: bool = False, path_prefix: str | None = None) -> list[AgentRecord]:
         records: list[AgentRecord] = []
-        for run in self.store.list_runs():
+        for run in self._runs():
             run_record, child_records = self._records_for_run(run)
             for record in (run_record, *child_records):
                 if not include_terminal and record.status in _TERMINAL_STATUSES:
@@ -101,7 +121,7 @@ class WorkflowChildAdapter:
         events: list[AgentEvent] = []
         next_cursors: dict[str, int] = {}
         errors: dict[str, str] = {}
-        for run in self.store.list_runs():
+        for run in self._runs():
             source_cursor = make_workflow_source_cursor(run.run_id)
             cursor = cursors.get(source_cursor, 0)
             try:
@@ -299,7 +319,7 @@ class WorkflowChildAdapter:
         )
 
     def _find_target(self, execution_id: str):
-        for run in self.store.list_runs():
+        for run in self._runs():
             run_record, child_records = self._records_for_run(run)
             if run_record.execution_id == execution_id:
                 return run, None, run_record
