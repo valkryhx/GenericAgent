@@ -26,7 +26,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from sensitive_redaction import sanitize, redact_sensitive_text
-from workflow_store import build_artifact_ownership_index
+from workflow_store import build_artifact_ownership_index, preview_text
 from subagent_wait import workflow_run_is_terminal
 from workflow_workspace import (
     WorkspacePathError,
@@ -66,11 +66,6 @@ _LIVE_TELEMETRY_RELATIVE = os.path.join("agents", "*", "live.json")
 # How many trailing journal events the workflow detail payload carries. The panel
 # derives everything from run/draft/progress; the tail is only for the raw view.
 _WORKFLOW_DETAIL_EVENT_TAIL = 50
-# CC parity (m0869_0xd12567a.js Mt()/Co=400): the workflow *event channel*
-# carries only a short prompt preview per agent, never the full text. The
-# full prompt stays in the durable state.json and the agent transcript
-# (read on demand). Shipping it cost up to ~440 KB per run payload.
-_WORKFLOW_PROMPT_PREVIEW_CHARS = 400
 
 
 def _backend_log_path() -> str:
@@ -159,19 +154,6 @@ def _read_json_object(path: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     return sanitize(payload)
-
-
-def _preview_text(value: Any, limit: int = _WORKFLOW_PROMPT_PREVIEW_CHARS) -> str:
-    """CC-style head preview: collapse whitespace, keep the first ``limit``
-    chars and append an ellipsis when the text is longer (tail discarded).
-
-    Mirrors m0869 Mt(): ``r.length > Co ? re(r, Co) + … : r``.
-    """
-    if value is None:
-        return ""
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
-    text = " ".join(text.split())
-    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def make_stdout_emitter(stdout: TextIO) -> EmitFn:
@@ -1544,7 +1526,10 @@ class GenericAgentBridge:
         if isinstance(jobs, list):
             for job in jobs:
                 if isinstance(job, dict) and isinstance(job.get("prompt"), str):
-                    job["prompt"] = _preview_text(job["prompt"])
+                    # Canonical CC-style preview (workflow_store.preview_text):
+                    # 400-char head + ellipsis; the tail is dropped from the
+                    # event channel, the durable record keeps the full text.
+                    job["prompt"] = preview_text(job["prompt"])
         recovery = self._workflow_recovery_hint(run)
         if recovery:
             data["recovery"] = recovery

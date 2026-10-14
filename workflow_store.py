@@ -50,6 +50,25 @@ def build_artifact_ownership_index(run: WorkflowRun) -> dict[str, list[str]]:
     return artifact_ownership_index(getattr(run, "jobs", None) or [])
 
 
+# CC parity (m0869_0xd12567a.js Mt()/Co=400): a workflow *preview* is the
+# head of the text (whitespace collapsed to one line), capped at 400 chars
+# with a trailing ellipsis; the tail is discarded. The full text always
+# lives in the durable record / agent transcript and is read on demand.
+PREVIEW_CHARS = 400
+
+
+def preview_text(value, limit: int = PREVIEW_CHARS) -> str:
+    """CC-style head preview: ``r.length > Co ? re(r, Co) + "…" : r``."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    text = " ".join(text.split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 # A named workflow is the GA analogue of CC's "save as named workflow"
 # (m1906_0xe19cc02.js). CC keeps the saved name as a display string and only
 # ever round-trips it through Workflow({name, args}); GA also has to map it to
@@ -610,15 +629,10 @@ class WorkflowStore:
         return None
 
     @staticmethod
-    def _preview(value, limit: int = 240) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            text = value
-        else:
-            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        text = " ".join(text.split())
-        return text[:limit]
+    def _preview(value, limit: int = PREVIEW_CHARS) -> str:
+        # Single canonical implementation (see ``preview_text``): CC's
+        # 400-char head preview with a trailing ellipsis.
+        return preview_text(value, limit)
 
     def replay_events(self, run_id: str) -> list[WorkflowEvent]:
         artifact_dir = self._find_run_dir(run_id)

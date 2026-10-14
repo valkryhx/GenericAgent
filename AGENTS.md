@@ -937,4 +937,7 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 对齐动作（本轮实施）：`_workflow_run_payload` 把每个 job 的 `prompt` 截成 **400 + `…`**（CC 口径），
   durable `state.json` 仍保留全文；面板无需改（仍首选 `job.prompt`，只是变成 400 预览）。
 - 详细文档：`docs/20261014-CC-workflow-promptPreview截断机制.md`。
+- 追加（同日）：**统一**三处预览为同一 CC 口径 —— `workflow_store.PREVIEW_CHARS=400` + `preview_text()`；
+  `WorkflowStore._preview`、`ink_bridge` job prompt、`agent_control_workflow.read_result` 全部委托它
+  （进度快照 `promptPreview`/`resultPreview` 由 240/无省略号 → 400 + `…`）。测试 228 OK。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。

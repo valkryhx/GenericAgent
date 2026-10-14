@@ -429,6 +429,38 @@ class WorkflowStoreTest(unittest.TestCase):
             self.assertNotIn("verbose transcript must stay out", serialized)
             self.assertNotIn("skill body must not be in progress", serialized)
 
+    def test_workflow_progress_preview_is_cc_style_400_char_head(self):
+        # CC parity (m0869 Mt()/Co=400): a preview is the whitespace-collapsed
+        # head capped at 400 chars with a trailing ellipsis; the tail is
+        # discarded. Both promptPreview and resultPreview follow this rule.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            long_prompt = "p" * 1200
+            run = store.create_run(
+                WorkflowRun(
+                    run_id="wf_preview_chars",
+                    session_id="session_preview_chars",
+                    script="",
+                    status="running",
+                    jobs=[WorkflowJob(job_id="agent_1", prompt=long_prompt, status="succeeded")],
+                )
+            )
+            job = run.jobs[0]
+            store.write_agent_result(
+                run,
+                job,
+                AgentResult(job_id="agent_1", payload={"summary": "s" * 900}),
+            )
+            progress_ref = store.write_workflow_progress(run)
+            data = json.loads((Path(run.artifact_dir) / progress_ref).read_text(encoding="utf-8"))
+            item = data["workflowProgress"][0]
+            self.assertEqual(401, len(item["promptPreview"]))
+            self.assertTrue(item["promptPreview"].endswith("…"))
+            self.assertEqual("p" * 400, item["promptPreview"][:-1])
+            self.assertEqual(401, len(item["resultPreview"]))
+            self.assertTrue(item["resultPreview"].endswith("…"))
+            self.assertEqual("s" * 400, item["resultPreview"][:-1])
+
     def test_workflow_progress_states_the_base_of_each_ref_kind(self):
         """Refs must carry their root instead of leaving it to be inferred.
 

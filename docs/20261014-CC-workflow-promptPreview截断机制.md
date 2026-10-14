@@ -103,8 +103,28 @@ G  = rt ? Ir(rt, y).map(...)   // Ir = 按面板宽度换行
 
 ---
 
+## 4.1 追加：进度快照预览统一为同一规则
+
+GA 的进度快照（`workflow_store.write_workflow_progress`）原本用
+`workflow_store._preview(value, limit=240)`（240 字、**无**省略号），与事件通道的 400 口径不一致。
+本轮**统一**为同一个 CC 口径的实现：
+
+- `workflow_store.py` 新增模块级常量 `PREVIEW_CHARS = 400` 与函数 `preview_text(value, limit=400)`
+  （空白折叠成一行 → 头部 `limit` 字 → 超出则追加 `…`，尾部丢弃）；
+- `WorkflowStore._preview` 改为委托 `preview_text`（默认 400）；
+- `frontends/ink_bridge.py` 的 job prompt 截断改用 `workflow_store.preview_text`
+  （删除本地重复的 `_preview_text`）；
+- `agent_control_workflow.py::read_result` 的 `preview` 也改用 `preview_text`（删除本地重复 `_preview`）。
+
+结果：**进度快照 `promptPreview`/`resultPreview`、事件通道 job prompt、read_result preview 三处
+全部是同一个 400 字 + `…` 头部预览**，不再有 240/400 两套规则。
+
+---
+
 ## 5. 验证
 
 - `_workflow_run_payload` 的 job `prompt` 长度 ≤ 401（400 + 省略号）。
 - 既有测试（`test_ink_bridge` 等）不受影响（断言用的 prompt 都是短串）。
 - durable `state.json` 的 `jobs[].prompt` 仍为全文（未被截断）。
+- 进度快照 `promptPreview`/`resultPreview` 长度 ≤ 401（400 + 省略号），与 job prompt 一致。
+- `python -m unittest tests.test_workflow_store tests.test_ink_bridge tests.test_agent_control_workflow tests.test_workflow_scheduler` → **228 OK**。

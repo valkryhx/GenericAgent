@@ -23,7 +23,7 @@ from workflow_models import (
     project_workflow_execution_outcome,
     summarize_workflow_jobs,
 )
-from workflow_store import WorkflowStore
+from workflow_store import WorkflowStore, preview_text
 
 
 _TERMINAL_STATUSES = frozenset(
@@ -166,7 +166,7 @@ class WorkflowChildAdapter:
                 data = json.loads(artifact_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     source_payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
-                    payload = {"preview": self._preview(source_payload)}
+                    payload = {"preview": preview_text(source_payload)}
             except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
                 payload = {}
         return AgentResultRecord(
@@ -346,14 +346,6 @@ class WorkflowChildAdapter:
         if raw_status in {"succeeded", "completed"} and outcome == "partial":
             return "partial"
         return _RUN_STATUS_MAP.get(raw_status, "unknown")
-
-    @staticmethod
-    def _preview(value, limit: int = 240) -> str:
-        if isinstance(value, str):
-            text = value
-        else:
-            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        return " ".join(text.split())[:limit]
 
     def _safe_artifact_path(self, run: WorkflowRun, ref: str) -> Path:
         ref_path = Path(str(ref))
