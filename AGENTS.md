@@ -971,3 +971,21 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 详细文档：`docs/20261014-GA-workflow列表轻量payload对齐CC.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-14）：**已实施**。
+
+### 测量 2026-10-14：事件→帧节流（Codex schedule_frame()）收益验证 —— 结论：暂不实施
+
+- 触发：遗留项「事件 → 帧节流」，用户要求先量一版验证收益。
+- 探针：`frontends/ink-ui/scripts/_probe_workflow_frame_cost.ts`
+  （真实 `<App>` + 假 bridge，计时 `emit()`，统计 stdout 写次数=帧数）。
+- 关键实测：
+  - Ink **每个 `dispatch` 同步写一帧**：同步 burst 20 事件 → 20 次 write（N 事件 = N 帧，未自动合并）。
+  - `<Static>` 让 transcript 长度**不影响**单帧成本（20 vs 1500 条几乎一样）；每帧只重绘 live chrome。
+  - 单帧 median：状态条 ~1.3–1.8ms（~443B）；面板打开 ~4.2ms（~584B）。
+  - 运行期事件速率 ≤ **8/s**（`_watch_workflow_progress` interval=0.25，每 tick ≤2 事件）。
+  - 换算：现状最坏 4.2ms×8 ≈ **3.3% CPU**；合并 4:1 只省 ~1–2.5%。
+- 结论：**收益可忽略，复杂度/风险 > 收益，暂不实施**；真正解决卡顿的是已修的四条
+  （composer 锁、detail/list 大 payload、watcher 的 load_run/json.dumps、list 全量 payload）。
+- 重估触发条件：单帧 >20ms、常态事件 >50/s、或出现每帧重绘大 transcript/大表格的新 UI。
+- 详细文档：`docs/20261014-GA-事件帧节流收益测量.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-14）：**已测量，判定不做**。
