@@ -2240,6 +2240,50 @@ class InkBridgeTest(unittest.TestCase):
             self.assertIn("cached results", hint["message"])
             self.assertTrue(hint["agentTranscriptsDir"].endswith("agents"))
 
+    def test_workflow_run_payload_truncates_job_prompt_like_cc(self):
+        # CC parity (m0869 Mt()/Co=400): the workflow event channel carries a
+        # bounded prompt preview per agent; the durable record keeps the full
+        # text. This is what keeps the run payload small.
+        agent = FakeAgent()
+        agent.session_id = "session_preview"
+        events = []
+        long_prompt = "x" * 1200
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_preview",
+                    session_id="session_preview",
+                    script="x",
+                    status="succeeded",
+                    jobs=[WorkflowJob(job_id="agent_1", prompt=long_prompt, status="succeeded")],
+                )
+            )
+            payload_prompt = bridge._workflow_run_payload(run)["jobs"][0]["prompt"]
+            self.assertEqual(401, len(payload_prompt))
+            self.assertTrue(payload_prompt.endswith("…"))
+            self.assertEqual("x" * 400, payload_prompt[:-1])
+            # Durable state.json keeps the full prompt (only the UI payload is
+            # truncated, exactly like CC's durable record vs event channel).
+            reloaded = bridge.workflow_store.load_run("wf_preview")
+            self.assertEqual(long_prompt, reloaded.jobs[0].prompt)
+
+    def test_workflow_run_payload_keeps_short_job_prompt_verbatim(self):
+        agent = FakeAgent()
+        agent.session_id = "session_preview_short"
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda event: None, workflow_root=tmp)
+            run = bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_preview_short",
+                    session_id="session_preview_short",
+                    script="x",
+                    status="succeeded",
+                    jobs=[WorkflowJob(job_id="agent_1", prompt="research the repo", status="succeeded")],
+                )
+            )
+            self.assertEqual("research the repo", bridge._workflow_run_payload(run)["jobs"][0]["prompt"])
+
     def test_workflow_list_includes_saved_workflow_names(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"

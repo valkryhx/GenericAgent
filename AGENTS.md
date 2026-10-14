@@ -914,3 +914,27 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 详细文档：`docs/20261014-ga-workflow-异步background-task-实施记录.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-14）：**已实施**。
+
+### 中途调研 2026-10-14：CC 的 promptPreview / resultPreview = 400 字头部截断（尾部丢弃）
+
+- 触发：用户问 `_workflow_run_payload` 里 job prompt「截断」对应 CC 的什么、截多少、是否丢尾部。
+- CC 证据（`claudecode283_hack`）：
+  - 预览助手 `Mt(e)`（`m0869_0xd12567a.js @36742`，见 `reconstructed/renamed/m0869.Mt.36742.js`）：
+    `function Mt(e){if(e==null)return;let r=(typeof e==="string"?e:b(e)).trim();if(!r)return;return r.length>Co?re(r,Co)+"\u2026":r}`
+  - 常量 `Co=400`（同模块 `Co=400`）。
+  - 用途：`workflow_agent` 进度事件里 `promptPreview: Mt(U)`、`resultPreview: Mt(te.result)`。
+  - 详情面板 `m1460_0xd973957.js`：`rt = a!=="loading" && a?.prompt ? a.prompt : o.promptPreview ?? ""`
+    —— 优先用**按需加载**的完整 prompt（`a.prompt`，来自 agent transcript），拿不到时退回 `promptPreview`，
+    并显示 `Loading…` / `Not available yet (agent still running).`。
+- 结论：
+  - **对应 CC 的 `promptPreview` / `resultPreview` 字段**：事件通道只传**预览**，不传全文；
+    全文留在 durable record + 按需读取的 transcript 里。
+  - **截断长度 = 400 字符**（`Co=400`），超出则取**头部 400** + 追加 `…`（U+2026）。
+  - **尾部丢弃**：`r.length > Co ? re(r,Co)+"…" : r` —— 保留前 400 字，其余丢弃、以单个省略号代替；
+    全文不丢（在 store / transcript / draft 里）。
+- GA 现状：`workflow_store._preview(value, limit=240)` 已用于进度快照的 `promptPreview`/`resultPreview`（240，无省略号）；
+  但 `_workflow_run_payload` 仍带**完整** `job.prompt`（最大 ~440 KB/run），面板 `workflowPanel.ts:392` 首选 `job?.prompt`。
+- 对齐动作（本轮实施）：`_workflow_run_payload` 把每个 job 的 `prompt` 截成 **400 + `…`**（CC 口径），
+  durable `state.json` 仍保留全文；面板无需改（仍首选 `job.prompt`，只是变成 400 预览）。
+- 详细文档：`docs/20261014-CC-workflow-promptPreview截断机制.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
