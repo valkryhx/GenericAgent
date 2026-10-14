@@ -1180,6 +1180,25 @@ class GenericAgentBridge:
     def _run_workflow_runtime(self, run_id: str, args: Any, timeout_seconds: float | None, resume_from_run_id: str | None = None) -> None:
         watch_stop = threading.Event()
         watcher = None
+
+        def _stop_watcher() -> None:
+            """Stop the progress watcher and wait for its last emit to land.
+
+            ``watch_stop.set()`` only *asks* the watcher to stop; a tick already
+            past ``stop.wait()`` still reads the progress file and emits. If that
+            read happened just before the run wrote its final snapshot, the stale
+            emit can land *after* the terminal ``workflow_progress`` and leave the
+            Ink status bar stuck at "3/6 agents done" for a finished 6/6 run.
+            Joining here makes the watcher's last emit strictly precede the
+            terminal emits below.
+            """
+            watch_stop.set()
+            if watcher is not None:
+                try:
+                    watcher.join(timeout=2.0)
+                except RuntimeError:
+                    pass
+
         try:
             # CC alignment (m1569 @65948 call() returns async_launched; m2000 renders
             # "Running in background · /workflows to monitor and save"): a dynamic
@@ -1215,14 +1234,14 @@ class GenericAgentBridge:
                 runtime = self._make_workflow_runtime(timeout_seconds=timeout_seconds)
                 runtime.run(run, args=args, resume_from_run_id=resume_from_run_id)
                 current = self.workflow_store.load_run(run_id)
-            watch_stop.set()
+            _stop_watcher()
             self._emit_workflow_events(run_id)
             self.emit({"type": "workflow_run", "run": self._workflow_run_payload(current)})
             self.workflow_progress(run_id)
             self.emit({"type": "workflow_final", "runId": run_id, "result": self._workflow_final_payload(current)})
             self._queue_workflow_handoff(current)
         except Exception as exc:
-            watch_stop.set()
+            _stop_watcher()
             try:
                 current = self.workflow_store.load_run(run_id)
                 if current.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
@@ -1257,7 +1276,7 @@ class GenericAgentBridge:
                 pass
             self.emit({"type": "error", "code": "workflow_run_failed", "message": str(exc)})
         finally:
-            watch_stop.set()
+            _stop_watcher()
 
     def _watch_workflow_progress(self, run_id: str, stop: threading.Event, *, interval: float = 0.25) -> None:
         """Publish workflow-progress snapshots until the run settles.

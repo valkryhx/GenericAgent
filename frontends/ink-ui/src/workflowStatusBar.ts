@@ -36,7 +36,12 @@ export function workflowStatusBarFromState(state: AppState): WorkflowStatusBarSu
 
 function workflowStatusBarFromRun(run: WorkflowRun, state: AppState, status = run.status): WorkflowStatusBarSummary {
   const progressEntries = state.workflowDetails[run.runId]?.progress?.workflowProgress ?? []
-  const agents = progressEntries.length > 0 ? progressEntries : progressFromJobs(run.jobs ?? [])
+  // Reconcile the polled progress snapshot with the authoritative run record.
+  // ``workflow-progress.json`` is a *snapshot*; the status bar used to trust it
+  // outright, so a snapshot captured a tick before the run settled (e.g. 3 of 6
+  // jobs done) kept showing "3/6 agents done" for a finished 6/6 run. Taking the
+  // most-settled state per job from *either* source makes the count monotonic.
+  const agents = mergeAgentStates(progressEntries, run.jobs ?? [])
   const completedAgents = agents.filter(agent => agent.state === 'succeeded' || agent.state === 'cached' || agent.state === 'degraded').length
   const totalAgents = agents.length
   const active = agents.find(agent => agent.state === 'running') ?? agents.find(agent => agent.state === 'queued' || agent.state === 'registered')
@@ -71,12 +76,56 @@ function workflowIntegrationText(run: WorkflowRun, state: AppState): string | un
   return pieces.length > 0 ? pieces.join(' · ') : undefined
 }
 
-function progressFromJobs(jobs: WorkflowJob[]): WorkflowProgressEntry[] {
-  return jobs.map(job => ({
-    label: stringValue(job.metadata?.label),
-    state: job.status,
-    tokenUsage: recordValue(job.metadata?.tokenUsage),
-  }))
+// Lifecycle order for reconciliation. Higher == further along, so when the two
+// sources disagree we keep the more-advanced state (a job that reached a
+// terminal state never moves backwards). ``cached``/``degraded`` are terminal
+// exactly like ``succeeded``.
+const SETTLED_STATES = new Set([
+  'succeeded', 'cached', 'degraded', 'failed', 'skipped', 'killed', 'cancelled', 'interrupted',
+])
+const RANK_BY_STATE: Record<string, number> = { registered: 0, queued: 1, running: 2 }
+
+function stateRank(state?: string): number {
+  if (!state) return -1
+  if (SETTLED_STATES.has(state)) return 3
+  return RANK_BY_STATE[state] ?? 1
+}
+
+type ReconciledAgent = WorkflowProgressEntry & { state: string }
+
+function agentIdentity(entry: { jobId?: unknown; agentId?: unknown; label?: unknown }): string | null {
+  return stringValue(entry.jobId) ?? stringValue(entry.agentId) ?? stringValue(entry.label) ?? null
+}
+
+/** Merge the polled progress entries with the run's job records, per jobId. */
+function mergeAgentStates(progressEntries: WorkflowProgressEntry[], jobs: WorkflowJob[]): ReconciledAgent[] {
+  const merged: ReconciledAgent[] = []
+  const indexByIdentity = new Map<string, number>()
+  const upsert = (entry: ReconciledAgent): void => {
+    const key = agentIdentity(entry)
+    if (!key) {
+      merged.push(entry)
+      return
+    }
+    const at = indexByIdentity.get(key)
+    if (at === undefined) {
+      indexByIdentity.set(key, merged.length)
+      merged.push(entry)
+      return
+    }
+    const current = merged[at]!
+    if (stateRank(entry.state) > stateRank(current.state)) merged[at] = { ...current, ...entry }
+  }
+  for (const entry of progressEntries) upsert({ ...entry, state: String(entry.state ?? 'registered') })
+  for (const job of jobs) {
+    const entry: ReconciledAgent = { jobId: job.jobId, state: String(job.status ?? 'registered') }
+    const label = stringValue(job.metadata?.label)
+    if (label) entry.label = label
+    const tokenUsage = recordValue(job.metadata?.tokenUsage)
+    if (tokenUsage) entry.tokenUsage = tokenUsage
+    upsert(entry)
+  }
+  return merged
 }
 
 export function workflowStatusBarRows(bar: WorkflowStatusBarSummary): string[] {

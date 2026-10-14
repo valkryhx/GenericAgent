@@ -1,5 +1,6 @@
 import type { BridgeCommand, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressEntry, WorkflowProgressPayload, WorkflowRun, WorkflowJob } from './protocol.js'
 import type { InputKey } from './inputController.js'
+import stringWidth from 'string-width'
 
 export type WorkflowDetailPayload = {
   run: WorkflowRun
@@ -327,16 +328,28 @@ export function workflowOverviewRows(overview: WorkflowOverview): string[] {
     overview.finalAuditStatus ? `audit ${overview.finalAuditStatus}` : null,
   ].filter(Boolean).join(' · ')
   const headline = `${overview.name}  ${overview.completed}/${overview.total} agents · ${overview.status}${gateSummary ? ` · ${gateSummary}` : ''}`
+  // Two aligned columns. The phase column is sized to the widest cell (never
+  // below PHASE_COLUMN_MIN) so the divider lines up no matter how long a phase
+  // title is -- the old fixed 16-cell pad broke as soon as a title overflowed.
+  const phaseCells = overview.phases.map((phase, index) => phaseRow(phase, index === overview.selectedPhase))
+  const phaseColumnWidth = Math.max(
+    PHASE_COLUMN_MIN,
+    stringWidth('Phases'),
+    ...phaseCells.map(cell => stringWidth(cell)),
+  )
+  const padCell = (cell: string) => cell + ' '.repeat(Math.max(0, phaseColumnWidth - stringWidth(cell)))
+  const agentHeader = selectedPhase
+    ? `${selectedPhase.title} · ${selectedPhase.total} ${selectedPhase.total === 1 ? 'agent' : 'agents'}`
+    : 'Agents'
   const rows = [
     headline,
     overview.description,
-    `Phases | ${selectedPhase ? `${selectedPhase.title} · ${selectedPhase.total} ${selectedPhase.total === 1 ? 'agent' : 'agents'}` : 'Agents'}`,
+    `${padCell('Phases')} │ ${agentHeader}`,
   ]
   const maxRows = Math.max(overview.phases.length, selectedPhase?.agents.length ?? 0)
   for (let index = 0; index < maxRows; index++) {
-    const phase = overview.phases[index]
     const agent = selectedPhase?.agents[index]
-    rows.push(`${phase ? phaseRow(phase, index === overview.selectedPhase) : ''.padEnd(16)} | ${agent ? overviewAgentRow(agent) : ''}`)
+    rows.push(`${padCell(phaseCells[index] ?? '')} │ ${agent ? overviewAgentRow(agent) : ''}`)
   }
   rows.push('Enter agent · j/k phase · PgUp/PgDn · Esc back')
   return rows
@@ -521,12 +534,31 @@ function liveFor(
   return undefined
 }
 
+// Lifecycle order for reconciling the polled progress snapshot with the run
+// record (see workflowStatusBar.ts for the status-bar twin).
+const SETTLED_STATES = new Set([
+  'succeeded', 'cached', 'degraded', 'failed', 'skipped', 'killed', 'cancelled', 'interrupted',
+])
+const RANK_BY_STATE: Record<string, number> = { registered: 0, queued: 1, running: 2 }
+function panelStateRank(state?: string): number {
+  if (!state) return -1
+  if (SETTLED_STATES.has(state)) return 3
+  return RANK_BY_STATE[state] ?? 1
+}
+function moreSettledStatus(a?: string, b?: string): string {
+  if (panelStateRank(b) > panelStateRank(a)) return b!
+  return a || b || 'registered'
+}
+
 function overviewAgentFromProgress(entry: WorkflowProgressEntry, job?: WorkflowJob, live?: WorkflowLiveJob): WorkflowOverviewAgent {
   const label = stringMetadata(entry.label) || stringMetadata(job?.metadata?.label) || stringMetadata(entry.jobId) || stringMetadata(entry.agentId) || 'agent'
   return {
     id: stringMetadata(entry.jobId) || stringMetadata(entry.agentId) || job?.jobId || label,
     label,
-    status: entry.state || job?.status || 'registered',
+    // Reconcile the polled snapshot with the run record: a progress entry read a
+    // tick before the job settled must not pin the row at ``running`` when the
+    // authoritative job record already says ``succeeded``.
+    status: moreSettledStatus(entry.state, job?.status),
     model: stringMetadata(job?.metadata?.model),
     // While a child runs the durable snapshot has no token total yet; the live
     // channel is the only place that knows it.
@@ -583,8 +615,12 @@ function workflowOverviewDescription(run: WorkflowRun, draft: WorkflowDraftPaylo
   return taskType || ''
 }
 
+const PHASE_COLUMN_MIN = 16
+
 function phaseRow(phase: WorkflowOverviewPhase, selected: boolean): string {
-  return `${selected ? '›' : ' '} ✓ ${phase.title} ${phase.completed}/${phase.total}`
+  // ✓ once every agent in the phase is done, ◌ while any is still in flight.
+  const glyph = phase.total > 0 && phase.completed >= phase.total ? '✓' : '◌'
+  return `${selected ? '›' : ' '} ${glyph} ${phase.title} ${phase.completed}/${phase.total}`
 }
 
 function overviewAgentRow(agent: WorkflowOverviewAgent): string {

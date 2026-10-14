@@ -107,7 +107,9 @@ test('workflowStatusBarRows formats running workflow controls and summary', () =
 
   assert.deepEqual(workflowStatusBarRows(bar!), [
     'Enter · /workflows · x stop',
-    '› ◌ live-workflow  1/2 agents done',
+    // The running job's id now surfaces as the active agent (the jobs-only
+    // path used to drop it); a real run shows the job's label instead.
+    '› ◌ live-workflow  1/2 agents done · a2',
   ])
 })
 
@@ -262,4 +264,85 @@ test('workflowStatusBarFromState displays partial projection without rewriting r
 
   assert.equal(bar?.status, 'partial')
   assert.equal(state.workflows[0].status, 'succeeded')
+})
+
+test('workflowStatusBarFromState reconciles a stale progress snapshot with the terminal run record', () => {
+  // Reproduces the "6 agents done but the box still shows 3/6" report: the
+  // polled workflow-progress.json snapshot was captured a tick before the run
+  // settled, so three jobs still read "running" there while the run record has
+  // all six succeeded.
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [
+      {
+        runId: 'wf_reconcile',
+        sessionId: 'session',
+        status: 'succeeded',
+        metadata: { workflowName: 'reconcile', integrationStatus: 'accepted', finalAuditStatus: 'passed' },
+        jobs: ['agent_1', 'agent_2', 'agent_3', 'agent_4', 'agent_5', 'agent_6'].map(jobId => ({ jobId, status: 'succeeded' })),
+      },
+    ],
+    workflowDetails: {
+      wf_reconcile: {
+        run: { runId: 'wf_reconcile', sessionId: 'session', status: 'succeeded' },
+        script: '',
+        events: [],
+        draft: null,
+        progress: {
+          runId: 'wf_reconcile',
+          sessionId: 'session',
+          status: 'running',
+          workflowProgress: [
+            { jobId: 'agent_1', label: 'author:newton', state: 'succeeded' },
+            { jobId: 'agent_2', label: 'author:queens8', state: 'succeeded' },
+            { jobId: 'agent_3', label: 'author:leapyear', state: 'succeeded' },
+            { jobId: 'agent_4', label: 'verify:leapyear', state: 'running' },
+            { jobId: 'agent_5', label: 'verify:queens8', state: 'running' },
+            { jobId: 'agent_6', label: 'verify:newton', state: 'running' },
+          ],
+        },
+      },
+    },
+  }))
+
+  assert.equal(bar?.totalAgents, 6)
+  assert.equal(bar?.completedAgents, 6)
+})
+
+test('workflowStatusBarFromState keeps the fresher progress state while the run record still lags', () => {
+  // The run record is only refreshed on workflow_run events (start/end), so
+  // mid-run it can still say queued while progress already shows succeeded.
+  const bar = workflowStatusBarFromState(stateWithWorkflows({
+    workflows: [
+      {
+        runId: 'wf_lag',
+        sessionId: 'session',
+        status: 'running',
+        metadata: { workflowName: 'lag' },
+        jobs: [
+          { jobId: 'agent_1', status: 'queued' },
+          { jobId: 'agent_2', status: 'queued' },
+        ],
+      },
+    ],
+    workflowDetails: {
+      wf_lag: {
+        run: { runId: 'wf_lag', sessionId: 'session', status: 'running' },
+        script: '',
+        events: [],
+        draft: null,
+        progress: {
+          runId: 'wf_lag',
+          sessionId: 'session',
+          status: 'running',
+          workflowProgress: [
+            { jobId: 'agent_1', state: 'succeeded' },
+            { jobId: 'agent_2', state: 'running' },
+          ],
+        },
+      },
+    },
+  }))
+
+  assert.equal(bar?.totalAgents, 2)
+  assert.equal(bar?.completedAgents, 1)
 })

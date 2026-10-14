@@ -1038,3 +1038,18 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 详细文档：`docs/20261014-ga-workflow-worktree隔离-CC机制补充调研.md`、
   `docs/20261014-ga-workflow-隔离工作副本-实施记录.md`。
 - 状态（2026-10-14）：**已实施，focused 测试通过**。
+
+### 实施 2026-10-14：workflow 进度计数修复（6/6 显示 3/6）+ /workflows 详情美化
+
+- 触发：用户实测「6 个 agent 都执行完毕，但输入框上方状态仍显示 3/6」，并要求美化 `/workflows` 详情（`|` 前列宽对齐）。
+- 排查证据：抽查 `temp/sessions/*/workflows/*/workflow-progress.json` 与 `run.json`，**磁盘快照是对的**（`wf_66e2…` 6/6、`wf_39565…` 6/6）→ 不是后端算错，是 **UI 显示陈旧快照**。
+- 根因 A（前端信错来源）：`workflowStatusBar.ts` 优先用 `workflowDetails[runId].progress.workflowProgress`（轮询快照，可能停在 3/6），忽略权威 `run.jobs`。
+- 根因 B（后端 emit 竞态）：`ink_bridge._run_workflow_runtime` 的 `watch_stop.set()` **不等待** watcher；`_watch_workflow_progress` 若已越过 `stop.wait()`，会把**旧**快照 emit 在终态 emit **之后**，覆盖回 3/6。
+- 修复：
+  - 后端 `_stop_watcher()`：`set()` 后 `watcher.join(timeout=2.0)`，让 watcher 最后 emit 严格早于终态 emit（三处 `watch_stop.set()` 全改）。
+  - 前端 `workflowStatusBar.mergeAgentStates` + `workflowPanel.moreSettledStatus`：按 jobId 合并快照与 `run.jobs`，**取更 settled 的状态**（settled 3 > running 2 > queued 1 > registered 0）→ 计数单调。
+- 美化（`workflowOverviewRows`）：列宽按内容算（`string-width`，CJK 正确）+ 分隔符 `|`→`│` + phase 字形完成 `✓`/未完成 `◌`；`|` 在所有行严格对齐。
+- 测试：前端 `npm test` **410 passed**、`tsc --noEmit` 0；后端 `pytest tests/test_ink_bridge.py tests/test_workflow_runtime.py -q` **233 passed, 20 subtests**。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 详细文档：`docs/20261014-ga-workflow-进度计数修复-与workflows详情美化.md`。
+- 状态（2026-10-14）：**已实施，focused 测试通过**。
