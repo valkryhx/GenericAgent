@@ -464,6 +464,40 @@ worker 结果以 `<task-notification>` XML 投递（包在 `<system-reminder>` �
   4. **复刻结论（不受上述不确定性影响）**：本 build **没有可调用的 `TeamCreate`/`TeamDelete` 入口**；
      团队入口 = `Agent`（带 `name`）+ `ExitPlanMode.launchSwarm`。
 
+### 10.1 缺这些工具定义，影响复刻吗？—— 结论：不影响核心复刻
+
+`TeamCreate`/`TeamDelete` 缺定义，对把 Agent Team 复刻进自研 Agent（GA）**基本零影响**，因为它们不是机制入口。
+
+**1) CC 的团队是「会话级隐式单例、自动创建」，不靠 `TeamCreate`。** `m0319` 的报错文案即证据：
+`Team file missing (session team not initialized)` / `The session team should have been initialized at startup.`
+—— 会话一启动，`m1614 initializeSessionTeam` 就自动建好团队文件（默认名 `session-<id[:8]>`），
+模型从不需要「创建团队」；`Agent`（带 `name`）直接往这个隐式团队加人。`TeamCreate`/`TeamDelete`
+即便存在，也只是**可选的生命周期便利**，不是机制必需。
+
+**2) 真正要复刻的原语，定义全都完整**（见 §2/§4/§5/§6/§7/§9）：spawn（`m0511`/`m1578`）、
+`SendMessage`（`m1548`/`m1549`/`m1344`）、`ListAgents`（`m1534`）、任务板（`m0531`）、
+team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词（`m0280`/`m0357`/`m1574`）。
+复刻要的每一块都有完整证据；缺的那两个名字不在清单里。
+
+**3) 唯一「略微相关」的未决项**不是 `TeamCreate`，而是 **`launchSwarm`/`teammateCount` 的批量拉起循环**
+（§10 上半 / §12）—— 只见「schema 字段 + 开关」，没见 spawn 循环。影响面：**可选**，只是
+「一次调用拉起 N 个 teammate」的便利；GA 完全可以自己 `for` 循环调 `Agent`（GA 的 workflow fan-out
+已是该模式）→ **低影响且可绕过**。
+
+**4) 其它未决项**（`SendMessage` 底层 socket send、team 文件 `mode`/`isActive` 取值、plan 审批 UI）
+都属于**实现细节 / UI 层**，GA 用自己已有的 IPC / 状态机 / UI 覆盖即可，**不影响机制骨架**。
+
+| 缺的东西 | 影响复刻？ |
+| --- | --- |
+| `TeamCreate`/`TeamDelete` 定义 | **不影响**（隐式单例自动建团队；非机制入口） |
+| `launchSwarm` 批量循环 | **几乎不影响**（可选便利，可自循环替代） |
+| socket 底层 / UI 细节 | **不影响**（GA 用自有实现） |
+
+**一句话**：Agent Team 复刻的「料」是齐的；缺的是可选的便利工具与实现细节，不影响 GA 按
+「隐式团队 + 具名 teammate + 名字寻址消息 + 共享任务板 + 协调者提示词」把机制跑起来。
+若日后要把 `TeamCreate`/`TeamDelete` 也做上（显式团队生命周期），属**锦上添花**，可等 `bunpeek`
+复核出真实定义后再对齐 —— **不建议卡在这里**。
+
 ---
 
 ## 11. GA 复刻映射（GenericAgent）
