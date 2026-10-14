@@ -1080,7 +1080,7 @@ class GenericAgentBridge:
             # whole store), which is what made "Enter to view" feel frozen.
             self.emit({
                 "type": "workflow_runs",
-                "runs": [self._workflow_run_payload(run) for run in runs],
+                "runs": [self._workflow_run_summary(run) for run in runs],
                 # CC m1906 lists saved named workflows next to the run history;
                 # GA surfaces them as names so the list panel can hint
                 # ``/workflow run <name>``.
@@ -1534,6 +1534,55 @@ class GenericAgentBridge:
         if recovery:
             data["recovery"] = recovery
         return data
+
+    # CC parity (m1906_0xe19cc02.js): the /workflows history list reads a
+    # small per-run snapshot (runId/status/name/agentCount/totals), never the
+    # full run record. The list row + status bar only need status, the display
+    # name, a few metadata flags, and a per-job {label,status,tokenUsage} -
+    # so ship exactly those instead of every job/prompt/artifact field.
+    _WORKFLOW_SUMMARY_METADATA_KEYS = (
+        "workflowName",
+        "workflowTaskType",
+        "integrationStatus",
+        "finalAuditStatus",
+        "launchedBy",
+    )
+    _WORKFLOW_SUMMARY_JOB_METADATA_KEYS = ("label", "tokenUsage")
+
+    def _workflow_run_summary(self, run) -> dict[str, Any]:
+        """Lightweight per-run payload for the ``/workflows`` list.
+
+        Keeps only what ``workflowListRunRow`` and ``workflowStatusBar`` read:
+        ``runId``/``sessionId``/``status`` + a few display metadata keys + a
+        minimal per-job record. Drops script/jobs.prompt/artifactDir/resultRef/
+        error and every other job metadata key, which is what made the list
+        payload ~440 KB for one session.
+        """
+        metadata = run.metadata if isinstance(run.metadata, dict) else {}
+        summary_metadata = {
+            key: metadata[key]
+            for key in self._WORKFLOW_SUMMARY_METADATA_KEYS
+            if key in metadata
+        }
+        jobs: list[dict[str, Any]] = []
+        for job in run.jobs or []:
+            job_metadata = job.metadata if isinstance(job.metadata, dict) else {}
+            entry: dict[str, Any] = {"jobId": job.job_id, "status": job.status}
+            slim_metadata = {
+                key: job_metadata[key]
+                for key in self._WORKFLOW_SUMMARY_JOB_METADATA_KEYS
+                if key in job_metadata
+            }
+            if slim_metadata:
+                entry["metadata"] = slim_metadata
+            jobs.append(entry)
+        return {
+            "runId": run.run_id,
+            "sessionId": run.session_id,
+            "status": run.status,
+            "metadata": summary_metadata,
+            "jobs": jobs,
+        }
 
     # CC evidence: m0567_0xcdd6311.js CTn() injects
     # "Resume the paused workflow by calling: Workflow({scriptPath, resumeFromRunId})"

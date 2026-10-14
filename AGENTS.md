@@ -941,3 +941,33 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   `WorkflowStore._preview`、`ink_bridge` job prompt、`agent_control_workflow.read_result` 全部委托它
   （进度快照 `promptPreview`/`resultPreview` 由 240/无省略号 → 400 + `…`）。测试 228 OK。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+### 实施 2026-10-14：workflow_list 轻量 payload（对齐 CC m1906 历史列表）
+
+- 触发：上一轮遗留项「workflow_list 轻量 payload」。
+- CC 证据：
+  - §8.6（`m0571_0xcddb07e.js`）：`G7r()` 把 `{runId, timestamp, result, agentCount, logs,
+    workflowProgress, totalTokens, totalToolCalls, status, ...}` 写成
+    `<projectsDir>/<sessionId>/workflows/<runId>.json` 快照；`psr()` 读回全部 `.json`
+    按 `startTime` 倒序，供 `/workflows` 列表展示 —— 即**列表读的是小快照，不是完整 run 记录**。
+  - `m1906_0xe19cc02.js`：列表行 = `{label: t.workflowName ?? t.summary ?? t.description,
+    icon: Bt[t.status], meta: [时间, t.agentCount + "agent", totalTokens + "tok"]}`。
+- GA 现状（改前）：`workflow_list` 对每个 run 发**完整** `_workflow_run_payload`（含 script 之外的全部
+  字段：jobs 全量 metadata、artifactDir、resultRef、error 等）。全仓 108 run 的 list payload ≈ **4.5 MB**。
+- 对齐动作：`frontends/ink_bridge.py` 新增 `_workflow_run_summary(run)`，`workflow_list` 改用它。摘要只保留
+  列表行 + 状态条真正读取的字段：
+  - `runId` / `sessionId` / `status`；
+  - `metadata` 子集：`workflowName` / `workflowTaskType` / `integrationStatus` /
+    `finalAuditStatus` / `launchedBy`；
+  - `jobs` 子集：每个 job 仅 `jobId` / `status` / `metadata.{label, tokenUsage}`。
+  - 丢弃：`script` / `jobs[].prompt` / `artifactDir` / `resultRef` / `error` / 其它 job metadata。
+- 实测（temp/sessions 下 108 run）：完整 4,512,030 B → 摘要 **95,374 B（−97.9%）**；
+  最大 session 单 run：232 KB → 2.4 KB。
+- 面板无需改：`workflowListRunRow` 只用 `runId/status/metadata.workflowName|workflowTaskType/jobs.length`；
+  `workflowStatusBarFromState` 只用 `metadata.workflowName|workflowTaskType|integrationStatus|finalAuditStatus`
+  与 `jobs[].{status,metadata.label,metadata.tokenUsage}` —— 摘要全部覆盖。
+- 测试：新增 `test_workflow_list_payload_is_lightweight`（断言摘要字段集、不含 prompt/script/model、<600B）；
+  `ink_bridge+workflow_store+agent_control_workflow` → **163 OK**；`workflowList.app.test.ts`+`workflowStatusBar.test.ts` → 16 pass。
+- 详细文档：`docs/20261014-GA-workflow列表轻量payload对齐CC.md`。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 状态（2026-10-14）：**已实施**。

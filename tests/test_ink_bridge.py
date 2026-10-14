@@ -2299,6 +2299,52 @@ class InkBridgeTest(unittest.TestCase):
             listed = [event for event in events if event["type"] == "workflow_runs"][-1]
             self.assertEqual(["demo-flow"], listed["savedWorkflows"])
 
+    def test_workflow_list_payload_is_lightweight(self):
+        # CC parity (m1906_0xe19cc02.js): the /workflows history list reads a
+        # small per-run snapshot (runId/status/name/agentCount/totals), never
+        # the full run record. The summary keeps only what the list row and the
+        # status bar read and drops script/job.prompt/artifact metadata.
+        agent = FakeAgent()
+        agent.session_id = "session_summary"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
+            bridge.workflow_store.create_run(
+                WorkflowRun(
+                    run_id="wf_summary",
+                    session_id="session_summary",
+                    script="x" * 5000,
+                    status="running",
+                    metadata={
+                        "workflowName": "demo",
+                        "workflowTaskType": "research",
+                        "integrationStatus": "ok",
+                        "finalAuditStatus": "pass",
+                        "unused": "drop-me",
+                    },
+                    jobs=[WorkflowJob(job_id="agent_1", prompt="p" * 5000, status="running", metadata={"label": "scout", "model": "Opus", "tokenUsage": {"input_tokens": 1}})],
+                )
+            )
+            bridge.workflow_list()
+            listed = [event for event in events if event["type"] == "workflow_runs"][-1]["runs"][0]
+            self.assertEqual("wf_summary", listed["runId"])
+            self.assertEqual("session_summary", listed["sessionId"])
+            self.assertEqual("running", listed["status"])
+            self.assertEqual(
+                {"workflowName", "workflowTaskType", "integrationStatus", "finalAuditStatus"},
+                set(listed["metadata"]),
+            )
+            self.assertNotIn("unused", listed["metadata"])
+            job = listed["jobs"][0]
+            self.assertEqual({"jobId", "status", "metadata"}, set(job))
+            self.assertEqual({"label", "tokenUsage"}, set(job["metadata"]))
+            serialized = json.dumps(listed, ensure_ascii=False)
+            self.assertNotIn("prompt", serialized)
+            self.assertNotIn("script", serialized)
+            self.assertNotIn("Opus", serialized)
+            # The whole point: a list payload is tiny next to the full record.
+            self.assertLess(len(serialized), 600)
+
     def test_workflow_named_list_emits_saved_workflows(self):
         agent = FakeAgent()
         agent.session_id = "session_workflow"
