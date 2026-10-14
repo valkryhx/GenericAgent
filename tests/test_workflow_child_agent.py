@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import types
 import threading
@@ -152,6 +153,61 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             isolated_file.write_text("print('hi')" + chr(10), encoding="utf-8")
             runner._collect_isolated_artifacts(job, cwd, ["sub/out.py"])
             self.assertTrue((workspace / "sub" / "out.py").is_file())
+
+    def test_isolated_workspace_is_seeded_with_working_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            (workspace / "existing.txt").write_text("v1", encoding="utf-8")
+            (workspace / "sub").mkdir()
+            (workspace / "sub" / "keep.py").write_text("print(1)", encoding="utf-8")
+            # Host-owned control-plane dir must NOT be copied into the copy.
+            (workspace / "workflow-handoffs").mkdir()
+            (workspace / "workflow-handoffs" / "h.json").write_text("{}", encoding="utf-8")
+            job = WorkflowJob(
+                job_id="agent_seed",
+                prompt="read an existing file",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "options": {"isolation": "worktree"},
+                },
+            )
+            base = Path(tmp) / "child_agents"
+            with mock.patch.dict(os.environ, {"GA_WORKFLOW_CHILD_AGENTS_ROOT": str(base)}, clear=False):
+                runner = NativeGPTChildAgentRunner()
+                cwd = Path(runner._child_cwd(job))
+                # Same relative file structure as the shared workspace.
+                self.assertEqual((cwd / "existing.txt").read_text(encoding="utf-8"), "v1")
+                self.assertTrue((cwd / "sub" / "keep.py").is_file())
+                self.assertFalse((cwd / "workflow-handoffs").exists())
+                # A fresh dir is seeded once; later calls do not re-copy.
+                (workspace / "later.txt").write_text("v2", encoding="utf-8")
+                runner._child_cwd(job)
+                self.assertFalse((cwd / "later.txt").exists())
+
+    def test_isolated_prompt_states_same_structure_and_path_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_prompt",
+                prompt="do it",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "options": {"isolation": "worktree"},
+                },
+            )
+            base = Path(tmp) / "child_agents"
+            with mock.patch.dict(os.environ, {"GA_WORKFLOW_CHILD_AGENTS_ROOT": str(base)}, clear=False):
+                runner = NativeGPTChildAgentRunner()
+                prompt = runner._build_prompt(job)
+            self.assertIn("isolated working copy", prompt)
+            self.assertIn("same relative file structure", prompt)
+            self.assertIn("translate them to your workspacePath root", prompt)
+            self.assertIn("re-read a file before editing", prompt)
+            self.assertNotIn("sharedWorkspace:", prompt)
 
     def test_non_isolated_job_uses_shared_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:

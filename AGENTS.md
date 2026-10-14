@@ -989,3 +989,52 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 - 详细文档：`docs/20261014-GA-事件帧节流收益测量.md`。
 - 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 状态（2026-10-14）：**已测量，判定不做**。
+
+### 中途调研 2026-10-14：CC「worktree 隔离」= 同相对结构的工作副本 + 显式提示词（不是空目录）
+
+- 触发：用户「开始 而且你需要先调研 CC怎么做的 因为这个机制很关键」——继续深挖 CC 的多 agent 冲突机制
+  （worktree 隔离 + 值传递，不靠冲突检测）。
+- 本轮新证据（CC 2.1.283，仓库 `D:\git_codes\claudecode283_hack`）：
+  - **创建**（`modules/m0869_0xd12567a.js`）：`Je=null` 默认不开；`ve?.isolation==="worktree"` 才 `Je=await vt(...)`；
+    命名 `<runId|label>-<agentId>` 或 `wf-<agentId>`；`worktreePath:fn` 透传给 child；内置 web-fetch agent 强制忽略。
+  - **提示词（关键）**：CC 给隔离 child 注入原文 ——
+    `m0869`：「You are running in an isolated git worktree at `<path>` (a separate working copy of the repo).
+    Changes you make here do NOT affect the main working directory ... or other agents. Work normally — the worktree
+    will be cleaned up automatically if you made no changes, or preserved for review if you did.」；
+    `m0357`：「isolated git worktree at `${n}` — **same repository, same relative file structure, separate working copy**.
+    **Paths in the inherited context refer to the parent's working directory; translate them to your worktree root.**
+    **Re-read files before editing if the parent may have modified them since they appear in the context.**」
+  - **生命周期/守卫**（`m0531` / `m0511` / `m0319`）：`worktree_created`/`kept`/`removed`；`qo()` @4333 数
+    `changedFiles`+`commits`；移除 fail-closed（非 owner / 无法验证 / 有未提交或未合并 → 拒绝，要 `discard_changes:true`）；
+    `git worktree remove --force`。**`movedToChangeset` 是云端，不复刻。**
+  - **值传递默认**（`extracted/workflow-authoring-reference.md`）：无 schema 返回文本，有 schema 返回**已校验对象**；
+    `isolation:'worktree'` 是 EXPENSIVE 选项，仅并行改文件时用，unchanged 自动删。
+  - **否定证据**：`grep -rl "artifactCollision\|artifactOwnership" claudecode283/modules/` → **0 命中**（CC 无事后冲突检测）。
+- GA 差距（本轮开工前）：隔离目录是**空目录**（`_isolated_workspace` 只 mkdir）→ 隔离 child 读不到共享 workspace
+  已有文件；提示词只有一句，缺 CC 的「同相对结构 / 路径换算 / 编辑前重读」语义。
+- 结论：GA 要补两处 ——（1）隔离目录在**创建时预填一份共享 workspace 的工作副本**（排除 host 自有目录、有上限、幂等）；
+  （2）隔离 child 提示词对齐 CC 三条语义。清理/守卫/值传递**已对齐**，不动。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 详细文档：`docs/20261014-ga-workflow-worktree隔离-CC机制补充调研.md`。
+- 状态（2026-10-14）：调研已落盘；实施见下方小节。
+
+### 实施 2026-10-14：隔离目录预填「工作副本」+ 提示词对齐 CC
+
+- 目标：把 GA 隔离 child 的私有目录从「空目录」改成 CC 的「同相对结构工作副本」，并让提示词讲清路径换算/重读。
+- 改动 1（`workflow_child_agent.py`）：`_isolated_workspace(job)` 仅**新建**时调
+  `_seed_isolated_workspace(job, target)` —— 用共享 workspace 的**启动快照**按同相对路径预填；
+  排除 `HOST_OWNED_WORKSPACE_DIRS`（`__pycache__`/`.git`/`workflow-handoffs`）；入口上限
+  `_ISOLATED_SEED_MAX_ENTRIES=20000`；任何 `OSError` 吞掉（最坏空/部分目录，不失败 job）。
+  只复制启动那一刻 → 并发 sibling 后续写入不可见，隔离保证不变；diff 仍以隔离目录为准。
+- 改动 2（`workflow_child_agent.py` `_build_prompt`）：隔离分支文案改为 CC 口径 ——
+  「isolated working copy / same relative file structure / 继承上下文路径要换算到 workspacePath root /
+  编辑前重读 / 改动不影响主工作区与其它 agent / 产物按相对路径写会被回收」。
+- 改动 3（`skills/workflow-authoring/SKILL.md`）：`isolation` 条目补「working copy、启动时预填、路径换算」。
+- 测试（focused，未跑 full）：`tests/test_workflow_child_agent.py` 新增 2 例（工作副本预填 + 提示词语义）；
+  `pytest tests/test_workflow_child_agent.py tests/test_workflow_isolation_cleanup.py -q` → **69 passed, 6 subtests**；
+  `pytest tests/test_workflow_implicit_isolation.py tests/test_workflow_workspace.py tests/test_workflow_scheduler.py -q`
+  → **101 passed, 10 subtests**。
+- 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 详细文档：`docs/20261014-ga-workflow-worktree隔离-CC机制补充调研.md`、
+  `docs/20261014-ga-workflow-隔离工作副本-实施记录.md`。
+- 状态（2026-10-14）：**已实施，focused 测试通过**。

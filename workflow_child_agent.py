@@ -1234,8 +1234,64 @@ class NativeGPTChildAgentRunner:
         concurrent runs that both register ``agent_1`` never share a directory.
         """
         workspace = self._isolated_workspace_path(job)
+        fresh = not workspace.exists()
         workspace.mkdir(parents=True, exist_ok=True)
+        if fresh:
+            self._seed_isolated_workspace(job, workspace)
         return str(workspace.resolve())
+
+    _ISOLATED_SEED_MAX_ENTRIES = 20_000
+
+    def _seed_isolated_workspace(self, job, target: Path) -> None:
+        """Pre-fill a *fresh* isolated dir with a working copy of the shared run workspace.
+
+        Mirrors Claude Code's worktree semantics: ``isolation:'worktree'`` gives
+        the agent "a separate working copy of the repo" with the *same relative
+        file structure*, so it can still read files that already exist. GA's run
+        workspace is a plain directory (usually not a git repo), so the working
+        copy is made by copying the shared workspace's current contents in at
+        creation time.
+
+        Host-owned control-plane dirs (``HOST_OWNED_WORKSPACE_DIRS``) are skipped
+        so they are never mistaken for deliverables. The copy is capped at
+        ``_ISOLATED_SEED_MAX_ENTRIES``; on overflow or any OSError the child is
+        left with a (still isolated) partial/empty dir rather than a failed job.
+        Only the *start* state is copied, so a concurrent sibling's later writes
+        are never visible here -- the isolation guarantee is unchanged.
+        """
+        shared = self._shared_workspace(job)
+        if not shared:
+            return
+        from workflow_workspace import HOST_OWNED_WORKSPACE_DIRS
+
+        import shutil
+
+        src_root = Path(shared)
+        if not src_root.is_dir():
+            return
+        copied = 0
+        try:
+            for src in src_root.rglob("*"):
+                if copied >= self._ISOLATED_SEED_MAX_ENTRIES:
+                    break
+                try:
+                    is_file = src.is_file()
+                except OSError:
+                    continue
+                if not is_file:
+                    continue
+                rel = src.relative_to(src_root)
+                if rel.parts and rel.parts[0] in HOST_OWNED_WORKSPACE_DIRS:
+                    continue
+                copied += 1
+                dst = target / rel
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                except OSError:
+                    continue
+        except OSError:
+            return
 
     @staticmethod
     def _isolated_workspace_keep_policy() -> str:
@@ -1414,9 +1470,13 @@ class NativeGPTChildAgentRunner:
             "toolBoundary: the host already removed every tool outside this profile from your tool list; "
             "work with what you have instead of trying to reconstruct a missing tool by hand.",
             (
-                "isolatedWorkspace: you have your own private working directory for this job; other jobs cannot "
-                "see or overwrite your files. Write each artifact at its declared workspace-relative path and it "
-                "will be collected into the shared workspace."
+                "isolatedWorkspace: you are running in an isolated working copy at your workspacePath -- the same "
+                "relative file structure as the shared run workspace, but a separate copy. Files that already existed "
+                "when this job started are present here; concurrent jobs' new writes are not. Paths in your inherited "
+                "context refer to the shared workspace, so translate them to your workspacePath root, and re-read a "
+                "file before editing it if it may have changed since it appeared in context. Your changes stay in this "
+                "copy and do NOT affect the shared workspace or other agents; write each artifact at its declared "
+                "workspace-relative path and it will be collected back into the shared workspace."
                 if self._job_isolation(job) == "worktree"
                 else "sharedWorkspace: the root agent and every other job in this run share this workspace; touch only "
                 "the paths assigned to you, never revert or rewrite another job's output, and never assume another "

@@ -138,7 +138,12 @@ GA-supported options:
 - `retryPolicy` — `{ maxAttempts: 1..3, backoffMs, retryableErrors }`.
 - `isolation` — `"worktree"` or `"none"`. `"worktree"` runs the child in its own
   private directory instead of the shared workspace, so parallel writers cannot
-  collide. The child's outputs are collected back into the shared workspace at
+  collide. Like CC's git worktree, that directory is a **working copy with the
+  same relative file structure**: it is pre-filled with the shared workspace's
+  contents at job start (so the child can still read files that already exist),
+  but it does not see a concurrent sibling's later writes. Paths inherited from
+  the parent refer to the shared workspace -- translate them to the child's own
+  root. The child's outputs are collected back into the shared workspace at
   their workspace-relative paths. EXPENSIVE (extra disk + setup per agent): use
   it ONLY when two or more agents write files in parallel and would otherwise
   overwrite each other. Prefer passing values (via `schema`) over writing files.
