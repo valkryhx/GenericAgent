@@ -503,6 +503,34 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **状态（2026-10-16）：已实施。** 新增 `src/glyphs.ts`（字形表）+ `glyphs.test.ts`；工具调用行 `> ` → `⏺ `；工具结果行 `[Action]/[Status]/[Stdout]` → `  ⎿  <body>`（dim）+ emoji 归一；超长 `[Stdout]` 折叠 + `(ctrl+o to expand)`；workflow 详情改 CC 风格树（`├ └ │ ─`）+ `string-width` 列宽（去固定 pad）。ink-ui `npm test` 425 passed、`tsc` 通过。
 - **补充（2026-10-16，commit 759d991）：源码去 emoji（不是只在 UI 层归一）。** 用户要求 emoji 不规范、要在**源码里**改，让 agent 直接产出 CC 字形：`agent_loop.py`/`continue_cmd.py` 工具头 `🔨/🛠️ Tool: … 📥 args:` → `⏺ Tool: … args:`；`ga.py`/`agentmain.py`/`continue_cmd.py`/`chatapp_common.py`/`btw_cmd.py` 状态哨兵 `✅/❌` → `✓/✗`。**关键坑**：`✅` 是**协议哨兵**（多前端 `startswith("✅")` 判恢复成功），故哨兵判断统一改**元组** `startswith(("✅","✓"))` 向后兼容；`App.tsx` 前缀正则 `^[✅✓]\s*`。pytest 160 passed、ink-ui 427 passed、无 emoji 残留。
 
+
+### 中途调研 + 实施 2026-10-16：上游 error 被静默吞掉 → 伪装成「LLM 空回复」死循环（commit caa42f1）
+
+- **现象**：workflow 任务里 `load_skill('workflow-authoring')` 之后，模型连续多轮
+  `[Warn] LLM returned an empty response. Retrying...`，Turn1..Turn4 后停止，**没有任何错误信息**。
+- **根因（实测复现，非猜测）**：provider `superapi.buzz` 的 `deepseek-flash` 渠道，对 `load_skill`
+  的 tool_result（≈17.7KB）返回一条**裸 JSON 行**——既没有 `data:` 前缀，也没有顶层 `type`：
+  `{"error":{"message":"Upstream access forbidden, please contact administrator","type":"upstream_error",...}}`。
+  GA 的 SSE 解析器 `if not line.startswith("data:"): continue` 直接跳过该行；且 responses 分支只认
+  `type=="error"` → `content_blocks=[]` → 下游 `do_no_tool` 判为「空回复」→ 静默重试 3 次 → 退出。
+- **触发边界（二分实验）**：同一 endpoint，`stream=true`，`max_output_tokens=81920`——
+  前 17500 字正常，**完整 17738 字**触发；「完整 + 尾部补一句问话」又正常；17738 个 `x` 也正常；
+  非流式同 payload → HTTP 502。→ 是该渠道对「裸的大段文档 payload」的 guardrail，与关键字无关。
+- **修复**（`llmcore.py` + `ga.py`）：
+  1. `_sse_payload()`：除标准 `data:` 行外，也识别**裸 JSON 错误行**（`{... "error" ...}`）；三个 SSE 解析器
+     （claude / openai responses / openai chat_completions）统一改用它。
+  2. `_provider_error_message()`：从 `{"error": {...}}` 提取 message（dict/str 兼容）；responses 分支额外处理
+     `response.failed` / `response.incomplete`；非流式 `_parse_openai_json` 前置校验。错误统一走既有哨兵 `!!!Error: ...`。
+  3. `ga.py::do_no_tool`：把「流异常中断」（可重试）与「provider error」（同一 payload 确定性失败、重试无意义）
+     分开——后者不再静默重试，改 `yield "[Error] LLM provider error: ..."` 并结束本轮，让用户看到真实原因。
+- **可复用的诊断入口**：`temp/model_responses/model_responses_<pid>.txt` 记着每次请求的 **Prompt / Response 原文**
+  （`=== Prompt ===` / `=== Response ===`）。看到 `Response` 是 `[]` 就说明**解析层拿到了空**，须查上游 SSE 原始字节，
+  不要只怀疑模型。
+- **验证**：真实 endpoint 复现裸错误行 → 三个解析器均产出 `!!!Error: ...`；GA 真实 client（profile=default）端到端确认；
+  pytest 233 passed。
+- **遗留（另案）**：`load_skill` 一次性把 17KB 正文塞进 tool_result 偏「重」（CC 的 skill 是渐进式披露），
+  可作为后续优化项，与本次「错误被吞」修复解耦。
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；
