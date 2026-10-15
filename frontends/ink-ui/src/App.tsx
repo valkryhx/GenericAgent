@@ -166,7 +166,7 @@ function isResumeSuccessNotice(text: string): boolean {
 }
 
 function resumeSuccessStatusText(text: string): string {
-  const normalized = text.replace(/^✅\s*/, '').split('\n', 1)[0] ?? text
+  const normalized = text.replace(/^[✅✓]\s*/, '').split('\n', 1)[0] ?? text
   const match = /已恢复\s+(\d+)\s+轮(?:结构化会话|完整对话|对话)?(?:（([^）]+)）)?/.exec(normalized)
   if (!match) return normalized
   const rounds = match[1]

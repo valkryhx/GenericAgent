@@ -1411,7 +1411,7 @@ class GenericAgentTUI(App[None]):
         except Exception as e:
             result = f"❌ /continue 失败: {e}"
         # 成功恢复：把历史 user/assistant 消息塞进当前 session 的 messages
-        if target and result.startswith("✅"):
+        if target and result.startswith(("✅", "✓")):
             sess.messages.clear()
             for h in continue_extract(target):
                 sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
@@ -1429,7 +1429,7 @@ class GenericAgentTUI(App[None]):
             result, _ = continue_restore(sess.agent, path)
         except Exception as e:
             result = f"❌ /continue 失败: {e}"
-        if result.startswith("✅"):
+        if result.startswith(("✅", "✓")):
             sess.messages.clear()
             for h in continue_extract(path):
                 sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))

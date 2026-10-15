@@ -2288,7 +2288,7 @@ class GenericAgentBridge:
         try:
             continue_reset(self.agent, message=None)
             result, _ = continue_restore(self.agent, path)
-            if str(result).startswith("✅"):
+            if str(result).startswith(("✅", "✓")):
                 self.emit({"type": "history_replace", "messages": self._resume_ui_messages_with_checkpoints(path)})
             self.emit({"type": "system", "text": str(result)})
         except Exception as exc:

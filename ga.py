@@ -659,7 +659,7 @@ class GenericAgentHandler(BaseHandler):
         new_content = args.get("new_content", "")
         try: new_content = expand_file_refs(new_content, base_dir=self.cwd, workspace_root=self.workspace_root)
         except ValueError as e:
-            yield f"[Status] ❌ 引用展开失败: {e}\n"
+            yield f"[Status] ✗ 引用展开失败: {e}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
         result = file_patch(path, old_content, new_content)
         yield f"\n{str(result)}\n"
@@ -683,7 +683,7 @@ class GenericAgentHandler(BaseHandler):
         
         content = args.get('content') or extract_robust_content(response.content)
         if not content:
-            yield f"[Status] ❌ 失败: 未在回复中找到<file_content>代码块内容\n"
+            yield f"[Status] ✗ 失败: 未在回复中找到<file_content>代码块内容\n"
             return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
             new_content = expand_file_refs(content, base_dir=self.cwd, workspace_root=self.workspace_root)
@@ -692,11 +692,11 @@ class GenericAgentHandler(BaseHandler):
                 open(path, 'w', encoding="utf-8").write(new_content + old)
             else:
                 with open(path, 'a' if mode == "append" else 'w', encoding="utf-8") as f: f.write(new_content)
-            yield f"[Status] ✅ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"
+            yield f"[Status] ✓ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"
             next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
             return StepOutcome({"status": "success", 'writed_bytes': len(new_content)}, next_prompt=next_prompt)
         except Exception as e:
-            yield f"[Status] ❌ 写入异常: {str(e)}\n"
+            yield f"[Status] ✗ 写入异常: {str(e)}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
         
     def do_file_read(self, args, response):

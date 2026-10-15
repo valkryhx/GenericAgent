@@ -279,7 +279,7 @@ if prompt := st.chat_input("any task?"):
         # Resolve target path BEFORE handle (which snapshots current log, shifting indices).
         target = sessions[idx][0] if 0 <= idx < len(sessions) else None
         result = handle_frontend_command(agent, cmd)
-        history = extract_ui_messages(target) if target and result.startswith('✅') else None
+        history = extract_ui_messages(target) if target and result.startswith(('✅', '✓')) else None
         tail = [{"role": "assistant", "content": result, "time": ts}]
         if history:
             st.session_state.messages = history + tail

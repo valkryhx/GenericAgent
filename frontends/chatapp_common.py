@@ -183,13 +183,13 @@ def _restore_native_history(content):
 def format_restore():
     files = _restore_log_files()
     if not files:
-        return None, "❌ 没有找到历史记录"
+        return None, "✗ 没有找到历史记录"
     latest = max(files, key=os.path.getmtime)
     with open(latest, "r", encoding="utf-8") as f:
         content = f.read()
     restored = _restore_text_pairs(content) or _restore_native_history(content)
     if not restored:
-        return None, "❌ 历史记录里没有可恢复内容"
+        return None, "✗ 历史记录里没有可恢复内容"
     count = sum(1 for line in restored if line.startswith("[USER]: "))
     return (restored, os.path.basename(latest), count), None
 
@@ -278,11 +278,11 @@ class AgentChatMixin:
             return await self.send_text(chat_id, f"状态: {'🔴 运行中' if self.agent.is_running else '🟢 空闲'}\nLLM: [{self.agent.llm_no}] {llm}", **ctx)
         if op == "/llm":
             if not self.agent.llmclient:
-                return await self.send_text(chat_id, "❌ 当前没有可用的 LLM 配置", **ctx)
+                return await self.send_text(chat_id, "✗ 当前没有可用的 LLM 配置", **ctx)
             if len(parts) > 1:
                 try:
                     self.agent.next_llm(int(parts[1]))
-                    return await self.send_text(chat_id, f"✅ 已切换到 [{self.agent.llm_no}] {self.agent.get_llm_name()}", **ctx)
+                    return await self.send_text(chat_id, f"✓ 已切换到 [{self.agent.llm_no}] {self.agent.get_llm_name()}", **ctx)
                 except Exception:
                     return await self.send_text(chat_id, f"用法: /llm <0-{len(self.agent.list_llms()) - 1}>", **ctx)
             lines = [f"{'→' if cur else '  '} [{i}] {name}" for i, name, cur in self.agent.list_llms()]
@@ -295,9 +295,9 @@ class AgentChatMixin:
                 restored, fname, count = restored_info
                 self.agent.abort()
                 self.agent.history.extend(restored)
-                return await self.send_text(chat_id, f"✅ 已恢复 {count} 轮对话\n来源: {fname}\n(仅恢复上下文，请输入新问题继续)", **ctx)
+                return await self.send_text(chat_id, f"✓ 已恢复 {count} 轮对话\n来源: {fname}\n(仅恢复上下文，请输入新问题继续)", **ctx)
             except Exception as e:
-                return await self.send_text(chat_id, f"❌ 恢复失败: {e}", **ctx)
+                return await self.send_text(chat_id, f"✗ 恢复失败: {e}", **ctx)
         if op == "/continue":
             return await self.send_text(chat_id, _handle_continue_frontend(self.agent, cmd), **ctx)
         if op == "/new":
@@ -331,7 +331,7 @@ class AgentChatMixin:
             import traceback
             print(f"[{self.label}] run_agent error: {e}")
             traceback.print_exc()
-            await self.send_text(chat_id, f"❌ 错误: {e}", **ctx)
+            await self.send_text(chat_id, f"✗ 错误: {e}", **ctx)
         finally:
             self.user_tasks.pop(chat_id, None)
 

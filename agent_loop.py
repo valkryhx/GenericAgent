@@ -70,8 +70,8 @@ def _tool_header(tool_name, args, verbose):
     if tool_name == "no_tool":
         return None
     if verbose:
-        return f"🔨 Tool: `{tool_name}`  📥 args:\n````text\n{get_pretty_json(args)}\n````\n"
-    return f"🔨 {tool_name}({_compact_tool_args(tool_name, args)})\n\n\n"
+        return f"⏺ Tool: `{tool_name}` args:\n````text\n{get_pretty_json(args)}\n````\n"
+    return f"⏺ {tool_name}({_compact_tool_args(tool_name, args)})\n\n\n"
 
 
 def _dispatch_tool(handler, response, tool_name, args, index, tool_num):

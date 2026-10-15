@@ -290,7 +290,7 @@ def reset_conversation(agent, message='🆕 已开启新对话，当前上下文
     return message
 
 def format_list(sessions, limit=20):
-    if not sessions: return '❌ 没有可恢复的历史会话'
+    if not sessions: return '✗ 没有可恢复的历史会话'
     lines = ['**可恢复会话**（输入 `/continue N` 恢复第 N 个）：', '']
     for i, (_, mtime, first, n) in enumerate(sessions[:limit], 1):
         preview = _escape_md((first or '（无法预览）').replace('\n', ' ')[:60])
@@ -303,23 +303,23 @@ def restore(agent, path):
         try:
             result = session_transcript.restore_agent_session(agent, path)
         except Exception as e:
-            return f'❌ 读取结构化会话失败: {e}', False
-        return f'✅ {result.message}\n(已写入 backend.history，可直接继续)', True
+            return f'✗ 读取结构化会话失败: {e}', False
+        return f'✓ {result.message}\n(已写入 backend.history，可直接继续)', True
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
             content = fh.read()
-    except Exception as e: return f'❌ 读取失败: {e}', False
+    except Exception as e: return f'✗ 读取失败: {e}', False
     pairs = _pairs(content)
-    if not pairs: return f'❌ {os.path.basename(path)} 为空或格式不符', False
+    if not pairs: return f'✗ {os.path.basename(path)} 为空或格式不符', False
     history = _parse_native_history(pairs)
     name = os.path.basename(path)
     if history is not None:
         agent.abort()
         _replace_backend_history(agent, history)
-        return f'✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
+        return f'✓ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
     from chatapp_common import _restore_native_history, _restore_text_pairs
     summary = _restore_text_pairs(content) or _restore_native_history(content)
-    if not summary: return f'❌ {name} 无法解析（非 native 且无摘要可提取）', False
+    if not summary: return f'✗ {name} 无法解析（非 native 且无摘要可提取）', False
     agent.abort()
     agent.history.extend(summary)
     n = sum(1 for l in summary if l.startswith('[USER]: '))
@@ -336,7 +336,7 @@ def handle(agent, query, display_queue):
         sessions = list_sessions(exclude_pid=os.getpid())
         idx = int(m.group(1)) - 1
         if not (0 <= idx < len(sessions)):
-            display_queue.put({'done': f'❌ 索引越界（有效范围 1-{len(sessions)}）', 'source': 'system'})
+            display_queue.put({'done': f'✗ 索引越界（有效范围 1-{len(sessions)}）', 'source': 'system'})
             return None
         reset_conversation(agent, message=None)
         msg, _ = restore(agent, sessions[idx][0])
@@ -384,7 +384,7 @@ def _format_tool_use(block):
     args = block.get('input', {})
     try: pretty = json.dumps(args, indent=2, ensure_ascii=False).replace('\\n', '\n')
     except Exception: pretty = str(args)
-    return f"🛠️ Tool: `{name}`  📥 args:\n````text\n{pretty}\n````\n"
+    return f"⏺ Tool: `{name}` args:\n````text\n{pretty}\n````\n"
 
 
 def _format_tool_result(content):
@@ -490,7 +490,7 @@ def handle_frontend_command(agent, query, exclude_pid=None):
         return '用法: /continue 或 /continue N'
     idx = int(m.group(1)) - 1
     if not (0 <= idx < len(sessions)):
-        return f'❌ 索引越界（有效范围 1-{len(sessions)}）'
+        return f'✗ 索引越界（有效范围 1-{len(sessions)}）'
     reset_conversation(agent, message=None)
     msg, _ = restore(agent, sessions[idx][0])
     return msg

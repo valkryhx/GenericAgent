@@ -95,7 +95,7 @@ def _format(question, body, took):
 def _run(agent, question, deadline):
     """Catches errors at the boundary so neither caller path needs its own try/except."""
     try: return _ask(agent, question, deadline)
-    except Exception as e: return f'❌ /btw 失败: {type(e).__name__}: {e}'
+    except Exception as e: return f'✗ /btw 失败: {type(e).__name__}: {e}'
 
 
 def handle(agent, query, display_queue) -> Optional[str]:

@@ -929,7 +929,7 @@ class GenericAgent:
             try: v = json.loads(v)  # cover number parsing
             except (json.JSONDecodeError, ValueError): pass
             setattr(self.llmclient.backend, k, v)
-            display_queue.put({'done': smart_format(f"✅ session.{k} = {repr(v)}", max_str_len=500), 'source': 'system'})
+            display_queue.put({'done': smart_format(f"✓ session.{k} = {repr(v)}", max_str_len=500), 'source': 'system'})
             return None
         if _cm := re.match(r'/compact(?:\s+([\s\S]*))?$', raw_query.strip()):
             self._manual_compact(_cm.group(1) or "", display_queue)
