@@ -37,6 +37,18 @@ GenericAgent 是一个紧凑的 Python 项目。核心运行时代码位于仓�
 
 Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
 
+### GA ink 真实 LLM API e2e 自测：先读 SOP
+
+凡是「用 GA ink + 真实 LLM API 做端到端自测」的需求（反复发生），**先读**
+`docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`。核心：真实自测**不靠固定期望输出**判定，
+靠**证据（事件流 / 日志 / 产物 / 真实 UI 帧）+ 不变量断言**。分三层：
+
+- **L1 事件级**：`python tests/real_ink_selftest.py`（结构检查，秒级）；真实回合加 `GA_RUN_REAL_API_E2E=1`（走默认模型即可），证据包落 `temp/ink-selftest/<ts>/`。
+- **L2 UI 版面级**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_panel_e2e.ts`（真实 App + 伪 TTY，不需 API，秒级）。
+- **L3 交互式手动**：`./ga`（人眼 + 会话产物）。
+
+注意：重型全链路脚本 `real_ink_ui_user_input_e2e.ts` **为 luna profile 硬编码**，用默认 `deepseek-flash` 跑会在子代理环节失败（`subagent child did not reach succeeded`）——默认模型下不要用它判定。
+
 ### Ink 终端 resize（reflow）：禁止依赖 ink 的相对 eraseLines
 
 终端**宽度**变化会让终端对已写出的缓冲区 reflow（长行重新折行），ink 的 `log-update` 下一帧仍按
