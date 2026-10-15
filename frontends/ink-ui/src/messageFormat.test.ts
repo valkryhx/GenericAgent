@@ -126,3 +126,14 @@ test('formatAssistantText folds long [Stdout] bodies until transcript mode', () 
   assert.match(expanded, /line 12/)
   assert.doesNotMatch(expanded, /more lines/)
 })
+
+test('formatAssistantText folds the hammer-emoji tool header too', () => {
+  // agent_loop.py emits a hammer emoji, continue_cmd.py a tools emoji; both must fold.
+  const raw = '🔨 Tool: `load_skill`  📥 args:\n````text\n{"name":"workflow-authoring"}\n````'
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill(name: workflow-authoring)`)
+})
+
+test('formatAssistantText collapses a tool header before its args fence arrives', () => {
+  const raw = '🔨 Tool: `load_skill`  📥 args:'
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill`)
+})

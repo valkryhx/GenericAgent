@@ -108,10 +108,16 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   text = text.replace(/<summary>([\s\S]*?)<\/summary>/g, (_match, summary) => `Summary: ${String(summary).trim()}`)
   text = text.replace(
-    /🛠️?\s*Tool:\s*`([^`]+)`\s*📥\s*args:\s*\n````text\n([\s\S]*?)\n````/g,
+    /^[^\S\r\n]*[^\w\s]*[^\S\r\n]*Tool:[^\S\r\n]*`([^`]+)`[^\S\r\n]*[^\w\s]*[^\S\r\n]*args:[^\S\r\n]*\n````text\n([\s\S]*?)\n````/gm,
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
-  text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `${GLYPHS.bullet} ${name}(${args})`)
+  // Streaming fallback: a tool header whose args fence has not arrived yet still
+  // collapses to the bullet form instead of showing the raw emoji header.
+  text = text.replace(
+    /^[^\S\r\n]*[^\w\s]*[^\S\r\n]*Tool:[^\S\r\n]*`([^`]+)`[^\S\r\n]*[^\w\s]*[^\S\r\n]*args:[^\S\r\n]*$/gm,
+    (_match, name) => `${GLYPHS.bullet} ${String(name)}`,
+  )
+  text = text.replace(/^[^\S\r\n]*[^\w\s]*[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `${GLYPHS.bullet} ${name}(${args})`)
   // Repair legacy GA status fences whose closing marker was emitted on the
   // same line as the body. This happens when a tool yields text without a
   // trailing newline (notably the workflow launch result); otherwise the next
