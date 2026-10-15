@@ -156,6 +156,43 @@ class AgentMainRolePromptsTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, prompt)
 
+    def test_root_prompt_carries_the_lead_team_addendum(self):
+        prompt = self._system_prompt()
+
+        self.assertIn("[GA_TEAM_LEAD_HINT]", prompt)
+        self.assertNotIn("[GA_TEAMMATE_HINT]", prompt)
+
+    def test_teammate_subagent_prompt_carries_the_coordination_brief(self):
+        teammate = type(
+            "Subagent",
+            (),
+            {
+                "task_dir": str(REPO_ROOT / "temp" / "demo_teammate"),
+                "capability_team_mode": True,
+            },
+        )()
+
+        prompt = self._system_prompt(teammate)
+
+        self.assertIn("[GA_SUBAGENT_USAGE_HINT]", prompt)
+        self.assertIn("[GA_TEAMMATE_HINT]", prompt)
+        self.assertNotIn("[GA_TEAM_LEAD_HINT]", prompt)
+
+    def test_plain_subagent_prompt_has_no_team_clauses(self):
+        subagent = type(
+            "Subagent",
+            (),
+            {
+                "task_dir": str(REPO_ROOT / "temp" / "demo_plain"),
+                "capability_team_mode": False,
+            },
+        )()
+
+        prompt = self._system_prompt(subagent)
+
+        self.assertNotIn("[GA_TEAMMATE_HINT]", prompt)
+        self.assertNotIn("[GA_TEAM_LEAD_HINT]", prompt)
+
     def test_subagent_hint_carries_isolation_and_delivery_semantics(self):
         subagent = type("Subagent", (), {"task_dir": str(REPO_ROOT / "temp" / "demo_subagent")})()
 

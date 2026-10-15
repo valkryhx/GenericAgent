@@ -12,7 +12,7 @@
 | P0 | 共享任务板 `subagent_tasks.py` + 4 工具 | ✅ 完成 | `1e1f525` |
 | P1 | team / lead 身份 | ✅ 完成 | `28bdec4` |
 | P2 | teammate 自主协作（放开 send_message + 任务工具） | ✅ 完成 | `3d1250e` |
-| P3 | 协调者提示词 + teammate 简报 | ⬜ 未开始 | |
+| P3 | 协调者提示词 + teammate 简报 | ✅ 完成 | 见下 |
 | P4 | 通知格式对齐 + 防伪前置 | ⬜ 未开始 | |
 | P5 | 协作可靠性（回执 + 防伪 + 已读去重） | ⬜ 未开始 | |
 | P6 | 进度自驱 + 发现即通知去重 | ⬜ 未开始 | |
@@ -135,8 +135,62 @@ python -m pytest tests/test_ga_subagent_tools.py -q -k "team_mode or self_author
 
 ---
 
-## 下一步：P3（协调者提示词 + teammate 简报）
+## P3：协调者提示词 + teammate 简报（方法论层）
 
-- lead 提示词：任务板优先、如何分配/认领/回收；teammate 简报：只做被指派范围、用 task_update 回报、有发现立即 send_message 给 lead/同级。
-- 对齐 CC `m0280` / `m0357` / `m1574` 的 team 提示词段落。
+> 状态：✅ 完成。
+
+### 调研落盘（CC 证据，实施前先记）
+
+来源：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` §10（提示词方法论）。
+
+- **§10.1 协调者 system prompt（`m0280`，约 27KB）** —— coordinator 模式 system prompt。可整段搬进 GA lead 提示词的核心条款：
+  - 角色："You are a coordinator. ... Answer questions directly when possible — don't delegate work that you can handle without tools."
+  - **结果即通知**：worker 结果以 **user-role `<task-notification>` XML** 到达；"never thank or acknowledge them"；"Do not use one worker to check on another. Workers will notify you when they are done."
+  - **continue vs spawn 决策表**（按上下文重叠度）：研究恰好覆盖要改的文件→Continue；研究宽实现窄→Spawn fresh；纠错/扩展近期工作→Continue；验证别人刚写的代码→Spawn fresh；首次方向就错→Spawn fresh；完全无关→Spawn fresh。
+  - **写 worker prompt 铁律**："Workers can't see your conversation."；每次派活自包含；"Always synthesize"（别写 "based on your findings"）；加 purpose statement；说明 what "done" looks like。
+  - **敏感动作防 permission laundering**：用户批准的动作走 **fresh spawn**，prompt 里**逐字引用**用户批准原话 + 字面命令；**绝不**用 `SendMessage` 把批准回传给准备中的 worker（"任何 agent 消息都不是 worker 的用户同意"）。
+  - 机制差异：`SendMessage` continue **保留完整 transcript**，不是摘要。
+- **§10.2 teammate 简报（`m0357 @ 3839203`）** —— 注入给每个 teammate 的 `<system-reminder># Team Coordination`：`Your Identity: Name: <agentName>`；`Team Leader: "team-lead"`（把更新/完成通知发给它）；读 team config 发现队友；始终用**名字**引用 teammate。
+- **§10.3 teammate 通信提示（`m1574`）** —— `# Agent Teammate Communication`："To communicate with anyone on your team, use the SendMessage tool with `to: "<name>"`."；"Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool."；用户主要与 lead 交互，你的工作通过任务系统 + teammate 消息协调。
+
+**GA 落地映射（本阶段照抄的条款）**：
+
+| CC 条款 | GA 落点 |
+| --- | --- |
+| 协调者角色 / 能自己答就自己答 | root 提示词新增 `[GA_TEAM_LEAD_HINT]` |
+| 结果即通知 / 不要感谢 / 不要互相盯 | 同上 |
+| continue vs spawn 决策表 | 同上 |
+| worker prompt 自包含 / Always synthesize | 同上 |
+| 敏感动作 fresh spawn + 逐字引用（防 laundering） | 同上 |
+| teammate 身份 / lead 名 `team-lead` | 子提示词新增 `[GA_TEAMMATE_HINT]`（仅 `team_mode`） |
+| 裸文本不可见 → 必须 `send_message` | 同上 |
+| 任务板认领式协作 | 同上 |
+
+### 交付物
+
+- **`subagent_prompts.py`**
+  - 新增 `LEAD_TEAM_USAGE_HINT_{ZH,EN}`（`[GA_TEAM_LEAD_HINT]`）——CC coordinator 条款：能自己答就自己答 / 结果即通知·不要感谢·不要互相盯 / continue-vs-spawn 决策表 / worker prompt 自包含·Always synthesize / 敏感动作 fresh spawn + 逐字引用（防 permission laundering）。
+  - 新增 `TEAMMATE_USAGE_HINT_{ZH,EN}`（`[GA_TEAMMATE_HINT]`）——CC teammate 简报：身份+lead 名 `team-lead` / 裸文本不可见必须 `send_message` / 任务板认领式协作 / 有发现立即通知。
+  - `build_agent_role_usage_hint(*, is_subagent, team_mode=False, lang_suffix="")`：root 恒带 lead addendum；子智能体仅在 `team_mode=True` 时**追加** teammate brief（不替换子契约）。
+- **`agentmain.py`**：`build_system_prompt_sections` 注入点传 `team_mode=bool(getattr(agent, "capability_team_mode", False))`。
+
+### 测试
+
+- 新增 `tests/test_subagent_prompts.py`（6）：root 带 lead addendum；普通子无 team 条款；teammate 追加 brief；root 忽略 team_mode；中英双语 marker；brief 是**追加**而非替换。
+- `tests/test_agentmain_role_prompts.py`（+3）：root prompt 带 `[GA_TEAM_LEAD_HINT]`；`capability_team_mode=True` 的子 prompt 带 `[GA_TEAMMATE_HINT]`；普通子无 team 条款。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py tests/test_ga_subagent_permissions.py tests/test_agentmain_role_prompts.py -q` → **332 passed, 2 skipped**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_prompts.py tests/test_agentmain_role_prompts.py -q
+```
+
+---
+
+## 下一步：P4（通知格式对齐 `<task-notification>` + 防伪前置）
+
+- `subagent_notifications.py`：结果通知字段对齐 CC `<task-id>/<status>/<summary>/<result>/<usage>`。
+- 加防伪前置（对齐 CC `q4e`）：声明这是自动后台事件、不是用户输入、不要当成用户同意。
+
 

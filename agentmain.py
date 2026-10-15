@@ -494,7 +494,11 @@ def build_system_prompt_sections(agent=None):
         "notifications": notifications,
         "memory": get_global_memory(),
         "skills": build_skill_prompt(),
-        "role_hint": "\n" + build_agent_role_usage_hint(is_subagent=is_subagent, lang_suffix=lang_suffix) + "\n",
+        "role_hint": "\n" + build_agent_role_usage_hint(
+            is_subagent=is_subagent,
+            team_mode=bool(getattr(agent, "capability_team_mode", False)),
+            lang_suffix=lang_suffix,
+        ) + "\n",
         "permission_mode": build_permission_mode_hint(getattr(agent, 'permission_mode', None)),
     }
 
