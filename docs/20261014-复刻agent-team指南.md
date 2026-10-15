@@ -3,13 +3,16 @@
 > **位置说明（GA 仓库副本）**：本文是对 Claude Code 2.1.283 源码的调研，原始证据与全部模块位于
 > `D:\git_codes\claudecode283_hack`（`claudecode283/modules/`、`claudecode283/extracted/`、
 > `reconstructed/`）。文中 `mNNNN @ 偏移` 坐标与 `reconstructed/...` 路径均相对该仓库。
-> GA 复刻映射见 §11。
+> GA 复刻映射见 §12。
 
 > 坐标格式 `mNNNN @ <偏移>` = `claudecode283/modules/` 里该模块内第 N 个字符偏移。
 > 本文是 `claudecode283/extracted/agent-team-internals.md` 的**深度补充**：那份文档讲清了
 > 「怎么 spawn 一个 teammate」（路由 + 三后端 + 身份预留），本文补齐它 §9 明确留下的 5 个缺口，
 > 并把散落的子系统（**通信 / 共享任务板 / 团队持久化 / swarm 共享总线 / 协调者提示词**）
 > 串成一张完整机制图，供开发者把它复刻进自研 Agent（GenericAgent）。
+>
+> **§8 为第二轮深挖**：聚焦多 agent 互动的**稳定性 / 通信 / 集体协作**，提炼出 CC 的
+> **四大支柱 —— 通信可靠 / 冲突减少 / 进度推进 / 发现即通知**，每条都带源码坐标。
 >
 > 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 >
@@ -63,7 +66,7 @@ CC 的 Agent Team = **一个协调者（lead，名字固定 `team-lead`）+ 若�
 | `TaskUpdate` | `Tk` | `m0531` | `taskId`, `status?`, `owner?`, `addBlocks?`, `addBlockedBy?`… | 改任务/认领/删（status=deleted） |
 | `TaskList` | `Sw` | `m0531` | （无） | 列任务摘要 |
 | `ExitPlanMode` | `iu="ExitPlanMode"` | `m0357` | `launchSwarm`, `teammateCount` | 退出计划模式时可选批量拉起 swarm |
-| `TeamCreate`/`TeamDelete` | — | 仅 `m0357` | — | **本 build 未提供**（见 §10） |
+| `TeamCreate`/`TeamDelete` | — | 仅 `m0357` | — | **本 build 未提供**（见 §11） |
 
 > 证据：`m0357 @ 921444` 的 `nOn=new Map([[iu,["launchSwarm","teammateCount"]],[ht,["name","team_name","mode"]]])`
 > ——把「swarm 专属 schema 字段」映射到工具；`m0511 @ 10530` 的 `Agent` schema 里
@@ -167,7 +170,7 @@ E(e):  // 把 resolver 结果归类
 | `other` | 其它 |
 
 > 复刻启示：**别自己造传输**。GA 已有 `subagent_ipc.py` / `subagent_mailbox.py` / `subagent_event_bus.py`，
-> 对齐这些错误类即可（见 §11）。
+> 对齐这些错误类即可（见 §12）。
 
 ### 4.6 协议帧（legacy，但 GA 直接可用）
 
@@ -301,7 +304,7 @@ E(e):  // 把 resolver 结果归类
 
 - 加入：spawn 时 `j()`（reserveTeammateIdentity）CAS 推进一条成员（见 `agent-team-internals.md` §3.3）。
 - 退出：`mNe`/`o0t`/`lxr` 从 `members` 摘除；`o0t` 的 `onlyIfJoinedBefore` 防止「移除发起后又被重加」。
-- 空闲：`TeammateIdle` 钩子（§8）；`isActive=false` 表示 idle。
+- 空闲：`TeammateIdle` 钩子（§9）；`isActive=false` 表示 idle。
 
 ---
 
@@ -331,7 +334,233 @@ class g {
 
 ---
 
-## 8. 生命周期与钩子
+## 8. 多智能体协作四大支柱：通信可靠 / 冲突减少 / 进度推进 / 发现即通知（第二轮深挖）
+
+> 本轮聚焦「多个 agent 互动时的**稳定性、通信、集体协作**」。结论先行：CC **不靠"事后冲突检测"**，
+> 而是靠 **结构化消息 + 认领式任务板 + 工作区隔离 + 结果自动投递** 四件事，把冲突**消灭在发生之前**。
+> 本节每条结论都带模块坐标，可回查源码。
+>
+> **【复刻时暂时不需要参考 claudecode 云端会话的实现】**（详见 §8.7）：本节涉及远端 task list、
+> 跨机器 peer 等云端分支可只做本地实现；但**本地协议语义要照抄**。
+
+### 8.1 通信可靠性：三层保障（传输 → 投递回执 → 消费）
+
+一条 teammate 消息要穿过三层，每层都有独立的可靠性设计。
+
+#### (A) 传输层：本地 UDS + 对端校验（`m0188`）
+
+发送函数 `Pe(path, frame, storage, {noFollowSymlink, expectPeerPid, expectPeerProcStart, preflightedJson})`：
+
+- **路径合法性**：`IN(path)` 拒绝非本地 IPC 路径（remote / UNC / 多段 pipe / 结尾点或空格），
+  抛错误类 `non-local`。
+- **对端可信用**：`MLo()` 校验对端 inbox 的 **owner token**（`requireLiveOwner`）。若对端没有活会话注册 inbox，
+  抛 `No running session has registered an inbox at <path> (<kind>) — refusing to send to an unvouched pipe`。
+- **符号链接防护**：`noFollowSymlink` 时对 reply target 做 `lstat`，是 symlink 就拒发（错误类 `symlink`）。
+- **连接超时** `5000ms`。
+- **帧大小上限**：`ye(n)` 断言 `DLo + len(n) + 1 <= GOt`，超限抛错（常量 `Ve=150` 族）。
+- **发送即记账**：成功发送后 `Xe(msg_id, to)` 把 `{msgId,to}` 压入 `receipts.outstandingSends`
+  （上限 `be=200`，FIFO 淘汰）。
+
+#### (B) 投递回执层：状态机 + 入站闸门（`m0188` receipts + `m1356` inbound gate）
+
+回执状态机 `XAr(msgId, state)`：
+
+- `outstandingSends` 命中且 `state==="held"` → 移入 `awaitingTerminal`（标 `wasHeld:true`）。
+- 命中 `awaitingTerminal` 且 `state!=="held"` → 从两个表移除，返回 `{destination, wasHeld:true}`。
+- `JAr(deadIds)`：发送者已死时清理其未决回执，按目标统计 `{dropped, wereHeld}`。
+
+对端**入站闸门** `peer_inbound_gate`（`m1356`）：
+
+- 策略集合 `{accept:0, hold:1, refuse:2}`，越严越高；跨
+  `policySettings > flagSettings > userSettings/repoSettings` 归并（同优先级时 repo 让位 policy）。
+- `accept` → 投递，`recordCorrespondent`。
+- `hold` → 压入 `held[]`（上限 **`F=100`**），回执 `"held"`；**缓冲满时淘汰最旧的为 `"expired"`**
+  （`hold buffer full — evicted oldest as expired`），并触发 `onPeerHoldDropped`。
+- `refuse` → 回执 `"dropped"`（带 `dropReason` / `droppedMsgIds`）。
+- **shutdown**：把仍 held 的消息统一结算为 `"expired"`（`settling N still-held peer message(s) as expired`）。
+
+#### (C) 消费/已读层：防伪造 + 已读去重（`m1575` in-process runner + `m0300 Wae`）
+
+- **收件**：`gNe(agentName, teamName, storageV5)` 读自己的 inbox 文件；读失败累加 `readFailures`，
+  连续失败时 warn（`could not read mailbox (N consecutive)`）。
+- **防伪造 provenance**（`m0300 Wae(unread, inboxPath, {roster, isPaneTeammate})`）→ 逐条判：
+  - `"verified"`：`msg_id` 存在、未重复，且**本进程 ledger 记录过写这条消息**（`ledger.wrote(recipient,msg)`，
+    ledger 用 sha256 摘要记账，见 §7 `class i`）。
+  - 否则：发送者**在 roster 里** → `"forged"`；不在 → `"unverifiable"`。
+  - **只有非 `forged` 的消息被消费**（`u.get(r)==="forged"` 直接跳过）。
+- **已读标记** `wge(...)`：失败累计 `l.count`；`l.count < Sge` 时下轮重试；达到 `Sge` 则
+  「先投递、不标记」（`deliveredUnmarked`），并发遥测
+  `swarm_inbox_poll` / `worker_mark_read_failed_streak`。
+- **held 集合**：`l.deliveredUnmarked` / `l.consumedUnmarked` 避免重复投递同一条未标记消息。
+- **shutdown 优先**：若 inbox 里出现 lead 的 `shutdown_request`，**先把更早的 held 消息投递完**再执行 shutdown
+  （`delivering N held message(s) ahead of a shutdown_request`）。
+- **协议帧过滤**（安全边界）：
+  - `plan_approval_response` **仅接受 `from === mi`（`team-lead`）**，否则
+    `Ignoring permission response from non-team-lead`。
+  - `mode_set_request` **从 inbox 收到一律丢弃**：
+    `dropping mode_set_request message: permission mode changes are never accepted from the inbox`。
+  - 其它协议帧丢弃并 warn（`dropping protocol frame from <from>`）。
+
+> **复刻要点**：CC 把「消息可靠」拆成 **传输校验 + 回执状态机 + 已读去重 + 防伪造** 四件事。
+> **GA 现状**：`SubagentMailbox` 有未读投递，但**无回执状态机、无 provenance 校验、无 held/expired**。
+
+### 8.2 冲突减少：不是"检测冲突"，而是"结构上不产生冲突"
+
+CC 用三层机制让「两个 agent 同时改同一个东西」几乎不可能发生。
+
+#### (A) 工作区隔离（worktree）—— 物理隔离 + 值传递
+
+- 每个 teammate 在**独立 git worktree** 里干活，物理上不共享工作目录。
+- 产物通过**值传递**（消息里带路径 / 内容）回传，而不是共享同一份文件互改。
+- 详见 `claudecode283/extracted/agent-team-internals.md` 与主文档 worktree 隔离章节。
+
+#### (B) 任务认领 = 软锁（`m0300 claimTask`）
+
+任务 schema 带 `owner` 字段。认领逻辑：
+
+```js
+// m0300 claimTask(taskList, taskId, owner)
+if (task.owner && task.owner !== owner) return { success:false, reason:"already_claimed", task }
+if (task.status === "completed")         return { success:false, reason:"already_resolved", task }
+const open = new Set(all.filter(t=>t.status!=="completed").map(t=>t.id))
+const blocked = task.blockedBy.filter(id => open.has(id))
+if (blocked.length)                      return { success:false, reason:"blocked", blockedByTasks:blocked }
+return { success:true, task: write(task, { owner }) }
+```
+
+- 变体 `claimTaskWithBusyCheck` 额外拒绝 `agent_busy`（一个 agent 同时只持有一个未完成任务）。
+- 失败原因枚举：`task_not_found / already_claimed / already_resolved / blocked / agent_busy`。
+  → **同一任务同一时刻只有一个 owner**，两个 teammate 不会同时做同一件事。
+
+#### (C) 任务板文件锁（`m0300`）—— 写操作串行化
+
+- 每个 task list 一个目录，写前取锁：`lockfilePath = <dir>/.lock`（`flag:"wx"` 独占创建），
+  外包 proper-lockfile 风格 `{retries:30, minTimeout:5, maxTimeout:100, onCompromised}`（常量 `oe`）。
+- 进程内再叠一层 `taskList.locks.run(key, fn)` 串行化（`ti().taskList.locks`）。
+- 写失败（`LockSuspect`）最多重试 `gt=5` 次。
+- **任务 ID 分配**：`createTask` 用 `ifAbsent` 语义抢 ID，冲突则取下一个（最多 `$e=16` 次）。
+  → 多进程并发建任务也不会撞 ID。
+
+#### (D) 收敛结论：CC 没有"文件级 owner"
+
+- 全量搜源码：`artifactCollision` / `artifactOwnership` **0 命中**。
+- `exclusive` / `owned by` / `claim` 的命中全部落在**文件锁、权限、worktree、任务 owner** 语境，
+  **没有"某个文件被某 agent 独占"的概念**。
+- 结论：CC 的防冲突 = **worktree 隔离（空间分开）+ 任务 owner（逻辑分开）+ 锁（写时串行）**，
+  **不做运行时冲突检测**——这是比冲突检测**更工程稳健**的路线。
+
+### 8.3 进度推进：空闲 teammate 自动认领 + 完成即解锁 + 死亡回收
+
+#### (A) 空闲自动认领（`m1575 qe`）
+
+teammate 进入 poll loop 后，每次轮询（间隔 **`he=500ms`**）除了查 mailbox，还调 `qe()`：
+
+```js
+// m1575 Ve(tasks)：找第一个「可认领」的任务
+tasks.find(t => t.status === "pending"
+             && !t.owner
+             && t.blockedBy.every(id => !openIds.has(id)))
+```
+
+找到 → `QEo()` 认领 → 置 `status:"in_progress"` → 返回提示词
+`He(task)` = `"Complete all open tasks. Start with task #N: <subject>\n\n<description>"`。
+
+- **意义**：teammate 不空转；team 吞吐随空闲 agent 数**自动提升**；推进不需要 lead 逐个派活。
+
+#### (B) 完成即解锁（`m0531` + `m0300`）
+
+- 任务置 `completed` 后，`TaskList` **只列未完成的 `blockedBy`**，依赖自动"解锁"。
+- 完成提示：「Call TaskList now to find your next available task or see if your work unblocked others.」
+- 闭环 `pending → in_progress → completed`，并触发 `TaskCompleted` 钩子（§9）。
+
+#### (C) 生命周期兜底：终止即回收（`m0300 N4e`）
+
+- teammate **终止 / 关闭**时，把它名下所有未完成任务**回收**：`owner=undefined, status="pending"`。
+- 生成通知：
+  「`<name> has shut down. N task(s) were unassigned: #a "#subj", ... Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.`」
+- **意义**：死掉的 agent 不会"占着任务不放"，team 不会因单点失败而卡死。
+
+### 8.4 发现即通知：结果自动投递 + 去重
+
+#### (A) 空闲通知帧（`idle_notification`，`m0300 mat`）
+
+teammate 结束一轮、变 idle 时，向 lead 发一条**结构化帧**：
+
+```jsonc
+{ "type": "idle_notification",
+  "from": "<agentName>",
+  "timestamp": "<ISO>",
+  "idleReason": "available" | "failed" | "interrupted",
+  "summary": "<压成一行、截断的摘要>",
+  "completedTaskId": "<id?>",
+  "completedStatus": "completed" | "failed",
+  "failureReason": "<body，仅失败时>",
+  "result": "<结果正文，≤4000 字符>" }
+```
+
+#### (B) 结果长度预算（`m0300`）
+
+- 单条 `result` 上限 **`xB=4000`** 字符，超出截断并附
+  `[result truncated — ask the agent for the rest via <SendMessage>]`。
+- 一次 drain（收集多条 idle 结果）总预算 **`eTo=16000`** 字符，超出替换为
+  `[result truncated — this drain's results exceeded 16000 characters; ask the agent for it via <SendMessage>]`。
+- 展示层另有 **`Rsn=40000`** 上限（`kF`）。
+- 遥测：`swarm_idle_result_delivery` = `budget_truncated` / `per_frame_truncated` / `mailbox_write_failed`。
+
+#### (C) 去重：显式 DM 抑制重复通知（`m1448 zo`）
+
+- 提取 idle result 时，若**最后一条 assistant 消息**里已有成功的 `SendMessage`（工具名 `lo`）发往
+  lead（`mi="team-lead"`）或 lead 别名（`Om`）→ **直接抑制** idle 结果投递，遥测 `suppressed_lead_dm`。
+- 语义：teammate 已经主动汇报过，就不再重复投递，避免 lead 收到两份。
+
+#### (D) 广播 / 多播
+
+- `SendMessage` 支持发往 `team-lead`、具体 teammate、以及广播（寻址模型见 §4.2）。
+- 一条发现经消息即可到达需要的成员；配合任务板 `owner` / `blockedBy`，
+  **"上游发现"自动变成"下游可认领的活"**。
+
+> **复刻要点**：CC 让"单个 agent 的发现"以 **结构化帧 + 长度预算 + 去重** 自动流到 lead 和其它 agent，无需人工搬运。
+> **GA 现状**：有 `SubagentEventBus` 与父收件箱，但**无 idle_notification 帧格式、无长度预算、无显式 DM 去重**。
+
+### 8.5 与「上万 agent」类比的工程落点
+
+大规模 agent 协作的瓶颈**不是算力，而是协调开销**：消息风暴、重复劳动、状态漂移、死锁。
+CC 的四支柱恰好各治一种病：
+
+| 病 | CC 的机制 | 模块坐标 |
+| --- | --- | --- |
+| 消息丢失 / 乱序 / 伪造 | 传输校验 + 回执状态机 + provenance | `m0188` / `m1356` / `m0300 Wae` |
+| 重复劳动 / 撞车 | worktree 隔离 + 任务 owner 软锁 | worktree / `m0300 claimTask` |
+| 进度停滞 / 单点卡死 | 空闲自动认领 + 完成解锁 + 终止回收 | `m1575 qe` / `m0300 N4e` |
+| 发现不共享 | idle_notification 自动投递 + 去重 | `m0300` / `m1448` |
+
+> 「人多力量大」能兑现的前提是**协调层足够稳健**：加人才能加产出，否则加人只加混乱。
+> CC 的四支柱正是把「协调开销」压到接近零的工程答案。
+
+### 8.6 关键常量速查（本轮实测）
+
+| 常量 | 值 | 含义 | 模块 |
+| --- | --- | --- | --- |
+| `be` | 200 | 未决发送 / 待终态回执表上限 | `m0188` |
+| `F` | 100 | 入站 hold 缓冲上限 | `m1356` |
+| `xB` | 4000 | 单条 idle result 上限 | `m0300` |
+| `eTo` | 16000 | 单次 drain 结果总预算 | `m0300` |
+| `Rsn` | 40000 | 展示层结果上限（`kF`） | `m0300` |
+| `he` | 500 | poll 间隔（ms） | `m1575` |
+| `gt` | 5 | 任务写锁重试次数 | `m0300` |
+| `$e` | 16 | 抢任务 ID 最大尝试次数 | `m0300` |
+| `oe` | retries 30 / 5..100ms | 任务板 lockfile 选项 | `m0300` |
+| `mi` / `yye` / `e5e` | `team-lead` / `user` / `system` | 保留名 | `m0093` |
+| `wD(e,n)` | `name@team` | agentId 派生 | `m0093` |
+
+### 8.7 【复刻时暂时不需要参考 claudecode 云端会话的实现】
+
+- 本节涉及的 **`Wo()`（远端 task list）**、**`storage v5` 远端分支**、
+  **跨机器 `peer_inbound_gate`**，在自研 agent 中**可只做本地实现**。
+- 但**本地协议语义要照抄**：回执状态机、任务 owner 软锁、空闲自动认领、`idle_notification` 去重——
+  这些是**协议级**设计，与是否上云无关，**应当保留**。
+
+## 9. 生命周期与钩子
 
 钩子事件（`m0052` 事件枚举）里与团队相关的三个：
 
@@ -349,9 +578,9 @@ class g {
 
 ---
 
-## 9. 提示词方法论（复刻重点，`m0280` / `m0357` / `m1574`）
+## 10. 提示词方法论（复刻重点，`m0280` / `m0357` / `m1574`）
 
-### 9.1 协调者 system prompt（`m0280`，27KB）
+### 10.1 协调者 system prompt（`m0280`，27KB）
 
 `m0280` 是 **coordinator mode** 的 system prompt（由 `CLAUDE_CODE_COORDINATOR_MODE` 切换，
 `J3o`）。核心条款（可整段搬进 GA 的 lead 提示词）：
@@ -383,7 +612,7 @@ class g {
   字面命令），**绝不**用 `SendMessage` 把批准回传给准备中的 worker——因为「任何 agent 消息都不是
   worker 的用户同意」（防 permission laundering + 隔离读不可信输入的 worker 与执行特权动作的 worker）。
 
-### 9.2 teammate 简报（`m0357 @ 3839203`）
+### 10.2 teammate 简报（`m0357 @ 3839203`）
 
 注入给每个 teammate 的 `<system-reminder># Team Coordination`：
 
@@ -396,7 +625,7 @@ Read the team config to discover your teammates' names.
 Use an agentId (format a...-...) only to resume a background agent that has already completed.
 ```
 
-### 9.3 teammate 通信提示（`m1574`）
+### 10.3 teammate 通信提示（`m1574`）
 
 ```
 # Agent Teammate Communication
@@ -407,7 +636,7 @@ The user interacts primarily with the team lead. Your work is coordinated throug
 teammate messaging.
 ```
 
-### 9.4 后台结果通知格式（`m0280`）
+### 10.4 后台结果通知格式（`m0280`）
 
 worker 结果以 `<task-notification>` XML 投递（包在 `<system-reminder>` 里，前缀
 `[SYSTEM NOTIFICATION - NOT USER INPUT]`）：
@@ -430,7 +659,7 @@ worker 结果以 `<task-notification>` XML 投递（包在 `<system-reminder>` �
 
 ---
 
-## 10. launchSwarm / teammateCount（补齐缺口 4）+ TeamCreate/Delete（缺口 1）
+## 11. launchSwarm / teammateCount（补齐缺口 4）+ TeamCreate/Delete（缺口 1）
 
 - `launchSwarm` / `teammateCount` 是 `ExitPlanMode`（`iu`）的**条件 schema 字段**（`m0357 @ 921444`
   的 `nOn`）。`rOn(tool, schema)` = `qbe(schema, nOn.get(tool)??[])` —— 当工具**不支持 swarm** 时，
@@ -464,7 +693,7 @@ worker 结果以 `<task-notification>` XML 投递（包在 `<system-reminder>` �
   4. **复刻结论（不受上述不确定性影响）**：本 build **没有可调用的 `TeamCreate`/`TeamDelete` 入口**；
      团队入口 = `Agent`（带 `name`）+ `ExitPlanMode.launchSwarm`。
 
-### 10.1 缺这些工具定义，影响复刻吗？—— 结论：不影响核心复刻
+### 11.1 缺这些工具定义，影响复刻吗？—— 结论：不影响核心复刻
 
 `TeamCreate`/`TeamDelete` 缺定义，对把 Agent Team 复刻进自研 Agent（GA）**基本零影响**，因为它们不是机制入口。
 
@@ -474,13 +703,13 @@ worker 结果以 `<task-notification>` XML 投递（包在 `<system-reminder>` �
 模型从不需要「创建团队」；`Agent`（带 `name`）直接往这个隐式团队加人。`TeamCreate`/`TeamDelete`
 即便存在，也只是**可选的生命周期便利**，不是机制必需。
 
-**2) 真正要复刻的原语，定义全都完整**（见 §2/§4/§5/§6/§7/§9）：spawn（`m0511`/`m1578`）、
+**2) 真正要复刻的原语，定义全都完整**（见 §2/§4/§5/§6/§7/§10）：spawn（`m0511`/`m1578`）、
 `SendMessage`（`m1548`/`m1549`/`m1344`）、`ListAgents`（`m1534`）、任务板（`m0531`）、
 team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词（`m0280`/`m0357`/`m1574`）。
 复刻要的每一块都有完整证据；缺的那两个名字不在清单里。
 
 **3) 唯一「略微相关」的未决项**不是 `TeamCreate`，而是 **`launchSwarm`/`teammateCount` 的批量拉起循环**
-（§10 上半 / §12）—— 只见「schema 字段 + 开关」，没见 spawn 循环。影响面：**可选**，只是
+（§11 上半 / §13）—— 只见「schema 字段 + 开关」，没见 spawn 循环。影响面：**可选**，只是
 「一次调用拉起 N 个 teammate」的便利；GA 完全可以自己 `for` 循环调 `Agent`（GA 的 workflow fan-out
 已是该模式）→ **低影响且可绕过**。
 
@@ -500,7 +729,7 @@ team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词
 
 ---
 
-## 11. GA 复刻映射（GenericAgent）
+## 12. GA 复刻映射（GenericAgent）
 
 > 下表把 CC 原语映射到 GA 现状；「差距」列是复刻时要补的。GA 代码位于 `D:\git_codes\GenericAgent`。
 
@@ -531,14 +760,14 @@ team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词
 
 ---
 
-## 12. 仍未确定（诚实标注）
+## 13. 仍未确定（诚实标注）
 
 - `launchSwarm`/`teammateCount` 的**批量拉起循环**：本 build 只见到 schema 字段与开关，
   实际 spawn 循环应在运行时（未在已抽 2135 模块中定位）。
 - `TeamCreate`/`TeamDelete`：**范围仅限已抽取的 2135 个模块** —— 其中只有名字、无工具定义
   （`Tfe` 白名单成员）；**不代表 CC 源码层没有此概念**（名字被 harness 显式识别）。
   **待复核**：在有原始 `claude.exe` 的机器上用 `reconstructed/tools/bunpeek.py` 搜一次，
-  确认是否定义在懒加载 chunk（本 checkout 无 exe）。详见 §10。
+  确认是否定义在懒加载 chunk（本 checkout 无 exe）。详见 §11。
 - `SendMessage` 的**完整分发实现**：`m1548` 是描述 + 一部分执行（`ns`/`qs`），`m1549` 是执行器
   （recipient 解析 + 权限 + `setSendMessagePins`）；真正落 socket 的底层 send 在更深的 chunk。
 - team 文件里成员 `mode` / `isActive` 的**取值枚举**未逐行核对（只见到 setter `B1n`/`i0t`）。
@@ -546,7 +775,7 @@ team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词
 
 ---
 
-## 13. 证据索引（模块 → 结论）
+## 14. 证据索引（模块 → 结论）
 
 | 模块 | 结论 |
 | --- | --- |
@@ -566,11 +795,15 @@ team 文件（`m0319`/`m1614`/`m0636`）、协作总线（`m0184`）、提示词
 | `m1574` | teammate 通信提示 |
 | `m0280` | coordinator system prompt + `<task-notification>` 格式 + 防伪前置 |
 | `m0357` | `nOn`（swarm schema 字段）；teammate 简报；`Tfe`（未提供工具名） |
-| `m0184` | swarm host 单例（inbound/receipts/permissions/mailbox/taskList） |
+| `m0184` | swarm host 单例（inbound/receipts/permissions/mailbox/taskList）；`mailbox.ledger`（sha256 记账，`wrote()` 去重，上限 2048） |
 | `m0970` | `SwarmPermissionPoller` |
 | `m0347` | 沙箱权限同步（lead 判定） |
-| `m1575`/`m1576` | in-process teammate 运行/收件箱/spawn |
-| `m0300`/`m1448` | 空闲结果投递 / lead 私信抑制 |
+| `m0188` | UDS 传输（`Pe`：路径校验/对端 token/symlink/5s 超时）；receipts 状态机 `XAr`（held↔awaitingTerminal，上限 200）；outbound pacer |
+| `m1356` | `peer_inbound_gate`：accept/hold/refuse 策略归并；`held[]` 上限 100，满则淘汰为 expired；shutdown 结算 held |
+| `m1575` | in-process runner：poll loop（500ms）、mailbox 消费、provenance 过滤、已读重试、shutdown 优先、`qe` 空闲自动认领任务 |
+| `m1576` | `Pnr` in-process spawn（agentId 派生、name 冲突再分配） |
+| `m0300` | 任务板（`claimTask`/`claimTaskWithBusyCheck`、`.lock` 文件锁、`N4e` 终止回收）+ `Wae` provenance + `idle_notification` 帧 + 结果预算（4000/16000） |
+| `m1448` | `zo` 提取 idle result；`suppressed_lead_dm`（已显式 DM lead 则抑制重复通知） |
 | `m0052` | 钩子事件枚举（TeammateIdle/TaskCreated/TaskCompleted） |
 
 > 关联：`claudecode283/extracted/agent-team-internals.md`（spawn 主干）、

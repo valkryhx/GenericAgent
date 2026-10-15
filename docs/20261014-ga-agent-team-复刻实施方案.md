@@ -14,7 +14,7 @@
 
 | 文档（在 `D:\git_codes\claudecode283_hack`） | 用途 |
 | --- | --- |
-| `docs/20261014-复刻agent-team指南.md` | CC Agent Team 完整机制剖析（§1–§13，含逐模块证据坐标、GA 映射 §11） |
+| `docs/20261014-复刻agent-team指南.md` | CC Agent Team 完整机制剖析（§1–§14，含逐模块证据坐标、**§8 四大支柱**、GA 映射 §12） |
 | `claudecode283/extracted/agent-team-internals.md` | spawn 主干（三后端 + 身份预留），§9 已更新为最新结论 |
 | `claudecode283/extracted/hooks-internals.md` | 钩子机制（`TeammateIdle`/`TaskCreated`/`TaskCompleted`） |
 | `reconstructed/deminified-agent-team/` | `spawnTeammate`/`Agent` 工具的可读化副本 |
@@ -23,7 +23,7 @@
 
 ---
 
-## 1. 要复刻什么（CC Agent Team 的 5 个正交原语）
+## 1. 要复刻什么（CC Agent Team 的 6 个正交原语）
 
 | # | 原语 | CC 工具/载体 | 作用 |
 | --- | --- | --- | --- |
@@ -32,16 +32,18 @@
 | 3 | **共享任务板** | `TaskCreate/Get/Update/List`（owner + blocks/blockedBy） | 协作契约：认领、依赖、进度 |
 | 4 | **team 状态** | `<configDir>/teams/<name>/config.json`（成员表 + CAS/lock） | lead + 成员名单持久化 |
 | 5 | **协调者/teammate 提示词** | coordinator prompt（`m0280`）+ teammate brief（`m0357`） | 「lead 只协调、teammate 用任务板+消息协作」的方法论 |
+| 6 | **协作可靠性协议** | receipts（`m0188`）+ provenance（`m0300 Wae`）+ held/expired（`m1356`）+ idle_notification（`m0300`） | 消息不丢/不重/不伪；空闲自驱推进；发现自动共享（第二轮补充，见 §11） |
 
 ---
 
-## 2. CC 设计精华（复刻时必须照抄的 5 条）
+## 2. CC 设计精华（复刻时必须照抄的 6 条）
 
 1. **能力 ≠ 授权**：teammate 是**用户/lead 显式要求**才起，模型不得从「任务看起来大/可并行」自行推断。
 2. **值传递，不共享上下文**：teammate 看不到 lead 的对话，每次派活都是自包含 prompt。
 3. **名字即地址，且跨会话稳定**：`to: "<name>"`；名字在 agent 结束后仍可用（send 唤醒）；重名用 `name [ref]`。
 4. **任务板是协作契约**：teammate 空闲 → `TaskList` 找 `pending`+无 owner+无 blockedBy → `TaskUpdate({owner})` 认领；完成必须**真的完成**（测试通过、无未解错误）才置 `completed`。
 5. **lead 只协调、不执行**：结果以通知（`<task-notification>`）回来，lead 综合；敏感动作走 **fresh spawn**（防 permission laundering）。
+6. **协作靠协议，不靠冲突检测**：worktree 隔离 + 值传递 + 任务 `owner` 软锁；消息带回执 + 防伪；结果自动投递 + 去重（第二轮补充，见 §8）。
 
 ---
 
@@ -61,7 +63,7 @@ GA 的 subagent 层已相当完整，很多原语**已存在**，复刻是「补
 | 角色/能力边界 | `subagent_capabilities.py`（`ORCHESTRATION_TOOLS` 从子代理剥离） | ✅ 已有（需为 teammate 放开部分） |
 | 提示词 | `subagent_prompts.py`（root/child hint） | ⚠️ 有，但非 CC 的 coordinator/teammate 模型 |
 
-## 4. 差距清单（要补的 5 件事）
+## 4. 差距清单（要补的 9 件事：G1–G5 主体 + G6–G9 第二轮补充）
 
 | # | 差距 | 严重度 | 对应 CC 原语 |
 | --- | --- | --- | --- |
@@ -70,6 +72,10 @@ GA 的 subagent 层已相当完整，很多原语**已存在**，复刻是「补
 | **G3** | **无 team/lead 身份**：没有「团队」对象与 `team-lead` 概念，root 只是 root | ★★ | 原语 4+5 |
 | **G4** | **提示词不是 coordinator/teammate 模型**：缺「lead 只协调」「teammate 用任务板+消息」「continue vs spawn」 | ★★ | 原语 5 |
 | **G5** | **通知格式未对齐**：GA 用 `<ga_subagent_notification>`，CC 用 `<task-notification>`（+ 防伪前置） | ★ | 原语 5 |
+| **G6** | **消息可靠性缺协议层**：`SubagentMailbox` 只有未读投递，**无回执状态机（held/dropped/expired）、无 provenance 防伪、无已读重试/去重** | ★★ | 支柱「通信可靠」（CC §8.1） |
+| **G7** | **无空闲自动认领**：teammate 干完手上的活就停，不会自己去任务板找下一个 `pending` 任务 | ★★ | 支柱「进度推进」（CC §8.3） |
+| **G8** | **无 idle_notification 帧 + 无长度预算**：结果回传没有统一结构、没有截断预算（CC 4000/16000） | ★ | 支柱「发现即通知」（CC §8.4） |
+| **G9** | **无死亡回收**：teammate 崩溃/关闭后，其名下未完成任务无人接管，team 会「卡」在这些任务上 | ★★ | 支柱「进度推进」（CC §8.3C） |
 
 > **G1 是地基**：没有共享任务板，teammate 之间就没有「协作契约」，只能各干各的。
 > G2 让任务板「活起来」：teammate 必须能读任务板、认领任务、给同级发消息。
@@ -99,7 +105,7 @@ GA 的 subagent 层已相当完整，很多原语**已存在**，复刻是「补
 
 ---
 
-## 6. 分阶段实施计划（P0 → P4）
+## 6. 分阶段实施计划（P0 → P6）
 
 > 每个阶段都「先落盘文档 → 改代码 → focused 测试 → 提交」，遵循 `AGENTS.md`。
 
@@ -195,6 +201,44 @@ E2E：lead 建 3 个任务 → spawn 2 个 teammate → teammate `TaskList` 各�
 
 ---
 
+
+### P5：协作可靠性（回执 + 防伪 + 已读去重）—— 对齐 CC §8.1
+
+**目标**：把 `SubagentMailbox` 从「尽力投递」升级为「可回执、可去重、可防伪」的可靠通道。
+
+- **消息回执状态机**（对齐 CC `m0188` receipts）：send 时记账 `{msg_id, to}`；teammate 消费后回
+  `consumed`；对端忙/不可达 → `held`/`dropped`/`expired`。GA 在 `mailbox.jsonl` 里加
+  `msg_id` + `state` 字段，父进程维护 `outstanding_sends` 表（上限 200，FIFO 淘汰）。
+- **provenance 防伪**（对齐 CC `m0300 Wae`）：只有「本进程 ledger 记录过写这条消息」的才 `verified`；
+  发送者不在 roster 的标 `unverifiable`；伪造的标 `forged` 并**丢弃**。GA 侧：写 mailbox 时在
+  `SubagentEventBus` 记一条 sha256 摘要（ledger），消费方校验。
+- **已读重试 + 去重**（对齐 CC `m1575`）：已读标记失败重试 `N` 次；超限则「先投递、不标记」；
+  `delivered_unmarked` / `consumed_unmarked` 两个集合避免重复投递。
+- **shutdown 优先**：收到 `close`/`shutdown` 请求时，先把更早的 held 消息投递完再关闭。
+
+**验收**：`pytest tests/test_subagent_mailbox.py -q`；模拟投递失败→回执状态流转正确；伪造消息被丢弃。
+
+### P6：进度自驱 + 发现即通知去重 —— 对齐 CC §8.3 / §8.4
+
+**目标**：teammate 空闲时**自己找活**；结果以结构化帧回传；显式汇报不再重复投递。
+
+- **空闲自动认领**（对齐 CC `m1575 qe`）：teammate 结束当前任务后自动
+  `TaskList → 找 pending+无 owner+无 blockedBy → 认领 → 置 in_progress`，并把
+  `"Complete all open tasks. Start with task #N: <subject>"` 作为下一轮 prompt。
+- **终止即回收**（对齐 CC `m0300 N4e`）：teammate 关闭/崩溃时，把它名下未完成任务
+  `owner=None, status=pending`，并发通知 lead 提示重新指派。
+- **idle_notification 帧**（对齐 CC `m0300 mat`）：teammate 变 idle 时向 lead 发
+  `{type, from, timestamp, idleReason, summary, completedTaskId, completedStatus, failureReason, result}`。
+- **结果长度预算**（对齐 CC `m0300`）：单条 result ≤ 4000 字符；一次 drain 总预算 16000 字符；
+  超出截断并附「ask the agent for the rest via send_message」。
+- **显式 DM 去重**（对齐 CC `m1448`）：若 teammate 本轮已 `send_message` 给 lead，
+  则**抑制**重复的 idle 结果投递。
+
+**验收**：`pytest tests/test_subagent_tasks.py tests/test_subagent_notifications.py -q`；
+E2E：lead 建 4 个任务、spawn 2 个 teammate → 各自认领 → 一个被 kill → 其任务被回收 → 另一个继续认领。
+
+---
+
 ## 7. 关键设计决策（复刻时的取舍）
 
 | 决策点 | 选择 | 理由 |
@@ -240,7 +284,7 @@ E2E：lead 建 3 个任务 → spawn 2 个 teammate → teammate `TaskList` 各�
 ## 10. 参考文档路径（实施时随手可查）
 
 **CC 源码调研（`D:\git_codes\claudecode283_hack`）**
-- `docs/20261014-复刻agent-team指南.md` ★ 主参考（含 §11 GA 映射、§10.1 缺定义影响）
+- `docs/20261014-复刻agent-team指南.md` ★ 主参考（含 §8 四大支柱、§12 GA 映射、§11.1 缺定义影响）
 - `claudecode283/extracted/agent-team-internals.md`（spawn 主干）
 - `claudecode283/extracted/hooks-internals.md`（TeammateIdle/TaskCreated/TaskCompleted）
 - `reconstructed/deminified-agent-team/`（可读化副本）
@@ -254,3 +298,32 @@ E2E：lead 建 3 个任务 → spawn 2 个 teammate → teammate `TaskList` 各�
 - `docs/20261012-ga-dynamic-workflow-复刻实施方案.md`（同类「先落盘→实施」范式参考）
 
 > 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+## 11. 第二轮补充：CC 四大支柱 → GA 落地映射
+
+> 完整源码证据见 `docs/20261014-复刻agent-team指南.md` §8（在 CC 仓库 `D:\git_codes\claudecode283_hack`）。
+> 本节只做「CC 机制 → GA 落点」的对照，便于 Codex 实施时快速定位。
+
+| 支柱 | CC 机制（证据模块） | GA 落点 | 状态 |
+| --- | --- | --- | --- |
+| **通信可靠** | 传输校验 + 回执状态机（`m0188`）+ 入站闸门 held/expired（`m1356`）+ provenance（`m0300 Wae`）+ 已读重试（`m1575`） | `SubagentMailbox` 加 `msg_id/state` + ledger + 重试/去重（**P5**） | 待做 |
+| **冲突减少** | worktree 隔离 + 值传递 + 任务 owner 软锁（`m0300 claimTask`）+ 任务板文件锁 | GA **已有** worktree + owner CAS；只需在 P0 任务板里落实 `already_claimed`/`blocked`/`agent_busy` 语义 | 大半已有 |
+| **进度推进** | 空闲自动认领（`m1575 qe`）+ 完成解锁（`m0531`）+ 终止回收（`m0300 N4e`） | teammate 空闲自驱 + 死亡回收（**P6**） | 待做 |
+| **发现即通知** | idle_notification 帧 + 长度预算 4000/16000（`m0300`）+ 显式 DM 去重（`m1448`） | 通知帧对齐 + 预算 + 去重（**P6**） | 待做 |
+
+**GA 的独特优势（照抄 CC 的同时保留）**：
+
+- GA 已有 `subagent_worktree.py` 的**隔离工作副本 + 清理守卫** —— 正是 CC「worktree 隔离」的等价物，**不要重造**。
+- GA 已有 `SubagentRegistry` 的**跨进程 CAS + lock** —— 正是 CC 任务板 / team 文件并发安全的等价物。
+- GA 已有 `SubagentEventBus` —— 可直接承载 provenance ledger 与 idle_notification。
+
+**照抄 CC 时要落实的协议语义（本地化，不含云端）**：
+
+1. 任务 `owner` 是**软锁**：`owner` 非空且非自己 → 拒绝认领（`already_claimed`）；同 agent 只持有一个未完成任务（`agent_busy`）。
+2. 依赖 `blockedBy` 命中未完成任务 → 拒绝认领（`blocked`）；完成后自动解锁下游。
+3. teammate 空闲 → **自动认领**下一个可认领任务（不空转）。
+4. teammate 终止 → 名下任务**回收**为 `pending` 并通知 lead 重新指派。
+5. 结果以 `idle_notification` 结构化帧回传，带**长度预算**；已显式 DM lead 则**抑制**重复投递。
+
+> 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+> CC 的 `Wo()`（远端 task list）/ 跨机器 peer 分支在 GA 中一律本地化，但**本地协议语义照抄**。
