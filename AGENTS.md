@@ -473,6 +473,12 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **GA 落点**：`frontends/ink-ui/src/`（`App.tsx` 的 `computeLayoutMetrics`/面板、转录区渲染、工具调用块）。
 - **交付物**：① 调研+设计文档；② GA ink 改动（折叠/展开 + 图标/排版对齐 CC）；③ 无截图式渲染断言测试（见本文件「Ink UI 测试」）。
 - **约束**：CC 仓库只读；GA 改动走「先落盘调研 → 再实施」强制流程。
+- **exe 到货后（用户 2026-10-15 说次日把 v2.1.283 exe 拷回）**：落位 `claudecode283_hack/claudecode283/claude.exe`
+  （该路径已被 `.gitignore` 忽略，**别** `git add -f`）。自检：`stat -c %s` = **244960928**；
+  `sha256sum` = **9DBE16DAFED59DA5CDABBFE11AD0335738C753FAD794989B47F9446ACCD6DE3A**（⚠️ 本机 `.local/bin/claude.exe` 是 v2.1.296，不是同一文件）。
+  搜法（Git Bash 无 `strings`，用 `grep -a -o -b`；**别**在 IDA 跑 `db.strings.rebuild()`）：
+  `grep -a -o -b 'chunk-x9hkq9y1.js' claude.exe` / `'ctrl+o'` / `'Ruminating'`；图标是真实 UTF-8 字节：`'⎿'`(⎿) `'⏺'`(⏺) `'✻'`(✻)。
+  已定位的 UI 关键 chunk：`chunk-x9hkq9y1.js`、`chunk-4rk7cwxz.js`、`chunk-rnj6pcz5.js`(m1277+m0696 共用)、`chunk-qkvevvte.js`、`chunk-bgthmgyc.js`。
 
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
