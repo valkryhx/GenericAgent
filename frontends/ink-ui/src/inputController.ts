@@ -128,6 +128,8 @@ function parseSlashSubmit(
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
+  // CC execution-time team view: roster + shared task board (/agents is the CC alias).
+  if (trimmed === '/team' || trimmed === '/team list' || trimmed === '/agents') return { command: { type: 'team_list' } }
   // approve/deny were removed from the product path; swallow them so they are not sent as chat.
   if (/^\/workflow\s+(approve|deny)\b/i.test(trimmed)) return {}
   // ``/workflow on|off`` toggles session opt-in. The bridge resolves the

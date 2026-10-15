@@ -1091,6 +1091,7 @@ test('App sticks composer near static history without a full-height empty live s
 test('App help documents the workflow opt-in and control commands', () => {
   assert.match(helpText(), /\/workflow on\|off - opt this session into dynamic workflow orchestration/)
   assert.match(helpText(), /\/workflows - list workflow runs/)
+  assert.match(helpText(), /\/team, \/agents - show team roster and shared task board/)
 })
 
 test('App keeps the input composer visible when the tall help panel opens', async () => {

@@ -22,6 +22,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/reset', description: 'Alias for /new' },
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/workflows', description: 'Show workflow runs' },
+  { name: '/team', description: 'Show team roster and shared task board' },
+  { name: '/agents', description: 'Alias for /team' },
   { name: '/workflow', description: 'Plan and run a dynamic workflow from task text', requiresArgs: true },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },

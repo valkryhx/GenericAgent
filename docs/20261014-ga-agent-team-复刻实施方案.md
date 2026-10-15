@@ -366,3 +366,25 @@ E2E：lead 建 4 个任务、spawn 2 个 teammate → 各自认领 → 一个被
 
 > **不做**：hooks 运行时（`TeammateIdle/TaskCreated/TaskCompleted`，GA 无 hooks 框架）；
 > 闸门传输层（UDS / 跨机器 peer / kill-switch）；**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+---
+
+## 14. 第四轮：执行期 team UI（P10）
+
+> CC 证据：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` **§16**。
+> 结论：CC 用 **tmux 多窗格 `swarm-view`（`m1573`）** 实时查看 team，本 build 无 `/team` 式 TUI 列表。
+> GA 无 tmux 多窗格 → 用 GA 既有 `/workflows` 面板范式承载 `/team`。
+
+### P10：`/team`、`/agents` 执行期 team UI（对齐 `/workflows` 面板）
+
+- **命令**：`/team` / `/team list` / `/agents` → `team_list`。
+- **后端**：`frontends/ink_bridge.py::team_list` → `_team_roster_payload()`：
+  `SubagentTeam.view()`（名册）+ `SubagentTaskStore.list_tasks()`（共享任务板），
+  逐成员补 `taskCount` / `currentTask` / `role`，emit `team_roster`。
+- **协议**：`protocol.ts` 增 `team_list` 命令 + `team_roster` 事件（`TeamRoster/TeamMember/TeamTask`）。
+- **面板**：`frontends/ink-ui/src/teamPanel.ts`（纯函数：`teamPanelFromRoster` / `teamPanelLines` /
+  `moveTeamSelection` / `teamPanelCommandForKey` / `teamPanelCapturesKey`）+ `App.tsx` 复用 `WorkflowPanelView`。
+- **交互**：`↑/↓` 选成员、`r` 刷新、`Esc` 关闭（与 `/workflows` 一致）。
+- **验收**：`/team` 显示名册（名/状态/任务数/当前任务）+ 任务板（`[x]/[~]/[ ]` + owner + blockedBy）；空团队显示占位。
+
+> **不做**：tmux 多窗格（GA 无 tmux）；云端 swarm-view。**【复刻时暂时不需要参考 claudecode 云端会话的实现】**

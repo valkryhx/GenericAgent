@@ -4,6 +4,32 @@ export type BridgeImageAttachment = {
   source?: string
 }
 
+export type TeamRoster = {
+  teamName: string
+  leadAgentId: string
+  leadName: string
+  memberCount: number
+}
+
+export type TeamMember = {
+  agentId: string
+  name?: string | null
+  status?: string | null
+  parentPath?: string | null
+  runId?: string | null
+  role?: string | null
+  taskCount?: number
+  currentTask?: string | null
+}
+
+export type TeamTask = {
+  id: string
+  subject: string
+  status: string
+  owner?: string | null
+  blockedBy?: string[]
+}
+
 export type BridgeCommand =
   | { type: 'submit'; text: string; images?: BridgeImageAttachment[] }
   | { type: 'stop' }
@@ -37,6 +63,7 @@ export type BridgeCommand =
   | { type: 'workflow_save'; runId: string; name?: string; overwrite?: boolean }
   | { type: 'workflow_run_named'; name: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_named_list' }
+  | { type: 'team_list' }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -360,6 +387,7 @@ export type BridgeEvent =
   | { type: 'workflow_final'; runId: string; result: Record<string, unknown> }
   | { type: 'workflow_saved'; workflow: NamedWorkflow; overwritten: boolean }
   | { type: 'named_workflows'; workflows: NamedWorkflow[] }
+  | { type: 'team_roster'; team: TeamRoster; members: TeamMember[]; tasks: TeamTask[] }
   | { type: 'agent_snapshot'; snapshot: AgentSnapshot }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'error'; code: string; message: string; taskId?: number }

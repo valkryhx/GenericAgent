@@ -4260,3 +4260,56 @@ return { resumed: true }
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InkBridgeTeamListTest(unittest.TestCase):
+    def setUp(self):
+        bridge_patch = patch(f"{__name__}.GenericAgentBridge", new=make_isolated_bridge)
+        bridge_patch.start()
+        self.addCleanup(bridge_patch.stop)
+
+    def test_team_list_emits_roster_and_shared_task_board(self):
+        from subagent_agent_path import AgentPath
+        from subagent_registry import SubagentRegistry
+        from subagent_tasks import SubagentTaskStore
+
+        agent = FakeAgent()
+        events = []
+        control = FakeAgentControl()
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp) / "temp"
+            registry = SubagentRegistry(temp / "subagents")
+            registry.create_child(
+                parent_path=AgentPath.root(),
+                task_name="agent_1",
+                task_dir=temp / "agent_1",
+                state_path=temp / "agent_1" / "state.json",
+                pid=1234,
+            )
+            store = SubagentTaskStore(tmp, list_id="default")
+            task = store.create_task("Add parser")
+            store.claim_task(task["id"], "/root/agent_1", start=True)
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+                agent_control=control,
+            )
+            bridge.project_dir = tmp
+            bridge.team_list()
+
+        roster = [event for event in events if event.get("type") == "team_roster"]
+        self.assertEqual(len(roster), 1)
+        payload = roster[0]
+        self.assertEqual(payload["team"]["teamName"], "default")
+        self.assertEqual(payload["team"]["leadName"], "team-lead")
+        names = [member["name"] for member in payload["members"]]
+        self.assertIn("agent_1", names)
+        member = next(m for m in payload["members"] if m["name"] == "agent_1")
+        self.assertEqual(member["taskCount"], 1)
+        self.assertEqual(member["currentTask"], "Add parser")
+        self.assertEqual([t["subject"] for t in payload["tasks"]], ["Add parser"])
+
+
+if __name__ == "__main__":
+    unittest.main()

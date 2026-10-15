@@ -263,6 +263,9 @@ class GenericAgentBridge:
             from workflow_controller import WorkflowController
             from workflow_store import WorkflowStore
 
+        # Project root the bridge reads shared state from (subagents/teams).
+        # Overridable so tests can point the team view at a temp tree.
+        self.project_dir = PROJECT_DIR
         self.workflow_store = WorkflowStore(root=workflow_root)
         self.workflow_controller = WorkflowController(store=self.workflow_store)
         if agent_control is None:
@@ -1088,6 +1091,65 @@ class GenericAgentBridge:
             })
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
+
+    def team_list(self) -> None:
+        """Emit the CC-style team roster + shared task board (GA ``/team``, ``/agents``).
+
+        Mirrors the ``/workflows`` list panel: a lightweight payload the frontend
+        renders as an overlay, not the generic agent read model.
+        """
+        try:
+            self.emit({"type": "team_roster", **self._team_roster_payload()})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "team_list_failed", "message": str(exc)})
+
+    def _team_roster_payload(self) -> dict[str, Any]:
+        with backend_output_redirect():
+            from subagent_registry import SubagentRegistry
+            from subagent_tasks import SubagentTaskStore
+            from subagent_team import SubagentTeam, team_name_for
+
+        project_dir = getattr(self, "project_dir", PROJECT_DIR)
+        registry = SubagentRegistry(Path(project_dir) / "temp" / "subagents")
+        team_name = team_name_for(self._current_session_id())
+        team = SubagentTeam(registry, "/root", team_name=team_name)
+        view = team.view()
+        store = SubagentTaskStore(project_dir, list_id=team_name)
+        try:
+            tasks = store.list_tasks()
+        except Exception:
+            tasks = []
+        by_owner: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            by_owner.setdefault(str(task.get("owner") or ""), []).append(task)
+        lead_id = str(view["leadAgentId"])
+        members: list[dict[str, Any]] = []
+        for member in view["members"]:
+            agent_id = str(member.get("agentId") or "")
+            owned = by_owner.get(agent_id, [])
+            current = next((t for t in owned if t.get("status") == "in_progress"), None)
+            members.append(
+                {
+                    "agentId": agent_id,
+                    "name": member.get("name"),
+                    "status": member.get("status"),
+                    "parentPath": member.get("parentPath"),
+                    "runId": member.get("runId"),
+                    "role": "lead" if agent_id == lead_id else "teammate",
+                    "taskCount": len(owned),
+                    "currentTask": current.get("subject") if current else None,
+                }
+            )
+        return {
+            "team": {
+                "teamName": view["teamName"],
+                "leadAgentId": lead_id,
+                "leadName": view["leadName"],
+                "memberCount": view["memberCount"],
+            },
+            "members": members,
+            "tasks": tasks,
+        }
 
     def workflow_detail(self, run_id: str) -> None:
         try:
@@ -2487,6 +2549,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             )
         elif cmd_type == "workflow_named_list":
             bridge.workflow_named_list()
+        elif cmd_type == "team_list":
+            bridge.team_list()
         elif cmd_type == "workflow_list":
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":

@@ -19,6 +19,13 @@ import {
   workflowPanelWithRunUpdate,
   type WorkflowPanelState,
 } from './workflowPanel.js'
+import {
+  teamPanelCapturesKey,
+  teamPanelCommandForKey,
+  teamPanelFromRoster,
+  teamPanelLines,
+  type TeamPanelState,
+} from './teamPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
@@ -533,6 +540,7 @@ export function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
     '/workflows - list workflow runs',
+    '/team, /agents - show team roster and shared task board',
     '/workflow on|off - opt this session into dynamic workflow orchestration (the agent then authors a JS workflow script)',
     '/workflow detail|resume|stop RUN_ID - inspect or control workflows',
     '/clear - clear display only',
@@ -577,6 +585,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const mouseMode = useMemo(() => resolveMouseCaptureMode(), [])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [workflowPanel, setWorkflowPanel] = useState<WorkflowPanelState | null>(null)
+  const [teamPanel, setTeamPanel] = useState<TeamPanelState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
@@ -736,6 +745,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setFooterPanel(null)
       if (decision.command.type.startsWith('workflow_')) {
         setWorkflowPanel(null)
+      }
+      if (decision.command.type !== 'team_list') {
+        setTeamPanel(null)
       }
       const command = decision.command
       if (command.type === 'submit') {
@@ -1011,6 +1023,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setWorkflowPanel(workflowListPanelFromRuns(event.runs, event.savedWorkflows ?? []))
         return
       }
+      if (event.type === 'team_roster') {
+        dispatch(event)
+        setTeamPanel(teamPanelFromRoster(event))
+        if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
+        return
+      }
       if (event.type === 'workflow_detail') {
         dispatch(event)
         setWorkflowPanel(workflowPanelFromDetail(event))
@@ -1192,6 +1210,23 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // into the composer, which would then disable the status-bar shortcut
       // (it only runs while the composer is empty).
       if (workflowPanelCapturesKey(workflowPanel, key, rawInput)) return
+    }
+    if (teamPanel) {
+      const decision = teamPanelCommandForKey(teamPanel, key, rawInput)
+      if (decision?.panel) {
+        setTeamPanel(decision.panel)
+        return
+      }
+      if (decision?.command) {
+        bridgeRef.current?.send(decision.command)
+        return
+      }
+      if (key.escape) {
+        setTeamPanel(null)
+        dismissPendingLocalCommand()
+        return
+      }
+      if (teamPanelCapturesKey(teamPanel, key, rawInput)) return
     }
     if (modelPanel) {
       if (key.escape) {
@@ -1482,7 +1517,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel
   const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
   const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
@@ -1679,6 +1714,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
       if (workflowPanel) return <WorkflowPanelView key={section} lines={workflowPanelLines} theme={theme} />
+      if (teamPanel) return <WorkflowPanelView key={section} lines={teamPanelLines(teamPanel)} theme={theme} />
       if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }

@@ -583,3 +583,11 @@ test('handleInput alt+v does not insert letter v (clipboard image or no-op)', as
   assert.notEqual(decision.value, 'hiv')
   assert.ok(decision.pendingImagePaste === true || decision.value === 'hi' || decision.value.includes('[Image #'))
 })
+
+test('handleInput maps /team and /agents to the team roster command', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/team', '', { return: true }, 'idle', store), { value: '', command: { type: 'team_list' } })
+  assert.deepEqual(handleInput('/agents', '', { return: true }, 'idle', store), { value: '', command: { type: 'team_list' } })
+  assert.deepEqual(handleInput('/team list', '', { return: true }, 'idle', store), { value: '', command: { type: 'team_list' } })
+})

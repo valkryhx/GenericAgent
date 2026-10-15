@@ -449,3 +449,53 @@ python -m pytest tests/test_subagent_swarm.py tests/test_subagent_inbound_gate.p
 - **hooks 运行时**（`TeammateIdle`/`TaskCreated`/`TaskCompleted`，`m0052`）：GA 无 hooks 框架，本轮不做。
 - **闸门传输层**（UDS / 跨机器 peer / kill-switch）：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 - 云端 peer / SendFile 跨机：不复刻。
+
+---
+
+## P10：执行期 team UI（`/team`、`/agents`）✅ 完成（第四轮）
+
+> 状态：✅ 完成。方案见 `docs/20261014-ga-agent-team-复刻实施方案.md` §14。
+
+### 调研落盘（CC 证据，实施前先记）
+
+来源：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` **§16**。
+
+- CC 的 team 执行期 UI = **tmux 多窗格 `swarm-view`（`m1573`）**：`createTeammatePaneInSwarmView` →
+  `createTeammatePaneWithLeader`（首窗格 `split-window -h -l 70%`）/ `createTeammatePaneExternal`；
+  `setPaneTitle` / `setPaneBorderColor` / `rebalancePanesWithLeader`；会话名 `claude-swarm-<pid>`（`m0093`）。
+- **本 build 未定位到 `/team` 式 TUI 列表**（`/agents` 在 `m0357` 指 `.claude/agents/*.md` 定义，非面板）。
+- **GA 无 tmux 多窗格** → 用 GA 既有 `/workflows` overlay 面板范式承载 `/team`（等价语义）。
+
+### 交付物
+
+- **`frontends/ink_bridge.py`**：新增 `team_list()` + `_team_roster_payload()`；`__init__` 增 `self.project_dir`
+  （可覆盖，便于测试指向临时树）；dispatch 增 `team_list` 分支。
+- **`frontends/ink-ui/src/protocol.ts`**：`team_list` 命令 + `team_roster` 事件 + `TeamRoster/TeamMember/TeamTask` 类型。
+- **`frontends/ink-ui/src/inputController.ts`**：`/team` / `/team list` / `/agents` → `team_list`。
+- **`frontends/ink-ui/src/slashCommands.ts`**：`/team`、`/agents` 补全项。
+- **`frontends/ink-ui/src/teamPanel.ts`**（新）：纯函数面板（`teamPanelFromRoster` / `teamPanelLines` /
+  `teamMemberGlyph` / `teamTaskGlyph` / `moveTeamSelection` / `teamPanelCommandForKey` / `teamPanelCapturesKey`）。
+- **`frontends/ink-ui/src/App.tsx`**：`teamPanel` state + `team_roster` 事件接线 + 键处理（↑/↓/r/Esc）+
+  渲染（复用 `WorkflowPanelView`）+ `activePanel` + help 文案。
+
+### 测试
+
+- 新增 `frontends/ink-ui/src/teamPanel.test.ts`（10）：payload 归一化、行渲染（名册/任务板/占位）、
+  选中标记、glyph 回退、选择环绕、键映射与捕获。
+- `frontends/ink-ui/src/inputController.test.ts` +1：`/team` / `/agents` / `/team list` → `team_list`。
+- `frontends/ink-ui/src/App.test.ts`：help 文案断言。
+- 新增 `tests/test_ink_bridge.py::InkBridgeTeamListTest`（1）：`team_list` emit `team_roster`
+  （名册含 agent_1、taskCount=1、currentTask="Add parser"、任务板 1 条）。
+- 回归：`tsx --test src/*.test.ts` → **420 passed**；`tsc --noEmit` 通过；
+  `pytest tests/test_ink_bridge.py` → **127 passed, 3 subtests**。
+
+### 复现命令
+
+```bash
+cd frontends/ink-ui && npm test && npm run typecheck
+cd ../.. && python -m pytest tests/test_ink_bridge.py -q
+```
+
+### 不做（诚实标注）
+
+- tmux 多窗格 `swarm-view`（GA 无 tmux）；云端 swarm-view。**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
