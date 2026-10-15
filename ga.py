@@ -860,9 +860,13 @@ class GenericAgentHandler(BaseHandler):
     def _get_subagent_manager(self):
         manager = getattr(self, "subagent_manager", None)
         if manager is not None:
+            manager.team_name = self._team_name()
             return manager
         from subagent_manager import SubagentManager
-        return SubagentManager(root_dir=script_dir, python_executable=sys.executable)
+
+        created = SubagentManager(root_dir=script_dir, python_executable=sys.executable)
+        created.team_name = self._team_name()
+        return created
 
     def _current_backend_history_snapshot(self):
         backend = getattr(getattr(self.parent, "llmclient", None), "backend", None)

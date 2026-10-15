@@ -1492,6 +1492,47 @@ def resolve_reply_wait_schedule(reply_wait_iterations, reply_sleep_s, poll_inter
     return interval, timeout, None
 
 
+def _teammate_idle_hook(task_dir, task_name):
+    """Self-driving teammate: claim the next open task, or report idle (CC m1575 qe / m0300 mat).
+
+    When a claimable task exists it is claimed and the CC prompt is dropped into
+    reply.txt so the next turn picks it up; otherwise an idle frame goes to the lead
+    unless a lead DM already went out this round (CC m1448).
+    """
+    try:
+        from subagent_idle import build_idle_notification, sent_lead_dm_since_last_turn
+        from subagent_state import append_jsonl_event, append_parent_inbox_event
+        from subagent_tasks import SubagentTaskStore, next_task_prompt
+        from subagent_team import team_name_for
+
+        state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
+        root_dir = os.path.dirname(os.path.dirname(task_dir))
+        store = SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
+        task = store.find_claimable()
+        events_path = os.path.join(task_dir, 'events.jsonl')
+        if task:
+            _claim_result = store.claim_task(task['id'], '/root/' + task_name, start=True)
+            if not isinstance(_claim_result, dict) or not _claim_result.get('success'):
+                return False
+            claimed = _claim_result.get('task') or task
+            with open(os.path.join(task_dir, 'reply.txt'), 'w', encoding='utf-8', newline=chr(10)) as handle:
+                handle.write(next_task_prompt(claimed))
+            append_jsonl_event(events_path, {
+                'type': 'task_claimed',
+                'task_name': task_name,
+                'task_id': claimed.get('id'),
+                'subject': claimed.get('subject'),
+            })
+            return True
+        if not sent_lead_dm_since_last_turn(events_path):
+            frame = build_idle_notification(from_name=task_name, idle_reason='available', summary='idle')
+            append_parent_inbox_event(task_dir, frame)
+            append_jsonl_event(events_path, frame)
+        return False
+    except Exception:
+        return False
+
+
 def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, capability_options=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
     task_dir = str(task_dir)
     task_name = os.path.basename(os.path.normpath(task_dir))
@@ -1679,6 +1720,9 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             _subagent_event(task_dir, {'type': 'agent_waiting_reply', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
             consume_file(task_dir, '_stop')
             stop_requested = False
+            if getattr(agent, 'capability_team_mode', False):
+                # A teammate never idles while work is claimable (CC m1575 qe).
+                _teammate_idle_hook(task_dir, task_name)
             # Provenance + receipts for the durable file bus (CC m0300 / m0188): a row that
             # was not written through the ledger is not a genuine teammate message.
             try:

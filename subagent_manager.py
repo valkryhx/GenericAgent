@@ -16,6 +16,7 @@ from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 from subagent_receipts import ProvenanceLedger, SubagentSendLedger
+from subagent_idle import build_idle_notification, sent_lead_dm_since_last_turn
 from subagent_wait import (
     evaluate_wait_condition,
     is_workflow_run_id,
@@ -265,6 +266,8 @@ class SubagentManager:
         # Delivery receipts + provenance for the durable file bus (CC m0188 / m0300).
         self.receipt_ledger = SubagentSendLedger(self.temp_dir / "subagents")
         self.provenance_ledger = ProvenanceLedger(self.temp_dir / "subagents")
+        # Team (task-board list_id) this manager speaks for; ga.py sets it from the session.
+        self.team_name = "default"
         self.process_exists = process_exists or _default_process_exists
         self.process_identity = process_identity or _default_process_identity
         self.terminate_process = terminate_process or _default_terminate_process
@@ -1952,6 +1955,23 @@ class SubagentManager:
             self.receipt_ledger.reap({previous.agent_path})
         except Exception:
             pass
+        # A closed agent cannot finish its tasks, so return them to the board (CC m0300 N4e).
+        reclaimed = self.reclaim_tasks_for(previous.agent_path)
+        if reclaimed:
+            try:
+                listing = ", ".join("#%s %r" % (row.get("id"), row.get("subject")) for row in reclaimed)
+                append_parent_inbox_event(task_dir, {
+                    "type": "task_reclaimed",
+                    "task_name": previous.task_name,
+                    "agent_path": previous.agent_path,
+                    "reclaimed": reclaimed,
+                    "summary": (
+                        "%s has shut down. %d task(s) were unassigned: %s. "
+                        "Use task_list to check availability and task_update with owner to reassign them."
+                    ) % (previous.agent_path, len(reclaimed), listing),
+                })
+            except Exception:
+                pass
         return CloseResult(target, previous, closed, previous.final_output_path)
 
     LEAD_TARGETS = frozenset({"team-lead", "lead", "main"})
@@ -2001,6 +2021,68 @@ class SubagentManager:
         except Exception:
             pass
         return paths
+
+    def task_store(self, list_id=None):
+        from subagent_tasks import SubagentTaskStore
+
+        return SubagentTaskStore(self.root_dir, list_id=list_id or self.team_name)
+
+    def reclaim_tasks_for(self, agent_path, list_id=None):
+        """Unassign every unfinished task owned by a terminated agent (CC m0300 N4e)."""
+        try:
+            return self.task_store(list_id).reclaim_owner(str(agent_path))
+        except Exception:
+            return []
+
+    def claim_next_task(self, agent_path, list_id=None):
+        """Claim the first pending, unowned, unblocked task for ``agent_path`` (CC qe)."""
+        store = self.task_store(list_id)
+        task = store.find_claimable()
+        if not task:
+            return None
+        try:
+            result = store.claim_task(task["id"], str(agent_path), start=True)
+        except Exception:
+            return None
+        if not isinstance(result, dict) or not result.get("success"):
+            return None
+        return result.get("task") or task
+
+    def _sent_to_lead_this_round(self, task_name):
+        """True when the teammate already messaged the lead since its last turn.
+
+        Mirrors CC ``m1448 zo``: an explicit lead DM suppresses the duplicate idle result.
+        """
+        return sent_lead_dm_since_last_turn(self.temp_dir / task_name / "events.jsonl")
+
+    def emit_idle_notification(
+        self,
+        task_name,
+        *,
+        idle_reason="available",
+        summary="",
+        completed_task_id=None,
+        completed_status=None,
+        failure_reason=None,
+        result=None,
+    ):
+        """Send the lead a structured idle frame; suppress a duplicate lead DM (CC m0300/m1448)."""
+        if self._sent_to_lead_this_round(task_name):
+            return None
+        frame = build_idle_notification(
+            from_name=task_name,
+            idle_reason=idle_reason,
+            summary=summary,
+            completed_task_id=completed_task_id,
+            completed_status=completed_status,
+            failure_reason=failure_reason,
+            result=result,
+        )
+        task_dir = self.temp_dir / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        append_parent_inbox_event(task_dir, frame)
+        append_jsonl_event(task_dir / "events.jsonl", frame)
+        return frame
 
     def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)

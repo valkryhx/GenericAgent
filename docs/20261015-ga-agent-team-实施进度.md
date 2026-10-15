@@ -15,7 +15,7 @@
 | P3 | 协调者提示词 + teammate 简报 | ✅ 完成 | `830af51` |
 | P4 | 通知格式对齐 + 防伪前置 | ✅ 完成 | `4f8dcaf` |
 | P5 | 协作可靠性（回执 + 防伪 + 已读去重） | ✅ 完成 | `099d9fc` |
-| P6 | 进度自驱 + 发现即通知去重 | ⬜ 未开始 | |
+| P6 | 进度自驱 + 发现即通知去重 | ✅ 完成 | 见下 |
 
 ---
 
@@ -305,7 +305,74 @@ python -m pytest tests/test_subagent_receipts.py tests/test_subagent_mailbox.py 
 
 ---
 
-## 下一步：P6（进度自驱 + 发现即通知去重）
+## P6：进度自驱 + 发现即通知去重 ✅ 完成
+
+> 状态：✅ 完成。**至此 P0–P6 全部完成。**
+
+### 调研落盘（CC 证据，实施前先记）
+
+来源：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` §8.3 / §8.4。
+
+- **(A) 空闲自动认领 `m1575 qe`**：teammate poll loop 每次轮询（间隔 `he=500ms`）调 `qe()` → `tasks.find(t => t.status==="pending" && !t.owner && t.blockedBy.every(id=>!openIds.has(id)))`；找到 → 认领 → 置 `in_progress` → 下一轮 prompt `He(task) = "Complete all open tasks. Start with task #N: <subject>
+
+<description>"`。
+- **(B) 完成即解锁 `m0531`/`m0300`**：任务 `completed` 后 `TaskList` 只列未完成 `blockedBy`，依赖自动解锁。
+- **(C) 终止即回收 `m0300 N4e`**：teammate 终止/关闭时名下未完成任务 `owner=None, status="pending"`，并通知 lead：`<name> has shut down. N task(s) were unassigned: ... Use TaskList ... TaskUpdate with owner to reassign them.`
+- **(D) idle_notification 帧 `m0300 mat`**：teammate 变 idle 时向 lead 发 `{type:"idle_notification", from, timestamp, idleReason:available|failed|interrupted, summary, completedTaskId, completedStatus, failureReason, result}`。
+- **(E) 结果长度预算 `m0300`**：单条 result ≤ **`xB=4000`**；一次 drain 总预算 **`eTo=16000`**；截断附提示。
+- **(F) 显式 DM 去重 `m1448 zo`**：若 teammate 本轮最后一条 assistant 消息已有成功的 `SendMessage` 发给 lead，则**抑制** idle 结果投递。
+
+**GA 落地映射**：
+
+| CC 机制 | GA 落点 |
+| --- | --- |
+| `qe()` 找可认领任务 | `SubagentTaskStore.find_claimable`（P0 已有） |
+| `He(task)` 下一轮 prompt | `subagent_tasks.next_task_prompt(task)` |
+| 空闲自动认领 | `agentmain._teammate_idle_hook`：认领后把 prompt 写入 `reply.txt`，下一轮直接取用 |
+| `N4e` 终止回收 | `SubagentManager.reclaim_tasks_for` + `close_agent` 回收并写 `task_reclaimed` 通知 |
+| `mat` idle 帧 | `subagent_idle.build_idle_notification` + `SubagentManager.emit_idle_notification` |
+| `xB`/`eTo` 预算 | `subagent_idle.truncate_result` / `truncate_drain`（4000 / 16000） |
+| `zo` DM 去重 | `subagent_idle.sent_lead_dm_since_last_turn`（`lead_message` 晚于 `turn_completed` 则抑制） |
+
+### 交付物
+
+- **`subagent_idle.py`**（新）：`RESULT_BUDGET=4000` / `DRAIN_BUDGET=16000`；`truncate_result` / `truncate_drain`；`build_idle_notification(...)`（CC `mat` 字段）；`sent_lead_dm_since_last_turn(events_path)`（CC `zo`）。
+- **`subagent_tasks.py`**：新增 `next_task_prompt(task)`（CC `He`）。
+- **`subagent_manager.py`**：`team_name` 属性；`task_store()` / `reclaim_tasks_for()` / `claim_next_task()`；`emit_idle_notification()`（含 DM 去重）；`close_agent` 回收任务并发 `task_reclaimed` 通知。
+- **`ga.py`**：`_get_subagent_manager` 设置 `manager.team_name`（让回收落在正确的任务板）。
+- **`agentmain.py`**：`_teammate_idle_hook(task_dir, task_name)` —— teammate 空闲时自动认领（写 `reply.txt`）或向 lead 发 idle 帧；子循环在 `stop_requested=False` 后调用（仅 `capability_team_mode`）。
+
+### 测试
+
+- 新增 `tests/test_subagent_idle.py`（8）：结果/整轮预算截断；idle 帧字段（含可选字段省略）；DM 去重三种情形。
+- 新增 `tests/test_agentmain_teammate_idle.py`（3）：认领并写 CC prompt；无可认领→发 idle 帧；已有 lead DM→不重复。
+- `tests/test_subagent_manager.py` 新增 `TaskReclaimAndIdleTest`（4）：`claim_next_task`；关闭回收 + `task_reclaimed`；idle 帧去重/写入。
+- `tests/test_subagent_tasks.py` 新增 `NextTaskPromptTest`（3）。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py tests/test_ga_subagent_permissions.py tests/test_agentmain_role_prompts.py tests/test_agentmain_subagent_lifecycle.py tests/test_agentmain_teammate_idle.py -q` → **391 passed, 2 skipped**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_idle.py tests/test_agentmain_teammate_idle.py tests/test_subagent_tasks.py -q
+```
+
+---
+
+## 收尾：P0–P6 全部完成 ✅
+
+| 阶段 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| P0 | 共享任务板 | ✅ | `1e1f525` |
+| P1 | team / lead 身份 | ✅ | `28bdec4` |
+| P2 | teammate 自主协作 | ✅ | `3d1250e` |
+| P3 | 协调者提示词 + teammate 简报 | ✅ | `830af51` |
+| P4 | 通知格式对齐 + 防伪前置 | ✅ | `4f8dcaf` |
+| P5 | 协作可靠性（回执 + 防伪 + 已读去重） | ✅ | `099d9fc` |
+| P6 | 进度自驱 + 发现即通知去重 | ✅ | 见下 |
+
+**建议下一步（未做，非本方案范围）**：`/agents`、`/team` 执行期 UI（对齐 CC `/workflows` 式可视化）。
+
+
 
 - 空闲自动认领（`m1575 qe`）、终止即回收任务（`m0300 N4e`）、`idle_notification` 帧、结果长度预算（4000/16000）、显式 DM 去重（`m1448`）。
 

@@ -2404,5 +2404,75 @@ class ReceiptProvenanceWiringTest(unittest.TestCase):
             self.assertIn("/root/a", roster)
 
 
+class TaskReclaimAndIdleTest(unittest.TestCase):
+    """Self-driving progress + discovery notification (CC m0300 N4e / mat / m1575 qe)."""
+
+    def _manager(self, td):
+        class FakeProcess:
+            next_pid = 9700
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+        )
+
+    def test_claim_next_task_takes_the_first_claimable(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.task_store().create_task("first" )
+            manager.task_store().create_task("second")
+
+            claimed = manager.claim_next_task("/root/agent_1")
+
+            self.assertEqual(claimed["subject"], "first")
+            self.assertEqual(claimed["owner"], "/root/agent_1")
+            self.assertEqual(claimed["status"], "in_progress")
+
+    def test_close_reclaims_unfinished_tasks_and_notifies_the_lead(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "work")
+            store = manager.task_store()
+            task = store.create_task("do the thing")
+            store.claim_task(task["id"], "/root/a", start=True)
+
+            manager.close_agent("a")
+
+            self.assertIsNone(store.get_task(task["id"])["owner"])
+            self.assertEqual(store.get_task(task["id"])["status"], "pending")
+            inbox = Path(td) / "temp" / "subagents" / "inbox.jsonl"
+            events = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(row.get("type") == "task_reclaimed" for row in events))
+
+    def test_emit_idle_notification_is_suppressed_after_a_lead_dm(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            events_path = Path(td) / "temp" / "agent_1" / "events.jsonl"
+            events_path.parent.mkdir(parents=True)
+            events_path.write_text(
+                json.dumps({"type": "turn_completed"}) + chr(10) + json.dumps({"type": "lead_message"}) + chr(10),
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(manager.emit_idle_notification("agent_1"))
+
+    def test_emit_idle_notification_writes_the_frame_without_a_lead_dm(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+
+            frame = manager.emit_idle_notification("agent_2", summary="idle")
+
+            self.assertEqual(frame["type"], "idle_notification")
+            inbox = Path(td) / "temp" / "subagents" / "inbox.jsonl"
+            rows = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(row.get("type") == "idle_notification" for row in rows))
+
+
 if __name__ == "__main__":
     unittest.main()

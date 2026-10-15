@@ -290,3 +290,17 @@ def _int_or(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def next_task_prompt(task):
+    """The self-driving prompt a teammate runs after claiming a task (CC ``He``).
+
+    CC: ``Complete all open tasks. Start with task #N: <subject>\n\n<description>``.
+    """
+    if not task:
+        return ""
+    task_id = task.get("id")
+    subject = task.get("subject") or ""
+    description = task.get("description") or ""
+    header = "Complete all open tasks. Start with task #%s: %s" % (task_id, subject)
+    return header + ("\n\n" + str(description) if description else "")

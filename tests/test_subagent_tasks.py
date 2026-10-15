@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_tasks import SubagentTaskStore  # noqa: E402
+from subagent_tasks import SubagentTaskStore, next_task_prompt  # noqa: E402
 
 
 class SubagentTaskStoreTest(unittest.TestCase):
@@ -131,6 +131,23 @@ class SubagentTaskStoreTest(unittest.TestCase):
         for thread in threads:
             thread.join()
         self.assertEqual(len(winners), 1)
+
+
+class NextTaskPromptTest(unittest.TestCase):
+    def test_prompt_names_the_task_and_includes_the_description(self):
+        prompt = next_task_prompt({"id": "2", "subject": "audit the log", "description": "line by line"})
+
+        self.assertIn("task #2", prompt)
+        self.assertIn("audit the log", prompt)
+        self.assertIn("line by line", prompt)
+
+    def test_prompt_without_a_description_has_no_trailing_blank(self):
+        prompt = next_task_prompt({"id": "1", "subject": "just do it"})
+
+        self.assertEqual(prompt, "Complete all open tasks. Start with task #1: just do it")
+
+    def test_empty_task_yields_an_empty_prompt(self):
+        self.assertEqual(next_task_prompt(None), "")
 
 
 if __name__ == "__main__":
