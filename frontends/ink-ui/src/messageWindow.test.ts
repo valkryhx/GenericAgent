@@ -14,6 +14,7 @@ import {
 } from './messageWindow.js'
 import type { ChatMessage } from './protocol.js'
 import { getInkTheme } from './theme.js'
+import { RESULT_PREFIX } from './glyphs.js'
 
 test('visibleMessages keeps only the latest messages', () => {
   const messages: ChatMessage[] = Array.from({ length: 5 }, (_, i) => ({
@@ -83,10 +84,10 @@ test('liveTranscriptViewportLines pins open-turn user lines above a long assista
   assert.equal(visible[0]?.id, 'u-1-0')
 })
 
-test('transcriptLines keeps [Action]/[Status] left-aligned and equally muted', () => {
-  // Stream-commit may place Action on the first line of a segment and Status on a
-  // later line. The old "indent every non-first line by 2 spaces" rule made Status
-  // look misaligned under Action; both should share the same column and style.
+test('transcriptLines renders [Action]/[Status] as CC-style result lines, equally muted', () => {
+  // GA tool progress markers become CC's `  ⎿  <body>` result lines (dim).
+  // Action and Status must share the same prefix + style, even when stream-commit
+  // placed them on different segment lines.
   const messages: ChatMessage[] = [
     {
       id: 'a-1-c0',
@@ -102,19 +103,16 @@ test('transcriptLines keeps [Action]/[Status] left-aligned and equally muted', (
     },
   ]
   const rows = transcriptLines(messages, { expandedTools: false, theme: getInkTheme('default') })
-  const action = rows.find(row => row.text.includes('[Action]'))
-  const status = rows.find(row => row.text.includes('[Status]'))
+  const action = rows.find(row => row.text.includes('Calling MCP tool'))
+  const status = rows.find(row => row.text.includes('MCP success'))
   assert.ok(action)
   assert.ok(status)
-  assert.equal(action!.text.startsWith('  '), false, `Action indented: ${JSON.stringify(action!.text)}`)
-  assert.equal(status!.text.startsWith('  '), false, `Status indented: ${JSON.stringify(status!.text)}`)
-  assert.equal(action!.text.trimStart(), action!.text)
-  assert.equal(status!.text.trimStart(), status!.text)
-  const actionColor = action!.parts?.find(part => part.text.includes('[Action]'))?.color
-  const statusColor = status!.parts?.find(part => part.text.includes('[Status]'))?.color
-  assert.equal(actionColor, 'gray')
-  assert.equal(statusColor, 'gray')
-  assert.equal(actionColor, statusColor)
+  assert.equal(action!.text, `${RESULT_PREFIX}Calling MCP tool: mcp__tavily__tavily_search`)
+  assert.equal(status!.text, `${RESULT_PREFIX}MCP success`)
+  assert.equal(action!.parts?.[0]?.color, 'gray')
+  assert.equal(status!.parts?.[0]?.color, 'gray')
+  assert.equal(action!.parts?.[0]?.dimColor, true)
+  assert.equal(status!.parts?.[0]?.dimColor, true)
 })
 
 test('transcriptLines strips blockquote markers from [Action]/[Status] lines', () => {
@@ -129,19 +127,19 @@ test('transcriptLines strips blockquote markers from [Action]/[Status] lines', (
     },
   ]
   const rows = transcriptLines(messages, { expandedTools: false, theme: getInkTheme('default') })
-  const action = rows.find(row => row.text.includes('[Action]'))
-  const status = rows.find(row => row.text.includes('[Status]'))
+  const action = rows.find(row => row.text.includes('Calling MCP tool'))
+  const status = rows.find(row => row.text.includes('MCP success'))
   assert.ok(action)
   assert.ok(status)
-  assert.equal(action!.text, '[Action] Calling MCP tool: x')
-  assert.equal(status!.text, '[Status] MCP success')
+  assert.equal(action!.text, `${RESULT_PREFIX}Calling MCP tool: x`)
+  assert.equal(status!.text, `${RESULT_PREFIX}MCP success`)
   assert.equal(action!.parts?.[0]?.color, 'gray')
   assert.equal(status!.parts?.[0]?.color, 'gray')
 })
 
 test('transcriptLines forces [Action]/[Status] to muted gray even when one side was a code fence', () => {
-  // Historical bug: open fence → Action rendered as theme.code (cyan); Status outside
-  // fence → default foreground. Users saw "calling=blue, success=black".
+  // Historical bug: open fence -> Action rendered as theme.code (cyan); Status outside
+  // fence -> default foreground. Users saw "calling=blue, success=black".
   const messages: ChatMessage[] = [
     {
       id: 'a-10',
@@ -158,18 +156,16 @@ test('transcriptLines forces [Action]/[Status] to muted gray even when one side 
   ]
   const theme = getInkTheme('default')
   const rows = transcriptLines(messages, { expandedTools: false, theme })
-  const action = rows.find(row => row.text.includes('[Action]'))
-  const status = rows.find(row => row.text.includes('[Status]'))
+  const action = rows.find(row => row.text.includes('Calling MCP tool'))
+  const status = rows.find(row => row.text.includes('MCP success'))
   assert.ok(action)
   assert.ok(status)
-  const actionColor = action!.parts?.find(part => part.text.includes('[Action]'))?.color
-  const statusColor = status!.parts?.find(part => part.text.includes('[Status]'))?.color
+  const actionColor = action!.parts?.[0]?.color
+  const statusColor = status!.parts?.[0]?.color
   assert.equal(actionColor, 'gray')
   assert.equal(statusColor, 'gray')
   assert.notEqual(actionColor, theme.code)
   assert.notEqual(statusColor, theme.code)
-  assert.equal(action!.text.startsWith('  '), false)
-  assert.equal(status!.text.startsWith('  '), false)
 })
 
 test('visibleMessagesForViewport can scroll upward from the sticky bottom', () => {

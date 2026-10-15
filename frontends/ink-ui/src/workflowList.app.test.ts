@@ -257,12 +257,12 @@ test('App keeps workflow panel keys out of the composer', async () => {
   })
 
   try {
-    const opened = await waitForFrame(stdout, frame => frame.includes('keys-demo') && frame.includes('› ◌ One'))
-    assert.match(opened, /› ◌ One/)
+    const opened = await waitForFrame(stdout, frame => frame.includes('keys-demo') && frame.includes('◌ One'))
+    assert.match(opened, /› (?:├|└)─ ◌ One/)
 
     stdin.push('j')
-    const moved = await waitForFrame(stdout, frame => frame.includes('› ◌ Two'))
-    assert.match(moved, /› ◌ Two/)
+    const moved = await waitForFrame(stdout, frame => frame.includes('◌ Two'))
+    assert.match(moved, /› (?:├|└)─ ◌ Two/)
     // The overlay owns 'j': it must not be typed into the composer.
     assert.equal(moved.includes('> j'), false)
 
@@ -348,8 +348,8 @@ test('App opens the workflow panel with Enter while a running turn holds a draft
     stdin.push('d')
     await delay(60)
     stdin.push('\r')
-    const panel = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('› ◌ One'))
-    assert.match(panel, /› ◌ One/)
+    const panel = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('◌ One'))
+    assert.match(panel, /› (?:├|└)─ ◌ One/)
     assert.equal(sent.some(command => command.type === 'submit'), false)
     assert.equal(sent.some(command => command.type === 'workflow_detail' && command.runId === 'wf_busy'), true)
   } finally {

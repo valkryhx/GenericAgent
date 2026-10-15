@@ -1,3 +1,5 @@
+import { GLYPHS, EXPAND_HINT } from './glyphs.js'
+
 type FormatOptions = {
   expanded?: boolean
 }
@@ -54,17 +56,50 @@ function formatExpandedTool(name: string, argsText: string): string {
   const parsed = parseJsonArgs(argsText)
   const pretty = parsed === null ? argsText.trim() : JSON.stringify(parsed, null, 2)
   const indented = pretty.split('\n').map(line => `  ${line}`).join('\n')
-  return `> ${name}\n  args:\n${indented}`
+  return `${GLYPHS.bullet} ${name}\n  args:\n${indented}`
 }
 
 function formatCollapsedTool(name: string, argsText: string): string {
   const { summary, truncated } = summarizeArgs(argsText)
-  const hint = truncated ? ' (ctrl+o to expand)' : ''
-  return summary ? `> ${name}(${summary})${hint}` : `> ${name}${hint}`
+  const hint = truncated ? ` ${EXPAND_HINT}` : ''
+  return summary ? `${GLYPHS.bullet} ${name}(${summary})${hint}` : `${GLYPHS.bullet} ${name}${hint}`
 }
 
 function formatToolBlock(name: string, argsText: string, options: FormatOptions): string {
   return options.expanded ? formatExpandedTool(name, argsText) : formatCollapsedTool(name, argsText)
+}
+
+const TOOL_OUTPUT_HEAD_LINES = 8
+const RESULT_MARKER_LINE_RE = /^[^\S\r\n]*(?:\|[^\S\r\n]*)?\[(?:Action|Status|Stdout)\][^\S\r\n]*$/
+const STDOUT_MARKER_LINE_RE = /^[^\S\r\n]*(?:\|[^\S\r\n]*)?\[Stdout\][^\S\r\n]*$/
+
+/**
+ * Fold long `[Stdout]` bodies to their first TOOL_OUTPUT_HEAD_LINES lines with a
+ * `(`ctrl+o to expand`)` hint, mirroring CC's offscreen-locked tool output
+ * (see claudecode283_hack/docs/20261016-CC-UI渲染对标调研.md §4). Transcript mode
+ * (`ctrl+o`) shows the full body.
+ */
+function foldToolOutput(text: string, expanded: boolean): string {
+  if (expanded) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    out.push(line)
+    if (!STDOUT_MARKER_LINE_RE.test(line)) continue
+    let j = i + 1
+    let total = 0
+    while (j < lines.length && (lines[j] ?? '').trim() !== '' && !RESULT_MARKER_LINE_RE.test(lines[j] ?? '')) {
+      if (total < TOOL_OUTPUT_HEAD_LINES) out.push(lines[j] ?? '')
+      total++
+      j++
+    }
+    if (total > TOOL_OUTPUT_HEAD_LINES) {
+      out.push(`... (+${total - TOOL_OUTPUT_HEAD_LINES} more lines) ${EXPAND_HINT}`)
+    }
+    i = j - 1
+  }
+  return out.join('\n')
 }
 
 export function formatAssistantText(raw: string, options: FormatOptions = {}): string {
@@ -76,7 +111,7 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     /🛠️?\s*Tool:\s*`([^`]+)`\s*📥\s*args:\s*\n````text\n([\s\S]*?)\n````/g,
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
-  text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `> ${name}(${args})`)
+  text = text.replace(/^[^\S\r\n]*🛠️?[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `${GLYPHS.bullet} ${name}(${args})`)
   // Repair legacy GA status fences whose closing marker was emitted on the
   // same line as the body. This happens when a tool yields text without a
   // trailing newline (notably the workflow launch result); otherwise the next
@@ -98,6 +133,7 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
   text = text.replace(/(?:^|\n)\s*\[Info\] Final response to user\.\s*(?=\n|$)/g, '\n')
   // Drop empty fence pairs left after stripping tool/info wrappers.
   text = text.replace(/(?:^|\n)```(?:[^\n`]*)\n\s*```(?=\n|$)/g, '\n')
+  text = foldToolOutput(text, options.expanded === true)
   text = text.replace(/\n{4,}/g, '\n\n\n')
   return text.trimEnd()
 }

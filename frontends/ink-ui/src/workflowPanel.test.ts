@@ -100,9 +100,11 @@ test('workflowOverviewRows groups agents by progress phaseTitle', () => {
   assert.deepEqual(workflowOverviewRows(overview).slice(0, 8), [
     'prompt-guided-planner-real-e2e-design  3/3 agents · done',
     'Design sufficient real GPT-5.5 E2E coverage for prompt-guided workflow planner',
-    'Phases           │ Inspect · 2 agents',
-    '› ✓ Inspect 2/2  │ ✓ planner-api  24.9k tok · 16 tools',
-    '  ✓ Matrix 1/1   │ ✓ real-e2e-patterns  45k tok · 24 tools',
+    '› ├─ ✓ Inspect 2/2',
+    '  │  ├─ ✓ planner-api  24.9k tok · 16 tools',
+    '  │  └─ ✓ real-e2e-patterns  45k tok · 24 tools',
+    '  └─ ✓ Matrix 1/1',
+    '     └─ ✓ summary  7k tok',
     'Enter agent · j/k phase · PgUp/PgDn · Esc back',
   ])
 })
@@ -204,9 +206,9 @@ test('workflowOverviewFromDetail derives awaiting approval agents from draft whe
   assert.deepEqual(workflowOverviewRows(overview).slice(0, 5), [
     'draft-only-review  0/2 agents · awaiting_approval',
     'Review draft before approval',
-    'Phases            │ Review · 1 agent',
-    '› ◌ Review 0/1    │ · contract-review',
-    '  ◌ Synthesis 0/1 │ ',
+    '› ├─ ◌ Review 0/1',
+    '  │  └─ · contract-review',
+    '  └─ ◌ Synthesis 0/1',
   ])
 })
 test('workflowPanelFromDetail defaults to overview rows instead of raw script', () => {
@@ -232,8 +234,8 @@ test('workflowPanelFromDetail defaults to overview rows instead of raw script', 
   assert.deepEqual(workflowPanelRows(panel).slice(0, 4), [
     'workflow-ui-plan  1/1 agents · done',
     '规划 UI',
-    'Phases           │ Plan · 1 agent',
-    '› ✓ Plan 1/1     │ ✓ planner',
+    '› └─ ✓ Plan 1/1',
+    '     └─ ✓ planner',
   ])
   assert.equal(workflowPanelRows(panel).some(row => row.includes('raw script')), false)
 })
@@ -284,19 +286,19 @@ test('workflowAgentDetailRows renders selected agent Prompt Activity Outcome sec
   const detailPanel = workflowAgentDetailPanelFromOverview(panel, 0, 0)
 
   assert.deepEqual(workflowPanelRows(detailPanel), [
-    'Inspect · 2 agents | planner-api',
-    '› ✓ planner-api | ✓ Completed · Opus 4.8 (1M context) · 24.9k tok · 4 tool calls',
-    '  ✓ real-e2e-patterns | Prompt',
-    '                   |   Inspect workflow_planner.py',
-    '                   | Activity · last 4 of 4 tool calls',
-    '                   |   Read 1',
-    '                   |   Read 2',
-    '                   |   Grep workflow symbols',
-    '                   |   Read final notes',
-    '                   | Outcome',
-    '                   |   已检查 workflow planner public API。',
-    '                   | ',
-    '                   | ',
+    'Inspect · 2 agents │ planner-api',
+    '› ✓ planner-api       │ ✓ Completed · Opus 4.8 (1M context) · 24.9k tok · 4 tool calls',
+    '  ✓ real-e2e-patterns │ Prompt',
+    '                      │   Inspect workflow_planner.py',
+    '                      │ Activity · last 4 of 4 tool calls',
+    '                      │   Read 1',
+    '                      │   Read 2',
+    '                      │   Grep workflow symbols',
+    '                      │   Read final notes',
+    '                      │ Outcome',
+    '                      │   已检查 workflow planner public API。',
+    '                      │ ',
+    '                      │ ',
     '↑↓ agent · j/k scroll · PgUp/PgDn page · g/G ends · esc back',
   ])
 })

@@ -484,6 +484,24 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   字形两种存法：明文 JS 模块区是**转义写法**（`⎿` 25 处 / `✻` 14 处 / `⏺` 6 处…）；bytecode 区有**真实字节**（`⏺`/`✢`/`❯`/`⏹`/`▪`）。
   ⚠️ exe 含 Bun/JSC 引擎字符串表（~65–88M），`to expand` 等会命中**引擎噪声**（非 CC UI）→ 命中需按区域过滤，CC UI 真正在 **≈97–100M 与 200–217M** 两段。
 
+### 中途调研 2026-10-16：CC 执行期「渲染层」UI（图标 / 折叠 / 排版）
+
+- **触发**：用户 2026-10-15 提出 GA ink 执行过程「没有折叠 + 图标审美偏低」，要求对标 CC 源码 UI。
+- **CC 源码坐标**（v2.1.283，`claude.exe` 已到货；权威证据见 `D:\git_codes\claudecode283_hack\docs\20261016-CC-UI渲染对标调研.md`）：
+  - 字形常量表：`m0052_0xbfaae5d.js`（exe @201043800 / @201044050）；全量具名字形表 exe @207816961。
+  - 工具结果行 `  ⎿  ` + dim + 折叠 `Hj`：`m1277_0xd55e81a.js`（exe @223735644 / @227326544 / @227360357）。
+  - spinner 动词表 + store：`m0696_0xcf4efd9.js`；spinner 字形帧 `·✢✳✶✻✻`（回弹）exe @217487017。
+  - 折叠提示（动态键位 `(ctrl+o to expand)`）exe @207813262 / @227327898 / @227328557；转录头 exe @228272100。
+- **结论**：CC 渲染层有三条硬规则——① 图标是**具名字形表**（`⏺` bullet / `⎿` 结果前缀 / `✻` 星 / `├└│` 树 / `▸` 折叠三角）；
+  ② 工具结果行统一 `  ⎿  ` + **dim** + 缩进；③ 折叠 = 渲染后测高锁 `minHeight`，提示走键位表。
+- **对 GA 的影响（差距）**：GA 工具行是 `> name(args)`（与 user 的 `>` 撞车）；无 `⎿` 结果前缀；用 emoji（`🛠️ 🔨 📥 ✅`）当图标；
+  workflow 详情用 `│`/`|` 两列表 + 固定 `padEnd(18)`（长标题错位）。折叠只有全局 `expandedTools`（ctrl+o）开关，无 per-block。
+- **待办 → 本轮实施**：① 新增 `frontends/ink-ui/src/glyphs.ts`（CC 字形子集，语义名）；② 工具调用改 `⏺ name(args)`、结果加 `  ⎿  ` + dim；
+  ③ emoji 换字形；④ 工具输出超长折叠 + `(ctrl+o to expand)`；⑤ workflow 详情改树/盒字形 + `string-width` 列宽（去掉固定 pad）。
+- **不做**：云端会话 UI（【复刻时暂时不需要参考 claudecode 云端会话的实现】）、完整帧动画 spinner。
+- **详细方案**：`docs/20261016-CC-UI-对标调研.md`（本仓库）。
+- **状态（2026-10-16）：已实施。** 新增 `src/glyphs.ts`（字形表）+ `glyphs.test.ts`；工具调用行 `> ` → `⏺ `；工具结果行 `[Action]/[Status]/[Stdout]` → `  ⎿  <body>`（dim）+ emoji 归一；超长 `[Stdout]` 折叠 + `(ctrl+o to expand)`；workflow 详情改 CC 风格树（`├ └ │ ─`）+ `string-width` 列宽（去固定 pad）。ink-ui `npm test` 425 passed、`tsc` 通过。
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；

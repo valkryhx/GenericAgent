@@ -2,6 +2,7 @@ import type { ChatMessage } from './protocol.js'
 import { formatAssistantText } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
+import { GLYPHS, RESULT_PREFIX, normalizeEmoji } from './glyphs.js'
 import { terminalSegments, terminalTextWidth } from './terminalText.js'
 
 export type TranscriptPart = MarkdownPart & {
@@ -204,16 +205,20 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
   rows.push(blankLine(`${message.id}-blank`))
 }
 
-/** Keep GA tool progress lines left-aligned and consistently muted (not code cyan). */
+/**
+ * GA tool progress lines ([Action]/[Status]/[Stdout]) become CC-style result
+ * lines: `  ⎿  <body>` (dim). Matches even when markdown left a blockquote
+ * marker or residual indent: "  [Status] ...", "| [Action] ...".
+ */
+const RESULT_MARKER_RE = /^\s*(?:\|\s*)?\[(?:Action|Status|Stdout)\]\s?/
+
 function styleAssistantTranscriptLine(parts: TranscriptPart[], theme?: InkTheme): TranscriptPart[] {
   const text = parts.map(part => part.text).join('')
-  // Match even when markdown left a blockquote marker or residual indent:
-  //   "  [Status] ...", "| [Action] ...", "  | [Status] ..."
-  if (/^\s*(?:\|\s*)?\[(?:Action|Status)\]/.test(text)) {
-    const cleaned = text
-      .replace(/^\s*(?:\|\s*)+/, '')
-      .replace(/^\s+/, '')
-    return [{ text: cleaned || text.trim() || ' ', color: theme?.muted ?? 'gray', dimColor: true }]
+  const match = RESULT_MARKER_RE.exec(text)
+  if (match) {
+    const body = normalizeEmoji(text.slice(match[0].length).trimEnd())
+    const line = body ? `${RESULT_PREFIX}${body}` : `  ${GLYPHS.resultPrefix}`
+    return [{ text: line, color: theme?.muted ?? 'gray', dimColor: true }]
   }
   return parts
 }

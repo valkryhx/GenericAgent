@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { formatAssistantText } from './messageFormat.js'
+import { GLYPHS } from './glyphs.js'
 
 test('formatAssistantText renders summary tags as plain text', () => {
   assert.equal(formatAssistantText('<summary>将写并运行质数脚本</summary>'), 'Summary: 将写并运行质数脚本')
@@ -15,7 +16,7 @@ test('formatAssistantText hides verbose tool args', () => {
     '[Action] Running python',
   ].join('\n')
 
-  assert.equal(formatAssistantText(raw), '> code_run(script: print(1), timeout: 60, type: python)\n[Action] Running python')
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} code_run(script: print(1), timeout: 60, type: python)\n[Action] Running python`)
 })
 
 test('formatAssistantText expands verbose tool args when transcript mode is enabled', () => {
@@ -27,7 +28,7 @@ test('formatAssistantText expands verbose tool args when transcript mode is enab
   ].join('\n')
 
   assert.equal(formatAssistantText(raw, { expanded: true }), [
-    '> code_run',
+    `${GLYPHS.bullet} code_run`,
     '  args:',
     '  {',
     '    "script": "print(1)",',
@@ -39,7 +40,7 @@ test('formatAssistantText expands verbose tool args when transcript mode is enab
 test('formatAssistantText renders compact tool calls without emoji', () => {
   const raw = '🛠️ code_run(type=python, script=print(1))\n\n\nDone'
 
-  assert.equal(formatAssistantText(raw), '> code_run(type=python, script=print(1))\n\n\nDone')
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} code_run(type=python, script=print(1))\n\n\nDone`)
 })
 
 test('formatAssistantText truncates long tool summaries with a ctrl+o hint', () => {
@@ -50,7 +51,7 @@ test('formatAssistantText truncates long tool summaries with a ctrl+o hint', () 
     '````',
   ].join('\n')
 
-  assert.match(formatAssistantText(raw), /^> code_run\(script: x{80}.*\) \(ctrl\+o to expand\)$/)
+  assert.match(formatAssistantText(raw), new RegExp(`^${GLYPHS.bullet} code_run\\(script: x{80}.*\\) \\(ctrl\\+o to expand\\)$`))
 })
 
 test('formatAssistantText removes final response marker block', () => {
@@ -111,4 +112,17 @@ test('formatAssistantText strips GA tool status fences so later turns stay markd
   assert.doesNotMatch(formatted, /```/)
   // After format, markdown renderer should still bold Turn 2 (no open fence).
   assert.match(formatted, /\*\*LLM Running \(Turn 2\) \.\.\.\*\*/)
+})
+
+test('formatAssistantText folds long [Stdout] bodies until transcript mode', () => {
+  const body = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join('\n')
+  const raw = ['`````', '[Status] Exit Code: 0', '[Stdout]', body, '`````'].join('\n')
+  const collapsed = formatAssistantText(raw)
+  assert.match(collapsed, /\[Stdout\]/)
+  assert.match(collapsed, /line 8/)
+  assert.doesNotMatch(collapsed, /line 9/)
+  assert.match(collapsed, /\(\+4 more lines\) \(ctrl\+o to expand\)/)
+  const expanded = formatAssistantText(raw, { expanded: true })
+  assert.match(expanded, /line 12/)
+  assert.doesNotMatch(expanded, /more lines/)
 })

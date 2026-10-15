@@ -1,5 +1,6 @@
 import { marked, type Token } from 'marked'
 import type { InkTheme } from './theme.js'
+import { GLYPHS } from './glyphs.js'
 
 export type MarkdownPart = {
   text: string
@@ -15,7 +16,7 @@ export type MarkdownLine = {
   parts: MarkdownPart[]
 }
 
-const TOOL_SUMMARY_RE = /^>\s+[A-Za-z_][A-Za-z0-9_]*\(.*\)$/
+const TOOL_SUMMARY_RE = new RegExp(`^(?:>|${GLYPHS.bullet})\\s+[A-Za-z_][A-Za-z0-9_]*\\(.*\\)$`)
 
 export function lineText(line: MarkdownLine): string {
   return line.text

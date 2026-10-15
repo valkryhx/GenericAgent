@@ -1,6 +1,7 @@
 import type { BridgeCommand, WorkflowDraftPayload, WorkflowEvent, WorkflowLiveJob, WorkflowProgressEntry, WorkflowProgressPayload, WorkflowRun, WorkflowJob } from './protocol.js'
 import type { InputKey } from './inputController.js'
 import stringWidth from 'string-width'
+import { GLYPHS } from './glyphs.js'
 
 export type WorkflowDetailPayload = {
   run: WorkflowRun
@@ -322,35 +323,29 @@ export function workflowOverviewFromDetail(detail: WorkflowDetailPayload, select
 }
 
 export function workflowOverviewRows(overview: WorkflowOverview): string[] {
-  const selectedPhase = overview.phases[overview.selectedPhase]
   const gateSummary = [
     overview.integrationStatus ? `integration ${overview.integrationStatus}` : null,
     overview.finalAuditStatus ? `audit ${overview.finalAuditStatus}` : null,
   ].filter(Boolean).join(' · ')
   const headline = `${overview.name}  ${overview.completed}/${overview.total} agents · ${overview.status}${gateSummary ? ` · ${gateSummary}` : ''}`
-  // Two aligned columns. The phase column is sized to the widest cell (never
-  // below PHASE_COLUMN_MIN) so the divider lines up no matter how long a phase
-  // title is -- the old fixed 16-cell pad broke as soon as a title overflowed.
-  const phaseCells = overview.phases.map((phase, index) => phaseRow(phase, index === overview.selectedPhase))
-  const phaseColumnWidth = Math.max(
-    PHASE_COLUMN_MIN,
-    stringWidth('Phases'),
-    ...phaseCells.map(cell => stringWidth(cell)),
-  )
-  const padCell = (cell: string) => cell + ' '.repeat(Math.max(0, phaseColumnWidth - stringWidth(cell)))
-  const agentHeader = selectedPhase
-    ? `${selectedPhase.title} · ${selectedPhase.total} ${selectedPhase.total === 1 ? 'agent' : 'agents'}`
-    : 'Agents'
-  const rows = [
-    headline,
-    overview.description,
-    `${padCell('Phases')} │ ${agentHeader}`,
-  ]
-  const maxRows = Math.max(overview.phases.length, selectedPhase?.agents.length ?? 0)
-  for (let index = 0; index < maxRows; index++) {
-    const agent = selectedPhase?.agents[index]
-    rows.push(`${padCell(phaseCells[index] ?? '')} │ ${agent ? overviewAgentRow(agent) : ''}`)
-  }
+  // CC-style tree (see claudecode283_hack/docs/20261016-CC-UI渲染对标调研.md §2.1,
+  // tree glyphs `o_`). Phases hang off the run; agents hang off their phase, so a
+  // row can never be read as belonging to the wrong phase the way the old
+  // side-by-side "Phases | Agents" columns could.
+  const rows = [headline, overview.description]
+  const lastPhase = overview.phases.length - 1
+  overview.phases.forEach((phase, index) => {
+    const selected = index === overview.selectedPhase
+    const isLastPhase = index === lastPhase
+    const phaseGlyph = phase.total > 0 && phase.completed >= phase.total ? GLYPHS.check : GLYPHS.pending
+    const branch = isLastPhase ? GLYPHS.treeLast : GLYPHS.treeBranch
+    rows.push(`${selected ? GLYPHS.pointer : ' '} ${branch}${GLYPHS.rule} ${phaseGlyph} ${phase.title} ${phase.completed}/${phase.total}`)
+    const indent = isLastPhase ? '   ' : `${GLYPHS.treePipe}  `
+    phase.agents.forEach((agent, agentIndex) => {
+      const agentBranch = agentIndex === phase.agents.length - 1 ? GLYPHS.treeLast : GLYPHS.treeBranch
+      rows.push(`  ${indent}${agentBranch}${GLYPHS.rule} ${overviewAgentRow(agent)}`)
+    })
+  })
   rows.push('Enter agent · j/k phase · PgUp/PgDn · Esc back')
   return rows
 }
@@ -435,16 +430,21 @@ function workflowAgentDetailRows(panel: WorkflowAgentDetailPanelState): string[]
   const scroll = workflowAgentDetailScrollInfo(panel)
   const visibleDetailRows = detailRows.slice(scroll.offset, scroll.offset + bodyRows)
   const scrollLabel = scroll.maxOffset > 0 ? `  ${scroll.offset + 1}-${scroll.offset + visibleDetailRows.length}/${scroll.total}` : ''
-  const rows = [`${phase?.title || 'Agents'} · ${panel.agents.length} ${panel.agents.length === 1 ? 'agent' : 'agents'} | ${panel.detail.label}${scrollLabel}`]
+  const rows = [`${phase?.title || 'Agents'} · ${panel.agents.length} ${panel.agents.length === 1 ? 'agent' : 'agents'} ${GLYPHS.treePipe} ${panel.detail.label}${scrollLabel}`]
   // Keep the selected agent inside the visible window instead of letting the
   // list overflow the panel and hide the selection.
   const agentOffset = Math.min(Math.max(0, panel.agentIndex - bodyRows + 1), Math.max(0, panel.agents.length - bodyRows))
+  // Left column width follows the widest agent cell (never below 12) so the
+  // `│` divider lines up for CJK/emoji labels too -- `.padEnd(18)` counted
+  // UTF-16 units and drifted on wide glyphs.
+  const leftCells = panel.agents.map((agent, index) => agentDetailAgentRow(agent, index === panel.agentIndex))
+  const leftWidth = Math.max(12, ...leftCells.map(cell => stringWidth(cell)))
+  const padLeft = (cell: string) => cell + ' '.repeat(Math.max(0, leftWidth - stringWidth(cell)))
   for (let index = 0; index < bodyRows; index++) {
     const agentIndex = agentOffset + index
-    const agent = panel.agents[agentIndex]
-    const left = agent ? agentDetailAgentRow(agent, agentIndex === panel.agentIndex) : ''.padEnd(18)
+    const left = agentIndex >= 0 && agentIndex < leftCells.length ? padLeft(leftCells[agentIndex]!) : ' '.repeat(leftWidth)
     const right = visibleDetailRows[index] ?? ''
-    rows.push(`${left} | ${right}`)
+    rows.push(`${left} ${GLYPHS.treePipe} ${right}`)
   }
   const hiddenAgents = panel.agents.length - bodyRows
   const agentHint = hiddenAgents > 0 ? ` · ${panel.agents.length} agents` : ''
@@ -615,13 +615,7 @@ function workflowOverviewDescription(run: WorkflowRun, draft: WorkflowDraftPaylo
   return taskType || ''
 }
 
-const PHASE_COLUMN_MIN = 16
 
-function phaseRow(phase: WorkflowOverviewPhase, selected: boolean): string {
-  // ✓ once every agent in the phase is done, ◌ while any is still in flight.
-  const glyph = phase.total > 0 && phase.completed >= phase.total ? '✓' : '◌'
-  return `${selected ? '›' : ' '} ${glyph} ${phase.title} ${phase.completed}/${phase.total}`
-}
 
 function overviewAgentRow(agent: WorkflowOverviewAgent): string {
   const live = agent.turnCount && agent.status === 'running' ? `turn ${agent.turnCount}` : null
