@@ -661,3 +661,9 @@ GA 加宿主兜底，避免弱模型漏调导致任务板失真。
 （3 条全部 completed，owner 各自 `/root/<name>`），三张碎板消失；`report.md` 11684 B、`part1/2/3.md` 齐备。
 测试：`tests/test_subagent_manager.py::test_child_launch_propagates_the_team_name`、
 `tests/test_ga_subagent_tools.py::test_team_name_follows_the_lead_team_env_for_a_child`。
+
+**独立复验（用户实跑，2026-10-15 18:14 / 18:22）**：两次 run 各只产生 **1 张板**
+（`session-fab13d08` / `session-6be9a152`，各 3 条全部 completed），18:10 后无任何单条碎板；
+6 个 teammate 均 `team_mode=true` / `turn_status=completed` 且共享同一 `parent_session_id`。
+更强的信号：`part3_task_cas` / `analyze_do_spawn_agent` / `analyze_taskboard_cas` **无宿主 `task_completed` 事件**
+却已 completed → **模型自己调用了 `task_update`**，证明 teammate 确实读写同一块共享板（修复前不可能）。
