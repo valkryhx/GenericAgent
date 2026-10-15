@@ -45,6 +45,7 @@ Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + ts
 
 - **L1 事件级**：`python tests/real_ink_selftest.py`（结构检查，秒级）；真实回合加 `GA_RUN_REAL_API_E2E=1`（走默认模型即可），证据包落 `temp/ink-selftest/<ts>/`。
 - **L2 UI 版面级**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_panel_e2e.ts`（真实 App + 伪 TTY，不需 API，秒级）。
+- **L2 agent team 全链路**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_swarm_e2e.ts`（真实 App + 伪 TTY，从输入框输入硬任务 + 真实 API + 默认模型；断言 team_mode teammate / 共享任务板 / 产物）。
 - **L3 交互式手动**：`./ga`（人眼 + 会话产物）。
 
 注意：重型全链路脚本 `real_ink_ui_user_input_e2e.ts` **为 luna profile 硬编码**，用默认 `deepseek-flash` 跑会在子代理环节失败（`subagent child did not reach succeeded`）——默认模型下不要用它判定。

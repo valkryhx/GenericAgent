@@ -24,12 +24,20 @@ def is_reserved_name(name) -> bool:
 
 
 def team_name_for(session_id=None, env=None) -> str:
-    """Implicit team name: ``GA_TEAM_NAME`` wins, else ``session-<id[:8]>`` (CC default)."""
+    """Implicit team name: ``GA_TEAM_NAME`` wins, else ``session-<id[:8]>`` (CC default).
+
+    GA session ids are ``session_<uuid4hex>`` (see ``session_transcript.new_session_id``),
+    so a naive ``sid[:8]`` would slice the constant ``session_`` prefix and collapse every
+    session onto the same team name (and thus the same shared task board). Strip that
+    prefix first so the 8-char suffix is actually session-unique.
+    """
     source = os.environ if env is None else env
     explicit = str(source.get(TEAM_NAME_ENV) or "").strip()
     if explicit:
         return explicit
     sid = str(session_id or "").strip()
+    if sid.startswith("session_"):
+        sid = sid[len("session_"):]
     return "session-" + sid[:8] if sid else "default"
 
 

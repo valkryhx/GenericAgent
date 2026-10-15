@@ -100,6 +100,7 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
 cd frontends/ink-ui
 npx tsx scripts/real_ink_team_panel_e2e.ts     # /team 面板：头部 + 任务板 + 页脚 + 宽度
 npx tsx scripts/real_ink_ui_user_input_e2e.ts  # 输入/光标/子代理/workflow 全链路（需真实 API）
+npx tsx scripts/real_ink_team_swarm_e2e.ts     # agent team 全链路：输入框驱动 + 真实 API + 默认模型
 ```
 
 `real_ink_team_panel_e2e.ts` 的检查（`GA_TEAM_E2E_DEBUG=1` 可打印帧）：
@@ -115,6 +116,15 @@ npx tsx scripts/real_ink_ui_user_input_e2e.ts  # 输入/光标/子代理/workflo
 > 且 `temp/subagents/registry.json` 里该子代理**停在 `running`**（未进 `succeeded`）。
 > 结论：**默认模型下的真实 UI 自测用 L1（`real_ink_selftest.py`，走默认模型）+ L2（`real_ink_team_panel_e2e.ts`，仅版面）**；
 > 只有在显式切到 luna 时才跑这个重型全链路脚本。
+
+> ℹ️ **agent team e2e（`real_ink_team_swarm_e2e.ts`）实测结论（默认 `deepseek-flash`）**：
+> - 从**输入框**输入一个硬任务（先 `task_create` 建任务板，再 `spawn_agent(team_mode=true)` 起 3 个 teammate），
+>   脚本断言：≥2 个 teammate 的 `state.json` 里 `capability_options.team_mode=true` 且 `turn_status=completed`、
+>   共享任务板 `temp/teams/<list_id>/tasks.json` 有 ≥2 条任务、`report.md` 已写。
+> - **`/team` 名册只列「活跃」成员**（`include_closed=False`）：lead 读完结果就 `close_agent` 释放槽位，
+>   所以**跑完后名册 memberCount=0 属正常**；持久的是共享任务板（`/team` 仍会显示 tasks）。别把它当 bug。
+> - 实测团队正确产出（70 / 107 / 28）并**自纠**：首轮误用 `agent_type=explore` 被裁成只读档导致阻塞，
+>   lead 关闭旧 teammate、任务重置 pending、改用 generic 档重启后成功——这正是 agent team 的价值。
 
 ### 4.2 判读帧的关键坑（必读）
 
@@ -152,7 +162,7 @@ cd /d/git_codes/GenericAgent
 | 后端日志 | `temp/ink_bridge_backend.log` | bridge/agent 的 stdout/stderr（栈、MCP、重试） |
 | L1 证据包 | `temp/ink-selftest/<ts>/` | events.jsonl + summary.json + 日志尾 |
 | 子代理注册表 | `temp/subagents/` | `registry`、`inbox.jsonl`、`events.jsonl`、`mailbox.jsonl` |
-| 任务板 | `temp/tasks/<list_id>.json` | `TaskCreate/Update` 的共享任务板 |
+| 任务板 | `temp/teams/<list_id>/tasks.json` | `task_create/task_update` 的共享任务板（list_id = `session-<sid[:8]>`） |
 | 会话/workflow | `temp/sessions/`、workflow store | 运行记录、产物引用 |
 | 每 agent 目录 | `temp/<name>/` | `output.txt`、`state.json`、`reply.txt`、`handoff` |
 
@@ -178,6 +188,7 @@ cd /d/git_codes/GenericAgent
 | 面板文本断言失败 | Ink 差分渲染，取错帧 | 取「最后一个 chrome 帧」 |
 | `wait_agent` 一直等 | 子代理终态未写 / 条件不匹配 | `temp/subagents/*/events.jsonl` |
 | 重型 UI e2e 报 `subagent … did not reach succeeded` | 脚本为 luna 硬编码，用默认模型跑 | 改用 L1+L2；或显式切 luna |
+| `/team` 跑完后 memberCount=0 但 taskCount>0 | 正常：名册只列活跃成员，teammate 已被 lead close | 看共享任务板，非 bug |
 | 中文乱码 | 没设 `LANG/LC_ALL` 或走了 PowerShell | 重跑，显式 `shell=bash` |
 | 临时目录删除失败（Windows） | 句柄未释放（日志被占用） | 让 bridge 写日志到真实 `PROJECT_DIR/temp`，不要 patch 到临时目录 |
 | heredoc 内容被截断/吃反斜杠 | 单条太长 / 经过 shell 层 | 分块写；`chr(92)` 构造 |

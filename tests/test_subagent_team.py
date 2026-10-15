@@ -42,6 +42,9 @@ class SubagentTeamTest(unittest.TestCase):
         self.assertEqual(team_name_for(None), "default")
         self.assertEqual(team_name_for("abcdef1234567890"), "session-abcdef12")
         self.assertEqual(team_name_for("abcdef1234567890", env={"GA_TEAM_NAME": "alpha"}), "alpha")
+        # GA session ids are ``session_<uuid4hex>``; the constant ``session_`` prefix
+        # must not be what gets sliced, or every session shares one team name.
+        self.assertEqual(team_name_for("session_a47239e44b0f42eabd6b3cee0f193ef2"), "session-a47239e4")
 
     def test_reserved_names(self):
         for name in ("main", "team-lead", "user", "system", "USER"):

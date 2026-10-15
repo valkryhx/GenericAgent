@@ -511,3 +511,45 @@ cd ../.. && python -m pytest tests/test_ink_bridge.py -q
 ### 不做（诚实标注）
 
 - tmux 多窗格 `swarm-view`（GA 无 tmux）；云端 swarm-view。**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
+
+---
+
+## 真实 e2e 缺陷修复：team 名不随会话唯一（2026-10-15，默认 deepseek-flash）
+
+> 来源：按 SOP `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md` 做「输入框驱动的真实 agent team e2e」
+> （`frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts`）时发现。
+
+### 现象
+
+- 跑完团队任务后打开 `/team`：`memberCount=0` 但 `taskCount>0`；且**跨两次运行任务板累积到 6 条**。
+- 任务板目录名恒为 `temp/teams/session-session_/`（不是每会话一个）。
+
+### 根因
+
+- GA 会话 id 形如 `session_<uuid4hex>`（`session_transcript.new_session_id`）。
+- `subagent_team.team_name_for` 取 `sid[:8]`，而 `session_` 恰好是前 8 个字符 →
+  **所有会话都塌缩成同一个 team 名 `session-session_`** → 共享同一块任务板（跨会话累积、串台）。
+
+### 修复
+
+- `subagent_team.team_name_for`：先剥掉前导 `session_` 再取 `sid[:8]`，使后缀真正按会话唯一。
+- 新增 `tests/test_subagent_team.py` 用例：`team_name_for("session_a47239e44b0f42eabd6b3cee0f193ef2") == "session-a47239e4"`。
+
+### 验证
+
+- `pytest tests/test_subagent_team.py tests/test_agentmain_teammate_idle.py -q` → **9 passed**；
+  `pytest tests/test_ink_bridge.py -k team` → **1 passed**。
+- 真实 e2e 复跑（默认 deepseek-flash）：`real_ink_team_swarm_e2e.ts` → **PASS**；
+  任务板变为 `temp/teams/session-ce626c89/tasks.json`（3 条，全部 completed，会话独立）；
+  6 个 teammate（两轮）`capability_options.team_mode=true` 且 `turn_status=completed`。
+
+### 设计说明（非缺陷）
+
+- `/team` 名册只列**活跃**成员（`include_closed=False`）：lead 读完结果即 `close_agent` 释放槽位，
+  所以**跑完后 memberCount=0 属正常**；持久的是共享任务板。详见 SOP §8。
+
+### 本次真实 e2e 的团队产出（正确性核验）
+
+- T1 根目录 `*.py` 数 = **70**、T2 `tests/test_*.py` 数 = **107**、T3 `AGENTS.md` `## ` 标题行 = **28**（已独立复核）。
+- lead 报告自纠：首轮误用 `agent_type=explore`（被宿主裁成只读档）导致三任务阻塞 →
+  关闭旧 teammate、任务重置 pending、改用 generic 档重启成功。
