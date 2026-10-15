@@ -269,6 +269,26 @@ class SubagentTaskStore:
                 self._save_unlocked(data)
             return reclaimed
 
+    def complete_owned_in_progress(self, owner) -> list[dict]:
+        """Mark every in_progress task owned by ``owner`` as completed (host reconciliation).
+
+        CC relies on the teammate calling TaskUpdate itself; GA adds this deterministic
+        fallback so a weaker model that finishes its turn without TaskUpdate still leaves
+        the shared board (the source of truth) accurate. Returns [{id, subject}, ...].
+        """
+        owner = str(owner)
+        with cross_process_lock(self.lock_path):
+            data = self._load_unlocked()
+            done = []
+            for task in data["tasks"]:
+                if task.get("status") == "in_progress" and task.get("owner") == owner:
+                    task["status"] = "completed"
+                    task["updatedAt"] = now_iso()
+                    done.append({"id": task.get("id"), "subject": task.get("subject")})
+            if done:
+                self._save_unlocked(data)
+            return done
+
     @staticmethod
     def _add_reverse_unlocked(data, task_id, other_id, field):
         other = SubagentTaskStore._find_unlocked(data, other_id)

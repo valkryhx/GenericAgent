@@ -126,6 +126,11 @@ teammate 是**按 spawn message 干活的**，没有走「从板上认领 → �
 - `ga.do_spawn_agent`：`team_mode=True` 时 `_bind_team_task()` **预绑定**一条可认领任务
   （优先 subject/description 命中 teammate 名，否则首个可认领，CC `qe` FIFO），并把它写进前言；
   无任务可绑时前言降级为"先 task_list 认领 / 无则 task_create"。
+- **宿主兜底（GA 稳定性增强，非 CC 原生）**：`agentmain._teammate_idle_hook` 在 teammate
+  `turn_status=completed` 时调用 `SubagentTaskStore.complete_owned_in_progress('/root/<name>')`
+  （只收自己的 `in_progress`），并在 CC `mat` idle 帧里带上 `completedTaskId`/`completedStatus`。
+  原因：CC 靠 teammate 自己 `TaskUpdate`，弱模型漏调时 lead 的 `close_agent`→`reclaim_owner`（CC `N4e`）
+  会把任务回收成 `pending`，使任务板失真。真实 e2e 复验：任务板 3/3 completed。
 - **owner 统一为 agent 路径** `/root/<task_name>`：与 idle 认领（`agentmain._teammate_idle_hook`）、
   `/team` 面板（`_team_roster_payload` 用 `agentId` 归属任务）一致；`TEAMMATE_USAGE_HINT` 措辞已同步。
 

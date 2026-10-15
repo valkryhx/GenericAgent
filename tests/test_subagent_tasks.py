@@ -150,5 +150,36 @@ class NextTaskPromptTest(unittest.TestCase):
         self.assertEqual(next_task_prompt(None), "")
 
 
+class CompleteOwnedInProgressTest(unittest.TestCase):
+    def test_completes_only_this_owner_in_progress_tasks(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = SubagentTaskStore(td, list_id="team-a")
+            mine = store.create_task("mine", "")
+            other = store.create_task("other", "")
+            pending = store.create_task("untouched", "")
+            store.claim_task(mine["id"], "/root/a", start=True)
+            store.claim_task(other["id"], "/root/b", start=True)
+
+            done = store.complete_owned_in_progress("/root/a")
+
+            self.assertEqual([mine["id"]], [item["id"] for item in done])
+            self.assertEqual(store.get_task(mine["id"])["status"], "completed")
+            self.assertEqual(store.get_task(other["id"])["status"], "in_progress")
+            self.assertEqual(store.get_task(pending["id"])["status"], "pending")
+            self.assertEqual(store.complete_owned_in_progress("/root/a"), [])
+
+    def test_completed_tasks_are_not_reclaimed(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = SubagentTaskStore(td, list_id="team-a")
+            task = store.create_task("done work", "")
+            store.claim_task(task["id"], "/root/a", start=True)
+            store.complete_owned_in_progress("/root/a")
+
+            reclaimed = store.reclaim_owner("/root/a")
+
+            self.assertEqual(reclaimed, [])
+            self.assertEqual(store.get_task(task["id"])["status"], "completed")
+
+
 if __name__ == "__main__":
     unittest.main()

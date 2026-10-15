@@ -482,6 +482,24 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   实施记录 `docs/20261015-ga-agent-team-实施进度.md` P11。
 
 
+### 中途调研 2026-10-15：teammate 完成不置 completed + close 回收 → 任务板失真（P11 补）
+
+- **触发**：P11 首轮真实 e2e（自然输入，默认 deepseek-flash）证据——3 个 `team_mode` teammate 全部
+  `turn_status=completed`、报告落盘，但共享任务板 3 条仍 `pending` / `owner=None`（验收不达标）。
+- **证据**：`temp/teams/session-3b37d4ea/tasks.json`（全 pending）；teammate `events.jsonl` 无
+  `task_claimed/task_completed`，只有 `turn_completed → agent_waiting_reply → idle_notification`
+  （`idleReason=available`、无 `completedTaskId`）。
+- **源码事实（GA 侧）**：`SubagentManager.close_agent` → `reclaim_tasks_for` →
+  `SubagentTaskStore.reclaim_owner`（对齐 CC `N4e`）会把「未完成」的 owned 任务回收为 `pending`；
+  teammate 既没自己 `task_update`，回收就把 spawn 时的绑定抹掉了。
+- **结论 / 对 GA 的影响**：CC 靠 teammate 自己 `TaskUpdate`；弱模型不照做 → 任务板不是事实来源。
+  GA 加**宿主兜底**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
+  `store.complete_owned_in_progress('/root/<name>')`（只收自己的 `in_progress`），并在 CC `mat` idle 帧里
+  带上 `completedTaskId`/`completedStatus`。→ **GA 相对 CC 的稳定性增强**（CC 无此分支），已标注。
+- **复验**：真实 e2e 复跑 `natural_p11b` → 任务板 **3/3 completed**，owner 各自 `/root/<name>`，报告 8014 B。
+- **待办**：无（P11 验收达成）。
+- **文档**：`docs/20261015-ga-agent-team-实施进度.md` P11。
+
 ### 中途调研 2026-10-12：CC Workflow 工具入口 + G8/G9
 
 - 触发：用户要求 GA 的 workflow 入口必须按 CC 设计，不能只停留在 `/workflow` 的 JSON plan 路径；除 B1 `budget` 外，CC 能对齐的能力都要对齐。

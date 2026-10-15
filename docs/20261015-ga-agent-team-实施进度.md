@@ -621,8 +621,26 @@ cd frontends/ink-ui && npm test && npx tsc --noEmit
 | **无**团队斜杠命令 | GA 仍保留 `/team`、`/agents` 名册面板（增强），并新增 `/team on|off`（会话开关，非 CC 原生） |
 | `launchSwarm` / plan mode | 不复刻（GA 无 plan mode） |
 
-### 验收（待真实 e2e 复核）
+### 中途发现 + 修复（首轮真实 e2e 暴露）
 
-- 自然输入（无团队语法）跑一次：`team_mode=true` teammate ≥2、任务板有对应任务，
-  且**任务被认领并置 completed**（`taskBoard.completed > 0`）。
-- 用 `frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts` 观测模式（`GA_TEAM_E2E_SOFT=1`）复跑对比。
+首轮真实 e2e（自然输入 `natural_p11`）证据：3 个 `team_mode` teammate 全部 `turn_status=completed`、报告落盘，
+但共享任务板 3 条仍 `pending` / `owner=None`。根因：teammate 没自己 `task_update`，而 lead 读完结果
+`close_agent` → `reclaim_owner`（CC `N4e`）把「未完成」任务回收为 `pending`，抹掉了 spawn 时的绑定。
+
+**修复（GA 稳定性增强，非 CC 原生）**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
+`SubagentTaskStore.complete_owned_in_progress('/root/<name>')`（只收自己的 `in_progress`），
+并在 CC `mat` idle 帧里带上 `completedTaskId`/`completedStatus`。CC 靠 teammate 自己 `TaskUpdate`；
+GA 加宿主兜底，避免弱模型漏调导致任务板失真。
+
+### 验收（已达成）
+
+- 自然输入（无团队语法）真实 e2e `natural_p11b`（默认 deepseek-flash，观测模式）：
+  `team_mode` teammate = 3（全 completed）、任务板 **3/3 completed**（owner 各自 `/root/<name>`）、
+  `report.md` 8014 B、`part1/2/3*.json` 齐备。
+- `/team` 面板（`real_ink_team_panel_e2e.ts`）→ PASS（header + task board + footer，宽度 OK）。
+- 复现：
+
+  ```bash
+  cd frontends/ink-ui
+  GA_TEAM_E2E_SOFT=1 GA_TEAM_E2E_RUNID=natural_p11b GA_TEAM_E2E_MIN_MEMBERS=2 \n    GA_TEAM_E2E_PROMPT='帮我并行做三件互不相关的小统计，然后汇总成一份报告：1) 根目录 .py 文件数；2) tests/ 下 test_*.py 文件数；3) AGENTS.md 里 ## 标题行数。写进 {ART_DIR}/report.md。只读，不要 git commit。' \n    npx tsx scripts/real_ink_team_swarm_e2e.ts
+  ```
