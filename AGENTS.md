@@ -457,6 +457,24 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 3. 最后按该独立文档实施代码，并在实施记录中回链本文件与调研文档。
 
 目的：让中途研究可持久化、可复核，避免只存在于会话上下文。
+### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
+
+- **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；
+  应像 CC 那样自然提问就能用起来，或给个简短斜杠命令。
+- **CC 源码坐标**（详见 `claudecode283_hack/docs/20261015-CC-agent-team激活机制调研.md`）：
+  - 开关：`m0283_0xc5c1f6e.js` `isAgentSwarmsEnabled` = `--agent-teams` 或
+    `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`，且 feature flag `tengu_amber_flint`；
+  - **无团队斜杠命令**（只有无关的 `/team-onboarding`）；
+  - **真正的激活机制 = 计划批准后 nudge**：`m0503_0xccfe7a3.js @78213` 的 `u6t()` 在用户批准计划后的
+    ExitPlanMode tool_result 里追加「可拆就 spawn 具名 teammate 并行」；
+  - 模型入口：`ExitPlanMode(launchSwarm,teammateCount)` / `Agent(name,team_name,mode)`（`m0357` `nOn`）。
+- **结论 / 对 GA 的影响**：GA **已经能靠自然输入自触发** agent team（实证：3 个 `team_mode=true` teammate
+  + 共享任务板 + 正确报告）。但差距有二：① 无「场景化 nudge」（lead hint 常驻但不含"何时组队"）；
+  ② **任务板不是事实来源**（teammate 按 spawn message 干活，任务停在 `pending`/无 owner）。
+- **待办**：① 在 user 消息组装处注入并行场景 nudge（对齐 CC）；② 让任务板成为 source of truth
+  （认领 + 置 completed）。不复刻 plan mode / `launchSwarm`。
+- **文档**：`docs/20261015-agent-team激活机制-调研补充.md`。
+
 
 ### 中途调研 2026-10-12：CC Workflow 工具入口 + G8/G9
 

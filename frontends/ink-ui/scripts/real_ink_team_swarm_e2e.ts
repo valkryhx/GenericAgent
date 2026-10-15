@@ -25,6 +25,8 @@ const RUN_ID = process.env.GA_TEAM_E2E_RUNID || String(Date.now())
 const ART_DIR = path.join(REPO, 'temp', `team_e2e_${RUN_ID}`)
 const MIN_MEMBERS = Number(process.env.GA_TEAM_E2E_MIN_MEMBERS || 2)
 const TIMEOUT_MS = Number(process.env.GA_TEAM_E2E_TIMEOUT_MS || 720_000)
+const CUSTOM_PROMPT = process.env.GA_TEAM_E2E_PROMPT || ''
+const SOFT = process.env.GA_TEAM_E2E_SOFT === '1'
 
 class CaptureWriteStream extends EventEmitter {
   columns = 80
@@ -243,7 +245,7 @@ async function main(): Promise<number> {
     validateFrame(chromeFrames(stdout).at(-1) || '', 'after permission switch')
 
     const runStartMs = Date.now()
-    const prompt = buildTeamPrompt()
+    const prompt = CUSTOM_PROMPT ? CUSTOM_PROMPT.split('{ART_DIR}').join(ART_DIR) : buildTeamPrompt()
     fs.writeFileSync(path.join(ART_DIR, 'prompt.txt'), prompt, { encoding: 'utf8' })
     const beforeDone = events.filter(event => event.type === 'assistant_done').length
     await typeUserInput(stdin, prompt)
@@ -293,17 +295,22 @@ async function main(): Promise<number> {
       artifacts: artifactFiles,
     }
 
-    assert.ok(teamChildren.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} team_mode teammates, saw ${teamChildren.length} (of ${children.length} children)`)
-    assert.ok(completedTeammates.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} teammates with turn_status=completed, saw ${completedTeammates.length}`)
-    assert.ok(board && boardTasks.length >= MIN_MEMBERS, `expected a shared task board with >=${MIN_MEMBERS} tasks, saw ${boardTasks.length}`)
-    assert.ok(completedBoardTasks.length >= 1, 'expected at least one task marked completed on the shared board')
     // NOTE: /team lists *active* members (include_closed=False). The lead closes
     // teammates right after reading their results, so a post-run roster is empty by
     // design; what persists is the shared task board, which /team must still surface.
     summary.teamRosterFrame = teamFrame.slice(0, 600)
-    assert.ok((roster?.tasks?.length ?? 0) >= MIN_MEMBERS, `/team payload did not surface the shared task board (saw ${roster?.tasks?.length} tasks)`)
-    assert.ok(teamFrame.includes('Task board'), `/team panel frame missing "Task board": ${JSON.stringify(teamFrame.slice(0, 200))}`)
-    assert.ok(reportExists && reportSize > 0, `expected lead to write report.md in ${ART_DIR}`)
+    if (SOFT) {
+      // 观测模式：只记录证据，不强制团队成立（用于验证自然输入是否自触发 team）
+      summary.softMode = true
+    } else {
+      assert.ok(teamChildren.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} team_mode teammates, saw ${teamChildren.length} (of ${children.length} children)`)
+      assert.ok(completedTeammates.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} teammates with turn_status=completed, saw ${completedTeammates.length}`)
+      assert.ok(board && boardTasks.length >= MIN_MEMBERS, `expected a shared task board with >=${MIN_MEMBERS} tasks, saw ${boardTasks.length}`)
+      assert.ok(completedBoardTasks.length >= 1, 'expected at least one task marked completed on the shared board')
+      assert.ok((roster?.tasks?.length ?? 0) >= MIN_MEMBERS, `/team payload did not surface the shared task board (saw ${roster?.tasks?.length} tasks)`)
+      assert.ok(teamFrame.includes('Task board'), `/team panel frame missing "Task board": ${JSON.stringify(teamFrame.slice(0, 200))}`)
+      assert.ok(reportExists && reportSize > 0, `expected lead to write report.md in ${ART_DIR}`)
+    }
 
     summary.passed = true
   } catch (error) {
