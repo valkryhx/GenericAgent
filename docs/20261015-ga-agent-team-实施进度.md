@@ -387,3 +387,65 @@ python -m pytest tests/test_subagent_idle.py tests/test_agentmain_teammate_idle.
 - 加防伪前置（对齐 CC `q4e`）：声明这是自动后台事件、不是用户输入、不要当成用户同意。
 
 
+
+---
+
+## P7–P9：CC 剩余机制补齐 ✅ 完成（第三轮）
+
+> 状态：✅ 完成。方案见 `docs/20261014-ga-agent-team-复刻实施方案.md` §13。
+
+### 调研落盘（CC 证据，实施前先记）
+
+来源：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` **§15**（本轮逐行读 `m0184` 全量 130 行、`m1356` 全量 436 行、`m0300` drain 段）。
+
+- **(A) swarm 共享总线 `m0184`**：`ti()` = `y.of(j().host)`，per-host **惰性单例**，聚合
+  `inbound/receipts/outbound/ingress/swarmPermissions/mailbox/taskList`。
+  `mailbox.ledger`（class `i`）：`record` 记 `msg_id -> sha256(from,timestamp,text,summary,color,from_plugin)`；
+  `wrote()` 判**幂等写**；`retire/retain/forget`；上限 **`h=2048`**（FIFO，retained writer 免淘汰）。
+- **(B) 入站闸门 `m1356`**：策略 `f={accept:0,hold:1,refuse:2}`；hold 缓冲 **`F=100`**（满则淘汰最旧为 `expired`）；
+  回执 `accepted|held|refused|expired|dropped|delivered|denied`；mode 变更 `A()` 释放、`OQe` 审批、shutdown `mbt()` 结算（`N=750ms`）；
+  origin 分 `peer|host-injected|coordinator|ungated`，`coordinator` 仅被显式 `refuse` 拦截，`selfSent` 恒 accept。
+- **(C) drain 结果预算 `m0300`**：单条 **`xB=4000`**，一次 drain **`eTo=16000`**；超预算替换为截断提示。
+
+**GA 落地映射**：
+
+| CC 机制 | GA 落点 |
+| --- | --- |
+| `ti()` host 单例 | `subagent_swarm.get_swarm(base_dir)`（进程内按目录缓存） |
+| `mailbox.ledger` `i` | `subagent_swarm.MailboxLedger`（`temp/subagents/mailbox_ledger.json`，cap 2048） |
+| `taskList.updated` / `leaderTeamName` | `subagent_swarm.TaskListState`（`mark_updated` / `leader_team_name`） |
+| `m1356` 闸门 | `subagent_inbound_gate.InboundGate`（策略来自 `GA_CROSS_SESSION_INBOUND`，默认 accept） |
+| `wrote()` 幂等入站 | `InboundGate.apply` 先查 ledger，命中返回 `duplicate` |
+| `m0300 xB/eTo` | `subagent_notifications.apply_result_budget`（4000 / 16000） |
+
+### 交付物
+
+- **`subagent_swarm.py`**（新）：`MailboxLedger`（`record/wrote/retire/retain/forget/entries`，cap 2048 FIFO，`_retained` 免淘汰）、
+  `mailbox_entry_digest`、`TaskListState`（`mark_updated`/`updated_seq`/`leader_team_name`/`reset`）、
+  `SubagentSwarm`（`inbound/receipts/mailbox_ledger/task_list/permissions` + `reset`）、`get_swarm`/`reset_swarm_cache`。
+- **`subagent_inbound_gate.py`**（新）：`POLICY_RANK`/`HOLD_BUFFER=100`/`SETTLE_GRACE_MS=750`；
+  `InboundGate.decide/origin_kind/apply/release/approve/deny/settle_shutdown/snapshot/reset`；回执落 `inbound_receipts.jsonl`。
+- **`subagent_manager.py`**：`__init__` 建 `self.swarm = get_swarm(...)`；`_queue_lead_message` 过闸门
+  （默认 `accept` 行为完全不变；`held`/`refused`/`duplicate` 时返回 `decision` 且不写 parent inbox）。
+- **`subagent_notifications.py`**：新增 `apply_result_budget`，`build_subagent_notifications_prompt` 对整批通知应用 4000/16000 预算。
+
+### 测试
+
+- 新增 `tests/test_subagent_swarm.py`（15）：digest 稳定性/字段 null 语义；ledger record/wrote/未知 writer/无 msg_id/cap FIFO/retire/forget/retain 免淘汰；TaskListState 递增与 reset；swarm 槽位接线 / reset / get_swarm 单例。
+- 新增 `tests/test_subagent_inbound_gate.py`（20）：策略归并与 env 解析；origin 分类；accept/self_sent/coordinator；hold+回执/缓冲满淘汰/release/approve/deny/settle/shutdown 后拒绝；refuse；ledger 幂等 duplicate；回执回写 sender ledger。
+- `tests/test_subagent_notifications.py` 新增 `ResultBudgetTest`（3）：单条 4000、整批 16000、未超预算不变。
+- `tests/test_subagent_manager.py` 新增 `LeadMessageInboundGateTest`（2）：默认 accept + 回执；`GA_CROSS_SESSION_INBOUND=hold` 时挂起且不写 inbox。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py tests/test_ga_subagent_permissions.py tests/test_agentmain_role_prompts.py tests/test_agentmain_subagent_lifecycle.py tests/test_agentmain_teammate_idle.py -q`
+  → **431 passed, 2 skipped, 70 subtests**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_swarm.py tests/test_subagent_inbound_gate.py tests/test_subagent_notifications.py -q
+```
+
+### 不做（诚实标注）
+
+- **hooks 运行时**（`TeammateIdle`/`TaskCreated`/`TaskCompleted`，`m0052`）：GA 无 hooks 框架，本轮不做。
+- **闸门传输层**（UDS / 跨机器 peer / kill-switch）：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+- 云端 peer / SendFile 跨机：不复刻。

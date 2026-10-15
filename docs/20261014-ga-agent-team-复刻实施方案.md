@@ -327,3 +327,42 @@ E2E：lead 建 4 个任务、spawn 2 个 teammate → 各自认领 → 一个被
 
 > 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 > CC 的 `Wo()`（远端 task list）/ 跨机器 peer 分支在 GA 中一律本地化，但**本地协议语义照抄**。
+
+---
+
+## 13. 第三轮：CC 剩余机制补齐（P7–P9）
+
+> CC 证据：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` **§15**（逐行源码）。
+> 动机：P0–P6 已复刻「任务板 / 身份 / 自主协作 / 提示词 / 通知 / 可靠性 / 进度自驱」。
+> 第三轮把 CC 剩余三件**通信/协作**机制补齐，目标是「通信更顺、更省、更稳」。
+
+### P7：swarm 共享总线（`m0184`）—— 集中协作状态单例
+
+- **CC 原语**：`ti()` = per-host 惰性单例 `g`，聚合
+  `inbound / receipts / outbound / ingress / swarmPermissions / mailbox / taskList`；
+  `mailbox.ledger` 用 `sha256(from,timestamp,text,summary,color,from_plugin)` 做**幂等写去重**，上限 **2048**（FIFO 淘汰）。
+- **GA 落地**：新增 `subagent_swarm.py`：`SubagentSwarm`（会话级单例，`get_swarm(temp_dir)` 缓存）。
+  - 槽位：`inbound`（P8 闸门）、`receipts`（复用 `SubagentSendLedger`）、`mailbox_ledger`（新 `MailboxLedger`，2048 + `record/wrote/retire/retain/forget`）、`task_list`（`updated` 事件 + `leader_team_name`）、`permissions`（pending map）。
+  - `mailbox_ledger` 接进 `SubagentManager._queue_message`：同一 (from,timestamp,text,...) 摘要重复 → `wrote()` 为真 → 跳过重复入队。
+- **验收**：同内容重复入队被去重；账本超 2048 淘汰最旧；`task_list.mark_updated()` 触发事件。
+
+### P8：入站闸门（`m1356`）—— accept / hold / refuse
+
+- **CC 原语**：策略 `{accept:0,hold:1,refuse:2}`；hold 缓冲上限 **100**；回执词表
+  `accepted|held|refused|expired|dropped|delivered|denied`；mode 变更释放、手动审批、shutdown 结算（750ms）。
+- **GA 落地**：新增 `subagent_inbound_gate.py`：`InboundGate`。
+  - 策略来自配置 `cross_session_inbound`（`accept|hold|refuse`，默认 `accept`）。
+  - `apply(msg) -> "accept"|"held"|"refused"`；`held[]` 上限 100，满则淘汰最旧为 `expired`。
+  - `release(reason)`（mode 变更）/ `approve(msg_id)` / `deny(msg_id)` / `settle_shutdown()`。
+  - 回执经 `SubagentSendLedger` 记 `held/delivered/refused/expired/dropped/denied`。
+  - 接进 `SubagentManager._queue_lead_message`（teammate→lead 的入站）。
+- **验收**：默认 accept 不变行为；hold 时消息进 held 且发 held 回执；release/approve/deny/settle 回执正确；缓冲满淘汰最旧。
+
+### P9：drain 结果预算接线（`m0300`）
+
+- **CC 原语**：单条 `xB=4000`，一次 drain `eTo=16000`；超预算替换为截断提示。
+- **GA 落地**：`subagent_notifications.build_subagent_notifications_prompt` 里对**整批**通知应用 `truncate_drain`（16000），单条仍用 `truncate_result`（4000）。
+- **验收**：批量通知总长超 16000 时被截断并附提示。
+
+> **不做**：hooks 运行时（`TeammateIdle/TaskCreated/TaskCompleted`，GA 无 hooks 框架）；
+> 闸门传输层（UDS / 跨机器 peer / kill-switch）；**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。

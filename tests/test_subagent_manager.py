@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -2476,3 +2477,49 @@ class TaskReclaimAndIdleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeadMessageInboundGateTest(unittest.TestCase):
+    """The lead's inbound path runs through the CC m1356 gate (default policy: accept)."""
+
+    def _teammate(self, td, name="agent_1"):
+        return SubagentManager(root_dir=td, self_agent_path=f"/root/{name}")
+
+    def _inbox(self, td):
+        path = Path(td) / "temp" / "subagents" / "inbox.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_default_policy_accepts_and_receipts(self):
+        from subagent_swarm import reset_swarm_cache
+
+        with tempfile.TemporaryDirectory() as td:
+            reset_swarm_cache()
+            manager = self._teammate(td)
+
+            row = manager.send_message("team-lead", "hi", author="/root/agent_1")
+
+            self.assertTrue(row.get("lead_message"))
+            self.assertNotIn("decision", row)
+            self.assertEqual(len(self._inbox(td)), 1)
+            self.assertEqual(manager.swarm.inbound.receipts_log()[-1]["state"], "accepted")
+
+    def test_hold_policy_parks_the_message(self):
+        from subagent_swarm import reset_swarm_cache
+
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["GA_CROSS_SESSION_INBOUND"] = "hold"
+            reset_swarm_cache()
+            try:
+                manager = self._teammate(td)
+
+                row = manager.send_message("team-lead", "hi", author="/root/agent_1")
+
+                self.assertFalse(row.get("delivered", True))
+                self.assertEqual(row.get("decision"), "held")
+                self.assertEqual(self._inbox(td), [])
+                self.assertEqual(manager.swarm.inbound.held_count(), 1)
+            finally:
+                os.environ.pop("GA_CROSS_SESSION_INBOUND", None)
+                reset_swarm_cache()

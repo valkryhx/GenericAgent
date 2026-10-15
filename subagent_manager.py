@@ -17,6 +17,7 @@ from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
 from subagent_receipts import ProvenanceLedger, SubagentSendLedger
 from subagent_idle import build_idle_notification, sent_lead_dm_since_last_turn
+from subagent_swarm import get_swarm
 from subagent_wait import (
     evaluate_wait_condition,
     is_workflow_run_id,
@@ -266,6 +267,9 @@ class SubagentManager:
         # Delivery receipts + provenance for the durable file bus (CC m0188 / m0300).
         self.receipt_ledger = SubagentSendLedger(self.temp_dir / "subagents")
         self.provenance_ledger = ProvenanceLedger(self.temp_dir / "subagents")
+        # Swarm host singleton (CC m0184): one object owning the shared inbound
+        # gate + idempotent mailbox ledger + task-list update signal.
+        self.swarm = get_swarm(self.temp_dir / "subagents", receipts=self.receipt_ledger)
         # Team (task-board list_id) this manager speaks for; ga.py sets it from the session.
         self.team_name = "default"
         self.process_exists = process_exists or _default_process_exists
@@ -1993,6 +1997,29 @@ class SubagentManager:
         task_dir = self.temp_dir / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
         message_id = "lead_%s_%s" % (task_name, os.urandom(4).hex())
+        created_at = now_iso()
+        gate_msg = {
+            "message_id": message_id,
+            "author": author,
+            "recipient": "/root",
+            "content": str(message),
+            "timestamp": created_at,
+            "origin": {"kind": "peer"},
+        }
+        # Inbound gate (CC m1356): accept / hold / refuse. A message whose exact
+        # entry is already in the mailbox ledger is dropped as a duplicate
+        # (CC m0184 wrote()). With the default accept policy this is a no-op.
+        decision = self.swarm.inbound.apply(gate_msg)
+        if decision != "accept":
+            return {
+                "recipient": "/root",
+                "task_name": task_name,
+                "author": author,
+                "message_id": message_id,
+                "lead_message": True,
+                "decision": decision,
+                "delivered": False,
+            }
         digest = self.provenance_ledger.record(
             author=author, recipient="/root", content=message, message_id=message_id
         )

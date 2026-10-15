@@ -65,11 +65,21 @@ def build_subagent_notifications_prompt(root_dir):
     notifications = bus.consume_notifications()
     if not notifications:
         return ""
+    # One drain of background results; cap a single result at 4000 and the whole
+    # drain at 16000, exactly like CC m0300 (xB / eTo).
+    blocks = apply_result_budget(["\n".join(_render_task_notification(event)) for event in notifications])
     lines = ["", "[GA_SUBAGENT_NOTIFICATIONS]", ANTI_SPOOF_PREAMBLE.rstrip("\n"), ""]
-    for event in notifications:
-        lines.extend(_render_task_notification(event))
+    lines.extend(blocks)
     lines.extend(["[/GA_SUBAGENT_NOTIFICATIONS]", ""])
     return "\n".join(lines)
+
+
+def apply_result_budget(blocks):
+    """Cap one result at 4000 and a whole drain at 16000 (CC m0300 xB / eTo)."""
+    from subagent_idle import DRAIN_BUDGET, RESULT_BUDGET, truncate_drain, truncate_result
+
+    capped = [truncate_result(block, RESULT_BUDGET) for block in blocks]
+    return truncate_drain(capped, DRAIN_BUDGET)
 
 
 def _render_task_notification(event):

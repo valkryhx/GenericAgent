@@ -83,3 +83,31 @@ class SubagentNotificationsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultBudgetTest(unittest.TestCase):
+    def test_single_block_is_capped_at_the_result_budget(self):
+        from subagent_idle import RESULT_BUDGET
+        from subagent_notifications import apply_result_budget
+
+        out = apply_result_budget(["x" * 5000])
+        self.assertTrue(out[0].startswith("x" * RESULT_BUDGET))
+        self.assertIn("truncated", out[0])
+
+    def test_whole_drain_is_capped_at_the_drain_budget(self):
+        from subagent_idle import DRAIN_BUDGET, DRAIN_TRUNCATION_HINT
+        from subagent_notifications import apply_result_budget
+
+        out = apply_result_budget(["y" * 5000 for _ in range(5)])
+        joined = "".join(out)
+        self.assertLessEqual(len(joined), DRAIN_BUDGET + 400)
+        self.assertIn(DRAIN_TRUNCATION_HINT, joined)
+
+    def test_under_budget_blocks_are_unchanged(self):
+        from subagent_notifications import apply_result_budget
+
+        self.assertEqual(apply_result_budget(["a", "b"]), ["a", "b"])
+
+
+if __name__ == "__main__":
+    unittest.main()
