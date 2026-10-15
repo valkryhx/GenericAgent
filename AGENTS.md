@@ -501,6 +501,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **不做**：云端会话 UI（【复刻时暂时不需要参考 claudecode 云端会话的实现】）、完整帧动画 spinner。
 - **详细方案**：`docs/20261016-CC-UI-对标调研.md`（本仓库）。
 - **状态（2026-10-16）：已实施。** 新增 `src/glyphs.ts`（字形表）+ `glyphs.test.ts`；工具调用行 `> ` → `⏺ `；工具结果行 `[Action]/[Status]/[Stdout]` → `  ⎿  <body>`（dim）+ emoji 归一；超长 `[Stdout]` 折叠 + `(ctrl+o to expand)`；workflow 详情改 CC 风格树（`├ └ │ ─`）+ `string-width` 列宽（去固定 pad）。ink-ui `npm test` 425 passed、`tsc` 通过。
+- **补充（2026-10-16，commit 759d991）：源码去 emoji（不是只在 UI 层归一）。** 用户要求 emoji 不规范、要在**源码里**改，让 agent 直接产出 CC 字形：`agent_loop.py`/`continue_cmd.py` 工具头 `🔨/🛠️ Tool: … 📥 args:` → `⏺ Tool: … args:`；`ga.py`/`agentmain.py`/`continue_cmd.py`/`chatapp_common.py`/`btw_cmd.py` 状态哨兵 `✅/❌` → `✓/✗`。**关键坑**：`✅` 是**协议哨兵**（多前端 `startswith("✅")` 判恢复成功），故哨兵判断统一改**元组** `startswith(("✅","✓"))` 向后兼容；`App.tsx` 前缀正则 `^[✅✓]\s*`。pytest 160 passed、ink-ui 427 passed、无 emoji 残留。
 
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
