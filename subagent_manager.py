@@ -762,8 +762,9 @@ class SubagentManager:
         if role_tools is not None:
             role_tools = [str(item).strip() for item in role_tools if str(item).strip()]
         allow_delegation = bool(capability_options.get("allow_delegation", False))
-        capability_options = {"role_tools": role_tools, "allow_delegation": allow_delegation}
-        capability_profile = "delegating" if allow_delegation else "isolated"
+        team_mode = bool(capability_options.get("team_mode", False))
+        capability_options = {"role_tools": role_tools, "allow_delegation": allow_delegation, "team_mode": team_mode}
+        capability_profile = "delegating" if allow_delegation else ("team" if team_mode else "isolated")
         fork_mode, history_to_write = self._select_fork_history(fork_turns, fork_history)
         context_mode = "isolated" if fork_mode == "none" else "explicit_fork"
         requested_ipc_mode = str(ipc_mode or "file").strip().lower() or "file"
@@ -1166,11 +1167,15 @@ class SubagentManager:
         return self._list_agent_states(self.probe_agent, path_prefix=path_prefix, include_closed=include_closed)
 
     def send_message(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
+        if self._is_lead_target(target):
+            return self._queue_lead_message(message, author=author, trigger_turn=False)
         return self._queue_message(
             target, message, author=author, trigger_turn=False, other_recipients=other_recipients, submission_id=submission_id
         )
 
     def followup_task(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
+        if self._is_lead_target(target):
+            return self._queue_lead_message(message, author=author, trigger_turn=True)
         return self._queue_message(
             target, message, author=author, trigger_turn=True, other_recipients=other_recipients, submission_id=submission_id
         )
@@ -1939,6 +1944,36 @@ class SubagentManager:
         self.registry.mark_closed(previous.agent_path, previous_status=previous.turn_status, closed_status=close_process_status)
         self._close_realtime_channel(previous.agent_path, task_dir=task_dir)
         return CloseResult(target, previous, closed, previous.final_output_path)
+
+    LEAD_TARGETS = frozenset({"team-lead", "lead", "main"})
+
+    @classmethod
+    def _is_lead_target(cls, target):
+        text = str(target or "").strip().replace(chr(92), "/").rstrip("/").split("/")[-1].lower()
+        return text in cls.LEAD_TARGETS
+
+    def _queue_lead_message(self, message, *, author, trigger_turn):
+        """Route a teammate message to the lead (CC addresses: team-lead / lead / main).
+
+        The lead has no mailbox file of its own; its inbox is the shared parent
+        inbox that wait_agent and the notification stream already read.
+        """
+        task_name = str(self.self_agent_path).rstrip("/").split("/")[-1] or "root"
+        if task_name == "root":
+            raise ValueError("the root agent is the lead; it cannot message team-lead")
+        task_dir = self.temp_dir / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        event = {
+            "type": "lead_message",
+            "task_name": task_name,
+            "author": author,
+            "recipient": "/root",
+            "message": str(message),
+            "trigger_turn": bool(trigger_turn),
+        }
+        append_parent_inbox_event(task_dir, event)
+        append_jsonl_event(task_dir / "events.jsonl", event)
+        return {"recipient": "/root", "task_name": task_name, "author": author, "message_id": None, "lead_message": True}
 
     def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)

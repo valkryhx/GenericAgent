@@ -767,7 +767,7 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             )
 
             state = json.loads((Path(handle.task_dir) / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["capability_options"], {"role_tools": ["file_read"], "allow_delegation": False})
+            self.assertEqual(state["capability_options"], {"role_tools": ["file_read"], "allow_delegation": False, "team_mode": False})
             self.assertEqual(state["capability_profile"], "isolated")
             self.assertFalse(state["allow_delegation"])
             self.assertEqual(state["context_mode"], "isolated")
@@ -1935,6 +1935,46 @@ class MulticastMessageTest(unittest.TestCase):
                 self.assertTrue(row["trigger_turn"], f"{name} got the multicast without being woken")
 
 
+class TeamModeSpawnTest(unittest.TestCase):
+    """spawn_agent(team_mode=True) must persist a team capability profile so the child
+    process builds a teammate toolset (collaboration, no orchestration)."""
+
+    def _manager(self, td):
+        class FakeProcess:
+            next_pid = 8000
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+        )
+
+    def test_team_mode_is_persisted_with_the_team_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+
+            manager.spawn_agent("agent_1", "coordinate", capability_options={"team_mode": True})
+
+            state = read_json_or_none(Path(td) / "temp" / "agent_1" / "state.json")
+            self.assertTrue(state["capability_options"]["team_mode"])
+            self.assertEqual(state["capability_profile"], "team")
+
+    def test_plain_spawn_stays_isolated(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+
+            manager.spawn_agent("agent_2", "solo")
+
+            state = read_json_or_none(Path(td) / "temp" / "agent_2" / "state.json")
+            self.assertFalse(state["capability_options"].get("team_mode", False))
+            self.assertEqual(state["capability_profile"], "isolated")
+
+
 class SpawnNameConflictTest(unittest.TestCase):
     """Spawning onto a live agent's name must be refused, not silently renamed.
 
@@ -2261,6 +2301,67 @@ class ResidencyEvictionTest(unittest.TestCase):
 
             events = [json.loads(line) for line in manager.event_bus.events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertTrue(any(row.get("type") == "agent_evicted" for row in events))
+
+
+class LeadMessageRoutingTest(unittest.TestCase):
+    """A teammate addresses the lead as team-lead / lead / main. The lead has no mailbox of
+    its own, so the message is appended to the shared parent inbox that wait_agent already
+    reads, and never spawns a new turn on the sender side."""
+
+    def test_lead_aliases_are_recognized(self):
+        for alias in ("team-lead", "lead", "main", "/root/team-lead", "TEAM-LEAD", " team-lead "):
+            self.assertTrue(SubagentManager._is_lead_target(alias), alias)
+        for peer in ("agent_1", "/root/agent_1", "team-leads", "leader", ""):
+            self.assertFalse(SubagentManager._is_lead_target(peer), peer)
+
+    def _teammate(self, td, name="agent_1"):
+        return SubagentManager(root_dir=td, self_agent_path=f"/root/{name}")
+
+    def _inbox(self, td):
+        path = Path(td) / "temp" / "subagents" / "inbox.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_teammate_message_to_lead_lands_in_the_shared_parent_inbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._teammate(td)
+
+            row = manager.send_message("team-lead", "found the root cause", author="/root/agent_1")
+
+            self.assertTrue(row.get("lead_message"))
+            self.assertEqual(row["recipient"], "/root")
+            inbox = self._inbox(td)
+            self.assertEqual(len(inbox), 1)
+            self.assertEqual(inbox[0]["type"], "lead_message")
+            self.assertEqual(inbox[0]["author"], "/root/agent_1")
+            self.assertEqual(inbox[0]["message"], "found the root cause")
+            self.assertFalse(inbox[0]["trigger_turn"])
+
+    def test_followup_to_lead_marks_trigger_turn(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._teammate(td)
+
+            row = manager.followup_task("lead", "please review", author="/root/agent_1")
+
+            self.assertTrue(row.get("lead_message"))
+            self.assertTrue(self._inbox(td)[0]["trigger_turn"])
+
+    def test_root_cannot_message_the_lead_it_already_is(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+
+            with self.assertRaises(ValueError):
+                manager.send_message("team-lead", "hi", author="/root")
+
+    def test_a_normal_peer_still_uses_the_mailbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._teammate(td)
+
+            row = manager.send_message("agent_2", "sync", author="/root/agent_1")
+
+            self.assertNotIn("lead_message", row)
+            self.assertEqual(row["recipient"], "/root/agent_2")
 
 
 if __name__ == "__main__":

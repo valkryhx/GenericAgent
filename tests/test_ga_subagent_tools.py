@@ -41,6 +41,31 @@ class GaSubagentToolsTest(unittest.TestCase):
         handler.subagent_manager = SubagentManager(root_dir=root, **manager_kwargs)
         return handler
 
+    def test_self_author_is_root_for_the_lead(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td)
+
+            self.assertEqual(handler._self_author(), "/root")
+
+    def test_self_author_is_the_teammate_path_for_a_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td, self_agent_path="/root/agent_1")
+
+            self.assertEqual(handler._self_author(), "/root/agent_1")
+
+    def test_send_message_from_a_teammate_is_attributed_to_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td, self_agent_path="/root/agent_1")
+
+            exhaust(handler.do_send_message(
+                {"target": "agent_2", "message": "sync"}, response=None
+            ))
+
+            from subagent_mailbox import SubagentMailbox
+            rows = SubagentMailbox(Path(td) / "temp" / "agent_2" / "mailbox.jsonl")._read_rows()
+            self.assertEqual(rows[-1]["author"], "/root/agent_1")
+
+
     def test_spawn_agent_tool_returns_structured_startup_timeout(self):
         with tempfile.TemporaryDirectory() as td:
             handler = GenericAgentHandler(FakeParent(), last_history=[], cwd=str(Path(td) / "temp"))
@@ -161,6 +186,30 @@ class GaSubagentToolsTest(unittest.TestCase):
             state = json.loads((Path(td) / "temp" / "readonly_worker" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["permission_profile"], "read_only")
             self.assertEqual(state["permission_options"], {"denied_tools": ["code_run"]})
+
+    def test_spawn_agent_tool_passes_team_mode_to_capability_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 224})(),
+                python_executable="python-test",
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "teammate_worker",
+                        "message": "coordinate with peers",
+                        "team_mode": True,
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            state = json.loads((Path(td) / "temp" / "teammate_worker" / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(state["capability_options"]["team_mode"])
+            self.assertEqual(state["capability_profile"], "team")
 
     def test_spawn_agent_tool_drops_worktree_for_search_only_allowlist(self):
         with tempfile.TemporaryDirectory() as td:

@@ -86,6 +86,7 @@
       "ipc_mode": {"type": "string", "description": "IPC 模式。'file' 是 durable 默认值。'socket'/'pipe'/'event_server' 会请求常驻实时通道推送已持久化事件；仅当 GA_SUBAGENT_REALTIME_IPC=1 且通道成功打开时才生效，否则仍以 durable file event bus 为传输，并在 ipc_fallback_reason 说明原因", "default": "file"},
       "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
       "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试会返回首次结果，不会再启动第二个进程、第二个活跃 agent 名额和第二份真实 LLM 花费。只有确实是一次全新的 spawn 时才可以省略"},
+            "team_mode": {"type": "boolean", "description": "子智能体的团队协作模式（需显式开启）。为 true 时子智能体成为 teammate：保留同级消息（send_message）与共享任务板（task_create/task_get/task_update/task_list/team_status），但仍不能 spawn 或 wait 其他 agent。当多个子智能体需围绕同一目标协作时使用；一次性隔离 worker 不需要开启。", "default": false},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
   }},
   {"type": "function", "function": {

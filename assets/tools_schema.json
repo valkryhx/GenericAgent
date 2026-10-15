@@ -86,6 +86,7 @@
       "ipc_mode": {"type": "string", "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why", "default": "file"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
       "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry a spawn or are not sure whether the previous call took effect: retrying with the same submission_id returns the first result instead of starting a second process, a second active-agent slot and a second round of LLM spend. Omit it only for a genuinely new spawn"},
+            "team_mode": {"type": "boolean", "description": "Opt-in team collaboration mode for the child. When true the child becomes a teammate: it keeps peer messaging (send_message) and the shared task board (task_create/task_get/task_update/task_list/team_status) but still cannot spawn or await agents. Use it when several subagents must coordinate on one goal; leave it off for one-shot isolated workers.", "default": false},
       "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
   }},
   {"type": "function", "function": {

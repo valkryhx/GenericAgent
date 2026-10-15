@@ -1017,6 +1017,7 @@ class GenericAgentHandler(BaseHandler):
         if allow_delegation is None and role is not None:
             allow_delegation = role.allow_delegation
         allow_delegation = bool(allow_delegation)
+        team_mode = bool(args.get("team_mode") or args.get("teamMode"))
         capability_options = {
             "role_tools": (
                 None
@@ -1024,6 +1025,7 @@ class GenericAgentHandler(BaseHandler):
                 else [str(item) for item in requested_role_tools if str(item).strip()]
             ),
             "allow_delegation": allow_delegation,
+            "team_mode": team_mode,
         }
         requested_isolation = args.get("isolation")
         isolation, isolation_fallback_reason = _resolve_subagent_isolation(
@@ -1144,6 +1146,14 @@ class GenericAgentHandler(BaseHandler):
 
         return team_name_for(getattr(self.parent, "session_id", None))
 
+    def _self_author(self):
+        """Agent path of the caller, used as the author of queued messages.
+        The lead is "/root"; a teammate is "/root/<task_name>".
+        """
+        manager = self._get_subagent_manager()
+        name = str(manager.self_agent_path).rstrip("/").split("/")[-1]
+        return "/root/" + name if name and name != "root" else "/root"
+
     def _get_task_store(self, list_id=None):
         manager = self._get_subagent_manager()
         from subagent_tasks import SubagentTaskStore
@@ -1243,7 +1253,7 @@ class GenericAgentHandler(BaseHandler):
         row = manager.send_message(
             target,
             message,
-            author="/root",
+            author=self._self_author(),
             other_recipients=self._other_recipients_arg(args),
             submission_id=args.get("submission_id") or args.get("submissionId"),
         )
@@ -1260,7 +1270,7 @@ class GenericAgentHandler(BaseHandler):
         row = manager.followup_task(
             target,
             message,
-            author="/root",
+            author=self._self_author(),
             other_recipients=self._other_recipients_arg(args),
             submission_id=args.get("submission_id") or args.get("submissionId"),
         )
@@ -1460,7 +1470,7 @@ class GenericAgentHandler(BaseHandler):
             result = manager.resume_agent(
                 target,
                 message,
-                author="/root",
+                author=self._self_author(),
                 submission_id=args.get("submission_id") or args.get("submissionId"),
             )
             data = {

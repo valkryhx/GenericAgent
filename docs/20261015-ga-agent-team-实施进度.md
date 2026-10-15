@@ -93,8 +93,50 @@ python -m pytest tests/test_subagent_team.py -q
 
 ---
 
-## 下一步：P2（teammate 自主协作：放开 send_message + 任务工具）
+## P2：teammate 自主协作 ✅ 完成
 
-- 复用 `SubagentRegistry` 给每个会话一个隐式 team（默认 `session-<id[:8]>`）。
-- 派生 team 视图 `{teamName, leadAgentId, members[]}`；lead 名字固定 `team-lead`。
-- 保留名 `main/team-lead/user/system` 拒绝。
+**目标**：让被 spawn 出来的子智能体在 `team_mode` 下成为 **teammate**——可读/认领共享任务板、可给同级或 lead 发消息，但**永远不能** spawn / wait（编排权只属于 lead），对齐 CC teammate 工具面（`m0511` 的 `RESERVED_AGENT_NAMES` + `m1574`/`m1575` 的 teammate 工具集）。
+
+### 交付物
+
+- **`subagent_capabilities.py`**
+  - 新增 `TEAMMATE_TOOLS = {send_message, task_create, task_get, task_update, task_list, team_status}`。
+  - `SubagentCapabilityProfile` 增 `team_mode: bool`（含 `to_dict`）。
+  - `build_subagent_capability_profile(..., team_mode=False)`：`is_subagent and not allow_delegation` 分支里 `if team_mode: allowed.update(TEAMMATE_TOOLS)`——**只放开协作面，不放开编排面**。
+  - `team_mode` 只对「非委派子智能体」生效；root 与 delegating 子代理恒为 `False`。
+- **`subagent_manager.py`**
+  - `spawn_agent`：读取 `capability_options["team_mode"]`，落 `capability_profile = "team" if team_mode else "isolated"`（delegating 优先），并写进 `state.json` / 子进程 `--capability_options`。
+  - `LEAD_TARGETS = {team-lead, lead, main}` + `_is_lead_target()`（归一化 `/root/team-lead`、大小写、斜杠）。
+  - `_queue_lead_message()`：lead **没有自己的 mailbox**，teammate 发给 lead 的消息写入 **共享父收件箱** `temp/subagents/inbox.jsonl`（`append_parent_inbox_event`）+ 自身 `events.jsonl`， 返回 `{recipient: "/root", lead_message: True, ...}`；root 自己调用时 `raise ValueError`。
+  - `send_message` / `followup_task` 开头 `if _is_lead_target(target): return _queue_lead_message(...)` （`followup_task` 记 `trigger_turn=True`）。
+- **`agentmain.py`**：`capability_team_mode` 全链路接线——root 默认 `False`（行 ~591）、子进程从 `capability_options` 读取（`run_task_worker_loop`，行 ~1503）、构建 profile 时传入（行 ~1088）。
+- **`ga.py`**
+  - `do_spawn_agent`：新增 `team_mode = bool(args.get("team_mode") or args.get("teamMode"))`，写入 `capability_options`。
+  - 新增 `_self_author()`：调用者的 agent path（lead 为 `/root`，teammate 为 `/root/<task_name>`）。
+  - `do_send_message` / `do_followup_task` / `do_resume_agent` 的 `author="/root"` → `author=self._self_author()`（此前所有消息都被硬编码署名 root，teammate 的消息会被误记为 lead 发出）。
+- **schema**：`assets/tools_schema.json` / `_cn.json` 给 `spawn_agent` 增 `team_mode` 布尔参数（工具数仍为 **30**，只加参数）。
+
+### 测试
+
+- `tests/test_subagent_capabilities.py`（+3）：team_mode 放开协作/关闭编排；team_mode 关=纯隔离；root / delegating 上 team_mode 被忽略。
+- `tests/test_subagent_manager.py`
+  - `LeadMessageRoutingTest`（5）：lead 别名识别 / 消息落父收件箱 / followup 记 trigger_turn / root 发 lead 抛错 / 普通同级仍走 mailbox。
+  - `TeamModeSpawnTest`（2）：`team_mode=True` 落 `capability_profile=team`；默认 `isolated`。
+  - 修正 1 处旧断言（`capability_options` 现含 `team_mode`）。
+- `tests/test_ga_subagent_tools.py`（+4）：`team_mode` 透传到 `capability_options`；`_self_author()` 对 lead / teammate 的取值；teammate 发消息署名正确。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py tests/test_ga_subagent_permissions.py -q` → **311 passed, 2 skipped**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_capabilities.py tests/test_subagent_manager.py -q
+python -m pytest tests/test_ga_subagent_tools.py -q -k "team_mode or self_author"
+```
+
+---
+
+## 下一步：P3（协调者提示词 + teammate 简报）
+
+- lead 提示词：任务板优先、如何分配/认领/回收；teammate 简报：只做被指派范围、用 task_update 回报、有发现立即 send_message 给 lead/同级。
+- 对齐 CC `m0280` / `m0357` / `m1574` 的 team 提示词段落。
+

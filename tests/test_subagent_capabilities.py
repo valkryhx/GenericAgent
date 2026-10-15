@@ -51,6 +51,65 @@ class SubagentCapabilityProfileTest(unittest.TestCase):
         self.assertTrue(profile.allow_delegation)
         self.assertTrue(profile.allows("spawn_agent"))
 
+    def test_team_mode_grants_collaboration_without_orchestration(self):
+        available = [
+            "file_read",
+            "code_run",
+            "send_message",
+            "task_create",
+            "task_get",
+            "task_update",
+            "task_list",
+            "team_status",
+            "spawn_agent",
+            "wait_agent",
+            "followup_task",
+        ]
+        profile = build_subagent_capability_profile(
+            is_subagent=True,
+            team_mode=True,
+            available_tools=available,
+        )
+
+        self.assertTrue(profile.team_mode)
+        self.assertFalse(profile.allow_delegation)
+        # collaboration surface is present
+        self.assertTrue(profile.allows("send_message"))
+        self.assertTrue(profile.allows("task_create"))
+        self.assertTrue(profile.allows("task_get"))
+        self.assertTrue(profile.allows("task_update"))
+        self.assertTrue(profile.allows("task_list"))
+        self.assertTrue(profile.allows("team_status"))
+        # orchestration surface stays closed
+        self.assertFalse(profile.allows("spawn_agent"))
+        self.assertFalse(profile.allows("wait_agent"))
+        self.assertFalse(profile.allows("followup_task"))
+        self.assertTrue(profile.to_dict()["team_mode"])
+
+    def test_team_mode_off_keeps_a_plain_isolated_child(self):
+        available = ["file_read", "code_run", "send_message", "task_create", "team_status"]
+        profile = build_subagent_capability_profile(
+            is_subagent=True,
+            team_mode=False,
+            available_tools=available,
+        )
+
+        self.assertFalse(profile.team_mode)
+        self.assertFalse(profile.allows("send_message"))
+        self.assertFalse(profile.allows("task_create"))
+        self.assertFalse(profile.allows("team_status"))
+        self.assertTrue(profile.allows("file_read"))
+
+    def test_team_mode_is_ignored_for_delegating_or_root_profiles(self):
+        delegating = build_subagent_capability_profile(
+            is_subagent=True, allow_delegation=True, team_mode=True
+        )
+        root = build_subagent_capability_profile(is_subagent=False, team_mode=True)
+
+        # team_mode only meaningfully flags a non-delegating child
+        self.assertFalse(delegating.team_mode)
+        self.assertFalse(root.team_mode)
+
     def test_unknown_tools_are_denied(self):
         profile = build_subagent_capability_profile(is_subagent=True, role_tools=["file_read"])
 

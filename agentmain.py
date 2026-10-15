@@ -588,6 +588,7 @@ class GenericAgent:
         self.is_subagent = False
         self.capability_profile = None
         self.capability_allow_delegation = False
+        self.capability_team_mode = False
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
         _record_startup_phase('agent_permission_init_started')
         from permission_policy import DEFAULT_PERMISSION_MODE
@@ -1084,6 +1085,7 @@ class GenericAgent:
                     is_subagent=bool(getattr(self, 'is_subagent', False)),
                     role_tools=getattr(self, 'capability_role_tools', None),
                     allow_delegation=bool(getattr(self, 'capability_allow_delegation', False)),
+                    team_mode=bool(getattr(self, 'capability_team_mode', False)),
                     available_tools=available_tool_names,
                 )
             self.capability_profile = profile
@@ -1501,12 +1503,14 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     agent.is_subagent = True
     agent.capability_profile = None
     agent.capability_allow_delegation = False
+    agent.capability_team_mode = False
     capability_options = capability_options if capability_options is not None else ((read_json_or_none(os.path.join(task_dir, 'state.json')) or {}).get('capability_options') or {})
     role_tools = capability_options.get('role_tools')
     if isinstance(role_tools, str):
         role_tools = [role_tools]
     agent.capability_role_tools = role_tools
     agent.capability_allow_delegation = bool(capability_options.get('allow_delegation', False))
+    agent.capability_team_mode = bool(capability_options.get('team_mode', False))
     agent.task_dir = task_dir
     # Must run before anything writes state.json. Every writer in this loop rebuilds the file
     # from `read_json_or_none(...) or {}`, so the first one silently replaces unparsable bytes

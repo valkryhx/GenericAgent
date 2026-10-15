@@ -35,6 +35,18 @@ ORCHESTRATION_TOOLS = frozenset(
     }
 )
 INTERNAL_SENTINEL_TOOLS = frozenset({"no_tool"})
+# Tools a teammate gets back when team_mode is on: it may talk to peers/lead
+# and use the shared task board, but never orchestrate (no spawn_agent/wait_agent).
+TEAMMATE_TOOLS = frozenset(
+    {
+        "send_message",
+        "task_create",
+        "task_get",
+        "task_update",
+        "task_list",
+        "team_status",
+    }
+)
 
 
 def _normalize_tool_name(value) -> str:
@@ -50,6 +62,7 @@ class SubagentCapabilityProfile:
     allowed_tools: frozenset[str]
     denied_tools: frozenset[str]
     allow_delegation: bool = False
+    team_mode: bool = False
 
     def allows(self, tool_name: str) -> bool:
         name = _normalize_tool_name(tool_name)
@@ -65,6 +78,7 @@ class SubagentCapabilityProfile:
             "allowed_tools": sorted(self.allowed_tools),
             "denied_tools": sorted(self.denied_tools),
             "allow_delegation": self.allow_delegation,
+            "team_mode": self.team_mode,
         }
 
 
@@ -73,6 +87,7 @@ def build_subagent_capability_profile(
     is_subagent: bool,
     role_tools: Iterable[str] | None = None,
     allow_delegation: bool = False,
+    team_mode: bool = False,
     available_tools: Iterable[str] | None = None,
     denied_tools: Iterable[str] | None = None,
 ) -> SubagentCapabilityProfile:
@@ -95,6 +110,10 @@ def build_subagent_capability_profile(
         allowed = set(role)
     if is_subagent and not allow_delegation:
         allowed.difference_update(ORCHESTRATION_TOOLS)
+        if team_mode:
+            # A teammate keeps the collaboration surface (peer messaging + task board)
+            # without the orchestration surface (it may not spawn or await agents).
+            allowed.update(TEAMMATE_TOOLS)
     elif allow_delegation or not is_subagent:
         if available:
             allowed.update(available.intersection(ORCHESTRATION_TOOLS))
@@ -107,6 +126,7 @@ def build_subagent_capability_profile(
         allowed_tools=frozenset(allowed),
         denied_tools=frozenset(denied - INTERNAL_SENTINEL_TOOLS),
         allow_delegation=bool(allow_delegation or not is_subagent),
+        team_mode=bool(team_mode and is_subagent and not allow_delegation),
     )
 
 
