@@ -500,6 +500,23 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **待办**：无（P11 验收达成）。
 - **文档**：`docs/20261015-ga-agent-team-实施进度.md` P11。
 
+### 中途调研 2026-10-15：teammate 团队名解析错位 → 任务板分片（P11 补 2）
+
+- **触发**：复查真实 e2e 产物时发现同一 run 出现「同一 teammate 落在两张板」：主板 `session-26db317d` 3 条 completed，
+  但另有 `session-f52c4ef1` / `session-c6c74e42` / `session-9c2e7341` 三张**单条**任务板。
+- **证据**：那三份 session 日志（`temp/sessions/session_{f52c4ef1,c6c74e42,9c2e7341}*.jsonl`）的
+  `session_start.created_at` 都是 17:49:53 = 三个 teammate 的 spawn 时刻 → 那三张板就是三个 teammate **各自的** session 板。
+- **源码事实**：`session_transcript.ensure_agent_session` 给每个 agent（含 teammate 子进程）**新建 session_id**；
+  `GenericAgentHandler._team_name()` = `team_name_for(self.parent.session_id)` → teammate 用**自己的** session 解析 team 名，
+  与 lead 不同。结果：teammate 模型可见的 `task_list/task_update/task_create` 全打到自己的板（还会触发
+  「板上没有就 task_create」的 fallback 产出碎板），**根本读不到 lead 的板**；主板 3/3 completed 完全靠宿主兜底
+  （`_bind_team_task` + `complete_owned_in_progress`），不是模型行为。
+- **修复**：`SubagentManager._child_popen_kwargs` 在子进程 env 注入 `GA_TEAM_NAME=<manager.team_name>`（= lead 的 team 名）；
+  `team_name_for` 优先读 `GA_TEAM_NAME` → 全队共用一块板。对齐 CC `m1578` 的 swarm env 传播。
+- **复验**：真实 e2e `boardfix_p11c` → 本次 run **只产生 1 张板**（`session-83b71255`，3 条全 completed），
+  三张碎板消失；teammate 仍有自己的 session，但都解析到 lead 的板。
+- **文档**：`docs/20261015-ga-agent-team-实施进度.md` P11；`docs/20261015-agent-team激活机制-调研补充.md` §7.6。
+
 ### 中途调研 2026-10-12：CC Workflow 工具入口 + G8/G9
 
 - 触发：用户要求 GA 的 workflow 入口必须按 CC 设计，不能只停留在 `/workflow` 的 JSON plan 路径；除 B1 `budget` 外，CC 能对齐的能力都要对齐。

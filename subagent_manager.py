@@ -362,6 +362,17 @@ class SubagentManager:
         agent it is; otherwise its own spawns would register under /root and the depth guard
         would see a flat tree.
         """
+        from subagent_team import TEAM_NAME_ENV
+
+        env = {**os.environ, self.AGENT_PATH_ENV: str(agent_path)}
+        # A child gets its OWN session id (session_transcript.ensure_agent_session), so it
+        # cannot derive the lead's team name from its own session: without this the teammate
+        # would resolve a different team and its task-board calls would hit a DIFFERENT board
+        # than the lead's. Propagate the team name explicitly (CC m1578 propagates the swarm
+        # env the same way) so every agent in the team shares one board.
+        team_name = str(getattr(self, "team_name", "") or "").strip()
+        if team_name:
+            env[TEAM_NAME_ENV] = team_name
         kwargs = {
             "cwd": str(worktree_path or self.root_dir),
             "stdout": stdout,
@@ -370,7 +381,7 @@ class SubagentManager:
             # child inherit that handle can leave Windows' console/pipe startup suspended until
             # the parent read completes, before agentmain can emit process_entry.
             "stdin": subprocess.DEVNULL,
-            "env": {**os.environ, self.AGENT_PATH_ENV: str(agent_path)},
+            "env": env,
         }
         if os.name == "nt":
             kwargs["creationflags"] = 0x08000000

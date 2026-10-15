@@ -66,6 +66,15 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(rows[-1]["author"], "/root/agent_1")
 
 
+    def test_team_name_follows_the_lead_team_env_for_a_child(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td)
+            with mock.patch.dict("os.environ", {"GA_TEAM_NAME": "session-lead01"}):
+                self.assertEqual(handler._team_name(), "session-lead01")
+                self.assertEqual(handler._get_task_store().list_id, "session-lead01")
+
     def test_spawn_agent_tool_returns_structured_startup_timeout(self):
         with tempfile.TemporaryDirectory() as td:
             handler = GenericAgentHandler(FakeParent(), last_history=[], cwd=str(Path(td) / "temp"))

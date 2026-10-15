@@ -541,6 +541,19 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
 
             self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
 
+    def test_child_launch_propagates_the_team_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+            manager.team_name = "session-abcdef12"
+
+            kwargs = manager._child_popen_kwargs(
+                None, stdout=object(), stderr=object(), agent_path="/root/worker"
+            )
+
+            # A child gets its own session id, so the team name must travel in the env
+            # (CC m1578) or the teammate would resolve a different task board.
+            self.assertEqual(kwargs["env"]["GA_TEAM_NAME"], "session-abcdef12")
+
     def test_spawn_fails_fast_when_child_never_emits_startup_handshake(self):
         """Popen returning a PID is not proof that agentmain entered the child."""
         with tempfile.TemporaryDirectory() as td:

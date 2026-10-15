@@ -149,3 +149,10 @@ teammate 是**按 spawn message 干活的**，没有走「从板上认领 → �
 
 - 自然输入（无团队语法）：`team_mode=true` teammate ≥2 + 任务板任务**被认领并置 completed**。
 - 观测模式复跑：`frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts`（`GA_TEAM_E2E_SOFT=1`）对比 `taskBoard.completed`。
+
+### 7.6 团队名必须显式传播（否则任务板分片）
+
+teammate 子进程会拿到**自己的** session_id（`ensure_agent_session`），因此 `_team_name()` 不能靠自己的 session
+推断团队 → 会把模型可见的 `task_list/task_update/task_create` 打到另一块板。修复：spawn 时把
+`GA_TEAM_NAME=<lead 的 team 名>` 注入子进程 env（`SubagentManager._child_popen_kwargs`），`team_name_for` 优先读它；
+对齐 CC `m1578` 的 swarm env 传播。复验：单 run 只产生 1 张板。
