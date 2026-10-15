@@ -27,6 +27,10 @@ ORCHESTRATION_TOOLS = frozenset(
         "detach_agent",
         "interrupt_agent",
         "close_agent",
+        "task_create",
+        "task_get",
+        "task_update",
+        "task_list",
     }
 )
 INTERNAL_SENTINEL_TOOLS = frozenset({"no_tool"})

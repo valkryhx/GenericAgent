@@ -253,5 +253,39 @@
         }
       }
     }
-  }
+  },
+  {"type": "function", "function": {
+    "name": "task_create",
+    "description": "Create a task on the shared team task board. The task starts as pending with no owner; teammates claim it with task_update(owner=<name>). Use the board as the collaboration contract so parallel agents do not duplicate work. Only mark a task completed when it is fully done and verified.",
+    "parameters": {"type": "object", "properties": {
+      "subject": {"type": "string", "description": "Short imperative title"},
+      "description": {"type": "string", "description": "Full detail: what to do, where, and the expected output contract"},
+      "activeForm": {"type": "string", "description": "Present-continuous label shown while in progress, e.g. 'Writing the parser'"},
+      "metadata": {"type": "object", "description": "Optional structured metadata (use _internal to hide from task_list)"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "task_get",
+    "description": "Read one task in full by id.",
+    "parameters": {"type": "object", "properties": {
+      "taskId": {"type": "string", "description": "Task id returned by task_create / task_list"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "task_update",
+    "description": "Update, claim, or delete a task. Setting owner claims the task; owner is a soft lock, so a task already owned by another agent is rejected with already_claimed. status is pending|in_progress|completed|deleted. addBlocks/addBlockedBy wire dependencies.",
+    "parameters": {"type": "object", "properties": {
+      "taskId": {"type": "string", "description": "Task id to update"},
+      "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"], "description": "New status; 'deleted' removes the task"},
+      "subject": {"type": "string", "description": "New subject"},
+      "description": {"type": "string", "description": "New description"},
+      "activeForm": {"type": "string", "description": "New present-continuous label"},
+      "owner": {"type": "string", "description": "Claim/assign owner (your agent name); omit to leave unchanged, pass empty to release"},
+      "addBlocks": {"type": "array", "items": {"type": "string"}, "description": "Task ids this task blocks"},
+      "addBlockedBy": {"type": "array", "items": {"type": "string"}, "description": "Task ids that must complete before this one can be claimed"},
+      "metadata": {"type": "object", "description": "Metadata keys to merge"}}}
+  }},
+  {"type": "function", "function": {
+    "name": "task_list",
+    "description": "List the team task board as summaries (id, subject, status, owner, blockedBy). blockedBy shows only unfinished blockers. Find a pending task with no owner and no blockedBy, then claim it with task_update(owner=<your name>).",
+    "parameters": {"type": "object", "properties": {}}
+  }}
 ]

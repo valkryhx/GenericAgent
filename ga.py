@@ -1139,6 +1139,86 @@ class GenericAgentHandler(BaseHandler):
         yield f"[Status] Found {len(states)} subagent(s).\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
+    def _get_task_store(self, list_id=None):
+        manager = self._get_subagent_manager()
+        from subagent_tasks import SubagentTaskStore
+
+        list_id = list_id or getattr(self.parent, "team_name", None) or "default"
+        return SubagentTaskStore(manager.root_dir, list_id=list_id)
+
+    @staticmethod
+    def _as_list_arg(args, *names):
+        for name in names:
+            if name in args and args[name] is not None:
+                raw = args[name]
+                if isinstance(raw, str):
+                    return [part.strip() for part in raw.split(",") if part.strip()]
+                return [str(part).strip() for part in raw if str(part).strip()]
+        return None
+
+    def do_task_create(self, args, response):
+        '''在团队共享任务板上新建一个任务（status 恒为 pending，owner 为空）。'''
+        subject = args.get("subject") or args.get("title")
+        if not subject:
+            return StepOutcome({"status": "error", "msg": "subject is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else None
+        task = store.create_task(
+            subject,
+            args.get("description") or "",
+            active_form=args.get("activeForm") or args.get("active_form"),
+            metadata=metadata,
+        )
+        yield f"[Status] Task #{task['id']} created: {task['subject']}\n"
+        return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_get(self, args, response):
+        '''按 id 读取任务全量字段。'''
+        task_id = args.get("taskId") or args.get("task_id") or args.get("id")
+        if task_id is None:
+            return StepOutcome({"status": "error", "msg": "taskId is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        task = store.get_task(task_id)
+        if task is None:
+            return StepOutcome({"status": "error", "reason": "task_not_found", "taskId": str(task_id)}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+        yield "[Status] Task #%s: %s (%s).%s" % (task_id, task.get("subject"), task.get("status"), chr(10))
+        return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_update(self, args, response):
+        '''更新/认领/删除任务。owner 为软锁：任务已被他人认领则拒绝（already_claimed）。'''
+        task_id = args.get("taskId") or args.get("task_id") or args.get("id")
+        if task_id is None:
+            return StepOutcome({"status": "error", "msg": "taskId is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        kwargs = {
+            "status": args.get("status"),
+            "subject": args.get("subject"),
+            "description": args.get("description"),
+            "active_form": args.get("activeForm") or args.get("active_form"),
+            "add_blocks": self._as_list_arg(args, "addBlocks", "add_blocks"),
+            "add_blocked_by": self._as_list_arg(args, "addBlockedBy", "add_blocked_by"),
+            "metadata": args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+        }
+        if "owner" in args:
+            kwargs["owner"] = args.get("owner")
+        result = store.update_task(task_id, **kwargs)
+        if not result.get("success"):
+            yield f"[Status] Task update rejected: {result.get('error') or result.get('reason')}\n"
+        else:
+            yield f"[Status] Task #{task_id} updated: {', '.join(result.get('updatedFields') or [])}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_list(self, args, response):
+        '''列出任务板摘要（只显示未完成的 blockedBy；隐藏内部任务）。'''
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        tasks = store.list_tasks()
+        claimable = [t for t in tasks if t["status"] == "pending" and not t["owner"] and not t["blockedBy"]]
+        hint = ""
+        if claimable:
+            hint = f" Claimable now: {', '.join('#' + str(t['id']) for t in claimable)}. Claim with TaskUpdate(owner=<your name>)."
+        yield f"[Status] {len(tasks)} task(s).{hint}\n"
+        return StepOutcome({"status": "success", "tasks": tasks}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
     def do_send_message(self, args, response):
         '''向子智能体邮箱发送消息，但不触发新一轮。'''
         target = args.get("target") or args.get("task_name")
