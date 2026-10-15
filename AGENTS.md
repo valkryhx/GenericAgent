@@ -457,6 +457,23 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 3. 最后按该独立文档实施代码，并在实施记录中回链本文件与调研文档。
 
 目的：让中途研究可持久化、可复核，避免只存在于会话上下文。
+### 待办 2026-10-16：GA ink「执行过程 UI」对标 CC（折叠 / 图标 / 排版）
+
+- **用户诉求（2026-10-15 提出，次日执行）**：GA ink 执行过程的 UI——**没有折叠**（工具调用/输出/思考过程收不起来），
+  且**图标审美偏低**（emoji / 粗制 glyph）。目标：**对标 Claude Code 源码的 UI 部分**，让执行过程更美观、优雅。
+- **第一步（明天先做）**：读 CC 源码 UI 相关模块，提炼「折叠/展开 + 图标字形 + 层级缩进 + 颜色/暗色 + spinner 文案」规则，
+  先写调研+设计文档 `docs/20261016-CC-UI-对标调研.md`，再据此改 GA ink（走本文件「中途补充调研的持久化流程」）。
+- **CC 源码线索（今日粗筛，仅起点，待细读）**：
+  - `m1277_0xd55e81a.js`（2.4KB）：工具结果行的 **`⎿` 前缀 + 缩进 + 「offscreen」锁定高度**（折叠/展开雏形）。
+  - `m0696_0xcf4efd9.js`（11KB）：**spinner 动词表**（`spinnerVerbs`，Accomplishing/Ruminating…，replace/append 模式）。
+  - 含 `Ctrl+O` / `to expand` 的模块：`m0052`、`m0340`、`m0560`、`m1369`、`m1412`、`m1428`、`m1437`、`m1444`、`m1478`(1.5MB)。
+  - 含转义字形（`⎿ ⎿` / `⏺ ⏺` / `✻ ✻`）的模块：`m0709`、`m1277`、`m1437`、`m1442`、`m1444`、`m1448`、`m1478`、`m1919`、`m0326`、`m0052`。
+  - ⚠️ CC 的渲染组件多在打包 chunk（`B:/~BUN/root/chunk-*.js`，bytecode），明文模块里只是**引用**；细节可能要在
+    `claude.exe` 上 `grep -a` 搜 chunk 名/字符串（同 agent-team 调研做法）。
+- **GA 落点**：`frontends/ink-ui/src/`（`App.tsx` 的 `computeLayoutMetrics`/面板、转录区渲染、工具调用块）。
+- **交付物**：① 调研+设计文档；② GA ink 改动（折叠/展开 + 图标/排版对齐 CC）；③ 无截图式渲染断言测试（见本文件「Ink UI 测试」）。
+- **约束**：CC 仓库只读；GA 改动走「先落盘调研 → 再实施」强制流程。
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；
