@@ -479,6 +479,10 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   搜法（Git Bash 无 `strings`，用 `grep -a -o -b`；**别**在 IDA 跑 `db.strings.rebuild()`）：
   `grep -a -o -b 'chunk-x9hkq9y1.js' claude.exe` / `'ctrl+o'` / `'Ruminating'`；图标是真实 UTF-8 字节：`'⎿'`(⎿) `'⏺'`(⏺) `'✻'`(✻)。
   已定位的 UI 关键 chunk：`chunk-x9hkq9y1.js`、`chunk-4rk7cwxz.js`、`chunk-rnj6pcz5.js`(m1277+m0696 共用)、`chunk-qkvevvte.js`、`chunk-bgthmgyc.js`。
+  **到货自检（2026-10-15，已通过）**：`claude.exe` 就位，`stat -c %s`=244960928、`sha256sum`=9dbe16da…de3a 与 MANIFEST 一致。
+  探测：chunk 名命中在 **~97.36M**；`ctrl+o` ~98.2M；`Ruminating`/`spinnerVerbs` ~100.0M；`u273B` ~201M；`u2722/u273D` ~217M。
+  字形两种存法：明文 JS 模块区是**转义写法**（`⎿` 25 处 / `✻` 14 处 / `⏺` 6 处…）；bytecode 区有**真实字节**（`⏺`/`✢`/`❯`/`⏹`/`▪`）。
+  ⚠️ exe 含 Bun/JSC 引擎字符串表（~65–88M），`to expand` 等会命中**引擎噪声**（非 CC UI）→ 命中需按区域过滤，CC UI 真正在 **≈97–100M 与 200–217M** 两段。
 
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
