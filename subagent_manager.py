@@ -43,6 +43,10 @@ def normalize_task_name(target):
         target = target.rstrip("/").split("/")[-1]
     if not target.replace("_", "").isalnum() or target.lower() != target:
         raise ValueError("task_name must contain lowercase letters, digits, and underscores")
+    from subagent_team import is_reserved_name
+
+    if is_reserved_name(target):
+        raise ValueError("task_name %r is reserved" % target)
     return target
 
 

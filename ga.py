@@ -1139,12 +1139,16 @@ class GenericAgentHandler(BaseHandler):
         yield f"[Status] Found {len(states)} subagent(s).\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
+    def _team_name(self):
+        from subagent_team import team_name_for
+
+        return team_name_for(getattr(self.parent, "session_id", None))
+
     def _get_task_store(self, list_id=None):
         manager = self._get_subagent_manager()
         from subagent_tasks import SubagentTaskStore
 
-        list_id = list_id or getattr(self.parent, "team_name", None) or "default"
-        return SubagentTaskStore(manager.root_dir, list_id=list_id)
+        return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name())
 
     @staticmethod
     def _as_list_arg(args, *names):
@@ -1218,6 +1222,16 @@ class GenericAgentHandler(BaseHandler):
             hint = f" Claimable now: {', '.join('#' + str(t['id']) for t in claimable)}. Claim with TaskUpdate(owner=<your name>)."
         yield f"[Status] {len(tasks)} task(s).{hint}\n"
         return StepOutcome({"status": "success", "tasks": tasks}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_team_status(self, args, response):
+        '''查看当前隐式团队：team 名、lead、成员。'''
+        from subagent_team import SubagentTeam
+
+        manager = self._get_subagent_manager()
+        team = SubagentTeam(manager.registry, manager.self_agent_path, team_name=self._team_name())
+        view = team.view(include_closed=bool(args.get("include_closed")))
+        yield "[Status] Team %s: %d member(s).%s" % (view["teamName"], view["memberCount"], chr(10))
+        return StepOutcome({"status": "success", "team": view}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_send_message(self, args, response):
         '''向子智能体邮箱发送消息，但不触发新一轮。'''

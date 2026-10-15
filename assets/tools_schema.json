@@ -287,5 +287,11 @@
     "name": "task_list",
     "description": "List the team task board as summaries (id, subject, status, owner, blockedBy). blockedBy shows only unfinished blockers. Find a pending task with no owner and no blockedBy, then claim it with task_update(owner=<your name>).",
     "parameters": {"type": "object", "properties": {}}
+  }},
+  {"type": "function", "function": {
+    "name": "team_status",
+    "description": "Show the current implicit team: team name, lead agent, and members. Use it to see who is on the team and their status before assigning work.",
+    "parameters": {"type": "object", "properties": {
+      "include_closed": {"type": "boolean", "description": "Include closed members", "default": false}}}
   }}
 ]

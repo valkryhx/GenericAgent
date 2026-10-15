@@ -10,7 +10,7 @@
 | 阶段 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
 | P0 | 共享任务板 `subagent_tasks.py` + 4 工具 | ✅ 完成 | 见本文件首提 |
-| P1 | team / lead 身份 | ⬜ 未开始 | |
+| P1 | team / lead 身份 | ✅ 完成 | 见本文件首提 |
 | P2 | teammate 自主协作（放开 send_message + 任务工具） | ⬜ 未开始 | |
 | P3 | 协调者提示词 + teammate 简报 | ⬜ 未开始 | |
 | P4 | 通知格式对齐 + 防伪前置 | ⬜ 未开始 | |
@@ -62,7 +62,38 @@ python -m pytest tests/test_subagent_tasks.py tests/test_ga_task_tools.py -q
 
 ---
 
-## 下一步：P1（team / lead 身份）
+## P1：team / lead 身份 ✅ 完成
+
+**目标**：引入「会话级隐式团队 + lead 身份」，对齐 CC（`m1614`/`m0319`/`m0511`）。
+
+### 交付物
+
+- **`subagent_team.py`**
+  - `LEAD_AGENT_NAME = "team-lead"`（同 CC `mi`）。
+  - `RESERVED_AGENT_NAMES = {main, team-lead, user, system}`（同 CC `m0511`）。
+  - `team_name_for(session_id)`：`GA_TEAM_NAME` 优先，否则 `session-<id[:8]>`，无 id → `default`。
+  - `SubagentTeam(registry, self_agent_path, team_name=...)`：
+    `view()` → `{teamName, leadAgentId, leadName, memberCount, members[]}`
+    （从 `registry.json` 派生，不引入第二份真相）；`validate_name()` 拒绝保留名。
+- **保留名拦截**：`normalize_task_name` 拒绝 `main/team-lead/user/system`。
+- **team 名接入任务板**：`ga.py._team_name()` → `_get_task_store` 用 team 名做 `list_id`（任务板按 team 隔离）。
+- **`team_status` 工具**：`do_team_status` + schema（en/cn，29→30）+ `ORCHESTRATION_TOOLS`。
+
+### 测试
+
+- `tests/test_subagent_team.py`（6 例）：team 名派生 / 保留名 / view 派生 / `normalize_task_name` 拒绝 / 工具往返。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py -q`
+  → **284 passed, 2 skipped**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_team.py -q
+```
+
+---
+
+## 下一步：P2（teammate 自主协作：放开 send_message + 任务工具）
 
 - 复用 `SubagentRegistry` 给每个会话一个隐式 team（默认 `session-<id[:8]>`）。
 - 派生 team 视图 `{teamName, leadAgentId, members[]}`；lead 名字固定 `team-lead`。
