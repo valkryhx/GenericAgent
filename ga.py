@@ -1714,8 +1714,18 @@ class GenericAgentHandler(BaseHandler):
         if not response or (not content.strip() and not thinking.strip()):
             yield "[Warn] LLM returned an empty response. Retrying...\n"
             return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
-        if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]:
+        if '[!!! 流异常中断' in content[-100:]:
+            yield "[Warn] Stream interrupted mid-response. Regenerating...\n"
             return self._retry_or_exit("[System] Incomplete response. Regenerate and tooluse.")
+        if '!!!Error:' in content[-100:]:
+            # Deterministic provider/transport error surfaced by the LLM layer
+            # (e.g. a proxy returned a bare {"error": {...}} object with no content).
+            # Retrying the same payload is futile, so report it instead of looping.
+            self._empty_ct = 0
+            detail = content.strip()
+            if len(detail) > 600: detail = detail[:600] + '...'
+            yield f"[Error] LLM provider error: {detail}\n"
+            return StepOutcome(response, next_prompt=None)
         if 'max_tokens !!!]' in content[-100:]:
             return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
         

@@ -145,6 +145,43 @@ def auto_make_url(base, path):
     if b.endswith(p): return b
     return f"{b}/{p}" if re.search(r'/v\d+(/|$)', b) else f"{b}/v1/{p}"
 
+def _provider_error_message(evt):
+    """Return a human-readable message when a stream/JSON payload is an error object.
+
+    Most OpenAI-compatible proxies return a *bare* error object with no top-level
+    "type" (e.g. superapi.buzz deepseek-flash:
+    {"error":{"message":"Upstream access forbidden, ...","type":"upstream_error"}}).
+    Older code only matched type=="error", so such payloads were silently dropped
+    and surfaced downstream as a blank ("empty") response. Return the message so
+    callers can raise it instead.
+    """
+    if not isinstance(evt, dict) or "error" not in evt:
+        return None
+    err = evt.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("type") or ""
+    else:
+        msg = str(err or "")
+    return msg or "provider returned an unspecified error"
+
+
+def _sse_payload(line):
+    """Return the JSON payload carried by an SSE line, or None if there is none.
+
+    Handles the standard "data: {...}" form and, additionally, the *bare* JSON line
+    some proxies emit for errors with no "data:" prefix (superapi.buzz does this:
+    `{"error":{"message":"Upstream access forbidden",...}}`). Without this, such an
+    error line is skipped as a non-event line and the whole turn looks like a blank
+    (empty) model response.
+    """
+    if line.startswith("data:"):
+        return line[5:].lstrip()
+    stripped = line.strip()
+    if stripped.startswith("{") and '"error"' in stripped:
+        return stripped
+    return None
+
+
 def _parse_claude_json(data, sess=None):
     content_blocks = data.get("content", [])
     _record_usage(data.get("usage", {}), "messages", sess)
@@ -160,14 +197,18 @@ def _parse_claude_sse(resp_lines, sess=None):
     for line in resp_lines:
         if not line: continue
         line = line.decode('utf-8') if isinstance(line, bytes) else line
-        if not line.startswith("data:"): continue
-        data_str = line[5:].lstrip()
+        data_str = _sse_payload(line)
+        if data_str is None: continue
         if data_str == "[DONE]": break
         try: evt = json.loads(data_str)
         except Exception as e:
             print(f"[SSE] JSON parse error: {e}, line: {data_str[:200]}")
             continue
         evt_type = evt.get("type", "")
+        if not evt_type:
+            _perr = _provider_error_message(evt)
+            if _perr:
+                warn = f"\n\n!!!Error: SSE {_perr}"; break
         if evt_type == "message_start":
             usage = evt.get("message", {}).get("usage", {})
             _record_usage(usage, "messages", sess)
@@ -248,12 +289,25 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
-            if not line.startswith("data:"): continue
-            data_str = line[5:].lstrip()
+            data_str = _sse_payload(line)
+            if data_str is None: continue
             if data_str == "[DONE]": break
             try: evt = json.loads(data_str)
             except: continue
             etype = evt.get("type", "")
+            _perr = _provider_error_message(evt)
+            if _perr:
+                msg = f"!!!Error: {_perr}"
+                content_text += msg; yield msg
+                break
+            if etype in ("response.failed", "response.incomplete"):
+                _resp = evt.get("response") or {}
+                _err = _resp.get("error") or {}
+                _emsg = ((_err.get("message") if isinstance(_err, dict) else None)
+                         or (_resp.get("incomplete_details") or {}).get("reason") or etype)
+                msg = f"!!!Error: {_emsg}"
+                content_text += msg; yield msg
+                break
             if etype == "response.output_text.delta":
                 delta = evt.get("delta", "")
                 if delta: seen_delta = True; content_text += delta; yield delta
@@ -272,11 +326,6 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             elif etype == "response.function_call_arguments.done":
                 idx = evt.get("output_index", current_fc_idx or 0)
                 if idx in fc_buf: fc_buf[idx]["args"] = evt.get("arguments", fc_buf[idx]["args"])
-            elif etype == "error":
-                err = evt.get("error", {})
-                emsg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                if emsg: content_text += f"!!!Error: {emsg}"; yield f"!!!Error: {emsg}"
-                break
             elif etype == "response.completed":
                 usage = evt.get("response", {}).get("usage", {})
                 _record_usage(usage, api_mode, sess)
@@ -297,11 +346,16 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
-            if not line.startswith("data:"): continue
-            data_str = line[5:].lstrip()
+            data_str = _sse_payload(line)
+            if data_str is None: continue
             if data_str == "[DONE]": break
             try: evt = json.loads(data_str)
             except: continue
+            _perr = _provider_error_message(evt)
+            if _perr:
+                msg = f"!!!Error: {_perr}"
+                content_text += msg; yield msg
+                break
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
             # reasoning_content 是标准字段；部分 vLLM/内部端点（如九天 GLM-5.2）
@@ -407,6 +461,11 @@ def _record_usage(usage, api_mode, sess=None):
     
 def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     blocks = []
+    _perr = _provider_error_message(data)
+    if _perr:
+        msg = f"!!!Error: {_perr}"
+        blocks.append({"type": "text", "text": msg}); yield msg
+        return blocks
     if api_mode == "responses":
         _record_usage(data.get("usage") or {}, api_mode, sess)
         for item in (data.get("output") or []):
