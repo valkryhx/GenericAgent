@@ -20,6 +20,7 @@ import {
   type WorkflowPanelState,
 } from './workflowPanel.js'
 import {
+  TEAM_PANEL_MAX_ROWS,
   teamPanelCapturesKey,
   teamPanelCommandForKey,
   teamPanelFromRoster,
@@ -1535,6 +1536,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     () => (workflowPanel ? workflowPanelRows(workflowPanel).slice(0, WORKFLOW_PANEL_MAX_ROWS) : []),
     [workflowPanel],
   )
+  const teamPanelRows = useMemo(
+    () => (teamPanel ? teamPanelLines(teamPanel).slice(0, TEAM_PANEL_MAX_ROWS) : []),
+    [teamPanel],
+  )
   const panelRows = approvalPanel
     ? approvalPanelRows(approvalPanel)
     : modelPanel
@@ -1549,6 +1554,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       ? Math.min(selectorSize(selector), 8) + 2
     : workflowPanel
       ? workflowPanelLines.length
+    : teamPanel
+      ? teamPanelRows.length
     : footerPanel
       ? footerPanelRows(footerPanel)
     : showMcpStartupStatus
@@ -1714,7 +1721,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (themePanelSelected !== null) return <ThemePanelView key={section} selected={themePanelSelected} currentTheme={themeName} theme={theme} />
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
       if (workflowPanel) return <WorkflowPanelView key={section} lines={workflowPanelLines} theme={theme} />
-      if (teamPanel) return <WorkflowPanelView key={section} lines={teamPanelLines(teamPanel)} theme={theme} />
+      if (teamPanel) return <WorkflowPanelView key={section} lines={teamPanelRows} theme={theme} />
       if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }

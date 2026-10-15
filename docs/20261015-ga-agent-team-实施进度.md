@@ -496,6 +496,18 @@ cd frontends/ink-ui && npm test && npm run typecheck
 cd ../.. && python -m pytest tests/test_ink_bridge.py -q
 ```
 
+### 缺陷修复：`/team` 面板被裁成一行（L2 版面自测抓到）
+
+- **现象**：`/team` 面板渲染成一行乱码 `(no tasks)0000000…running 0 task(s)ask(s)`。
+- **根因**：`App.tsx` 把 `teamPanel` 加进了 `activePanel`，但 **`panelRows` 三元链缺 `teamPanel` 分支**
+  → `computeLayoutMetrics` 给 bottom chrome 的面板高度为 0 → 面板被裁。
+- **修复**：import `TEAM_PANEL_MAX_ROWS`；新增 `teamPanelRows = useMemo(() => teamPanelLines(teamPanel).slice(0, TEAM_PANEL_MAX_ROWS), …)`；
+  `panelRows` 链加 `: teamPanel ? teamPanelRows.length`；渲染改用 `teamPanelRows`。
+- **验证**：`frontends/ink-ui/scripts/real_ink_team_panel_e2e.ts`（真实 App + 伪 TTY 80×24）PASS，帧为：
+  `Team session-session_ · lead team-lead · 1 member(s) · 0 task(s)` / `Task board` / `Up/Down select · r refresh · Esc close`。
+- **教训**：单元测试全绿也挡不住的版面缺陷，被 L2 版面 e2e 一次抓到。方法固化见
+  `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`。
+
 ### 不做（诚实标注）
 
 - tmux 多窗格 `swarm-view`（GA 无 tmux）；云端 swarm-view。**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
