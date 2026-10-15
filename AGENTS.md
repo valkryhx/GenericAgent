@@ -561,6 +561,9 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   `load_skill` 的 tool_result 体量显著下降（不再 17KB 级单块）；③ 需要细节时模型能按路径分段读取并完成任务；
   ④ 压缩/续跑后 skill 指南仍在（回注）。
 - **关联**：`llmcore.py` 的 `!!!Error:` 修复（commit `caa42f1`）已让"被渠道拒绝"可被看见；本条是**根因侧**的优化。
+- **详细方案（已落盘）**：`docs/20261017-Skill渐进式披露对标CC.md`（GA 现状 + 差距 + 4 阶段实施 + 验收）。
+- **CC 侧证据（已落盘）**：`D:/git_codes/claudecode283_hack/docs/20261017-CC-skill渐进式披露调研.md`（L1 清单预算/降级、L2 `{alwaysOn,onInvoke}`、L3 附带文件、`/skills` 菜单原文、逐条模块坐标）。
+- **关键认知（避免做错方向）**：CC 的 L2 **也是载入全文**，它没把 SKILL.md 切片按需加载；渐进披露的杠杆是 ①清单常驻 ②**正文要瘦**（重内容放 `references/`）。GA 的 L1/L2 已基本对齐，真正缺的是 **L3 正文瘦身 + 压缩回注**。
 
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
