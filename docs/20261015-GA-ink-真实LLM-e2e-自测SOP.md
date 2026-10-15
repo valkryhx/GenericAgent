@@ -108,6 +108,14 @@ npx tsx scripts/real_ink_ui_user_input_e2e.ts  # 输入/光标/子代理/workflo
 - 渲染帧含 `Team … lead team-lead`、`Task board`、`Esc close`；
 - 任意一行宽度 `< 80`（不溢出）。
 
+> ⚠️ **模型绑定（实测教训）**：`real_ink_ui_user_input_e2e.ts` **为 luna profile 硬编码**——
+> `GA_UI_EXPECTED_PROFILE` 默认 `luna`，且注入给子代理的 prompt 里**写死** “luna index N”。
+> **用默认 `deepseek-flash` 跑会在子代理环节失败**：报
+> `AssertionError: subagent child did not reach succeeded in N read-model refreshes`，
+> 且 `temp/subagents/registry.json` 里该子代理**停在 `running`**（未进 `succeeded`）。
+> 结论：**默认模型下的真实 UI 自测用 L1（`real_ink_selftest.py`，走默认模型）+ L2（`real_ink_team_panel_e2e.ts`，仅版面）**；
+> 只有在显式切到 luna 时才跑这个重型全链路脚本。
+
 ### 4.2 判读帧的关键坑（必读）
 
 - **Ink 是差分渲染**：`stdout.chunks` 是逐帧写入，不是「最后一块 = 整屏」。
@@ -169,6 +177,7 @@ cd /d/git_codes/GenericAgent
 | 面板内容错乱/挤成一行 | `panelRows` 未加新面板分支 | `App.tsx` `computeLayoutMetrics` 调用处 |
 | 面板文本断言失败 | Ink 差分渲染，取错帧 | 取「最后一个 chrome 帧」 |
 | `wait_agent` 一直等 | 子代理终态未写 / 条件不匹配 | `temp/subagents/*/events.jsonl` |
+| 重型 UI e2e 报 `subagent … did not reach succeeded` | 脚本为 luna 硬编码，用默认模型跑 | 改用 L1+L2；或显式切 luna |
 | 中文乱码 | 没设 `LANG/LC_ALL` 或走了 PowerShell | 重跑，显式 `shell=bash` |
 | 临时目录删除失败（Windows） | 句柄未释放（日志被占用） | 让 bridge 写日志到真实 `PROJECT_DIR/temp`，不要 patch 到临时目录 |
 | heredoc 内容被截断/吃反斜杠 | 单条太长 / 经过 shell 层 | 分块写；`chr(92)` 构造 |
