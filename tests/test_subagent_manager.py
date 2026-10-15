@@ -2364,5 +2364,45 @@ class LeadMessageRoutingTest(unittest.TestCase):
             self.assertEqual(row["recipient"], "/root/agent_2")
 
 
+class ReceiptProvenanceWiringTest(unittest.TestCase):
+    """A queued message must leave a receipt and a provenance record (CC m0188/m0300)."""
+
+    def _manager(self, td):
+        class FakeProcess:
+            next_pid = 9500
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+        )
+
+    def test_send_records_a_receipt_and_a_provenance_digest(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "initial")
+
+            row = manager.send_message("a", "hello", author="/root")
+
+            sends = manager.receipt_ledger.snapshot()["sends"]
+            self.assertTrue(any(item["message_id"] == row["message_id"] and item["to"] == "/root/a" for item in sends))
+            self.assertIn(row["digest"], manager.provenance_ledger.digests())
+
+    def test_roster_includes_root_and_live_agents(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "initial")
+
+            roster = manager.roster()
+
+            self.assertIn("/root", roster)
+            self.assertIn("/root/a", roster)
+
+
 if __name__ == "__main__":
     unittest.main()

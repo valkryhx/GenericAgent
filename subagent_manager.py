@@ -15,6 +15,7 @@ from subagent_registry import SubagentRegistry, _default_process_identity
 from subagent_submissions import SubagentSubmissionLog
 from subagent_transcript import SubagentTranscriptStore
 from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
+from subagent_receipts import ProvenanceLedger, SubagentSendLedger
 from subagent_wait import (
     evaluate_wait_condition,
     is_workflow_run_id,
@@ -261,6 +262,9 @@ class SubagentManager:
         self.realtime_channel_factory = realtime_channel_factory or self._env_realtime_channel_factory()
         self._realtime_channels = {}
         self.event_bus = SubagentEventBus(self.temp_dir / "subagents", publisher=self._publish_realtime_event)
+        # Delivery receipts + provenance for the durable file bus (CC m0188 / m0300).
+        self.receipt_ledger = SubagentSendLedger(self.temp_dir / "subagents")
+        self.provenance_ledger = ProvenanceLedger(self.temp_dir / "subagents")
         self.process_exists = process_exists or _default_process_exists
         self.process_identity = process_identity or _default_process_identity
         self.terminate_process = terminate_process or _default_terminate_process
@@ -1943,6 +1947,11 @@ class SubagentManager:
         atomic_write_json(task_dir / "state.json", raw)
         self.registry.mark_closed(previous.agent_path, previous_status=previous.turn_status, closed_status=close_process_status)
         self._close_realtime_channel(previous.agent_path, task_dir=task_dir)
+        # A closed agent can never consume, so drop the receipts aimed at it (CC m0188 JAr).
+        try:
+            self.receipt_ledger.reap({previous.agent_path})
+        except Exception:
+            pass
         return CloseResult(target, previous, closed, previous.final_output_path)
 
     LEAD_TARGETS = frozenset({"team-lead", "lead", "main"})
@@ -1963,6 +1972,10 @@ class SubagentManager:
             raise ValueError("the root agent is the lead; it cannot message team-lead")
         task_dir = self.temp_dir / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
+        message_id = "lead_%s_%s" % (task_name, os.urandom(4).hex())
+        digest = self.provenance_ledger.record(
+            author=author, recipient="/root", content=message, message_id=message_id
+        )
         event = {
             "type": "lead_message",
             "task_name": task_name,
@@ -1970,10 +1983,24 @@ class SubagentManager:
             "recipient": "/root",
             "message": str(message),
             "trigger_turn": bool(trigger_turn),
+            "message_id": message_id,
+            "digest": digest,
         }
+        self.receipt_ledger.record_send(message_id, to="/root", digest=digest)
         append_parent_inbox_event(task_dir, event)
         append_jsonl_event(task_dir / "events.jsonl", event)
-        return {"recipient": "/root", "task_name": task_name, "author": author, "message_id": None, "lead_message": True}
+        return {"recipient": "/root", "task_name": task_name, "author": author, "message_id": message_id, "lead_message": True}
+
+    def roster(self):
+        """Known team member agent paths, for provenance verification (CC m0300)."""
+        paths = {"/root"}
+        try:
+            for state in self.registry.list_agents(include_closed=True):
+                if getattr(state, "agent_path", None):
+                    paths.add(str(state.agent_path))
+        except Exception:
+            pass
+        return paths
 
     def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)
@@ -1992,6 +2019,12 @@ class SubagentManager:
             message_id=self._submission_message_id(submission_id, primary_path),
             other_recipients=[p for p in ([primary_path] + extra_paths) if p != primary_path] or None,
             source_tool="followup_task" if trigger_turn else "send_message",
+            provenance=self.provenance_ledger,
+        )
+        # Receipt state machine: the sender keeps a bounded outstanding-send record so it
+        # can later tell delivered/consumed from dropped (CC m0188).
+        self.receipt_ledger.record_send(
+            row.get("message_id"), to=primary_path, digest=row.get("digest")
         )
         event = {
             "type": "message_queued",

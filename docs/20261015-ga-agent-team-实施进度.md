@@ -14,7 +14,7 @@
 | P2 | teammate 自主协作（放开 send_message + 任务工具） | ✅ 完成 | `3d1250e` |
 | P3 | 协调者提示词 + teammate 简报 | ✅ 完成 | `830af51` |
 | P4 | 通知格式对齐 + 防伪前置 | ✅ 完成 | `4f8dcaf` |
-| P5 | 协作可靠性（回执 + 防伪 + 已读去重） | ⬜ 未开始 | |
+| P5 | 协作可靠性（回执 + 防伪 + 已读去重） | ✅ 完成 | 见下 |
 | P6 | 进度自驱 + 发现即通知去重 | ⬜ 未开始 | |
 
 ---
@@ -253,7 +253,63 @@ python -m pytest tests/test_subagent_notifications.py -q
 
 ---
 
-## 下一步：P5（协作可靠性：回执 + 防伪 + 已读去重）
+## P5：协作可靠性（回执 + 防伪 + 已读去重）✅ 完成
+
+> 状态：✅ 完成。
+
+### 调研落盘（CC 证据，实施前先记）
+
+来源：`claudecode283_hack/docs/20261014-复刻agent-team指南.md` §8.1（通信可靠性三层）。
+
+- **(A) 传输层 `m0188 Pe(...)`**：路径合法性 / 对端 owner token 校验 / symlink 防护 / 连接超时 5000ms / 帧大小上限；**发送即记账**——成功后把 `{msgId,to}` 压入 `receipts.outstandingSends`（上限 **`be=200`**，FIFO 淘汰）。
+- **(B) 回执状态机 `m0188 XAr(msgId,state)`**：`outstanding` 命中且 `held` → 移入 `awaitingTerminal`（`wasHeld:true`）；命中 `awaitingTerminal` 且非 `held` → 从两表移除，返回 `{destination, wasHeld}`；`JAr(deadIds)` 发送者已死时清理其未决回执。入站闸门 `m1356 peer_inbound_gate`：`accept`/`hold`/`refuse`；`hold` 缓冲上限 **`F=100`**，满则最旧 `expired`；shutdown 把仍 held 的结算为 `expired`。
+- **(C) 消费/已读层 `m1575` + `m0300 Wae`**：防伪造 provenance——`verified`（ledger 记录过写这条）/ `forged`（发送者在 roster 但无 ledger 记录）/ `unverifiable`（不在 roster）；**只消费非 `forged`**。已读标记失败重试 `Sge` 次，超限「先投递、不标记」（`deliveredUnmarked`），并用 `consumedUnmarked` 集合避免重复投递。
+
+**GA 现状**：`SubagentMailbox` 有未读投递（文件落盘先于读取，天然强于 CC 的 socket），但**无回执状态机、无 provenance 校验、无已读重试/去重**。
+
+**GA 落地映射**：
+
+| CC 机制 | GA 落点 |
+| --- | --- |
+| `outstandingSends`（cap 200 FIFO） | `subagent_receipts.SubagentSendLedger`（`temp/subagents/receipts.json`） |
+| `XAr` 回执状态机 | `record_send` / `resolve(msg_id,state)`→`{destination,was_held}` |
+| `JAr(deadIds)` | `reap(dead_recipients)`；`close_agent` 时回收指向该 agent 的未决回执 |
+| `Wae` provenance | `ProvenanceLedger`（`provenance.jsonl`，sha256 摘要）+ `verify(row,roster)` |
+| 只消费非 forged | `consume_trigger_turn(provenance=..., roster=...)` 过滤并标 `state=forged` |
+| `Sge` 已读重试 + `deliveredUnmarked` | `_write_rows_with_retry` + `mailbox.jsonl.unmarked.json` 去重 |
+| shutdown 优先投递 | 子循环改为「先消费 mailbox、再查 `_stop`」，队列消息先于 shutdown 投递 |
+
+### 交付物
+
+- **`subagent_receipts.py`**（新）：
+  - `SubagentSendLedger`：`record_send` / `resolve` / `reap` / `snapshot`；上限 200 FIFO（先淘汰 terminal，再淘汰最旧 pending）。
+  - `ProvenanceLedger`：`record(...)`（sha256 摘要，append-only）/ `digests()` / `verify(row, roster, digests=None)`。
+  - `message_digest(...)` + `build_roster(temp_dir)`。
+- **`subagent_mailbox.py`**：`state` 字段（queued→delivered→consumed / forged）；`enqueue(..., provenance=)` 落摘要；`consume_trigger_turn(provenance, roster, mark_read_retries)` 丢弃 forged、重试已读、失败则 `deliveredUnmarked`；`mark_delivered` / `pending_trigger_ids`。
+- **`subagent_manager.py`**：`__init__` 建 `receipt_ledger` / `provenance_ledger`；`_queue_message` 落 provenance + 回执；`_queue_lead_message` 同；`roster()`；`close_agent` 回收该 agent 的回执。
+- **`agentmain.py`**：子循环先消费 mailbox（带 provenance + roster）再查 `_stop`（队列消息先于 shutdown 投递）。
+
+### 测试
+
+- 新增 `tests/test_subagent_receipts.py`（10）：回执 record/resolve/was_held/reap/FIFO 上限/pending 优先；provenance verified/forged/unverifiable + digest 稳定性 + roster。
+- `tests/test_subagent_mailbox.py` 新增 `MailboxReliabilityTest`（4）：forged 行被标记且不消费；`mark_delivered`；`pending_trigger_ids`；已读失败→投递未标记且不重复投递。
+- `tests/test_subagent_manager.py` 新增 `ReceiptProvenanceWiringTest`（2）：发送落回执 + provenance；roster 含 /root 与在跑 agent。
+- 既有测试适配（消息必须带 provenance 才被视为真消息）：`test_subagent_mailbox`、`test_agentmain_subagent_lifecycle`（2 处）、`test_subagent_realtime_ipc`（4 处）。
+- 回归：`pytest tests/test_subagent_*.py tests/test_ga_subagent_tools.py tests/test_ga_task_tools.py tests/test_ga_subagent_permissions.py tests/test_agentmain_role_prompts.py -q` → **351 passed, 2 skipped**。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_receipts.py tests/test_subagent_mailbox.py -q
+```
+
+---
+
+## 下一步：P6（进度自驱 + 发现即通知去重）
+
+- 空闲自动认领（`m1575 qe`）、终止即回收任务（`m0300 N4e`）、`idle_notification` 帧、结果长度预算（4000/16000）、显式 DM 去重（`m1448`）。
+
+
 
 - `SubagentMailbox` 升级为可回执（`msg_id` + `state`）、可去重、可防伪（provenance ledger）。
 - 对齐 CC `m0188` receipts / `m0300 Wae` provenance / `m1575` 已读重试。

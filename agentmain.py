@@ -1679,6 +1679,26 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             _subagent_event(task_dir, {'type': 'agent_waiting_reply', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
             consume_file(task_dir, '_stop')
             stop_requested = False
+            # Provenance + receipts for the durable file bus (CC m0300 / m0188): a row that
+            # was not written through the ledger is not a genuine teammate message.
+            try:
+                from subagent_receipts import ProvenanceLedger, build_roster
+
+                _prov_ledger = ProvenanceLedger(os.path.join(os.path.dirname(task_dir), 'subagents'))
+                _roster = build_roster(os.path.dirname(task_dir))
+            except Exception:
+                _prov_ledger, _roster = None, None
+
+            def _consume_child_mailbox():
+                try:
+                    from subagent_mailbox import SubagentMailbox
+
+                    return SubagentMailbox(os.path.join(task_dir, 'mailbox.jsonl')).consume_trigger_turn(
+                        provenance=_prov_ledger, roster=_roster
+                    )
+                except Exception:
+                    return None
+
             for wait_s in _reply_wait_slices(poll_interval, idle_timeout, max_wait_iterations, monotonic_fn):
                 if realtime_subscriber is not None and not realtime_subscriber.closed:
                     # A signal carries no payload; it only means "go re-read the durable
@@ -1693,16 +1713,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                     # degradation has to be visible or it looks healthy.
                     child_ipc_status, child_ipc_fallback_reason = 'fallback', 'realtime channel disconnected mid-run; durable file event bus stays the transport'
                     _record_child_ipc_status(task_dir, task_name, child_ipc_status, child_ipc_fallback_reason)
-                if consume_file(task_dir, '_stop'):
-                    _subagent_state(task_dir, task_name, nround, 'completed', 'shutdown', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
-                    _subagent_event(task_dir, {'type': 'agent_shutdown', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
-                    stop_requested = True
-                    break
-                try:
-                    from subagent_mailbox import SubagentMailbox
-                    mailbox_result = SubagentMailbox(os.path.join(task_dir, 'mailbox.jsonl')).consume_trigger_turn()
-                except Exception:
-                    mailbox_result = None
+                mailbox_result = _consume_child_mailbox()
                 if mailbox_result is not None:
                     raw = mailbox_result.get('content') or ''
                     consume_file(task_dir, 'reply.txt')
@@ -1713,6 +1724,13 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                         'source': 'mailbox',
                         'message_ids': [row.get('message_id') for row in mailbox_result.get('messages') or []],
                     })
+                    break
+                if consume_file(task_dir, '_stop'):
+                    # CC m1356: a queued message is delivered ahead of a shutdown request,
+                    # so only stop once nothing is left to deliver.
+                    _subagent_state(task_dir, task_name, nround, 'completed', 'shutdown', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
+                    _subagent_event(task_dir, {'type': 'agent_shutdown', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
+                    stop_requested = True
                     break
                 if (raw := consume_file(task_dir, 'reply.txt')):
                     _subagent_event(task_dir, {'type': 'message_consumed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})

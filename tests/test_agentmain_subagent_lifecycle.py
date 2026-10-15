@@ -560,6 +560,14 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             def sleep_fn(_):
                 sleep_calls["count"] += 1
                 if sleep_calls["count"] == 1:
+                    from subagent_receipts import ProvenanceLedger
+
+                    ProvenanceLedger(Path(td) / "temp" / "subagents").record(
+                        author="/root",
+                        recipient="/root/demo_mailbox",
+                        content="second task from mailbox",
+                        message_id="msg_1",
+                    )
                     row = {
                         "schema_version": 1,
                         "id": "msg_1",
@@ -611,6 +619,14 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             def sleep_fn(_):
                 sleep_calls["count"] += 1
                 if sleep_calls["count"] == 1:
+                    from subagent_receipts import ProvenanceLedger
+
+                    ProvenanceLedger(Path(td) / "temp" / "subagents").record(
+                        author="/root",
+                        recipient="/root/demo_mailbox",
+                        content="second task from mailbox",
+                        message_id="msg_1",
+                    )
                     row = {
                         "schema_version": 1,
                         "id": "msg_1",

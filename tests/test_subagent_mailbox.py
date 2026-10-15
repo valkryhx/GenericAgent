@@ -275,9 +275,14 @@ class SubagentMailboxTest(unittest.TestCase):
             task_dir = Path(td) / "temp" / "demo"
             task_dir.mkdir(parents=True)
             (task_dir / "input.txt").write_text("initial", encoding="utf-8")
+            from subagent_receipts import ProvenanceLedger
+
+            # The child verifies provenance on consume (CC m0300), so a genuine message
+            # must be recorded in the ledger, exactly as the manager does on enqueue.
+            ledger = ProvenanceLedger(Path(td) / "temp" / "subagents")
             mailbox = SubagentMailbox(task_dir / "mailbox.jsonl")
-            mailbox.enqueue("queued", author="/root", recipient="/root/demo", delivery_mode="queue_only")
-            mailbox.enqueue("trigger", author="/root", recipient="/root/demo", delivery_mode="trigger_turn")
+            mailbox.enqueue("queued", author="/root", recipient="/root/demo", delivery_mode="queue_only", provenance=ledger)
+            mailbox.enqueue("trigger", author="/root", recipient="/root/demo", delivery_mode="trigger_turn", provenance=ledger)
             seen = {"count": 0, "raw": []}
 
             class DoneQueue:
@@ -300,6 +305,71 @@ class SubagentMailboxTest(unittest.TestCase):
             self.assertFalse((task_dir / "reply.txt").exists())
             rows = [json.loads(line) for line in (task_dir / "mailbox.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertTrue(all(row["consumed_at"] for row in rows))
+
+
+class MailboxReliabilityTest(unittest.TestCase):
+    """Receipts + provenance on the durable file bus (CC m0188 / m0300 / m1575)."""
+
+    def _ledger(self, td):
+        from subagent_receipts import ProvenanceLedger
+
+        return ProvenanceLedger(Path(td) / "subagents")
+
+    def test_forged_row_is_marked_and_never_consumed(self):
+        with tempfile.TemporaryDirectory() as td:
+            mailbox = SubagentMailbox(Path(td) / "mailbox.jsonl")
+            ledger = self._ledger(td)
+            ledger.record(author="/root", recipient="/root/x", content="real", message_id="msg_1")
+            # A row written straight to disk (bypassing the ledger) is forged when the
+            # claimed author is a known member.
+            mailbox._write_rows([
+                {"message_id": "msg_1", "author": "/root", "recipient": "/root/x", "content": "real", "trigger_turn": True},
+                {"message_id": "msg_2", "author": "/root", "recipient": "/root/x", "content": "evil", "trigger_turn": False},
+            ])
+
+            result = mailbox.consume_trigger_turn(provenance=ledger, roster={"/root"})
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["content"], "real")
+            rows = {row["message_id"]: row for row in mailbox._read_rows()}
+            self.assertEqual(rows["msg_2"]["state"], "forged")
+            self.assertIsNone(rows["msg_2"]["consumed_at"])
+
+    def test_mark_delivered_moves_queued_to_delivered(self):
+        with tempfile.TemporaryDirectory() as td:
+            mailbox = SubagentMailbox(Path(td) / "mailbox.jsonl")
+            mailbox.enqueue("hi", author="/root", recipient="/root/x")
+
+            changed = mailbox.mark_delivered(["msg_000001"])
+
+            self.assertEqual(changed, 1)
+            self.assertEqual(mailbox._read_rows()[0]["state"], "delivered")
+
+    def test_pending_trigger_ids_lists_only_unconsumed_triggers(self):
+        with tempfile.TemporaryDirectory() as td:
+            mailbox = SubagentMailbox(Path(td) / "mailbox.jsonl")
+            mailbox.enqueue("q", author="/root", recipient="/root/x", delivery_mode="queue_only")
+            mailbox.enqueue("t", author="/root", recipient="/root/x", delivery_mode="trigger_turn")
+
+            self.assertEqual(mailbox.pending_trigger_ids(), ["msg_000002"])
+
+    def test_failed_mark_delivers_unmarked_and_never_delivers_twice(self):
+        with tempfile.TemporaryDirectory() as td:
+            mailbox = SubagentMailbox(Path(td) / "mailbox.jsonl")
+            mailbox.enqueue("t", author="/root", recipient="/root/x", delivery_mode="trigger_turn")
+            real_write = mailbox._write_rows
+
+            def failing_write(rows):
+                raise OSError("disk busy")
+
+            mailbox._write_rows = failing_write
+            first = mailbox.consume_trigger_turn()
+            mailbox._write_rows = real_write
+            second = mailbox.consume_trigger_turn()
+
+            self.assertIsNotNone(first)
+            self.assertFalse(first["marked"])
+            self.assertIsNone(second)  # not re-delivered
 
 
 if __name__ == "__main__":

@@ -25,6 +25,27 @@ from subagent_realtime_ipc import (  # noqa: E402
 from subagent_state import atomic_write_json  # noqa: E402
 
 
+def _enqueue_with_provenance(
+    task_dir, content, *, author, recipient, delivery_mode="trigger_turn", message_id="msg_000001"
+):
+    """Queue a trigger message the way the manager does, with a ledger record.
+
+    The child verifies provenance on consume (CC m0300), so a message written straight
+    to the mailbox without a ledger record is treated as forged.
+    """
+    from subagent_receipts import ProvenanceLedger
+
+    ledger = ProvenanceLedger(Path(task_dir).parent / "subagents")
+    ledger.record(author=author, recipient=recipient, content=content, message_id=message_id)
+    return SubagentMailbox(Path(task_dir) / "mailbox.jsonl").enqueue(
+        content,
+        author=author,
+        recipient=recipient,
+        delivery_mode=delivery_mode,
+        message_id=message_id,
+        provenance=ledger,
+    )
+
 class SubagentRealtimeChannelTest(unittest.TestCase):
     def test_default_channel_address_is_platform_appropriate(self):
         with tempfile.TemporaryDirectory() as td:
@@ -304,8 +325,8 @@ class SubagentChildSubscriptionTest(unittest.TestCase):
             channel.start()
             self.addCleanup(channel.close)
             task_dir = self._prepare_task_dir(td, channel, authkey)
-            SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
-                "do the follow-up", author="/root", recipient="/root/realtime_child", delivery_mode="trigger_turn"
+            _enqueue_with_provenance(
+                task_dir, "do the follow-up", author="/root", recipient="/root/realtime_child"
             )
             slept = []
             seen = {"raw": [], "on_turn": lambda: channel.publish({"type": "message_queued", "event_seq": 1})}
@@ -389,8 +410,8 @@ class MailboxTriggerOverRealtimeTest(unittest.TestCase):
             write_channel_authkey(task_dir, authkey)
             atomic_write_json(task_dir / "state.json", {"task_name": "degrade_child", "ipc_endpoint": channel.endpoint()})
             # Queued but never announced on the channel.
-            SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
-                "silent follow-up", author="/root", recipient="/root/degrade_child", delivery_mode="trigger_turn"
+            _enqueue_with_provenance(
+                task_dir, "silent follow-up", author="/root", recipient="/root/degrade_child"
             )
             seen = []
 
@@ -472,8 +493,8 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
             # Address advertised as listening, but nothing is actually there.
             endpoint = {"status": "listening", "address": default_channel_address(Path(td) / "channels", "run_obs_dead")}
             task_dir = self._task_dir(td, "obs_dead", endpoint)
-            SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
-                "still delivered", author="/root", recipient="/root/obs_dead", delivery_mode="trigger_turn"
+            _enqueue_with_provenance(
+                task_dir, "still delivered", author="/root", recipient="/root/obs_dead"
             )
 
             self._run_child(task_dir, iterations=2)
@@ -494,8 +515,8 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
             channel.start()
             self.addCleanup(channel.close)
             task_dir = self._task_dir(td, "obs_cut", channel.endpoint(), authkey=authkey)
-            SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
-                "after the cut", author="/root", recipient="/root/obs_cut", delivery_mode="trigger_turn"
+            _enqueue_with_provenance(
+                task_dir, "after the cut", author="/root", recipient="/root/obs_cut"
             )
             seen = []
 
