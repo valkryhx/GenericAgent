@@ -531,6 +531,37 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **遗留（另案）**：`load_skill` 一次性把 17KB 正文塞进 tool_result 偏「重」（CC 的 skill 是渐进式披露），
   可作为后续优化项，与本次「错误被吞」修复解耦。
 
+
+### 待办 2026-10-17：Skill「渐进式披露」（progressive disclosure）对标 CC —— 必做
+
+- **动机（用户拍板）**：现在 GA 的 skill 越来越大（`workflow-authoring/SKILL.md` 已 17.3KB），
+  `load_skill` **一次性把整篇正文塞进一个 tool_result**，这既是上文那次「上游 17.7KB 裸 payload 被
+  guardrail 拒绝」的直接诱因，也浪费上下文。CC 的 skill 是**渐进式披露**，这是它的核心设计，必须抄。
+- **CC 机制（v2.1.283 源码证据）**——三级披露：
+  1. **L1 常驻上下文（廉价）**：系统提示里只放一份 **skill 清单 = 名字 + 一行描述**。
+     证据：`m0357_0xc63ba04.js` 的 `skill_listing` 提醒模板
+     `"The following skills are available for use with the Skill tool:\n\n${content}"`（`isMeta` 提醒），
+     以及 `dynamic_skill`（新发现 skill 也只播报名字）。
+  2. **L2 调用时加载正文**：`Skill` 工具被调用时才把该 skill 的**指令正文加载进本轮**。
+     证据：`m0357` 的 Skill 工具描述 `Nqt`——"Available skills appear in a system-reminder listing
+     with **one-line descriptions**… call this tool first — the skill's instructions **load into the turn**"。
+  3. **L3 按需读附带文件**：skill 目录可带额外文件（`references/`、脚本等），正文里**让模型需要时再用 Read 读**，
+     不预加载。证据：`m1556_0xdcb6d73.js` 的 `propose_skills` / `SKILL.md` 读写（`skillRoot` + `SKILL.md`）。
+  补充：`invoked_skills` 提醒（`m0357`）在**压缩后**把"本会话早先调用过的 skill 正文"重新注入，避免遗忘。
+- **GA 现状差距**：① 无 L1 清单（要么全量 load，要么模型不知道有什么 skill）；② `load_skill` 返回**全量正文**，
+  无分片/摘要；③ skill 目录附带文件没有「按需读」的显式约定；④ 压缩后无 `invoked_skills` 回注。
+- **优化方向（初稿，待细化）**：
+  1. L1：把已注册 skill 的 `name + description`（+ 可选 `when_to_use`）注入系统提示/提醒，**不注入正文**。
+  2. L2：`load_skill(name)` 仍返回正文，但正文本身应按"渐进式"重写——**先给目录/摘要 + 指向附带文件的路径**，
+     而不是一次性倾倒；对超长 SKILL.md 提供 `load_skill(name, section=...)` 或让模型自己 `file_read` 分段。
+  3. L3：约定 skill 目录内 `references/*.md` 等按需读取（正文里显式写"需要 X 时读 references/x.md"）。
+  4. 压缩后回注 `invoked_skills`（对齐 CC）。
+  5. 顺带解决上文那个「大 payload 被渠道 guardrail 拒绝」的诱因（正文不再一次性全塞）。
+- **验收标准**：① 系统提示里能看到 skill 清单（名字+一行描述）而**不含正文**；② 一次 workflow 任务里
+  `load_skill` 的 tool_result 体量显著下降（不再 17KB 级单块）；③ 需要细节时模型能按路径分段读取并完成任务；
+  ④ 压缩/续跑后 skill 指南仍在（回注）。
+- **关联**：`llmcore.py` 的 `!!!Error:` 修复（commit `caa42f1`）已让"被渠道拒绝"可被看见；本条是**根因侧**的优化。
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；
