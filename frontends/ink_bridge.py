@@ -255,6 +255,13 @@ class GenericAgentBridge:
             from workflow_activation import WorkflowActivationState
 
         self._workflow_activation = WorkflowActivationState()
+        with backend_output_redirect():
+            from subagent_team_activation import TeamActivationState
+
+        # Bridge-scoped agent-team session switch (``/team on|off``); ``GA_AGENT_TEAMS=1``
+        # seeds it enabled. Per-turn activation stays stateless and is resolved from the
+        # request text (CC has no team slash command; the session gate mirrors --agent-teams).
+        self._team_activation = TeamActivationState()
         self._workflow_emitted_sequences: dict[str, set[int]] = {}
         self._mcp_watch_lock = threading.Lock()
         self._mcp_watch_thread: threading.Thread | None = None
@@ -343,26 +350,53 @@ class GenericAgentBridge:
             # tool. GA no longer auto-plans; the main agent is the script author
             # (Claude Code's direct-JS model). A merely workflow-friendly task is
             # not opt-in, so a ``recommended`` verdict does nothing special.
+            from subagent_team_activation import team_activation_reminder
             from workflow_activation import workflow_opt_in_reminder
 
+            stripped = raw_text.strip()
+            lowered = stripped.lower()
             activation = self._workflow_activation.handle(text)
-            if activation.action == "requested":
-                stripped = raw_text.strip()
-                # ``/workflow on`` (and the per-turn ``/workflow <task>`` prefix)
-                # are opt-in markers, not part of the request: inject the CC-style
-                # reminder and hand the model the task text without the prefix.
-                if stripped.lower() == "/workflow on":
-                    self.emit({"type": "status", "status": "idle"})
-                    self.emit({"type": "system", "text": "Dynamic workflow session mode enabled: the agent will author a JS workflow script for multi-step requests."})
-                    return 0
-                if stripped.lower().startswith("/workflow"):
-                    text = activation.task_text
-                if text.strip():
-                    text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
-            elif raw_text.strip().lower() == "/workflow off":
+            team = self._team_activation.handle(text)
+
+            # ``/workflow on|off`` and ``/team on|off`` are session switches, not requests:
+            # answer them locally and never hand the marker to the model.
+            if lowered == "/workflow on":
+                self.emit({"type": "status", "status": "idle"})
+                self.emit({"type": "system", "text": "Dynamic workflow session mode enabled: the agent will author a JS workflow script for multi-step requests."})
+                return 0
+            if lowered == "/workflow off":
                 self.emit({"type": "status", "status": "idle"})
                 self.emit({"type": "system", "text": "Dynamic workflow session mode disabled."})
                 return 0
+            if lowered == "/team on":
+                self.emit({"type": "status", "status": "idle"})
+                self.emit({"type": "system", "text": "Agent team session mode enabled: parallel / independent requests may stand up named teammates."})
+                return 0
+            if lowered == "/team off":
+                self.emit({"type": "status", "status": "idle"})
+                self.emit({"type": "system", "text": "Agent team session mode disabled."})
+                return 0
+
+            workflow_signals = set(activation.matched_signals)
+            # An explicit *workflow* request (``/workflow <task>`` or "用 workflow") always
+            # wins: the user asked for a scripted workflow, not a team. Everything else that
+            # looks parallelizable gets the CC plan-approval nudge (adapted: a natural request
+            # is enough), so the user never has to type team syntax.
+            explicit_workflow = activation.action == "requested" and bool(
+                {"slash_workflow", "workflow_mention"} & workflow_signals or activation.mode == "session"
+            )
+            team_wants = team.action in ("recommended", "requested")
+            if explicit_workflow:
+                # ``/workflow on`` (and the per-turn ``/workflow <task>`` prefix) are opt-in
+                # markers, not part of the request: hand the model the task text without it.
+                if lowered.startswith("/workflow"):
+                    text = activation.task_text
+                if text.strip():
+                    text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
+            elif team_wants and text.strip():
+                text = team_activation_reminder(team) + chr(10) + chr(10) + text
+            elif activation.action == "requested" and text.strip():
+                text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
         if not self._auto_compact_if_needed(text):
             return -1
         self._task_seq += 1

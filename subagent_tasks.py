@@ -304,3 +304,34 @@ def next_task_prompt(task):
     description = task.get("description") or ""
     header = "Complete all open tasks. Start with task #%s: %s" % (task_id, subject)
     return header + ("\n\n" + str(description) if description else "")
+
+
+def team_task_protocol(task_name, *, owner_path=None, task_id=None, subject=None):
+    """Preamble prepended to a ``team_mode`` spawn message so the shared task board
+    becomes the *source of truth* for that teammate (CC: teammates claim from the board).
+
+    Two shapes:
+    - bound (``task_id`` given): the task was already claimed for the teammate at spawn;
+      the preamble tells it to close that exact task when done.
+    - unbound: the teammate must claim a claimable task first (or create one), then close it.
+    """
+    name = str(task_name or "").strip() or "teammate"
+    owner = str(owner_path or ("/root/" + name))
+    lines = [
+        "[TEAM TASK PROTOCOL]",
+        "你是本团队 teammate \"" + name + "\"（owner 一律用你的 agent 路径 \"" + owner + "\"）。"
+        "共享任务板是进度的事实来源：",
+    ]
+    if task_id is not None:
+        label = "（" + str(subject) + "）" if subject else ""
+        lines.append("- 你已被指派任务板上的 #" + str(task_id) + label
+                     + "：直接开始下面的任务，不要重复认领。")
+        lines.append("- 完成后必须 task_update taskId=" + str(task_id)
+                     + " status=completed；中途遇到阻塞/发现用 task_update 记录并 send_message 通知 lead。")
+    else:
+        lines.append("- 开始前先 task_list，找到可认领的 pending 任务（无 owner、无 blockedBy），"
+                     "用 task_update 认领（owner=\"" + owner + "\"）；若板上没有对应任务，先 task_create 建一条再认领。")
+        lines.append("- 完成后把该任务 task_update 置 status=completed；"
+                     "中途遇到阻塞/发现用 task_update 记录并 send_message 通知 lead。")
+    lines.append("[/TEAM TASK PROTOCOL]")
+    return "\n".join(lines)

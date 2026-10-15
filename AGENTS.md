@@ -471,9 +471,15 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **结论 / 对 GA 的影响**：GA **已经能靠自然输入自触发** agent team（实证：3 个 `team_mode=true` teammate
   + 共享任务板 + 正确报告）。但差距有二：① 无「场景化 nudge」（lead hint 常驻但不含"何时组队"）；
   ② **任务板不是事实来源**（teammate 按 spawn message 干活，任务停在 `pending`/无 owner）。
-- **待办**：① 在 user 消息组装处注入并行场景 nudge（对齐 CC）；② 让任务板成为 source of truth
-  （认领 + 置 completed）。不复刻 plan mode / `launchSwarm`。
-- **文档**：`docs/20261015-agent-team激活机制-调研补充.md`。
+- **待办 → 已完成（2026-10-15 本轮实施，见 P11）**：
+  ① 场景化 nudge（对齐 CC `u6t`）：`subagent_team_activation.py` + `ink_bridge.submit()` 在自然并行请求上注入
+     `[TEAM ORCHESTRATION OPT-IN]`；
+  ② 任务板成为 source of truth：`subagent_tasks.team_task_protocol()` + `ga.do_spawn_agent` 的 `_bind_team_task()`
+     预绑定（owner 统一为 agent 路径 `/root/<task_name>`）；
+  ③ 会话开关：`/team on|off` + `GA_AGENT_TEAMS=1`（贴 CC `--agent-teams`）。
+  不复刻 plan mode / `launchSwarm`。
+- **文档**：`docs/20261015-agent-team激活机制-调研补充.md`（§7 实施设计）；
+  实施记录 `docs/20261015-ga-agent-team-实施进度.md` P11。
 
 
 ### 中途调研 2026-10-12：CC Workflow 工具入口 + G8/G9

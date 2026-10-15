@@ -553,3 +553,76 @@ cd ../.. && python -m pytest tests/test_ink_bridge.py -q
 - T1 根目录 `*.py` 数 = **70**、T2 `tests/test_*.py` 数 = **107**、T3 `AGENTS.md` `## ` 标题行 = **28**（已独立复核）。
 - lead 报告自纠：首轮误用 `agent_type=explore`（被宿主裁成只读档）导致三任务阻塞 →
   关闭旧 teammate、任务重置 pending、改用 generic 档重启成功。
+
+---
+
+## P11：激活机制对齐 CC（场景化 nudge + 任务板 source of truth + 会话开关）✅ 完成
+
+> 来源：`docs/20261015-agent-team激活机制-调研补充.md`（§4 三条建议）。
+> CC 权威证据：`claudecode283_hack/docs/20261015-CC-agent-team激活机制调研.md`。
+> 云端不复刻：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+### 目标
+
+让用户**自然提问**就能用起来 agent team（不靠 `task_create` / `spawn_agent(team_mode=true)` 这类正规输入），
+并把共享任务板变成协作的**事实来源**（teammate 认领 → 置 completed）。
+
+### 交付物
+
+- **`subagent_team_activation.py`（新）** —— 场景化激活（对齐 CC `u6t` 的批准后 nudge）。
+  - 信号：`_EXPLICIT_TEAM`（多智能体 / agent team / teammate / 组队…）、`_PARALLEL`（并行/同时/分别/各自…）、
+    `_INDEPENDENT`（互不相关/彼此独立…）、`_COUNTED`（N 个/件/份/路…）、`_ENUM`（1) 2) / A、B）、`multi_item`（≥2 个分隔符）。
+  - `resolve_team_activation(text, session_enabled)` → `TeamActivationDecision(mode, action, signals, reason)`；
+    explicit → `requested`；并行+强信号 → `recommended`；弱信号（仅"同时"）→ `none`。
+  - `TeamActivationState`：`/team on|off` 会话开关；`GA_AGENT_TEAMS=1` 播种（贴 CC `--agent-teams`/env 门控 `m0283`）。
+  - `team_activation_reminder()` → `[TEAM ORCHESTRATION OPT-IN]…[/TEAM ORCHESTRATION OPT-IN]`（CC 同款"可拆就 spawn teammate"措辞）。
+- **`subagent_tasks.team_task_protocol(name, owner_path, task_id, subject)`（新）** —— team_mode spawn 的
+  `[TEAM TASK PROTOCOL]` 前言：已绑定任务则"直接干、完成置 completed"；未绑定则"先 task_list 认领 / 无则 task_create 再认领"。
+- **`ga.do_spawn_agent`** —— `team_mode=True` 时：
+  - `_bind_team_task()` 预绑定（优先 subject/description 命中 teammate 名，否则取首个可认领任务，CC `qe` FIFO）；
+  - 把 `team_task_protocol(...)` 前置到 spawn message；结果加 `team_task`；spawn 失败则 `reclaim_owner` 回收。
+- **`frontends/ink_bridge.py`** —— `submit()` 装配：
+  - `/team on|off` 本地应答（同 `/workflow on|off`）；`TeamActivationState` 在 `__init__` 用 `GA_AGENT_TEAMS` 播种。
+  - 优先级：**显式 workflow 请求**（`/workflow <task>` 或"用 workflow"）→ workflow opt-in；
+    否则并行/独立信号 → **team nudge**；否则 `explicit_fanout` → workflow opt-in。
+  - nudge 只加在 model-facing `text`，transcript 保留原文。
+- **`frontends/ink-ui/src/inputController.ts`** —— `/team on|off` → `submit`（`/team`、`/team list`、`/agents` 仍是名册面板）。
+- **`subagent_prompts.py`** —— teammate 简报的 owner 措辞对齐为 **agent 路径** `/root/<task_name>`
+  （与 idle 认领、`/team` 面板的 `agentId` 归属一致）。
+
+### 测试
+
+- 新增 `tests/test_subagent_team_activation.py`（9 例 + 6 子测试）：显式团队 / 并行计数 / multi_item /
+  语义 workflow 不误触 / 弱信号不触发 / env 门控 / 会话开关与寒暄抑制 / reminder 契约。
+- `tests/test_ga_subagent_tools.py`（+2）：team_mode spawn 前置协议且自动绑定（owner=`/root/<name>`、`in_progress`、
+  `team_task` 回执）；非 team_mode 无协议、无 `team_task`。
+- `tests/test_ink_bridge.py`（+3）：自然并行请求注入 `TEAM ORCHESTRATION OPT-IN`（transcript 保留原文）；
+  显式 workflow 请求压过 team nudge；`/team on` 本地应答 + 会话模式对实质回合注入 nudge。
+- `frontends/ink-ui/src/inputController.test.ts`（+1）：`/team on|off` → submit。
+- 回归：`pytest tests/test_workflow_activation.py tests/test_subagent_prompts.py tests/test_agentmain_role_prompts.py
+  tests/test_subagent_tasks.py tests/test_ga_task_tools.py tests/test_ga_subagent_tools.py tests/test_ink_bridge.py -q`
+  → **210 passed**；`pytest tests/test_ink_bridge.py tests/test_ga_subagent_tools.py -q` → **171 passed**；
+  ink-ui `npm test` → **421 passed**；`npx tsc --noEmit` → 0。
+
+### 复现命令
+
+```bash
+python -m pytest tests/test_subagent_team_activation.py tests/test_ga_subagent_tools.py tests/test_ink_bridge.py -q
+cd frontends/ink-ui && npm test && npx tsc --noEmit
+```
+
+### 设计说明（与 CC 的对应关系）
+
+| CC 机制 | GA 落点 |
+| --- | --- |
+| 批准计划后 nudge `u6t`（`m0503 @78213`） | 自然并行请求 → `team_activation_reminder()` 注入 user 消息（GA 无 plan mode） |
+| 会话开关 `--agent-teams` / env（`m0283`） | `/team on|off` + `GA_AGENT_TEAMS=1` |
+| teammate 从任务板认领（`qe`/`He`） | `team_task_protocol` + `_bind_team_task` 预绑定 + idle 自动认领 |
+| **无**团队斜杠命令 | GA 仍保留 `/team`、`/agents` 名册面板（增强），并新增 `/team on|off`（会话开关，非 CC 原生） |
+| `launchSwarm` / plan mode | 不复刻（GA 无 plan mode） |
+
+### 验收（待真实 e2e 复核）
+
+- 自然输入（无团队语法）跑一次：`team_mode=true` teammate ≥2、任务板有对应任务，
+  且**任务被认领并置 completed**（`taskBoard.completed > 0`）。
+- 用 `frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts` 观测模式（`GA_TEAM_E2E_SOFT=1`）复跑对比。

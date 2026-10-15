@@ -1039,6 +1039,18 @@ class GenericAgentHandler(BaseHandler):
             permission_options,
         )
         manager = self._get_subagent_manager()
+        bound_task = None
+        if team_mode:
+            from subagent_tasks import team_task_protocol
+
+            owner_path = "/root/" + str(task_name)
+            bound_task = self._bind_team_task(manager, task_name, owner_path)
+            message = team_task_protocol(
+                task_name,
+                owner_path=owner_path,
+                task_id=(bound_task or {}).get("id"),
+                subject=(bound_task or {}).get("subject"),
+            ) + chr(10) + chr(10) + message
         yield f"[Action] Spawning subagent: {task_name}\n"
         try:
             handle = manager.spawn_agent(
@@ -1091,14 +1103,57 @@ class GenericAgentHandler(BaseHandler):
                 "context_mode": "isolated" if fork_turns.lower() == "none" else "explicit_fork",
                 "llm_no": handle.llm_no,
             }
+            if bound_task:
+                result["team_task"] = {"id": bound_task.get("id"), "subject": bound_task.get("subject")}
             yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
         except Exception as e:
+            if bound_task:
+                try:
+                    manager.task_store().reclaim_owner("/root/" + str(task_name))
+                except Exception:
+                    pass
             result = self._subagent_error_result(e)
             result["requested_isolation"] = requested_isolation
             result["isolation"] = isolation
             result["isolation_fallback_reason"] = isolation_fallback_reason
             yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _bind_team_task(self, manager, task_name, owner_path):
+        """Pre-assign a claimable board task to a team_mode teammate (CC: teammates claim from the board).
+
+        Prefers a task whose subject/description mentions the teammate name, else the first
+        claimable task (CC ``qe`` FIFO). Returns the claimed task dict, or None when the board
+        has nothing claimable (the teammate then claims/creates one via the spawn preamble).
+        """
+        try:
+            store = manager.task_store()
+            tasks = store.list_tasks()
+        except Exception:
+            return None
+        claimable = [
+            t for t in tasks
+            if t.get("status") == "pending" and not t.get("owner") and not (t.get("blockedBy") or [])
+        ]
+        if not claimable:
+            return None
+        needle = str(task_name or "").strip().lower()
+        pick = None
+        if needle:
+            for candidate in claimable:
+                hay = (str(candidate.get("subject") or "") + " " + str(candidate.get("description") or "")).lower()
+                if needle in hay:
+                    pick = candidate
+                    break
+        if pick is None:
+            pick = claimable[0]
+        try:
+            result = store.claim_task(pick["id"], str(owner_path), start=True)
+        except Exception:
+            return None
+        if isinstance(result, dict) and result.get("success"):
+            return result.get("task") or pick
+        return None
 
     @staticmethod
     def _subagent_error_result(exc):

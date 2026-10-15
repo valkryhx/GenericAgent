@@ -424,6 +424,57 @@ class InkBridgeTest(unittest.TestCase):
         user_event = next(event for event in events if event.get("type") == "user")
         self.assertEqual("用 workflow 帮我并行调研 A、B、C，然后综合验证", user_event["text"])
 
+    def test_submit_injects_team_opt_in_reminder_for_parallel_request(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        task = "帮我并行做三件互不相关的小统计，然后汇总成一份报告"
+
+        task_id = bridge.submit(task)
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+
+        self.assertEqual(1, task_id)
+        submitted = agent.prompts[0][0]
+        self.assertIn("TEAM ORCHESTRATION OPT-IN", submitted)
+        self.assertIn("spawn_agent(team_mode=true)", submitted)
+        # The model-facing reminder must not leak into the user transcript.
+        user_event = next(event for event in events if event.get("type") == "user")
+        self.assertEqual(task, user_event["text"])
+
+    def test_explicit_workflow_request_wins_over_the_team_nudge(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.submit("用 workflow 帮我并行调研 A、B、C，然后综合验证")
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+
+        submitted = agent.prompts[0][0]
+        self.assertIn("WORKFLOW OPT-IN", submitted)
+        self.assertNotIn("TEAM ORCHESTRATION OPT-IN", submitted)
+
+    def test_team_session_toggle_is_answered_locally(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        self.assertEqual(0, bridge.submit("/team on"))
+        self.assertEqual([], agent.prompts)
+        self.assertTrue(any(
+            event.get("type") == "system" and "Agent team session mode enabled" in event.get("text", "")
+            for event in events
+        ))
+
+        # Session mode nudges a substantive turn even without explicit parallel words.
+        bridge.submit("生成一份报告")
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+        self.assertIn("TEAM ORCHESTRATION OPT-IN", agent.prompts[0][0])
+
+        self.assertEqual(0, bridge.submit("/team off"))
+
     def test_submit_forwards_images_to_put_task(self):
         agent = FakeAgent()
         events = []

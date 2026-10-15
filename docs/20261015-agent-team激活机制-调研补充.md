@@ -103,3 +103,44 @@ teammate 是**按 spawn message 干活的**，没有走「从板上认领 → �
   `temp/teams/session-cb790b6a/tasks.json`
 - 驱动脚本：`frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts`
   （支持 `GA_TEAM_E2E_PROMPT` / `GA_TEAM_E2E_SOFT`）
+
+---
+
+## 7. 实施设计（本轮落盘，已实现）
+
+> 见 `docs/20261015-ga-agent-team-实施进度.md` **P11**。三条建议全部落地。
+
+### 7.1 场景化 nudge（建议 1，对齐 CC）
+
+- 新模块 `subagent_team_activation.py`（镜像 `workflow_activation.py` 的结构）：
+  - 信号分级：显式团队词（`多智能体`/`agent team`/`teammate`/`组队`）→ `requested`；
+    `并行 + (计数/枚举/独立/multi_item)` → `recommended`；仅弱词（`同时`）→ `none`（避免噪音）。
+  - `team_activation_reminder()` 产出 `[TEAM ORCHESTRATION OPT-IN]` 包裹的 CC 同款措辞：
+    "可拆成多个互不依赖子任务 → 先 `task_create` 建板、再 `spawn_agent(team_mode=true)`、
+    要求 teammate 认领并置 completed"。
+- 注入点：`frontends/ink_bridge.py::submit()`，只加在 **model-facing text**，transcript 保留原文。
+
+### 7.2 任务板成为 source of truth（建议 2）
+
+- `subagent_tasks.team_task_protocol()`：team_mode spawn 的 `[TEAM TASK PROTOCOL]` 前言。
+- `ga.do_spawn_agent`：`team_mode=True` 时 `_bind_team_task()` **预绑定**一条可认领任务
+  （优先 subject/description 命中 teammate 名，否则首个可认领，CC `qe` FIFO），并把它写进前言；
+  无任务可绑时前言降级为"先 task_list 认领 / 无则 task_create"。
+- **owner 统一为 agent 路径** `/root/<task_name>`：与 idle 认领（`agentmain._teammate_idle_hook`）、
+  `/team` 面板（`_team_roster_payload` 用 `agentId` 归属任务）一致；`TEAMMATE_USAGE_HINT` 措辞已同步。
+
+### 7.3 会话开关（建议 3，贴 CC `--agent-teams`）
+
+- `/team on|off`（bridge 本地应答，`TeamActivationState`）+ `GA_AGENT_TEAMS=1`（进程级播种）。
+- `inputController.ts` 把 `/team on|off` 路由为 `submit`；`/team`、`/team list`、`/agents` 仍是名册面板。
+
+### 7.4 与 workflow 的优先级（避免双入口打架）
+
+显式 workflow 请求（`/workflow <task>` 或"用 workflow"）**恒优先** → 注入 workflow opt-in；
+其余并行/独立请求 → team nudge；`explicit_fanout`（如"并行调研"）→ 若未命中 team 强信号则回落 workflow opt-in。
+（CC 本身无 workflow 自动触发，此优先级是 GA 两套机制共存下的收敛规则。）
+
+### 7.5 验收
+
+- 自然输入（无团队语法）：`team_mode=true` teammate ≥2 + 任务板任务**被认领并置 completed**。
+- 观测模式复跑：`frontends/ink-ui/scripts/real_ink_team_swarm_e2e.ts`（`GA_TEAM_E2E_SOFT=1`）对比 `taskBoard.completed`。

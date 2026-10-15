@@ -130,6 +130,9 @@ function parseSlashSubmit(
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
   // CC execution-time team view: roster + shared task board (/agents is the CC alias).
   if (trimmed === '/team' || trimmed === '/team list' || trimmed === '/agents') return { command: { type: 'team_list' } }
+  // ``/team on|off`` toggles the agent-team session switch. The bridge resolves the
+  // activation and answers locally, so the frontend just forwards the line (mirrors /workflow on|off).
+  if (/^\/team\s+(on|off)$/i.test(trimmed)) return { command: { type: 'submit', text: trimmed } }
   // approve/deny were removed from the product path; swallow them so they are not sent as chat.
   if (/^\/workflow\s+(approve|deny)\b/i.test(trimmed)) return {}
   // ``/workflow on|off`` toggles session opt-in. The bridge resolves the

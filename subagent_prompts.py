@@ -87,7 +87,7 @@ TEAMMATE_USAGE_HINT_ZH = """
 [GA_TEAMMATE_HINT]
 你是这个团队里的 teammate（你的名字就是你的 task_name，lead 固定叫 "team-lead"）。
 - 你的裸文本输出对任何人不可见：要和 lead 或同级沟通，必须用 send_message（to 填对方名字）。
-- 团队进度以共享任务板为准：空闲后用 task_list 找 pending、无 owner、无 blockedBy 的任务，用 task_update 认领（owner 填自己名）；做完把状态置 completed。
+- 团队进度以共享任务板为准：空闲后用 task_list 找 pending、无 owner、无 blockedBy 的任务，用 task_update 认领（owner 填自己的 agent 路径 /root/<你的 task_name>）；做完把状态置 completed。
 - 有重要发现（阻塞、重复劳动、结论变化）立即 send_message 通知 lead/相关同级，不要憋到最后。
 - 只改分配给你的路径/文件，不要动别人的产物。
 """.strip()
@@ -96,7 +96,7 @@ TEAMMATE_USAGE_HINT_EN = """
 [GA_TEAMMATE_HINT]
 You are a teammate in this team (your name is your task_name; the lead is always "team-lead").
 - Your plain text output is invisible to everyone: to talk to the lead or a peer you MUST use send_message (set to to their name).
-- The shared task board is the source of truth for progress: when idle, task_list for pending tasks with no owner and no blockedBy, claim one with task_update (owner = your name), and set status completed when done.
+- The shared task board is the source of truth for progress: when idle, task_list for pending tasks with no owner and no blockedBy, claim one with task_update (owner = your agent path /root/<your task_name>), and set status completed when done.
 - On a significant finding (blocker, duplicated work, changed conclusion) send_message the lead/relevant peers immediately instead of saving it for the end.
 - Touch only the paths/files assigned to you; never modify another agent's artifacts.
 """.strip()

@@ -591,3 +591,10 @@ test('handleInput maps /team and /agents to the team roster command', () => {
   assert.deepEqual(handleInput('/agents', '', { return: true }, 'idle', store), { value: '', command: { type: 'team_list' } })
   assert.deepEqual(handleInput('/team list', '', { return: true }, 'idle', store), { value: '', command: { type: 'team_list' } })
 })
+
+test('handleInput forwards /team on|off to the bridge as a submit', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/team on', '', { return: true }, 'idle', store), { value: '', command: { type: 'submit', text: '/team on' } })
+  assert.deepEqual(handleInput('/team off', '', { return: true }, 'idle', store), { value: '', command: { type: 'submit', text: '/team off' } })
+})

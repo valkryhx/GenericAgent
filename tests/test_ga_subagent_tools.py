@@ -211,6 +211,54 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertTrue(state["capability_options"]["team_mode"])
             self.assertEqual(state["capability_profile"], "team")
 
+    def test_spawn_agent_team_mode_prepends_task_protocol_and_binds_a_task(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 224})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("teammate_worker stats", "count root py files")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"task_name": "teammate_worker", "message": "do the work", "team_mode": True},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            input_text = (Path(td) / "temp" / "teammate_worker" / "input.txt").read_text(encoding="utf-8")
+            self.assertIn("[TEAM TASK PROTOCOL]", input_text)
+            self.assertIn("#" + task["id"], input_text)
+            self.assertIn("do the work", input_text)
+            bound = store.get_task(task["id"])
+            self.assertEqual(bound["owner"], "/root/teammate_worker")
+            self.assertEqual(bound["status"], "in_progress")
+            self.assertEqual(outcome.data["team_task"]["id"], task["id"])
+
+    def test_spawn_agent_without_team_mode_has_no_task_protocol(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 225})(),
+                python_executable="python-test",
+            )
+            handler._get_task_store().create_task("plain_worker stats", "some work")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"task_name": "plain_worker", "message": "do the work"},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            input_text = (Path(td) / "temp" / "plain_worker" / "input.txt").read_text(encoding="utf-8")
+            self.assertNotIn("[TEAM TASK PROTOCOL]", input_text)
+            self.assertNotIn("team_task", outcome.data)
+
     def test_spawn_agent_tool_drops_worktree_for_search_only_allowlist(self):
         with tempfile.TemporaryDirectory() as td:
             worktree_calls = []
