@@ -565,6 +565,17 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **CC 侧证据（已落盘）**：`D:/git_codes/claudecode283_hack/docs/20261017-CC-skill渐进式披露调研.md`（L1 清单预算/降级、L2 `{alwaysOn,onInvoke}`、L3 附带文件、`/skills` 菜单原文、逐条模块坐标）。
 - **关键认知（避免做错方向）**：CC 的 L2 **也是载入全文**，它没把 SKILL.md 切片按需加载；渐进披露的杠杆是 ①清单常驻 ②**正文要瘦**（重内容放 `references/`）。GA 的 L1/L2 已基本对齐，真正缺的是 **L3 正文瘦身 + 压缩回注**。
 
+#### 追加实证 2026-10-17：CC Workflow 的 17K authoring prompt 是“按需 + 分通道”，不是常驻大块
+
+- **源码坐标**：`m1502_0xdb4a986.js` 定义 `t`（Workflow 工具短描述，3,078 字符）、`i`（185 字符 load-skill 指针）、`Anr()`（完整 authoring reference，17,526 字符）；`xnr(e)` 在 skill 可用时返回 `t + i`，不可用时才回退 `t + Anr()`。
+- **内置 skill**：`m1503_0xdb4fec6.js` 把 `Anr()` 注册为 `workflow-authoring` 内置 skill 的 `getPromptForCommand()` 返回值。正常路径不在 Workflow 工具 schema 里常驻 17K，而是模型调用 Skill 后才加载。
+- **两通道**：`m0357_0xc63ba04.js` 的 `TAt(...)` 取 skill 正文 `w`，构造 `Ce({ content: w, isMeta: true, ... })` 作为**独立 user message**；`m0517_0xcd36592.js` 的 tool_result 仍然只有 `Launching skill: <name>`（约 30-40 字符）。真实 transcript 形态：tool_result 小确认 + `isMeta=true` 正文消息。
+- **为什么不出问题**：17.5K 正文是合法 user text，不是嵌套 tool_result JSON；tool_result 保持极小；正文按需、一次加载；重复调用去重；compact 截断后有 re-invocation 提示。**不是因为 Claude 上下文大就无脑常驻**——17.5K 字符约 4.4-5K tokens，关键是按需加载和分通道。
+- **GA 对齐要点**：Workflow 工具描述保持短；`load_skill` 的 tool_result 只做“已加载”确认；正文作为下一轮独立注入（GA 可先用 `next_prompt`，不必先改底层 API）；正文瘦身到 `references/`；重复加载去重；compact/续跑后 `invoked_skills` 回注。
+- **详细落盘**：CC 侧 `D:/git_codes/claudecode283_hack/docs/20261017-CC-skill渐进式披露调研.md` §7；GA 侧 `docs/20261017-Skill渐进式披露对标CC.md` §1.1。
+- **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；
