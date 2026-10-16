@@ -9,6 +9,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,11 +38,15 @@ from mcp_runtime import (  # noqa: E402
     reset_mcp_manager,
     set_mcp_server_enabled,
     discover_mcp_tools_cached_fast,
+    get_mcp_tool_max_result_chars,
     start_background_discovery,
     wait_for_background_discovery,
     _MCP_LOG_DIR,
+    _load_mcp_tools_cache_entry,
     _redact_sensitive,
+    _write_mcp_tools_cache,
 )
+from tool_result_limits import clear_tool_result_max_chars  # noqa: E402
 
 
 TEMP_ROOT = REPO_ROOT / "temp" / "test_mcp_runtime"
@@ -1711,6 +1716,123 @@ class McpStartupResilienceTest(unittest.TestCase):
                 os.environ.pop("GA_MCP_LOCAL_CONNECT_CONCURRENCY", None)
             else:
                 os.environ["GA_MCP_LOCAL_CONNECT_CONCURRENCY"] = original
+
+
+class McpToolResultLimitTest(unittest.TestCase):
+    def setUp(self):
+        clear_tool_result_max_chars()
+
+    def tearDown(self):
+        clear_tool_result_max_chars()
+
+    def test_tool_meta_extracts_ga_camel_case_key(self):
+        import mcp_runtime
+
+        tool = SimpleNamespace(name="echo", meta={"maxResultSizeChars": 12345})
+        self.assertEqual(mcp_runtime._tool_max_result_size_chars(tool), 12345)
+
+    def test_tool_meta_accepts_dict_and_model_dump(self):
+        import mcp_runtime
+
+        self.assertEqual(
+            mcp_runtime._tool_max_result_size_chars({"_meta": {"maxResultSizeChars": 77}}),
+            77,
+        )
+
+        class DumpedTool:
+            def model_dump(self, **kwargs):
+                return {"_meta": {"maxResultSizeChars": 88}}
+
+        self.assertEqual(mcp_runtime._tool_max_result_size_chars(DumpedTool()), 88)
+
+    def test_tool_meta_clamps_and_rejects_invalid_values(self):
+        import mcp_runtime
+
+        cases = {
+            12.9: 12,
+            999999: 500000,
+            0: None,
+            -1: None,
+            True: None,
+            "100": None,
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                tool = SimpleNamespace(name="echo", meta={"maxResultSizeChars": raw})
+                self.assertEqual(mcp_runtime._tool_max_result_size_chars(tool), expected)
+
+    def test_tool_schema_does_not_leak_private_metadata(self):
+        import mcp_runtime
+
+        tool = SimpleNamespace(
+            name="echo",
+            description="echo",
+            inputSchema={"type": "object", "properties": {}},
+            meta={"maxResultSizeChars": 12345},
+        )
+        schema = mcp_runtime._tool_to_function_schema("demo", tool, "mcp__demo__echo")
+        self.assertNotIn("maxResultSizeChars", json.dumps(schema))
+
+    def test_cache_round_trip_registers_limit(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            cache_path = Path(tmp) / "cache.json"
+            signature = {"test": "mcp-result-limit"}
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__demo__echo",
+                        "description": "echo",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+            _write_mcp_tools_cache(
+                cache_path,
+                signature,
+                tools,
+                tool_metadata={"mcp__demo__echo": {"maxResultSizeChars": 12345}},
+            )
+            entry = _load_mcp_tools_cache_entry(cache_path, signature)
+            self.assertEqual(entry["tool_metadata"]["mcp__demo__echo"]["maxResultSizeChars"], 12345)
+
+            clear_tool_result_max_chars()
+            loaded = mcp_runtime._read_mcp_tools_cache(cache_path, signature)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(get_mcp_tool_max_result_chars("mcp__demo__echo"), 12345)
+
+    def test_old_cache_without_tool_metadata_is_compatible(self):
+        import mcp_runtime
+
+        with _tempdir() as tmp:
+            cache_path = Path(tmp) / "cache.json"
+            signature = {"test": "old-cache"}
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__demo__echo",
+                        "description": "echo",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "signature": signature,
+                        "tools": tools,
+                        "cached_at": time.time(),
+                        "complete": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = mcp_runtime._read_mcp_tools_cache(cache_path, signature)
+            self.assertEqual(len(loaded), 1)
+            self.assertIsNone(get_mcp_tool_max_result_chars("mcp__demo__echo"))
 
 
 if __name__ == "__main__":

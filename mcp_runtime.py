@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sensitive_redaction import redact_sensitive_text
+from tool_result_limits import (
+    clear_tool_result_max_chars,
+    get_tool_result_max_chars,
+    normalize_tool_result_max_chars,
+    replace_tool_result_max_chars,
+)
 
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +60,7 @@ _MCP_LOCAL_CONNECT_CONCURRENCY_DEFAULT = 4
 # stderr from stdio servers is a debug log; bound it so it cannot grow forever.
 _MCP_STDERR_LOG_MAX_BYTES_DEFAULT = 256 * 1024
 _MAX_MCP_DESCRIPTION_LENGTH = 2048
+_MCP_MAX_RESULT_SIZE_CHARS = 500000
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,7 @@ class McpToolRef:
     tool_name: str
     server_config: dict[str, Any]
     schema: dict[str, Any]
+    max_result_size_chars: Optional[int] = None
 
 
 @dataclass
@@ -158,8 +166,13 @@ def build_mcp_tool_name(server_name: str, tool_name: str) -> str:
     return f"{MCP_TOOL_PREFIX}{normalize_mcp_name(server_name)}__{normalize_mcp_name(tool_name)}"
 
 
+def _mcp_tool_prefix(server_name: str) -> str:
+    return f"{MCP_TOOL_PREFIX}{normalize_mcp_name(server_name)}__"
+
+
 def clear_mcp_cache() -> None:
     _DISCOVERY_CACHE.clear()
+    clear_tool_result_max_chars(prefix=MCP_TOOL_PREFIX)
 
 
 def mcp_discovery_state() -> dict[str, Any]:
@@ -621,7 +634,9 @@ class McpManager:
                     tool_name=original_name,
                     server_config=dict(state.config),
                     schema=schema,
+                    max_result_size_chars=_tool_max_result_size_chars(tool),
                 )
+            _register_tool_limits_from_refs(refs, state.name)
             with self.lock:
                 state.tools = schemas
                 state.tool_refs = refs
@@ -629,6 +644,7 @@ class McpManager:
                 state.error = ""
         except Exception as e:
             await self._close_state_async(state)
+            clear_tool_result_max_chars(prefix=_mcp_tool_prefix(state.name))
             with self.lock:
                 state.status = "failed"
                 state.error = _redact_sensitive(f"{type(e).__name__}: {e}")
@@ -749,6 +765,7 @@ def reset_mcp_manager() -> None:
     with _MANAGER_LOCK:
         manager = _MANAGER
         _MANAGER = None
+    clear_tool_result_max_chars(prefix=MCP_TOOL_PREFIX)
     if manager is not None:
         manager.close()
 
@@ -852,7 +869,13 @@ def discover_mcp_tools_cached(
     # A server that failed/timed out (errors non-empty) means the tool set is
     # partial; cache it only briefly so a transient remote timeout self-heals.
     complete = not discovery.errors
-    _write_mcp_tools_cache(cache_file, signature, tools, complete=complete)
+    _write_mcp_tools_cache(
+        cache_file,
+        signature,
+        tools,
+        complete=complete,
+        tool_metadata=_tool_metadata_from_refs(discovery.tool_refs),
+    )
     return tools
 
 
@@ -874,6 +897,7 @@ def available_mcp_tools(
                 errors[state.name] = state.error
                 continue
             tools.extend(dict(tool) for tool in state.tools)
+            _register_tool_limits_from_refs(state.tool_refs, state.name)
     return tools, errors
 
 
@@ -971,12 +995,16 @@ def _background_discovery_worker(
             retry_failed=retry_failed,
         )
         tools = [dict(tool) for tool in discovery.tools]
+        metadata = _tool_metadata_from_refs(discovery.tool_refs)
         errors = dict(discovery.errors)
         complete = not discovery.errors
         cfg = load_mcp_config_with_disabled(config_path)
         signature = _cache_signature(cfg, include_unavailable)
         cache_file = _discovery_cache_file(cache_path)
         previous = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
+        previous_metadata = (previous or {}).get("tool_metadata")
+        if not isinstance(previous_metadata, dict):
+            previous_metadata = {}
         if errors:
             prior_tools = len((previous or {}).get("tools") or [])
             if not tools and prior_tools:
@@ -987,7 +1015,14 @@ def _background_discovery_worker(
                 _record_discovery_skip("no_server_reached", prior_tools)
             else:
                 tools = _merge_partial_discovery(tools, previous, set(errors))
-        _write_mcp_tools_cache(cache_file, signature, tools, complete=complete)
+        metadata = _metadata_for_tool_schemas(tools, metadata, previous_metadata)
+        _write_mcp_tools_cache(
+            cache_file,
+            signature,
+            tools,
+            complete=complete,
+            tool_metadata=metadata,
+        )
     except Exception as e:
         error = _redact_sensitive(f"{type(e).__name__}: {e}")
     finally:
@@ -1145,6 +1180,7 @@ def discover_mcp_tools_cached_fast(
     cache_file = _discovery_cache_file(cache_path)
     cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
     if cached is not None:
+        _register_tool_limits_from_metadata(cached.get("tool_metadata"))
         _maybe_schedule_discovery_refresh(cached, config_path, include_unavailable, timeout, cache_path)
         return _merge_live_mcp_tools(cached["tools"], config_path, include_unavailable)
     thread = start_background_discovery(
@@ -1156,6 +1192,7 @@ def discover_mcp_tools_cached_fast(
     wait_for_background_discovery(budget, thread=thread)
     cached = _load_mcp_tools_cache_entry(cache_file, signature, allow_stale=True)
     if cached is not None:
+        _register_tool_limits_from_metadata(cached.get("tool_metadata"))
         return _merge_live_mcp_tools(cached["tools"], config_path, include_unavailable)
     tools, _errors = available_mcp_tools(config_path=config_path, include_unavailable=include_unavailable)
     return tools
@@ -1172,6 +1209,11 @@ def call_mcp_tool(
         arguments=arguments,
         timeout=timeout,
     )
+
+
+def get_mcp_tool_max_result_chars(full_name: str) -> Optional[int]:
+    """Return the registered GA ``maxResultSizeChars`` for an MCP tool."""
+    return get_tool_result_max_chars(full_name)
 
 
 def _default_timeout(
@@ -1323,11 +1365,15 @@ def _load_mcp_tools_cache_entry(
         return None
     cached_at = data.get("cached_at")
     complete = bool(data.get("complete", True))
+    tool_metadata = data.get("tool_metadata")
+    if not isinstance(tool_metadata, dict):
+        tool_metadata = {}
     if allow_stale:
         return {
             "tools": [dict(tool) for tool in tools if isinstance(tool, dict)],
             "complete": complete,
             "cached_at": cached_at if isinstance(cached_at, (int, float)) else None,
+            "tool_metadata": dict(tool_metadata),
         }
     # Incomplete results (a server failed at discovery) expire after a short TTL
     # so a transient remote-server timeout does not permanently hide its tools.
@@ -1340,12 +1386,16 @@ def _load_mcp_tools_cache_entry(
         "tools": [dict(tool) for tool in tools if isinstance(tool, dict)],
         "complete": complete,
         "cached_at": cached_at if isinstance(cached_at, (int, float)) else None,
+        "tool_metadata": dict(tool_metadata),
     }
 
 
 def _read_mcp_tools_cache(cache_path: Path, signature: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
     entry = _load_mcp_tools_cache_entry(cache_path, signature)
-    return None if entry is None else entry["tools"]
+    if entry is None:
+        return None
+    _register_tool_limits_from_metadata(entry.get("tool_metadata"))
+    return entry["tools"]
 
 
 def _write_mcp_tools_cache(
@@ -1353,12 +1403,19 @@ def _write_mcp_tools_cache(
     signature: dict[str, Any],
     tools: list[dict[str, Any]],
     complete: bool = True,
+    tool_metadata: Optional[dict[str, Any]] = None,
 ) -> None:
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
             json.dumps(
-                {"signature": signature, "tools": tools, "cached_at": time.time(), "complete": bool(complete)},
+                {
+                    "signature": signature,
+                    "tools": tools,
+                    "cached_at": time.time(),
+                    "complete": bool(complete),
+                    "tool_metadata": dict(tool_metadata or {}),
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -1409,7 +1466,16 @@ async def _discover_mcp_async(cfg: McpConfig, include_unavailable: bool, timeout
                 tool_name=original_name,
                 server_config=dict(server_config),
                 schema=schema,
+                max_result_size_chars=_tool_max_result_size_chars(tool),
             )
+        _register_tool_limits_from_refs(
+            {
+                name: ref
+                for name, ref in discovery.tool_refs.items()
+                if ref.server_name == server_name
+            },
+            server_name,
+        )
     return discovery
 
 
@@ -1542,6 +1608,111 @@ def _normalize_server_config(server_config: dict[str, Any]) -> dict[str, Any]:
         merged_env.setdefault("LANG", "C.UTF-8")
         cfg["env"] = merged_env
     return cfg
+
+
+def _tool_meta(tool: Any) -> dict[str, Any] | None:
+    """Return MCP Tool ``_meta`` across SDK objects and test doubles."""
+    meta: Any = None
+    if isinstance(tool, dict):
+        meta = tool.get("_meta", tool.get("meta"))
+    else:
+        meta = getattr(tool, "meta", None)
+        if meta is None:
+            meta = getattr(tool, "_meta", None)
+        if meta is None and hasattr(tool, "model_dump"):
+            try:
+                dumped = tool.model_dump(by_alias=True)
+            except TypeError:
+                dumped = tool.model_dump()
+            if isinstance(dumped, dict):
+                meta = dumped.get("_meta", dumped.get("meta"))
+    if not isinstance(meta, dict):
+        return None
+    safe = _json_safe(meta)
+    return safe if isinstance(safe, dict) else None
+
+
+def _normalize_mcp_max_result_size_chars(value: Any) -> int | None:
+    """Normalize the GA MCP metadata field ``maxResultSizeChars``.
+
+    GA deliberately uses the plain camelCase key instead of Anthropic's
+    private ``anthropic/maxResultSizeChars`` namespace.  The value is clamped
+    to CC's 1..500000 range before it reaches the generic budget layer.
+    """
+    normalized = normalize_tool_result_max_chars(value)
+    if normalized is None:
+        return None
+    return min(normalized, _MCP_MAX_RESULT_SIZE_CHARS)
+
+
+def _tool_max_result_size_chars(tool: Any) -> int | None:
+    meta = _tool_meta(tool) or {}
+    return _normalize_mcp_max_result_size_chars(meta.get("maxResultSizeChars"))
+
+
+def _tool_metadata_from_refs(refs: dict[str, McpToolRef]) -> dict[str, dict[str, int]]:
+    return {
+        name: {"maxResultSizeChars": ref.max_result_size_chars}
+        for name, ref in refs.items()
+        if ref.max_result_size_chars is not None
+    }
+
+
+def _tool_name_from_schema(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return ""
+    return str(function.get("name") or "")
+
+
+def _metadata_for_tool_schemas(
+    tools: list[dict[str, Any]],
+    primary: dict[str, dict[str, int]],
+    fallback: dict[str, Any],
+) -> dict[str, dict[str, int]]:
+    """Keep metadata aligned with the final cached tool set."""
+    names = {name for tool in tools if (name := _tool_name_from_schema(tool))}
+    merged: dict[str, dict[str, int]] = {}
+    for name in names:
+        item = primary.get(name)
+        if not isinstance(item, dict):
+            item = fallback.get(name)
+        if isinstance(item, dict):
+            value = _normalize_mcp_max_result_size_chars(item.get("maxResultSizeChars"))
+            if value is not None:
+                merged[name] = {"maxResultSizeChars": value}
+    return merged
+
+
+def _limits_from_tool_metadata(metadata: Any) -> dict[str, int]:
+    limits: dict[str, int] = {}
+    if not isinstance(metadata, dict):
+        return limits
+    for name, item in metadata.items():
+        if not isinstance(item, dict):
+            continue
+        value = _normalize_mcp_max_result_size_chars(item.get("maxResultSizeChars"))
+        if value is not None and str(name).startswith(MCP_TOOL_PREFIX):
+            limits[str(name)] = value
+    return limits
+
+
+def _register_tool_limits_from_refs(refs: dict[str, McpToolRef], server_name: str) -> None:
+    limits = {
+        name: ref.max_result_size_chars
+        for name, ref in refs.items()
+        if ref.max_result_size_chars is not None
+    }
+    replace_tool_result_max_chars(limits, prefix=_mcp_tool_prefix(server_name))
+
+
+def _register_tool_limits_from_metadata(metadata: Any) -> None:
+    replace_tool_result_max_chars(
+        _limits_from_tool_metadata(metadata),
+        prefix=MCP_TOOL_PREFIX,
+    )
 
 
 def _tool_to_function_schema(server_name: str, tool: Any, full_name: str) -> dict[str, Any]:

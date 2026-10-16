@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from sensitive_redaction import redact_sensitive_text
+from tool_result_limits import get_tool_result_max_chars, normalize_tool_result_max_chars
 
 
 DEFAULT_MAX_RESULT_CHARS = 50_000
@@ -152,12 +153,21 @@ def budget_tool_result(
     content: str,
     *,
     structured: bool = False,
+    max_chars: int | None = None,
 ) -> str:
-    """Return content unchanged or a persisted/truncated envelope."""
+    """Return content unchanged or a persisted/truncated envelope.
+
+    ``max_chars`` is an optional per-call override.  When omitted, the
+    per-tool registry populated by MCP discovery (and, later, ordinary tool
+    metadata) is consulted before the global default.
+    """
     name = str(tool_name or "")
-    if name in _EXEMPT_TOOLS:
+    resolved_max_chars = normalize_tool_result_max_chars(max_chars)
+    if resolved_max_chars is None:
+        resolved_max_chars = get_tool_result_max_chars(name)
+    if name in _EXEMPT_TOOLS and resolved_max_chars is None:
         return content
-    max_chars = _env_int("GA_TOOL_RESULT_MAX_CHARS", DEFAULT_MAX_RESULT_CHARS)
+    max_chars = resolved_max_chars or _env_int("GA_TOOL_RESULT_MAX_CHARS", DEFAULT_MAX_RESULT_CHARS)
     preview_chars = _env_int("GA_TOOL_RESULT_PREVIEW_CHARS", DEFAULT_PREVIEW_CHARS)
     persist_limit = _env_int("GA_TOOL_RESULT_PERSIST_LIMIT_CHARS", DEFAULT_PERSIST_LIMIT_CHARS)
     text = str(content or "")

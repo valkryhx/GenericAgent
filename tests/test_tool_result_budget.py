@@ -10,6 +10,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tool_result_budget import budget_tool_result  # noqa: E402
+from tool_result_limits import (  # noqa: E402
+    clear_tool_result_max_chars,
+    get_tool_result_max_chars,
+    replace_tool_result_max_chars,
+    set_tool_result_max_chars,
+)
 from agent_loop import StepOutcome, agent_runner_loop  # noqa: E402
 
 
@@ -58,6 +64,12 @@ class _LoopHandler:
 
 
 class ToolResultBudgetTest(unittest.TestCase):
+    def setUp(self):
+        clear_tool_result_max_chars()
+
+    def tearDown(self):
+        clear_tool_result_max_chars()
+
     def _handler(self, root):
         return SimpleNamespace(
             workspace_root=str(root),
@@ -120,6 +132,59 @@ class ToolResultBudgetTest(unittest.TestCase):
             content = "x" * 80_000
             result = budget_tool_result(self._handler(tmp), "file_read", "t1", content)
         self.assertEqual(result, content)
+
+    def test_registered_per_tool_limit_overrides_global_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_tool_result_max_chars("mcp__demo__read", 20)
+            result = budget_tool_result(
+                self._handler(tmp),
+                "mcp__demo__read",
+                "t1",
+                "x" * 80_000,
+            )
+        self.assertIn("<persisted-output>", result)
+        self.assertIn("originalChars: 80000", result)
+
+    def test_explicit_per_tool_limit_wins_over_registered_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_tool_result_max_chars("mcp__demo__read", 80_000)
+            result = budget_tool_result(
+                self._handler(tmp),
+                "mcp__demo__read",
+                "t1",
+                "x" * 100,
+                max_chars=20,
+            )
+        self.assertIn("<persisted-output>", result)
+
+    def test_registered_limit_can_opt_exempt_tool_into_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_tool_result_max_chars("file_read", 20)
+            result = budget_tool_result(
+                self._handler(tmp),
+                "file_read",
+                "t1",
+                "x" * 80_000,
+            )
+        self.assertIn("<persisted-output>", result)
+
+    def test_replace_with_prefix_preserves_other_tool_limits(self):
+        set_tool_result_max_chars("mcp__a__read", 10)
+        set_tool_result_max_chars("mcp__b__read", 30)
+        replace_tool_result_max_chars({"mcp__b__read": 20}, prefix="mcp__b__")
+        self.assertEqual(get_tool_result_max_chars("mcp__a__read"), 10)
+        self.assertEqual(get_tool_result_max_chars("mcp__b__read"), 20)
+
+    def test_invalid_registered_limit_falls_back_to_global(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_tool_result_max_chars("mcp__demo__read", 0)
+            result = budget_tool_result(
+                self._handler(tmp),
+                "mcp__demo__read",
+                "t1",
+                "x" * 80_000,
+            )
+        self.assertIn("<persisted-output>", result)
 
     def test_agent_loop_uses_the_budget_layer(self):
         with tempfile.TemporaryDirectory() as tmp:
