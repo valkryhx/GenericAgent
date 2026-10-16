@@ -101,7 +101,7 @@ client = lark.Client.builder().app_id("你的APP_ID").app_secret("你的APP_SECR
 def handle(data):
     print(f"你的 Open ID: {data.event.sender.sender_id.open_id}")
 
-# ... 或者查看 frontends/fsapp.py 运行时的日志输出
+# ... 或者查看 frontends/desktop/fsapp.py 运行时的日志输出
 ```
 
 ---
@@ -196,7 +196,7 @@ claude_config = {
 
 ```bash
 cd /path/to/pc-agent-loop
-python frontends/fsapp.py
+python frontends/desktop/fsapp.py
 ```
 
 ### 预期输出
@@ -254,7 +254,7 @@ App ID: cli_xxxxxxxxxxxxxxxx
 
 **A:** 检查：
 
-1. `frontends/fsapp.py` 是否在运行
+1. `frontends/desktop/fsapp.py` 是否在运行
 2. 终端是否有错误日志
 3. LLM API 密钥是否配置正确
 
@@ -264,7 +264,7 @@ App ID: cli_xxxxxxxxxxxxxxxx
 
 ### Q: 如何获取自己的 Open ID？
 
-**A:** 运行 `frontends/fsapp.py` 后给机器人发消息，查看终端日志中的 `open_id`
+**A:** 运行 `frontends/desktop/fsapp.py` 后给机器人发消息，查看终端日志中的 `open_id`
 
 ### Q: 能否多人同时使用？
 
@@ -275,14 +275,14 @@ App ID: cli_xxxxxxxxxxxxxxxx
 ## 架构说明
 
 ```
-你的飞书 ←→ 飞书云 ←→ 长连接 ←→ frontends/fsapp.py ←→ Agent ←→ 你的电脑
+你的飞书 ←→ 飞书云 ←→ 长连接 ←→ frontends/desktop/fsapp.py ←→ Agent ←→ 你的电脑
                               ↑
                          运行在你电脑上
 ```
 
-- 消息通过飞书云转发到你电脑上运行的 `frontends/fsapp.py`
+- 消息通过飞书云转发到你电脑上运行的 `frontends/desktop/fsapp.py`
 - Agent 处理请求后，通过飞书 API 回复消息
-- **你的电脑必须保持运行** `frontends/fsapp.py` 才能响应消息
+- **你的电脑必须保持运行** `frontends/desktop/fsapp.py` 才能响应消息
 
 ---
 

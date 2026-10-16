@@ -4,7 +4,7 @@
 
 运行桌面宠物：
 ```bash
-python3 desktop_pet_v2.pyw
+python frontends/desktop/desktop_pet_v2.pyw
 ```
 
 ## 功能特性
@@ -150,7 +150,7 @@ cp -r ai-bubu-main/packages/app/public/skins/tard frontends/skins/
 
 ## 与 stapp.py 集成
 
-在 `stapp.py` 中点击"🐱 桌面宠物"按钮会自动启动桌面宠物，并在每个 turn 结束时发送通知。
+在 `frontends/web/stapp.py` 中点击"🐱 桌面宠物"按钮会自动启动桌面宠物，并在每个 turn 结束时发送通知。
 
 ## 故障排查
 
