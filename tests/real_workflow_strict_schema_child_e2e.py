@@ -54,6 +54,7 @@ def check_profile(summary: dict[str, Any]) -> bool:
 
 
 STRICT_SCHEMA_SCRIPT = r"""
+export const meta = { name: 'strict-schema-child-e2e', description: 'strict schema child contract e2e' }
 phase('Source Discovery')
 const result = await agent(`This is a research assignment. Do not call tools; answer from general knowledge only.
 Task: list three fictional-but-well-formed bibliographic sources, two claims, and one risk.
@@ -78,6 +79,7 @@ return {
 """
 
 ARTIFACT_HANDOFF_SCRIPT = r"""
+export const meta = { name: 'artifact-handoff-e2e', description: 'artifact handoff e2e' }
 phase('Source Discovery')
 const research = await agent(`Write a short workspace-relative research note using file_write.
 Path: research_notes.md

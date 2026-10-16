@@ -1165,3 +1165,4 @@ chore(structure): enforce package boundaries and update packaging
   - Ink UI `npm test`：431 pass；`npx tsc --noEmit`：通过；
   - `python scripts/check_project_structure.py`：通过；
   - L1 真实 API bridge 自测：`GA_RUN_REAL_API_E2E=1 GA_SELFTEST_TIMEOUT=240 python tests/real_ink_selftest.py` → 5/5 PASS，当前模型 `default/deepseek-flash`，证据包 `temp/ink-selftest/20261016-181824`。
+  - 真实 workflow strict-schema E2E：`GA_RUN_REAL_WORKFLOW_STRICT_SCHEMA_E2E=1 GA_WORKFLOW_LLM_PROFILE=default python tests/real_workflow_strict_schema_child_e2e.py` → `passed: true`，`default/deepseek-flash`，runId `wf_strict_schema_e2e`，1/1 job succeeded，`schemaValidation: true`，耗时 6.3s。首跑暴露测试夹具脚本缺少 CC 要求的首语句 `export const meta`；已修复夹具后复跑通过。
