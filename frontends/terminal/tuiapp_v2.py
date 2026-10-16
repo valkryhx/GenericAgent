@@ -1,10 +1,10 @@
 """GenericAgent TUI v2 — Textual app with refined visual style.
 
 Run from project root:
-    python frontends/tuiapp_v2.py
+    python frontends/terminal/tuiapp_v2.py
 
 Visual design carried from temp/GA_tui 设计/tui_demo.py;
-functionality migrated from frontends/tuiapp.py plus new commands:
+functionality migrated from frontends/terminal/tuiapp.py plus new commands:
 - /btw       — side question (subagent, doesn't interrupt main)
 - /continue  — list / restore historical sessions
 - /export    — export last reply (clip / file / all)

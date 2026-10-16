@@ -8,5 +8,5 @@ requests==2.31.0
 streamlit==1.48.0
 pywebview==6.2.1
 
-# Terminal UI (frontends/tuiapp.py)
+# Terminal UI (frontends/terminal/tuiapp.py)
 textual==7.5.0

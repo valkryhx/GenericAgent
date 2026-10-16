@@ -2,11 +2,11 @@
 
 Run from the project root:
 
-    python frontends/tuiapp.py
+    python frontends/terminal/tuiapp.py
 
 Useful options:
 
-    python frontends/tuiapp.py --help
+    python frontends/terminal/tuiapp.py --help
 
 MVP design notes:
 - One TUI manages multiple GenericAgent instances.
