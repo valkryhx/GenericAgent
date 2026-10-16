@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-GenericAgent 是一个紧凑的 Python 项目。核心运行时代码位于仓库根目录，包括 `agentmain.py`、`agent_loop.py`、`ga.py`、`llmcore.py` 和 `simphtml.py`。可安装的 CLI 包在 `ga_cli/`，`ga` 命令入口映射到 `ga_cli.cli:main`。各类界面和聊天/机器人适配器位于 `frontends/`；图片、皮肤和静态资源位于 `frontends/skins/` 与 `assets/`。长期记忆、SOP 和辅助工具位于 `memory/`，反射与自主运行辅助逻辑位于 `reflect/`，可选集成放在 `plugins/`。测试统一放在 `tests/`。
+GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent/`，按 `core/`、`llm/`、`mcp/`、`agents/`、`workflow/`、`web/`、`media/`、`resources/` 分域。仓库根目录只保留 `agentmain.py`、`ga.py` 等兼容入口/shim，以及 `ga`、`ga.cmd`、`launch.pyw`、`hub.pyw`。可安装的 CLI 门面仍在 `ga_cli/`，`ga` 命令入口映射到 `ga_cli.cli:main`。各类界面和聊天/机器人适配器位于 `frontends/`；图片、皮肤和静态资源位于 `frontends/skins/` 与 `assets/`。长期记忆、SOP 和辅助工具位于 `memory/`，反射与自主运行辅助逻辑位于 `reflect/`，可选集成放在 `plugins/`。测试统一放在 `tests/`。
 
 ## 构建、测试与本地运行
 
@@ -1377,3 +1377,12 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   分批迁移；每批单独提交、单独验证，旧根模块通过兼容 shim 过渡，最后再清理。
 - **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
 - **详细方案**：`docs/20261016-ga-project-structure-reorg-plan.md`。
+- **实施结果（2026-10-16，P0–P5 主体完成）**：
+  - 新增 `genericagent/` 主包与 `genericagent/paths.py`；73 个根级实现 `*.py` 已迁入 `core/llm/mcp/agents/workflow/web/media` 等子包，根目录保留同名薄 shim。
+  - `workflow_js_worker.js` / `workflow_script_contract.js` 迁到 `genericagent/workflow/js/`；`assets/code_run_header.py` 迁到 `genericagent/resources/`；资源定位统一走 `paths.py`。
+  - `pyproject.toml` 改为 `ga_cli* + genericagent*` 包发现并配置 JS/resources/templates package-data；`ga_cli/__init__.py` 改从 `genericagent.core.handler` 重导出稳定符号。
+  - 新增 `scripts/check_project_structure.py`，当前通过：`project structure ok (73 allowed root Python shims/entrypoints)`。
+  - 验证：`compileall`、`agentmain.py --help`、`python -m ga_cli list`、关键 Python focused tests 308 OK、p8 provider anomaly + ink bridge 139 OK、Ink UI `npm test` 431 pass、`tsc --noEmit` 通过。
+  - 契约修正：p8 旧测试曾要求 workflow 尾部发 `idle`，与 CC 对齐后的后台任务契约冲突；现统一断言**后台 workflow 不得翻转全局 session status**，避免锁住 Ink composer。
+  - P6 前端目录整理（`frontends/ink_bridge.py`、`frontends/ink-ui/` → `frontends/ink/`）与 P7 根 shim 清理仍待继续。
+  - 详细实施记录：`docs/20261016-ga-project-structure-reorg-plan.md` §13。

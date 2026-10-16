@@ -1,0 +1,1929 @@
+import sys, os, re, json, time, threading, importlib, hashlib
+from datetime import datetime
+from pathlib import Path
+from genericagent import paths
+import tempfile, traceback, subprocess, itertools, collections, difflib
+def _configure_stdio_utf8():
+    for name in ('stdout', 'stderr'):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        elif hasattr(stream, 'reconfigure'):
+            try: stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception: stream.reconfigure(errors='replace')
+_configure_stdio_utf8()
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generator
+from workflow_workspace import WorkspacePathError
+from subagent_wait import is_workflow_run_id
+script_dir = str(paths.PROJECT_ROOT)
+
+
+_SUBAGENT_WORKSPACE_MUTATION_TOOLS = {
+    "file_write",
+    "file_patch",
+    "code_run",
+    "functions.file_write",
+    "functions.file_patch",
+    "functions.code_run",
+}
+
+
+def _resolve_subagent_isolation(requested_isolation, permission_profile, parent_permission_mode, permission_options):
+    if str(requested_isolation or "").strip().lower() != "worktree":
+        return requested_isolation, None
+
+    profile = str(permission_profile or "").strip().lower()
+    parent_mode = str(parent_permission_mode or "").strip().lower()
+    if profile == "read_only":
+        return None, "read_only_permission_profile"
+    if profile == "inherit-current-permissions" and parent_mode == "read_only":
+        return None, "inherited_read_only_permission_mode"
+
+    allowed_tools = (permission_options or {}).get("allowed_tools")
+    if isinstance(allowed_tools, str):
+        allowed_tools = [allowed_tools]
+    if allowed_tools:
+        normalized_tools = {str(tool).strip().lower() for tool in allowed_tools if str(tool).strip()}
+        if not normalized_tools.intersection(_SUBAGENT_WORKSPACE_MUTATION_TOOLS):
+            return None, "read_only_tool_allowlist"
+    return "worktree", None
+
+
+def _stop_requested(stop_signal):
+    if stop_signal is None:
+        return False
+    is_set = getattr(stop_signal, "is_set", None)
+    return bool(is_set()) if callable(is_set) else bool(stop_signal)
+
+def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, workspace_root=None, bash_clamp=None):
+    """代码执行器
+    python: 运行复杂的 .py 脚本（文件模式）
+    powershell/bash: 运行单行指令（命令模式）
+    优先使用python，仅在必要系统操作时使用powershell"""
+    preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
+    yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
+    if workspace_root and code_type not in {"python", "py"}:
+        return {"status": "error", "msg": "workflow code_run only permits Python under the workspace guard"}
+    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
+    if code_type in ["python", "py"]:
+        if code_cwd is not None and not os.path.isdir(code_cwd):
+            return {"status": "error", "msg": f"code_cwd does not exist: {code_cwd}"}
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
+        cr_header = os.path.join(paths.RESOURCES_DIR, 'code_run_header.py')
+        if os.path.exists(cr_header):
+            with open(cr_header, encoding='utf-8') as header:
+                tmp_file.write(header.read())
+        tmp_file.write(code)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        cmd = [sys.executable, "-X", "utf8", "-u", tmp_path]   
+    elif code_type in ["powershell", "bash", "sh", "shell", "ps1", "pwsh"]:
+        if os.name == 'nt': cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", code]
+        else: cmd = ["bash", "-c", code]
+    else:
+        return {"status": "error", "msg": f"不支持的类型: {code_type}"}
+    print("code run output:") 
+    startupinfo = None
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0 # SW_HIDE
+    full_stdout = []
+
+    def stream_reader(proc, logs):
+        try:
+            for line_bytes in iter(proc.stdout.readline, b''):
+                try: line = line_bytes.decode('utf-8')
+                except UnicodeDecodeError: line = line_bytes.decode('gbk', errors='ignore')
+                logs.append(line)
+                try: print(line, end="") 
+                except: pass
+        except: pass
+
+    try:
+        # The inlined header is written to ``code_cwd`` and may therefore run
+        # outside the repository. Point it at the repo root so its imports
+        # (workflow_workspace_guard) resolve regardless of the child cwd.
+        child_env = None
+        if workspace_root or code_type in ["python", "py"]:
+            child_env = os.environ.copy()
+            child_env["GA_CODE_RUN_ROOT"] = str(paths.PROJECT_ROOT)
+        if workspace_root:
+            child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
+            if bash_clamp:
+                # Mirror CC's agent({bashCommandClamp}): the guard scopes the
+                # child's subprocess commands to these declared forms.
+                child_env["GA_WORKFLOW_BASH_CLAMP"] = json.dumps([str(item) for item in bash_clamp])
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            bufsize=0, cwd=cwd, startupinfo=startupinfo, env=child_env,
+            creationflags=0x08000000 if os.name == 'nt' else 0
+        )
+        start_t = time.time()
+        t = threading.Thread(target=stream_reader, args=(process, full_stdout), daemon=True)
+        t.start()
+
+        while process.poll() is None:
+            istimeout = time.time() - start_t > timeout
+            if istimeout or _stop_requested(stop_signal):
+                process.kill()
+                print("[Debug] Process killed due to timeout or stop signal.")
+                if istimeout: full_stdout.append("\n[Timeout Error] 超时强制终止")
+                else: full_stdout.append("\n[Stopped] 用户强制终止")
+                break
+            time.sleep(0.1)
+
+        t.join(timeout=1)
+        exit_code = process.poll()
+
+        stdout_str = "".join(full_stdout)
+        status = "success" if exit_code == 0 else "error"
+        output_snippet = smart_format(stdout_str, max_str_len=600, omit_str='\n\n[omitted long output]\n\n')
+        output_snippet = re.sub(r'`{4,}', lambda m: m.group(0)[:3] + '\u200b' + m.group(0)[3:], output_snippet)
+        yield f"[Status] Exit Code: {exit_code}\n[Stdout]\n{output_snippet}\n"
+        if process.stdout: threading.Thread(target=process.stdout.close, daemon=True).start()
+        return {
+            "status": status,
+            "stdout": smart_format(stdout_str, max_str_len=maxlen, omit_str='\n\n[omitted long output]\n\n'),
+            "exit_code": exit_code
+        }
+    except Exception as e:
+        if 'process' in locals(): process.kill()
+        return {"status": "error", "msg": str(e)}
+    finally:
+        if code_type in ["python", "py"] and tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
+
+
+def ask_user(question, candidates=None):
+    """question: 向用户提出的问题。candidates: 可选的候选项列表"""
+    return {"status": "INTERRUPT", "intent": "HUMAN_INTERVENTION",
+        "data": {"question": question, "candidates": candidates or []}}
+
+import simphtml
+driver = None
+def first_init_driver():
+    global driver
+    from TMWebDriver import TMWebDriver
+    driver = TMWebDriver()
+    for i in range(20):
+        time.sleep(1)
+        sess = driver.get_all_sessions()
+        if len(sess) > 0: break
+    if len(sess) == 0: return 
+    if len(sess) == 1: 
+        #driver.newtab()
+        time.sleep(3)
+
+def web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000):
+    """获取当前页面的简化HTML内容和标签页列表。注意：简化过程会过滤边栏、浮动元素等非主体内容。
+    tabs_only: 仅返回标签页列表，不获取HTML内容（节省token）。
+    switch_tab_id: 可选参数，如果提供，则在扫描前切换到该标签页。
+    应当多用execute_js，少全量观察html"""
+    global driver
+    try:
+        if driver is None: first_init_driver()
+        if len(driver.get_all_sessions()) == 0:
+            return {"status": "error", "msg": "没有可用的浏览器标签页，查L3记忆分析原因。"}
+        tabs = []
+        for sess in driver.get_all_sessions(): 
+            sess.pop('connected_at', None)
+            sess.pop('type', None)
+            sess['url'] = sess.get('url', '')[:50] + ("..." if len(sess.get('url', '')) > 50 else "")
+            tabs.append(sess)
+        if switch_tab_id: driver.default_session_id = switch_tab_id
+        result = {
+            "status": "success",
+            "metadata": {
+                "tabs_count": len(tabs), "tabs": tabs,
+                "active_tab": driver.default_session_id
+            }
+        }
+        if not tabs_only: 
+            importlib.reload(simphtml); result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
+            if text_only: result['content'] = smart_format(result['content'], max_str_len=maxlen//3, omit_str='\n\n[omitted long content]\n\n')
+        return result
+    except Exception as e:
+        return {"status": "error", "msg": format_error(e)}
+    
+def format_error(e):
+    exc_type, exc_value, exc_traceback = sys.exc_info()
+    tb = traceback.extract_tb(exc_traceback)
+    if tb:
+        f = tb[-1]
+        fname = os.path.basename(f.filename)
+        return f"{exc_type.__name__}: {str(e)} @ {fname}:{f.lineno}, {f.name} -> `{f.line}`"
+    return f"{exc_type.__name__}: {str(e)}"
+
+def log_memory_access(path):
+    if 'memory' not in path: return
+    stats_file = os.path.join(script_dir, 'memory/file_access_stats.json')
+    try:
+        with open(stats_file, 'r', encoding='utf-8') as f: stats = json.load(f)
+    except: stats = {}
+    fname = os.path.basename(path)
+    stats[fname] = {'count': stats.get(fname, {}).get('count', 0) + 1, 'last': datetime.now().strftime('%Y-%m-%d')}
+    with open(stats_file, 'w', encoding='utf-8') as f: json.dump(stats, f, indent=2, ensure_ascii=False)
+
+def web_execute_js(script, switch_tab_id=None, no_monitor=False):
+    """执行 JS 脚本来控制浏览器，并捕获结果和页面变化"""
+    global driver
+    try:
+        if driver is None: first_init_driver()
+        if len(driver.get_all_sessions()) == 0: return {"status": "error", "msg": "没有可用的浏览器标签页，查L3记忆分析原因。"}
+        if switch_tab_id: driver.default_session_id = switch_tab_id
+        result = simphtml.execute_js_rich(script, driver, no_monitor=no_monitor)
+        return result
+    except Exception as e: return {"status": "error", "msg": format_error(e)}
+
+def expand_file_refs(text, base_dir=None, workspace_root=None):
+    """展开文本中的 {{file:路径:起始行:结束行}} 引用为实际文件内容。
+    可与普通文本混排。展开失败抛 ValueError。
+    base_dir: 相对路径的基准目录，默认为进程 cwd
+    workspace_root: 提供时，引用文件必须落在该 workspace 内；否则拒绝展开。
+        file_write/file_patch 在 workflow 子代理里用它，防止 {{file:../x}} 读出
+        workspace 之外的文件。"""
+    workspace = None
+    if workspace_root:
+        from workflow_workspace import WorkspacePathError, resolve_workspace_child
+        workspace = Path(workspace_root)
+    pattern = r'\{\{file:(.+?):(\d+):(\d+)\}\}'
+    def replacer(match):
+        path, start, end = match.group(1), int(match.group(2)), int(match.group(3))
+        candidate = os.path.abspath(os.path.join(base_dir or '.', path))
+        if workspace is not None:
+            try:
+                # Canonical containment check resolves symlinks and rejects
+                # absolute/traversal paths outside the workspace.
+                relative = os.path.relpath(candidate, str(workspace))
+                path = str(resolve_workspace_child(relative, workspace))
+            except (WorkspacePathError, ValueError) as exc:
+                raise ValueError(f"引用文件越界（必须在 workspace 内）: {candidate}") from exc
+        else:
+            path = candidate
+        if not os.path.isfile(path): raise ValueError(f"引用文件不存在: {path}")
+        with open(path, 'r', encoding='utf-8') as f: lines = f.readlines()
+        if start < 1 or end > len(lines) or start > end: raise ValueError(f"行号越界: {path} 共{len(lines)}行, 请求{start}-{end}")
+        return ''.join(lines[start-1:end])
+    return re.sub(pattern, replacer, text)
+    
+def file_patch(path: str, old_content: str, new_content: str):
+    """在文件中寻找唯一的 old_content 块并替换为 new_content"""
+    path = str(Path(path).resolve())
+    try:
+        if not os.path.exists(path): return {"status": "error", "msg": "文件不存在"}
+        with open(path, 'r', encoding='utf-8') as f: full_text = f.read()
+        if not old_content: return {"status": "error", "msg": "old_content 为空，请确认 arguments"}
+        count = full_text.count(old_content)
+        if count == 0: return {"status": "error", "msg": "未找到匹配的旧文本块，建议：先用 file_read 确认当前内容，再分小段进行 patch。若多次失败则询问用户，严禁自行使用 overwrite 或代码替换。"}
+        if count > 1: return {"status": "error", "msg": f"找到 {count} 处匹配，无法确定唯一位置。请提供更长、更具体的旧文本块以确保唯一性。建议：包含上下文行来增强特征，或分小段逐个修改。"}
+        updated_text = full_text.replace(old_content, new_content)
+        with open(path, 'w', encoding='utf-8') as f: f.write(updated_text)
+        return {"status": "success", "msg": "文件局部修改成功"}
+    except Exception as e: return {"status": "error", "msg": str(e)}
+
+_read_dirs = set()
+def _scan_files(base, depth=2):
+    try:
+        for e in os.scandir(base):
+            if e.is_file(): yield (e.name, e.path)
+            elif depth > 0 and e.is_dir(follow_symlinks=False): yield from _scan_files(e.path, depth - 1)
+    except (PermissionError, OSError): pass
+def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            stream = ((i, l.rstrip('\r\n')) for i, l in enumerate(f, 1))
+            stream = itertools.dropwhile(lambda x: x[0] < start, stream)
+            if keyword:
+                before = collections.deque(maxlen=count//3)
+                for i, l in stream:
+                    if keyword.lower() in l.lower():
+                        res = list(before) + [(i, l)] + list(itertools.islice(stream, count - len(before) - 1))
+                        break
+                    before.append((i, l))
+                else: return f"Keyword '{keyword}' not found after line {start}. Falling back to content from line {start}:\n\n" \
+                               + file_read(path, start, None, count, show_linenos)
+            else: res = list(itertools.islice(stream, count))
+            realcnt = len(res); L_MAX = min(max(100, 256000//max(realcnt,1)), 8000); TAG = " ... [TRUNCATED]"
+            remaining = sum(1 for _ in itertools.islice(stream, 5000))
+            total_lines = (res[0][0] - 1 if res else start - 1) + realcnt + remaining
+            tl_str = f"{total_lines}+" if remaining >= 5000 else str(total_lines)
+            partial = total_lines > realcnt
+            total_tag = f"[FILE] {tl_str} lines" + (f" | PARTIAL showing {realcnt}; assess need for more" if partial else "") + "\n"
+            res = [(i, l if len(l) <= L_MAX else l[:L_MAX] + TAG) for i, l in res]
+            result = "\n".join(f"{i}|{l}" if show_linenos else l for i, l in res)
+            if show_linenos: result = total_tag + result
+            elif partial: result += f"\n\n[FILE PARTIAL: showing {realcnt}/{tl_str} lines; assess need for more]"
+            _read_dirs.add(os.path.dirname(os.path.abspath(path)))
+            return result
+    except FileNotFoundError:
+        msg = f"Error: File not found: {path}"
+        try:
+            tgt = os.path.basename(path); scan = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+            roots = [scan] + [d for d in _read_dirs if not d.startswith(scan)]
+            cands = list(itertools.islice((c for base in roots for c in _scan_files(base)), 2000))
+            top = sorted([(difflib.SequenceMatcher(None, tgt.lower(), c[0].lower()).ratio(), c) for c in cands[:2000]], key=lambda x: -x[0])[:5]
+            top = [(s, c) for s, c in top if s > 0.3]
+            if top: msg += "\n\nDid you mean:\n" + "\n".join(f"  {c[1]}  ({s:.0%})" for s, c in top)
+        except Exception: pass
+        return msg
+    except Exception as e: return f"Error: {str(e)}"
+
+def smart_format(data, max_str_len=100, omit_str=' ... '):
+    if not isinstance(data, str): data = str(data)
+    if len(data) < max_str_len + len(omit_str)*2: return data
+    return f"{data[:max_str_len//2]}{omit_str}{data[-max_str_len//2:]}"
+
+def consume_file(dr, file):
+    if dr and os.path.exists(os.path.join(dr, file)): 
+        with open(os.path.join(dr, file), encoding='utf-8', errors='replace') as f: content = f.read()
+        os.remove(os.path.join(dr, file))
+        return content
+
+class GenericAgentHandler(BaseHandler):
+    '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
+    def __init__(self, parent, last_history=None, cwd='./temp', workspace_root=None):
+        self.parent = parent
+        self.working = {}
+        self.cwd = cwd;  self.current_turn = 0
+        self.workspace_root = str(workspace_root) if workspace_root else None
+        self.history_info = last_history if last_history else []
+        self.code_stop_signal = threading.Event()
+        self._done_hooks = []
+        self.workflow_permission_policy = None
+        self.workflow_permission_context = {}
+        self.workflow_permission_event_callback = None
+        self._workflow_permission_profile_selected = False
+        # 主会话三档权限（read_only/ask/full_access）。默认 None = 全开（等价 full_access）。
+        # workflow 子 agent 的 workflow_permission_policy 优先级更高，两者都设时以 workflow 为准。
+        self.permission_mode_policy = None
+        self.subagent_permission_policy = None
+        self.subagent_permission_event_callback = None
+        # ask 档阻塞审批 runtime（permission_request/response）；None = 无 UI 时 ask→deny。
+        self.permission_runtime = None
+
+    def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        capability_profile = getattr(self, "capability_profile", None)
+        if capability_profile is not None and not capability_profile.allows(tool_name):
+            reason = "tool_not_granted"
+            yield f"[Capability] deny: {tool_name} ({reason})\n"
+            ret = StepOutcome(
+                {
+                    "status": "error",
+                    "capability": {
+                        "action": "deny",
+                        "reason": reason,
+                        "tool_name": str(tool_name or ""),
+                    },
+                },
+                next_prompt=(
+                    f"工具 `{tool_name}` 不在当前 agent 的能力范围内。"
+                    "请不要重试该工具，改用当前可用工具或直接给出结论。"
+                ),
+            )
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
+        policy = getattr(self, 'workflow_permission_policy', None)
+        if policy is not None:
+            decision = self._check_workflow_permission(tool_name, args or {})
+            if decision.action != 'allow':
+                # workflow 内 ask 仍非阻塞（大件 #3）；主会话 ask 见下方 mode_policy 路径。
+                status = 'approval_required' if decision.action == 'ask' else 'error'
+                yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
+                ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                return ret
+        else:
+            subagent_policy = getattr(self, 'subagent_permission_policy', None)
+            if subagent_policy is not None:
+                decision = subagent_policy.evaluate(tool_name, args or {})
+                subagent_permission_callback = getattr(self, 'subagent_permission_event_callback', None)
+                if subagent_permission_callback is not None:
+                    subagent_permission_callback(tool_name, args or {}, decision)
+                if decision.action != 'allow':
+                    status = 'approval_required' if decision.action == 'ask' else 'error'
+                    yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
+                    ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
+                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                    return ret
+            mode_policy = getattr(self, 'permission_mode_policy', None)
+            if mode_policy is not None:
+                decision = mode_policy.evaluate(tool_name, args or {})
+                if decision.action == 'deny':
+                    yield f"[Permission] deny: {tool_name} ({decision.reason})\n"
+                    ret = StepOutcome({"status": "error", "permission": decision.to_dict()}, next_prompt="\n")
+                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                    return ret
+                if decision.action == 'ask':
+                    # 阻塞审批：accept 后继续执行工具；deny / 无 UI / stop → 不执行。
+                    from permission_runtime import ACCEPT, DENY
+                    runtime = getattr(self, 'permission_runtime', None)
+                    yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})\n"
+                    user_decision = DENY
+                    if runtime is not None:
+                        parent = getattr(self, 'parent', None)
+                        def _stop_check():
+                            return bool(getattr(parent, 'stop_sig', False))
+                        user_decision = runtime.wait_for_decision(
+                            tool_name, args or {}, decision.reason, stop_check=_stop_check
+                        )
+                    if user_decision != ACCEPT:
+                        yield f"[Permission] deny: {tool_name} (user_or_headless)\n"
+                        denied = {
+                            "status": "error",
+                            "permission": {
+                                **decision.to_dict(),
+                                "action": "deny",
+                                "user_decision": user_decision if user_decision in (ACCEPT, DENY) else DENY,
+                                "message": (
+                                    f"User denied tool `{tool_name}` (or no approval UI / stopped). "
+                                    "Do not retry the same write/execute blindly; adjust the plan or ask the user."
+                                ),
+                            },
+                        }
+                        ret = StepOutcome(denied, next_prompt="\n")
+                        _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                        return ret
+                    yield f"[Permission] accept: {tool_name}\n"
+        if str(tool_name).startswith('mcp__'):
+            args = args or {}
+            args['_index'] = index; args['_tool_num'] = tool_num
+            _ = yield from try_call_generator(self.tool_before_callback, tool_name, args, response)
+            ret = yield from self._dispatch_mcp_tool(tool_name, args, response)
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args, response, ret)
+            return ret
+        decision = self._check_workspace_path_access(tool_name, args or {})
+        if decision is not None and not decision.allowed:
+            yield f"[PathACL] deny: {tool_name} ({decision.reason})\n"
+            ret = StepOutcome({"status": "error", "path_acl": decision.to_dict()}, next_prompt="\n")
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
+        try:
+            return (yield from super().dispatch(tool_name, args, response, index=index, tool_num=tool_num))
+        except WorkspacePathError as exc:
+            # A tool argument that names no valid workspace path must be a
+            # recoverable tool error, never a fatal job failure. do_file_read
+            # (unlike file_write/file_patch) resolved its path outside any guard,
+            # so a child that passed the workspace root itself aborted the whole
+            # job with 'path must name a workspace child'. Returning a normal
+            # error lets the model retry with a correct path.
+            yield f"[PathACL] invalid path: {exc}" + chr(10)
+            ret = StepOutcome(
+                {"status": "error", "msg": f"invalid workspace path: {exc}"},
+                next_prompt=(
+                    "路径无效或不在工作区内。请改用工作区内的相对文件路径"
+                    "（例如 eight_queens.py），不要传入工作区根目录本身。" + chr(10)
+                ),
+            )
+            _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+            return ret
+
+    def _check_workspace_path_access(self, tool_name, args):
+        """Host-side path ACL, evaluated before the tool executes.
+
+        Capability (permission profile) decides *whether* a tool may be used;
+        this decides *which paths* it may touch. It runs for every workflow
+        child (``workspace_root`` set) regardless of permission profile, because
+        read_only and verify profiles can still pass arguments that escape the
+        workspace.
+        """
+
+        if not self.workspace_root:
+            return None
+        from workflow_path_acl import check_tool_call
+
+        decision = check_tool_call(self.workspace_root, tool_name, args or {})
+        if not decision.allowed:
+            callback = getattr(self, 'workflow_permission_event_callback', None)
+            if callback:
+                from workflow_permissions import PermissionDecision, build_permission_event
+
+                event = build_permission_event(
+                    'tool_denied',
+                    context=getattr(self, 'workflow_permission_context', {}) or {},
+                    tool_name=str(tool_name or ''),
+                    decision=PermissionDecision(
+                        action='deny',
+                        reason='path_acl_violation',
+                        profile=getattr(getattr(self, 'workflow_permission_policy', None), 'profile', '') or '',
+                        tool_name=str(tool_name or ''),
+                        details=decision.to_dict(),
+                    ),
+                )
+                try:
+                    callback(event)
+                except Exception:
+                    pass
+        return decision
+
+    def _check_workflow_permission(self, tool_name, args):
+        policy = self.workflow_permission_policy
+        decision = policy.evaluate(tool_name, args)
+        if not self._workflow_permission_profile_selected:
+            self._workflow_permission_profile_selected = True
+            self._emit_workflow_permission_event('permission_profile_selected', tool_name, decision)
+        event_type = 'tool_allowed' if decision.action == 'allow' else 'tool_denied'
+        self._emit_workflow_permission_event(event_type, tool_name, decision)
+        return decision
+
+    def _emit_workflow_permission_event(self, event_type, tool_name, decision):
+        callback = getattr(self, 'workflow_permission_event_callback', None)
+        if not callback:
+            return
+        from workflow_permissions import build_permission_event
+        event = build_permission_event(
+            event_type,
+            context=getattr(self, 'workflow_permission_context', None),
+            tool_name=tool_name,
+            decision=decision,
+        )
+        callback(event)
+
+    def _dispatch_mcp_tool(self, tool_name, args, response):
+        call_args = {k: v for k, v in (args or {}).items() if not str(k).startswith('_')}
+        yield f"[Action] Calling MCP tool: {tool_name}\n"
+        try:
+            from mcp_runtime import call_mcp_tool, mcp_cancellation_scope
+            with mcp_cancellation_scope(self.code_stop_signal):
+                result = call_mcp_tool(tool_name, call_args)
+        except Exception as e:
+            result = {"status": "error", "msg": format_error(e)}
+        yield f"[Status] MCP {result.get('status', 'unknown')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def cancel(self):
+        self.code_stop_signal.set()
+
+    def _get_abs_path(self, path):
+        if not path: return ""
+        if self.workspace_root:
+            from workflow_workspace import resolve_workspace_child
+            return str(resolve_workspace_child(path, Path(self.workspace_root)))
+        return os.path.abspath(os.path.join(self.cwd, path))
+
+    def _extract_code_block(self, response, code_type):
+        code_type = {'python':'python|py', 'powershell':'powershell|ps1|pwsh', 'bash':'bash|sh|shell'}.get(code_type, re.escape(code_type))
+        matches = re.findall(rf"```(?:{code_type})\n(.*?)\n```", response.content, re.DOTALL)
+        return matches[-1].strip() if matches else None
+
+    def do_code_run(self, args, response):
+        '''执行代码片段，有长度限制，不允许代码中放大量数据，如有需要应当通过文件读取进行。'''
+        code_type = args.get("type", "python")
+        code = args.get("code") or args.get("script")
+        if not code:
+            code = self._extract_code_block(response, code_type)
+            if not code: return StepOutcome("[Error] Code missing. Must use reply code block or 'script' arg.", next_prompt="\n")
+        try: timeout = int(args.get("timeout", 60))
+        except: timeout = 60
+        if self.workspace_root:
+            try:
+                cwd = str(self._get_abs_path(args.get("cwd", './') or './'))
+            except Exception as exc:
+                return StepOutcome({"status": "error", "msg": f"code_run cwd denied: {exc}"}, next_prompt="\n")
+            code_cwd = os.path.normpath(self.workspace_root)
+        else:
+            raw_path = os.path.join(self.cwd, args.get("cwd", './'))
+            cwd = os.path.normpath(os.path.abspath(raw_path))
+            code_cwd = os.path.normpath(self.cwd)
+        maxlen = 10000 // args.get('_tool_num', 1)
+        if code_type == 'python' and args.get("inline_eval"):
+            ns = {'handler':self, 'parent':self.parent, 'history':json.dumps(self.parent.llmclient.backend.history)}
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(cwd)
+                try:
+                    try: result = repr(eval(code, ns))
+                    except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
+                except Exception as e: result = f'Error: {e}'
+            finally: os.chdir(old_cwd)
+        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, workspace_root=self.workspace_root, bash_clamp=getattr(self, "workflow_bash_clamp", None))
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+    
+    def do_ask_user(self, args, response):
+        question = args.get("question", "请提供输入：")
+        candidates = args.get("candidates", [])
+        result = ask_user(question, candidates)
+        yield f"Waiting for your answer ...\n"
+        return StepOutcome(result, next_prompt="", should_exit=True)
+    
+    def do_web_scan(self, args, response):
+        '''获取当前页面内容和标签页列表。也可用于切换标签页。
+        注意：HTML经过简化，边栏/浮动元素等可能被过滤。如需查看被过滤的内容请用execute_js。
+        tabs_only=true时仅返回标签页列表，不获取HTML（省token）'''
+        tabs_only = args.get("tabs_only", False)
+        switch_tab_id = args.get("switch_tab_id", None)
+        text_only = args.get("text_only", False)
+        maxlen = 35000 // args.get('_tool_num', 1)
+        result = web_scan(tabs_only=tabs_only, switch_tab_id=switch_tab_id, text_only=text_only, maxlen=maxlen)
+        content = result.pop("content", None)
+        yield f'[Info] {str(result)}\n'
+        if content: result = json.dumps(result, ensure_ascii=False, default=json_default) + f"\n```html\n{content}\n```"
+        next_prompt = "\n"
+        return StepOutcome(result, next_prompt=next_prompt)
+    
+    def do_web_execute_js(self, args, response):
+        '''web情况下的优先使用工具，执行任何js达成对浏览器的*完全*控制。支持将结果保存到文件供后续读取分析。'''
+        script = args.get("script", "") or self._extract_code_block(response, "javascript")
+        if not script: return StepOutcome("[Error] Script missing. Use ```javascript block or 'script' arg.", next_prompt="\n")
+        abs_path = self._get_abs_path(script.strip())
+        if os.path.isfile(abs_path):
+            with open(abs_path, 'r', encoding='utf-8') as f: script = f.read()
+        save_to_file = args.get("save_to_file", "")
+        switch_tab_id = args.get("switch_tab_id") or args.get("tab_id")
+        no_monitor = args.get("no_monitor", False)
+        result = web_execute_js(script, switch_tab_id=switch_tab_id, no_monitor=no_monitor)
+        if save_to_file and "js_return" in result:
+            content = str(result["js_return"] or '')
+            abs_path = self._get_abs_path(save_to_file)
+            result["js_return"] = smart_format(content, max_str_len=170)
+            try:
+                with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
+                result["js_return"] += f"\n\n[已保存完整内容到 {abs_path}]"
+            except: result['js_return'] += f"\n\n[保存失败，无法写入文件 {abs_path}]"
+        show = smart_format(json.dumps(result, ensure_ascii=False, indent=2, default=json_default), max_str_len=300)
+        try: print("Web Execute JS Result:", show)
+        except: pass
+        yield f"JS 执行结果:\n{show}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        result = json.dumps(result, ensure_ascii=False, default=json_default)
+        maxlen = 8000 // args.get('_tool_num', 1)
+        return StepOutcome(smart_format(result, max_str_len=maxlen), next_prompt=next_prompt)
+    
+    def do_file_patch(self, args, response):
+        path = self._get_abs_path(args.get("path", ""))
+        yield f"[Action] Patching file: {path}\n"
+        old_content = args.get("old_content", "")
+        new_content = args.get("new_content", "")
+        try: new_content = expand_file_refs(new_content, base_dir=self.cwd, workspace_root=self.workspace_root)
+        except ValueError as e:
+            yield f"[Status] ✗ 引用展开失败: {e}\n"
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        result = file_patch(path, old_content, new_content)
+        yield f"\n{str(result)}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
+    
+    def do_file_write(self, args, response):
+        '''用于对整个文件的大量处理，精细修改要用file_patch。
+        需要将要写入的内容放在<file_content>标签内，或者放在代码块中'''
+        path = self._get_abs_path(args.get("path", ""))
+        mode = args.get("mode", "overwrite")  # overwrite/append/prepend
+        action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
+        yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
+
+        def extract_robust_content(text):
+            tags = re.findall(r"<file_content[^>]*>(.*?)</file_content>", text, re.DOTALL)
+            if tags: return tags[-1].strip()
+            blocks = re.findall(r"```[^\n]*\n([\s\S]*?)```", text)
+            if blocks: return blocks[-1].strip()
+            return None
+        
+        content = args.get('content') or extract_robust_content(response.content)
+        if not content:
+            yield f"[Status] ✗ 失败: 未在回复中找到<file_content>代码块内容\n"
+            return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
+        try:
+            new_content = expand_file_refs(content, base_dir=self.cwd, workspace_root=self.workspace_root)
+            if mode == "prepend":
+                old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
+                open(path, 'w', encoding="utf-8").write(new_content + old)
+            else:
+                with open(path, 'a' if mode == "append" else 'w', encoding="utf-8") as f: f.write(new_content)
+            yield f"[Status] ✓ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"
+            next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+            return StepOutcome({"status": "success", 'writed_bytes': len(new_content)}, next_prompt=next_prompt)
+        except Exception as e:
+            yield f"[Status] ✗ 写入异常: {str(e)}\n"
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        
+    def do_file_read(self, args, response):
+        '''读取文件内容。从第start行开始读取。如有keyword则返回第一个keyword(忽略大小写)周边内容'''
+        path = self._get_abs_path(args.get("path", ""))
+        yield f"\n[Action] Reading file: {path}\n"
+        start = args.get("start", 1)
+        count = args.get("count", 200)
+        keyword = args.get("keyword")
+        show_linenos = args.get("show_linenos", True)
+        result = file_read(path, start=start, keyword=keyword,
+                           count=count, show_linenos=show_linenos)
+        if show_linenos and not result.startswith("Error:"): result = '由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n' + result 
+        if ' ... [TRUNCATED]' in result: result += '\n\n（某些行被截断，如需完整内容可改用 code_run 读取）'
+        maxlen = 20000 // args.get('_tool_num', 1)
+        result = smart_format(result, max_str_len=maxlen, omit_str='\n\n[omitted long content]\n\n')
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        log_memory_access(path)
+        if 'memory' in path or 'sop' in path: 
+            next_prompt += "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory."
+        return StepOutcome(result, next_prompt=next_prompt)
+    
+    def _in_plan_mode(self): return self.working.get('in_plan_mode')
+    def _exit_plan_mode(self): self.working.pop('in_plan_mode', None)
+    def enter_plan_mode(self, plan_path): 
+        self.working['in_plan_mode'] = plan_path; self.max_turns = 100
+        print(f"[Info] Entered plan mode with plan file: {plan_path}"); return plan_path
+    def _check_plan_completion(self):
+        if not os.path.isfile(p:=self._in_plan_mode() or ''): return None
+        try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
+        except: return None
+    
+    def do_update_working_checkpoint(self, args, response):
+        '''为整个任务设定后续需要临时记忆的重点。'''
+        key_info = args.get("key_info", "")
+        related_sop = args.get("related_sop", "")
+        if "key_info" in args: self.working['key_info'] = key_info
+        if "related_sop" in args: self.working['related_sop'] = related_sop
+        self.working['passed_sessions'] = 0
+        yield f"[Info] Updated key_info and related_sop.\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        #next_prompt += '\n[SYSTEM TIPS] 此函数一般在任务开始或中间时调用，如果任务已成功完成应该是start_long_term_update用于结算长期记忆。\n'
+        return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
+
+    def do_load_skill(self, args, response):
+        """按名称加载 Claude/Codex 风格的 SKILL.md。
+
+        CC 的 Skill 工具只把 ``Launching skill: <name>`` 放进 tool_result，
+        SKILL.md 正文作为独立的 meta/user message 注入。这里沿用同一条通道：
+        tool_result 只保留短元数据，正文放进 ``next_prompt``，避免 17KB 级
+        正文被序列化成一个大 JSON tool_result。
+        """
+        skill_name = args.get("skill") or args.get("name") or ""
+        skill_args = args.get("args", "")
+        search_roots = args.get("search_roots")
+        try:
+            from skills_runtime import load_skill_content
+            result = load_skill_content(skill_name, search_roots=search_roots, args=skill_args)
+        except KeyError as e:
+            yield f"[Warn] {e}" + chr(10)
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt=chr(10))
+        except Exception as e:
+            yield f"[Warn] Failed to load skill: {e}" + chr(10)
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt=chr(10))
+
+        content = result.pop("content", "") or ""
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        loaded_hashes = self.working.setdefault("_loaded_skill_hashes", {})
+        already_loaded = loaded_hashes.get(result["name"]) == content_hash
+        loaded_hashes[result["name"]] = content_hash
+        result["content_chars"] = len(content)
+        result["loaded"] = not already_loaded
+        loaded_records = self.working.setdefault("_loaded_skill_records", {})
+        loaded_records[result["name"]] = {
+            "name": result["name"],
+            "description": result.get("description", ""),
+            "source": result.get("source", ""),
+            "path": result.get("path", ""),
+            "base_dir": result.get("base_dir", ""),
+            "content_chars": len(content),
+            "state": result.get("state", "on"),
+        }
+
+        self.working['active_skill'] = result['name']
+        if result.get('allowed_tools'):
+            self.working['active_skill_allowed_tools'] = ', '.join(result['allowed_tools'])
+        else:
+            self.working.pop('active_skill_allowed_tools', None)
+        yield f"[Info] Loaded skill {result['name']} from {result.get('source', 'local')}: {result.get('path', '')}" + chr(10)
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        if already_loaded:
+            next_prompt += chr(10) + (
+                f"[SYSTEM TIPS] Skill {result['name']} is already loaded above; "
+                "instructions unchanged. Do not treat this as a new request."
+            )
+        else:
+            next_prompt += (
+                chr(10)
+                + f"[SYSTEM TIPS] 已加载 skill {result['name']}。以下正文是独立注入内容，"
+                + "不是 tool_result；必须按它执行。若正文引用相对路径，使用上面的 base_dir。"
+                + chr(10)
+                + "<skill_content>"
+                + chr(10)
+                + content
+                + chr(10)
+                + "</skill_content>"
+                + chr(10)
+            )
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_workflow(self, args, response):
+        '''CC-style dynamic workflow tool entry; starts a background run and hands off on completion.'''
+        launcher = getattr(self.parent, "workflow_tool_launcher", None)
+        if not callable(launcher):
+            msg = "workflow tool launcher unavailable; use /workflow <task> instead"
+            yield f"[Warn] {msg}"
+            return StepOutcome({"status": "error", "error": msg}, next_prompt=chr(10))
+        try:
+            payload = launcher(
+                script=args.get("script"),
+                script_path=args.get("scriptPath"),
+                name=args.get("name"),
+                args=args.get("args"),
+                resume_from_run_id=args.get("resumeFromRunId"),
+                timeout_seconds=args.get("timeoutSeconds"),
+            )
+        except Exception as exc:
+            payload = {"status": "error", "error": str(exc)}
+        if not isinstance(payload, dict):
+            payload = {"status": "error", "error": "workflow launcher returned an invalid result"}
+        if payload.get("status") == "async_launched":
+            run_id = str(payload.get("runId") or "")
+            workflow_name = str(payload.get("workflowName") or "workflow")
+            # CC parity: the Workflow tool result is
+            # "Workflow launched in background. ... You will be notified when it
+            # completes." (m1569 @70281) -- the main agent must NOT block waiting.
+            yield (
+                f"[Workflow] launched {workflow_name} ({run_id}) in the background."
+                " You will be notified when it completes; do not wait for it. "
+                "Report the launch in one line and end your turn."
+            )
+        else:
+            yield f"[Warn] workflow launch failed: {payload.get('error') or payload.get('msg') or payload.get('status')}\n"
+        return StepOutcome(payload, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_structured_output(self, args, response):
+        '''CC-style StructuredOutput tool: the child's validated final answer.
+
+        CC evidence (m0869): with a schema, the child is forced to call a
+        ``StructuredOutput`` tool whose input schema IS the requested schema, and
+        the script reads ONLY that tool call. Validation sits at the tool-call
+        layer, so a wrong shape is rejected and the model retries inside its turn.
+        Returning ``next_prompt=None`` ends the child's turn with this value, which
+        the runner reads as the structured answer (no text parsing).
+        '''
+        payload = {key: value for key, value in (args or {}).items() if not str(key).startswith("_")}
+        schema = getattr(self, "workflow_output_schema", None)
+        if isinstance(schema, dict) and schema:
+            from workflow_scheduler import validate_agent_payload_against_schema
+
+            issues = validate_agent_payload_against_schema(payload, schema)
+            if issues:
+                detail = "; ".join(issues[:12])
+                msg = "Output does not match required schema: " + detail
+                yield f"[Schema] structured_output rejected: {detail}\n"
+                return StepOutcome(
+                    {"status": "error", "error": msg, "issues": issues[:12]},
+                    next_prompt="\n" + msg + "\nCall structured_output again with a corrected shape; do not put your answer in a text response.\n",
+                )
+        self.workflow_structured_output = payload
+        yield "[Schema] structured output accepted.\n"
+        return StepOutcome({"status": "ok", "structured_output": payload}, next_prompt=None)
+
+    def _bind_workflow_wait_resolver(self, manager):
+        """Give the manager the workflow-store resolver owned by the frontend.
+
+        Without it, a ``wf_<id>`` target falls through to the subagent state
+        machine and is answered by a synthesised, never-terminal state (GA
+        defect A). The resolver lives on the agent because the bridge binds it
+        there (``ink_bridge._bind_agent``); headless agents simply have none and
+        keep the subagent-only behaviour.
+        """
+        resolver = getattr(self.parent, "workflow_run_resolver", None)
+        if callable(resolver):
+            manager.workflow_run_resolver = resolver
+        return manager
+
+    @staticmethod
+    def _unknown_workflow_targets(targets, manager):
+        """Workflow-shaped ids with no run behind them, so the wait fails fast."""
+        unknown = []
+        for target in targets or []:
+            text = str(target or '').strip()
+            if not is_workflow_run_id(text):
+                continue
+            try:
+                if manager.resolve_workflow_run(text) is None:
+                    unknown.append(text)
+            except Exception:
+                unknown.append(text)
+        return unknown
+
+    def _get_subagent_manager(self):
+        manager = getattr(self, "subagent_manager", None)
+        if manager is not None:
+            manager.team_name = self._team_name()
+            return manager
+        from subagent_manager import SubagentManager
+
+        created = SubagentManager(root_dir=script_dir, python_executable=sys.executable)
+        created.team_name = self._team_name()
+        return created
+
+    def _current_backend_history_snapshot(self):
+        backend = getattr(getattr(self.parent, "llmclient", None), "backend", None)
+        history = getattr(backend, "history", None)
+        if history is None:
+            return []
+        try:
+            return json.loads(json.dumps(history, ensure_ascii=False, default=json_default))
+        except Exception:
+            return []
+
+    def _subagent_state_payload(self, state, include_output=False, max_output_chars=8000):
+        payload = {
+            "task_name": state.task_name,
+            "agent_path": state.agent_path,
+            "pid": state.pid,
+            "task_dir": state.task_dir,
+            "turn_status": state.turn_status,
+            "process_status": state.process_status,
+            "round": state.round,
+            "output_path": state.output_path,
+            "final_output_path": state.final_output_path,
+            "run_id": getattr(state, "run_id", None),
+            "parent_session_id": getattr(state, "parent_session_id", None),
+            "artifact_dir": getattr(state, "artifact_dir", None),
+            "permission_profile": getattr(state, "permission_profile", None),
+            "parent_permission_mode": getattr(state, "parent_permission_mode", None),
+            "permission_options": getattr(state, "permission_options", None) or {},
+            "capability_options": getattr(state, "capability_options", None) or {},
+            "capability_profile": getattr(state, "capability_profile", None),
+            "allow_delegation": getattr(state, "allow_delegation", False),
+            "context_mode": getattr(state, "context_mode", None),
+            "agent_type": getattr(state, "agent_type", None),
+            "role_source_path": getattr(state, "role_source_path", None),
+            "background": getattr(state, "background", True),
+            "handoff_mode": getattr(state, "handoff_mode", None),
+            "handoff_reason": getattr(state, "handoff_reason", None),
+            "attach_status": getattr(state, "attach_status", None),
+            "ipc_mode": getattr(state, "ipc_mode", None),
+            "effective_ipc_mode": getattr(state, "effective_ipc_mode", None),
+            "ipc_fallback_reason": getattr(state, "ipc_fallback_reason", None),
+            "ipc_endpoint": getattr(state, "ipc_endpoint", None),
+            "isolation": getattr(state, "isolation", None),
+            "worktree_path": getattr(state, "worktree_path", None),
+            "worktree_summary": getattr(state, "worktree_summary", None),
+            "worktree_cleanup": getattr(state, "worktree_cleanup", None),
+            "updated_at": state.updated_at,
+            "last_message": state.last_message,
+            "last_error": state.last_error,
+            "last_error_stage": getattr(state, "last_error_stage", None),
+            "completion_status": getattr(state, "completion_status", None),
+            "llm_no": getattr(state, "llm_no", None),
+            "model_profile": getattr(state, "model_profile", None),
+            "model_id": getattr(state, "model_id", None),
+            "startup_phase": getattr(state, "startup_phase", None),
+            "startup_phase_at": getattr(state, "startup_phase_at", None),
+            "startup_elapsed_ms": getattr(state, "startup_elapsed_ms", None),
+        }
+        if include_output and state.final_output_path and os.path.exists(state.final_output_path):
+            try:
+                with open(state.final_output_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                text = text.replace("\n\n[ROUND END]\n", "").rstrip()
+                payload["final_output"] = smart_format(text, max_str_len=max_output_chars, omit_str="\n\n[omitted long subagent output]\n\n")
+            except Exception as e:
+                payload["final_output_error"] = str(e)
+        return payload
+
+    def do_spawn_agent(self, args, response):
+        '''启动一个后台子智能体。默认使用隔离上下文，并移除子 agent 的编排工具。'''
+        task_name = args.get("task_name") or args.get("name")
+        agent_type = args.get("agent_type") or args.get("agentType")
+        role = None
+        role_source_path = None
+        if agent_type:
+            from subagent_roles import SubagentRoleRegistry, build_role_task_message
+
+            manager_for_roles = self._get_subagent_manager()
+            role_registry = SubagentRoleRegistry(manager_for_roles.root_dir)
+            try:
+                role = role_registry.get(agent_type)
+                role_source_path = role.source_path
+                task_name = task_name or role.name
+            except FileNotFoundError:
+                available_agent_types = sorted(role.name for role in role_registry.list_roles())
+                if available_agent_types:
+                    available_text = ", ".join(available_agent_types)
+                    msg = (
+                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label. "
+                        f"Available agent_type values: {available_text}. Retry with one exact available value, "
+                        "or omit agent_type to spawn a generic subagent. Do not probe the filesystem for role names."
+                    )
+                else:
+                    msg = (
+                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label, "
+                        "and no role definitions are available. Retry the same spawn with task_name and message "
+                        "but omit agent_type. Do not probe the filesystem for role names."
+                    )
+                return StepOutcome(
+                    {
+                        "status": "error",
+                        "reason": "unknown_agent_type",
+                        "requested_agent_type": str(agent_type),
+                        "available_agent_types": available_agent_types,
+                        "msg": msg,
+                    },
+                    next_prompt="\n",
+                )
+            except Exception as e:
+                return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} could not be loaded: {format_error(e)}"}, next_prompt="\n")
+        message = args.get("message") or args.get("prompt") or ""
+        if not task_name:
+            return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
+        if not message:
+            return StepOutcome({"status": "error", "msg": "message is required"}, next_prompt="\n")
+        if role is not None:
+            message = build_role_task_message(role, message)
+        raw_fork_turns = args.get("fork_turns")
+        if raw_fork_turns is None and role is not None and role.fork_turns_default:
+            raw_fork_turns = role.fork_turns_default
+        fork_turns = str(raw_fork_turns if raw_fork_turns is not None else "none")
+        fork_history = None if fork_turns.lower() == "none" else self._current_backend_history_snapshot()
+        try:
+            llm_no = int(args.get("llm_no", getattr(self.parent, "llm_no", 0)))
+        except Exception:
+            llm_no = getattr(self.parent, "llm_no", 0)
+        verbose = bool(args.get("verbose", getattr(self.parent, "verbose", False)))
+        permission_profile = args.get("permission_profile") or args.get("permissionProfile") or (role.permission_profile if role is not None else None) or "inherit-current-permissions"
+        parent_permission_mode = args.get("parent_permission_mode") or args.get("parentPermissionMode") or getattr(self.parent, "permission_mode", None)
+        role_permission_options = dict(role.permission_options or {}) if role is not None else {}
+        permission_options = {
+            key: args.get(key)
+            for key in [
+                "allowed_tools",
+                "denied_tools",
+                "allowed_mcp_servers",
+                "denied_mcp_servers",
+                "allowed_mcp_tools",
+                "denied_mcp_tools",
+            ]
+            if args.get(key) is not None
+        }
+        permission_options = {**role_permission_options, **permission_options}
+        requested_role_tools = args.get("tools") or args.get("capability_tools")
+        if requested_role_tools is None and role is not None:
+            requested_role_tools = list(role.tools)
+        if isinstance(requested_role_tools, str):
+            requested_role_tools = [requested_role_tools]
+        allow_delegation = args.get("allow_delegation")
+        if allow_delegation is None:
+            allow_delegation = args.get("allowDelegation")
+        if allow_delegation is None and role is not None:
+            allow_delegation = role.allow_delegation
+        allow_delegation = bool(allow_delegation)
+        team_mode = bool(args.get("team_mode") or args.get("teamMode"))
+        capability_options = {
+            "role_tools": (
+                None
+                if requested_role_tools is None
+                else [str(item) for item in requested_role_tools if str(item).strip()]
+            ),
+            "allow_delegation": allow_delegation,
+            "team_mode": team_mode,
+        }
+        requested_isolation = args.get("isolation")
+        isolation, isolation_fallback_reason = _resolve_subagent_isolation(
+            requested_isolation,
+            permission_profile,
+            parent_permission_mode,
+            permission_options,
+        )
+        manager = self._get_subagent_manager()
+        bound_task = None
+        if team_mode:
+            from subagent_tasks import team_task_protocol
+
+            owner_path = "/root/" + str(task_name)
+            bound_task = self._bind_team_task(manager, task_name, owner_path)
+            message = team_task_protocol(
+                task_name,
+                owner_path=owner_path,
+                task_id=(bound_task or {}).get("id"),
+                subject=(bound_task or {}).get("subject"),
+            ) + chr(10) + chr(10) + message
+        yield f"[Action] Spawning subagent: {task_name}\n"
+        try:
+            handle = manager.spawn_agent(
+                task_name,
+                message,
+                llm_no=llm_no,
+                verbose=verbose,
+                parent_session_id=getattr(self.parent, "session_id", None),
+                fork_turns=fork_turns,
+                fork_history=fork_history,
+                permission_profile=permission_profile,
+                parent_permission_mode=parent_permission_mode,
+                permission_options=permission_options,
+                capability_options=capability_options,
+                agent_type=agent_type,
+                role_source_path=role_source_path,
+                background=bool(args.get("background", True)),
+                ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "file",
+                isolation=isolation,
+                submission_id=args.get("submission_id") or args.get("submissionId"),
+            )
+            result = {
+                "status": "started",
+                "task_name": handle.task_name,
+                "agent_path": handle.agent_path,
+                "pid": handle.pid,
+                "task_dir": handle.task_dir,
+                "state_path": handle.state_path,
+                "run_id": handle.run_id,
+                "artifact_dir": handle.artifact_dir,
+                "permission_profile": handle.permission_profile,
+                "parent_permission_mode": handle.parent_permission_mode,
+                "permission_options": handle.permission_options or {},
+                "capability_options": getattr(handle, "capability_options", None) or capability_options,
+                "capability_profile": getattr(handle, "capability_profile", None) or ("delegating" if allow_delegation else "isolated"),
+                "allow_delegation": bool(getattr(handle, "allow_delegation", allow_delegation)),
+                "context_mode": getattr(handle, "context_mode", None) or ("isolated" if fork_turns.lower() == "none" else "explicit_fork"),
+                "agent_type": handle.agent_type,
+                "role_source_path": handle.role_source_path,
+                "background": handle.background,
+                "ipc_mode": handle.ipc_mode,
+                "effective_ipc_mode": handle.effective_ipc_mode,
+                "ipc_fallback_reason": handle.ipc_fallback_reason,
+                "ipc_endpoint": handle.ipc_endpoint,
+                "requested_isolation": requested_isolation,
+                "isolation": handle.isolation,
+                "isolation_fallback_reason": isolation_fallback_reason,
+                "worktree_path": handle.worktree_path,
+                "fork_turns": fork_turns,
+                "context_mode": "isolated" if fork_turns.lower() == "none" else "explicit_fork",
+                "llm_no": handle.llm_no,
+            }
+            if bound_task:
+                result["team_task"] = {"id": bound_task.get("id"), "subject": bound_task.get("subject")}
+            yield f"[Status] Subagent {handle.agent_path} started (pid={handle.pid}).\n"
+        except Exception as e:
+            if bound_task:
+                try:
+                    manager.task_store().reclaim_owner("/root/" + str(task_name))
+                except Exception:
+                    pass
+            result = self._subagent_error_result(e)
+            result["requested_isolation"] = requested_isolation
+            result["isolation"] = isolation
+            result["isolation_fallback_reason"] = isolation_fallback_reason
+            yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _bind_team_task(self, manager, task_name, owner_path):
+        """Pre-assign a claimable board task to a team_mode teammate (CC: teammates claim from the board).
+
+        Prefers a task whose subject/description mentions the teammate name, else the first
+        claimable task (CC ``qe`` FIFO). Returns the claimed task dict, or None when the board
+        has nothing claimable (the teammate then claims/creates one via the spawn preamble).
+        """
+        try:
+            store = manager.task_store()
+            tasks = store.list_tasks()
+        except Exception:
+            return None
+        claimable = [
+            t for t in tasks
+            if t.get("status") == "pending" and not t.get("owner") and not (t.get("blockedBy") or [])
+        ]
+        if not claimable:
+            return None
+        needle = str(task_name or "").strip().lower()
+        pick = None
+        if needle:
+            for candidate in claimable:
+                hay = (str(candidate.get("subject") or "") + " " + str(candidate.get("description") or "")).lower()
+                if needle in hay:
+                    pick = candidate
+                    break
+        if pick is None:
+            pick = claimable[0]
+        try:
+            result = store.claim_task(pick["id"], str(owner_path), start=True)
+        except Exception:
+            return None
+        if isinstance(result, dict) and result.get("success"):
+            return result.get("task") or pick
+        return None
+
+    @staticmethod
+    def _subagent_error_result(exc):
+        """Shape a spawn/resume failure for the model.
+
+        A live-name conflict is a policy answer, not a crash: its message already names the
+        things the model can do instead, so `format_error`'s ``@ file:line, func -> `src```
+        suffix only invites the model to read a deliberate refusal as a GA bug and retry with a
+        mangled task_name. Every other exception keeps the traceback context.
+        """
+        from subagent_manager import SubagentStartupError
+        from subagent_registry import SubagentNameConflictError
+
+        if isinstance(exc, SubagentNameConflictError):
+            return {"status": "error", "reason": "name_conflict", "agent_path": getattr(exc, "agent_path", None), "msg": str(exc)}
+        if isinstance(exc, SubagentStartupError):
+            result = {
+                "status": "error",
+                "reason": exc.reason,
+                "task_name": exc.task_name,
+                "pid": exc.pid,
+                "msg": str(exc),
+            }
+            if exc.returncode is not None:
+                result["returncode"] = exc.returncode
+            return result
+        return {"status": "error", "msg": format_error(exc)}
+
+    def do_list_agents(self, args, response):
+        '''列出当前 root 下的子智能体状态。'''
+        manager = self._get_subagent_manager()
+        include_closed = bool(args.get("include_closed", False))
+        include_output = bool(args.get("include_output", False))
+        path_prefix = args.get("path_prefix")
+        max_output_chars = max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))
+        states = manager.list_agents(path_prefix=path_prefix, include_closed=include_closed)
+        result = {
+            "status": "success",
+            "agents": [
+                self._subagent_state_payload(state, include_output=include_output, max_output_chars=max_output_chars)
+                for state in states
+            ],
+        }
+        yield f"[Status] Found {len(states)} subagent(s).\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _team_name(self):
+        from subagent_team import team_name_for
+
+        return team_name_for(getattr(self.parent, "session_id", None))
+
+    def _self_author(self):
+        """Agent path of the caller, used as the author of queued messages.
+        The lead is "/root"; a teammate is "/root/<task_name>".
+        """
+        manager = self._get_subagent_manager()
+        name = str(manager.self_agent_path).rstrip("/").split("/")[-1]
+        return "/root/" + name if name and name != "root" else "/root"
+
+    def _get_task_store(self, list_id=None):
+        manager = self._get_subagent_manager()
+        from subagent_tasks import SubagentTaskStore
+
+        return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name())
+
+    @staticmethod
+    def _as_list_arg(args, *names):
+        for name in names:
+            if name in args and args[name] is not None:
+                raw = args[name]
+                if isinstance(raw, str):
+                    return [part.strip() for part in raw.split(",") if part.strip()]
+                return [str(part).strip() for part in raw if str(part).strip()]
+        return None
+
+    def do_task_create(self, args, response):
+        '''在团队共享任务板上新建一个任务（status 恒为 pending，owner 为空）。'''
+        subject = args.get("subject") or args.get("title")
+        if not subject:
+            return StepOutcome({"status": "error", "msg": "subject is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else None
+        task = store.create_task(
+            subject,
+            args.get("description") or "",
+            active_form=args.get("activeForm") or args.get("active_form"),
+            metadata=metadata,
+        )
+        yield f"[Status] Task #{task['id']} created: {task['subject']}\n"
+        return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_get(self, args, response):
+        '''按 id 读取任务全量字段。'''
+        task_id = args.get("taskId") or args.get("task_id") or args.get("id")
+        if task_id is None:
+            return StepOutcome({"status": "error", "msg": "taskId is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        task = store.get_task(task_id)
+        if task is None:
+            return StepOutcome({"status": "error", "reason": "task_not_found", "taskId": str(task_id)}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+        yield "[Status] Task #%s: %s (%s).%s" % (task_id, task.get("subject"), task.get("status"), chr(10))
+        return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_update(self, args, response):
+        '''更新/认领/删除任务。owner 为软锁：任务已被他人认领则拒绝（already_claimed）。'''
+        task_id = args.get("taskId") or args.get("task_id") or args.get("id")
+        if task_id is None:
+            return StepOutcome({"status": "error", "msg": "taskId is required"}, next_prompt="\n")
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        kwargs = {
+            "status": args.get("status"),
+            "subject": args.get("subject"),
+            "description": args.get("description"),
+            "active_form": args.get("activeForm") or args.get("active_form"),
+            "add_blocks": self._as_list_arg(args, "addBlocks", "add_blocks"),
+            "add_blocked_by": self._as_list_arg(args, "addBlockedBy", "add_blocked_by"),
+            "metadata": args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+        }
+        if "owner" in args:
+            kwargs["owner"] = args.get("owner")
+        result = store.update_task(task_id, **kwargs)
+        if not result.get("success"):
+            yield f"[Status] Task update rejected: {result.get('error') or result.get('reason')}\n"
+        else:
+            yield f"[Status] Task #{task_id} updated: {', '.join(result.get('updatedFields') or [])}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_task_list(self, args, response):
+        '''列出任务板摘要（只显示未完成的 blockedBy；隐藏内部任务）。'''
+        store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        tasks = store.list_tasks()
+        claimable = [t for t in tasks if t["status"] == "pending" and not t["owner"] and not t["blockedBy"]]
+        hint = ""
+        if claimable:
+            hint = f" Claimable now: {', '.join('#' + str(t['id']) for t in claimable)}. Claim with TaskUpdate(owner=<your name>)."
+        yield f"[Status] {len(tasks)} task(s).{hint}\n"
+        return StepOutcome({"status": "success", "tasks": tasks}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_team_status(self, args, response):
+        '''查看当前隐式团队：team 名、lead、成员。'''
+        from subagent_team import SubagentTeam
+
+        manager = self._get_subagent_manager()
+        team = SubagentTeam(manager.registry, manager.self_agent_path, team_name=self._team_name())
+        view = team.view(include_closed=bool(args.get("include_closed")))
+        yield "[Status] Team %s: %d member(s).%s" % (view["teamName"], view["memberCount"], chr(10))
+        return StepOutcome({"status": "success", "team": view}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_send_message(self, args, response):
+        '''向子智能体邮箱发送消息，但不触发新一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        row = manager.send_message(
+            target,
+            message,
+            author=self._self_author(),
+            other_recipients=self._other_recipients_arg(args),
+            submission_id=args.get("submission_id") or args.get("submissionId"),
+        )
+        yield f"[Status] Message queued for {row.get('recipient')}.\n"
+        return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_followup_task(self, args, response):
+        '''给已完成或等待中的子智能体发送后续任务，并触发下一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        row = manager.followup_task(
+            target,
+            message,
+            author=self._self_author(),
+            other_recipients=self._other_recipients_arg(args),
+            submission_id=args.get("submission_id") or args.get("submissionId"),
+        )
+        yield f"[Status] Follow-up task queued for {row.get('recipient')}.\n"
+        return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    @staticmethod
+    def _other_recipients_arg(args):
+        """Accept a list or a comma-separated string; models emit both for array params."""
+        raw = args.get("other_recipients") or args.get("otherRecipients")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        return [str(part).strip() for part in raw if str(part).strip()]
+
+    def do_wait_agent(self, args, response):
+        '''等待子智能体 mailbox/status 更新；不读取最终输出正文。'''
+        raw_targets = args.get("targets")
+        target = args.get("target") or args.get("task_name")
+        if raw_targets is None:
+            targets = [target] if target else None
+        elif isinstance(raw_targets, str):
+            raw_targets = raw_targets.strip()
+            targets = [raw_targets] if raw_targets else ([target] if target else None)
+        else:
+            targets = list(raw_targets)
+            if not targets:
+                targets = [target] if target else None
+        try:
+            timeout_s = float(args.get("timeout_seconds", args.get("timeout_s", 30)))
+        except Exception:
+            timeout_s = 30.0
+        timeout_s = max(0.0, min(timeout_s, 3600.0))
+        try:
+            poll_interval_s = float(args.get("poll_interval_seconds", 0.5))
+        except Exception:
+            poll_interval_s = 0.5
+        poll_interval_s = max(0.05, min(poll_interval_s, 10.0))
+        raw_since_seq = args.get("since_event_seq") or args.get("sinceEventSeq")
+        since_event_seq = None
+        if raw_since_seq is not None:
+            try:
+                since_event_seq = int(raw_since_seq)
+            except Exception:
+                since_event_seq = 0
+        wait_condition = str(
+            args.get("condition") or args.get("wait_condition") or args.get("waitCondition") or "event"
+        ).strip().lower()
+        manager = self._get_subagent_manager()
+        manager = self._bind_workflow_wait_resolver(manager)
+        unknown_runs = self._unknown_workflow_targets(targets, manager)
+        if unknown_runs:
+            msg = "workflow run not found: " + ", ".join(unknown_runs)
+            yield f"[Warn] {msg}\n"
+            return StepOutcome(
+                {
+                    "status": "error",
+                    "condition": wait_condition,
+                    "error": msg,
+                    "unknown_workflow_runs": unknown_runs,
+                    "hint": "A workflow run id is wf_<32 hex>. Check /workflows for the real runId; do not retry the same id.",
+                },
+                next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+            )
+        yield f"[Action] Waiting for subagent update ({timeout_s:g}s, condition={wait_condition}).\n"
+        result = manager.wait_agents(
+            targets=targets,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            since_event_seq=since_event_seq,
+            wait_condition=wait_condition,
+        )
+        data = {
+            "status": "timeout" if result.timed_out else ("satisfied" if result.satisfied else "changed"),
+            "condition": result.condition,
+            "satisfied": result.satisfied,
+            "remaining_targets": result.remaining_targets,
+            "terminal_targets": result.terminal_targets,
+            "result_refs": result.result_refs,
+            "recommended_next_action": result.recommended_next_action,
+            "message": result.message,
+            "events": result.events or [],
+            "next_event_seq": result.next_event_seq,
+            "agents": [
+                self._subagent_state_payload(state, include_output=False)
+                for state in result.changed_agents
+            ],
+            "observed_agents": [
+                self._subagent_state_payload(state, include_output=False)
+                for state in result.observed_agents
+            ],
+        }
+        if result.result_refs or any(agent.get("turn_status") == "completed" for agent in data["agents"] + data["observed_agents"]):
+            data["result_hint"] = "Call read_agent_result for a completed subagent when you need its final output."
+        live_observed = sum(
+            1
+            for agent in data["observed_agents"]
+            if agent.get("turn_status") in {"pending", "running"}
+            and agent.get("process_status") not in {"shutdown", "killed", "exited"}
+        )
+        observed_suffix = f"; {live_observed} target(s) still pending/running" if live_observed else ""
+        yield f"[Status] {data['status']}: {len(data['agents'])} update(s){observed_suffix}.\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_read_agent_result(self, args, response):
+        '''读取一个已完成子智能体的最终输出；和 wait_agent 的事件等待职责分离。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        artifact_id = args.get("artifact_id") or args.get("artifactId")
+        include_transcript_replay = bool(args.get("include_transcript_replay") or args.get("includeTranscriptReplay"))
+        include_transcript_timeline = bool(args.get("include_transcript_timeline") or args.get("includeTranscriptTimeline"))
+        include_resume_context = bool(args.get("include_resume_context") or args.get("includeResumeContext"))
+        resume_context_edits = args.get("resume_context_edits") or args.get("resumeContextEdits") or None
+        try:
+            max_output_chars = int(args.get("max_output_chars", max(1000, 12000 // max(1, int(args.get('_tool_num', 1))))))
+        except Exception:
+            max_output_chars = 8000
+        max_output_chars = max(1000, min(max_output_chars, 50000))
+        manager = self._get_subagent_manager()
+        manager = self._bind_workflow_wait_resolver(manager)
+        unknown_runs = self._unknown_workflow_targets([target], manager)
+        if unknown_runs:
+            msg = "workflow run not found: " + ", ".join(unknown_runs)
+            yield f"[Warn] {msg}\n"
+            return StepOutcome(
+                {"status": "error", "msg": msg, "unknown_workflow_runs": unknown_runs},
+                next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+            )
+        try:
+            state = manager.read_agent(target)
+            payload = self._subagent_state_payload(state, include_output=not bool(artifact_id), max_output_chars=max_output_chars)
+            if artifact_id:
+                from subagent_artifacts import SubagentArtifactStore
+
+                artifact = SubagentArtifactStore(state.artifact_dir).get(artifact_id)
+                artifact_path = artifact.get("path")
+                with open(artifact_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                text = text.replace("\n\n[ROUND END]\n", "").rstrip()
+                payload.update(
+                    {
+                        "artifact_id": artifact.get("artifact_id"),
+                        "artifact": artifact,
+                        "final_output_path": artifact_path,
+                        "final_output": smart_format(
+                            text,
+                            max_str_len=max_output_chars,
+                            omit_str="\n\n[omitted long subagent output]\n\n",
+                        ),
+                    }
+                )
+                status = "success"
+            elif state.turn_status != "completed":
+                status = "not_completed"
+            elif payload.get("final_output") is None:
+                status = "missing_result"
+            else:
+                status = "success"
+            if include_transcript_replay or include_transcript_timeline or include_resume_context:
+                parent_session_id = getattr(state, "parent_session_id", None)
+                run_id = getattr(state, "run_id", None)
+                if parent_session_id and run_id:
+                    from subagent_transcript import SubagentTranscriptStore
+
+                    transcript_store = SubagentTranscriptStore(manager.temp_dir / "sessions")
+                    if include_transcript_replay:
+                        payload["transcript_replay"] = transcript_store.replay(parent_session_id, run_id)
+                    if include_transcript_timeline:
+                        payload["transcript_timeline"] = transcript_store.build_replay_timeline(parent_session_id, run_id)
+                    if include_resume_context:
+                        payload["resume_context"] = transcript_store.build_resume_context(parent_session_id, run_id, edits=resume_context_edits)
+                else:
+                    missing = {"status": "missing", "reason": "parent_session_id_or_run_id_missing"}
+                    if include_transcript_replay:
+                        payload["transcript_replay"] = missing
+                    if include_transcript_timeline:
+                        payload["transcript_timeline"] = missing
+                    if include_resume_context:
+                        payload["resume_context"] = missing
+            data = {"status": status, "agent": payload}
+            yield f"[Status] Read result for {state.agent_path}: {status}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to read subagent result: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_resume_agent(self, args, response):
+        '''基于 sidechain transcript 恢复一个已关闭子智能体并启动下一轮。'''
+        target = args.get("target") or args.get("task_name")
+        message = args.get("message") or args.get("prompt") or ""
+        if not target or not message:
+            return StepOutcome({"status": "error", "msg": "target and message are required"}, next_prompt="\n")
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.resume_agent(
+                target,
+                message,
+                author=self._self_author(),
+                submission_id=args.get("submission_id") or args.get("submissionId"),
+            )
+            data = {
+                "status": "resumed",
+                "target": result.target,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+                "handle": {
+                    "task_name": result.handle.task_name,
+                    "agent_path": result.handle.agent_path,
+                    "pid": result.handle.pid,
+                    "task_dir": result.handle.task_dir,
+                    "state_path": result.handle.state_path,
+                    "run_id": result.handle.run_id,
+                    "artifact_dir": result.handle.artifact_dir,
+                    "permission_profile": result.handle.permission_profile,
+                    "parent_permission_mode": result.handle.parent_permission_mode,
+                    "permission_options": result.handle.permission_options or {},
+                    "agent_type": result.handle.agent_type,
+                    "background": result.handle.background,
+                    "ipc_mode": result.handle.ipc_mode,
+                    "effective_ipc_mode": result.handle.effective_ipc_mode,
+                    "ipc_fallback_reason": result.handle.ipc_fallback_reason,
+                    "isolation": result.handle.isolation,
+                    "worktree_path": result.handle.worktree_path,
+                    "handoff_mode": result.handle.handoff_mode,
+                    "handoff_reason": result.handle.handoff_reason,
+                },
+                "resume_context": result.resume_context,
+            }
+            yield f"[Status] Resumed subagent {result.target}.\n"
+        except Exception as e:
+            data = self._subagent_error_result(e)
+            yield f"[Status] Failed to resume subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_foreground_agent(self, args, response):
+        '''请求子智能体切到前台观察状态；当前版本只记录 handoff 状态，不接管交互式 TUI。'''
+        return self._do_handoff_agent(args, handoff_mode="foreground")
+
+    def do_background_agent(self, args, response):
+        '''请求子智能体切回后台队列状态；当前版本只记录 handoff 状态。'''
+        return self._do_handoff_agent(args, handoff_mode="background")
+
+    def _do_handoff_agent(self, args, *, handoff_mode):
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or f"parent_{handoff_mode}"
+        manager = self._get_subagent_manager()
+        try:
+            if handoff_mode == "foreground":
+                result = manager.request_foreground(target, reason=reason)
+            else:
+                result = manager.request_background(target, reason=reason)
+            data = {
+                "status": "handoff_requested",
+                "target": result.target,
+                "handoff_mode": result.handoff_mode,
+                "reason": result.reason,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+                "updated_state": self._subagent_state_payload(result.updated_state),
+            }
+            yield f"[Status] Requested {handoff_mode} handoff for {result.target}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to request {handoff_mode} handoff: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_attach_agent(self, args, response):
+        '''附着到子智能体的实时输出流：切到前台 handoff 状态并按 since_offset 增量读取输出。'''
+        return self._do_attach_stream(args, attach_status="attached")
+
+    def do_detach_agent(self, args, response):
+        '''从子智能体输出流分离：读取剩余增量输出并切回后台 handoff 状态。'''
+        return self._do_attach_stream(args, attach_status="detached")
+
+    def _do_attach_stream(self, args, *, attach_status):
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or ("parent_attach" if attach_status == "attached" else "parent_detach")
+        since_offset = args.get("since_offset") or 0
+        max_chars = args.get("max_chars")
+        manager = self._get_subagent_manager()
+        try:
+            if attach_status == "attached":
+                result = manager.attach_agent(target, since_offset=since_offset, max_chars=max_chars, reason=reason)
+            else:
+                result = manager.detach_agent(target, since_offset=since_offset, max_chars=max_chars, reason=reason)
+            data = {
+                "status": result.attach_status,
+                "target": result.target,
+                "handoff_mode": result.handoff_mode,
+                "reason": result.reason,
+                "output_path": result.output_path,
+                "stream_text": result.stream_text,
+                "stream_offset": result.stream_offset,
+                "next_stream_offset": result.next_stream_offset,
+                "stream_truncated": result.stream_truncated,
+                "stream_eof": result.stream_eof,
+                "next_event_seq": result.next_event_seq,
+                "state": self._subagent_state_payload(result.state),
+            }
+            yield f"[Status] {result.attach_status.capitalize()} subagent {result.target} stream.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to {attach_status[:-2]} subagent stream: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_interrupt_agent(self, args, response):
+        '''请求子智能体中断当前轮次；子进程会尽量保留以便后续 followup_task。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or "parent_interrupt"
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.interrupt_agent(target, reason=reason)
+            data = {
+                "status": "interrupt_requested",
+                "target": result.target,
+                "stop_path": result.stop_path,
+                "previous_state": self._subagent_state_payload(result.previous_state),
+            }
+            yield f"[Status] Interrupt requested for {result.previous_state.agent_path}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to interrupt subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def do_close_agent(self, args, response):
+        '''关闭子智能体并返回关闭前状态；root agent 不能关闭。cascade=true 会先关闭其所有后代。'''
+        target = args.get("target") or args.get("task_name")
+        if not target:
+            return StepOutcome({"status": "error", "msg": "target is required"}, next_prompt="\n")
+        reason = args.get("reason") or "parent_cleanup"
+        try:
+            grace_s = float(args.get("grace_seconds", args.get("grace_s", 2)))
+        except Exception:
+            grace_s = 2.0
+        grace_s = max(0.0, min(grace_s, 60.0))
+        cleanup_worktree = bool(args.get("cleanup_worktree") or args.get("cleanupWorktree"))
+        cascade = bool(args.get("cascade"))
+        manager = self._get_subagent_manager()
+        try:
+            result = manager.close_agent(
+                target,
+                reason=reason,
+                grace_s=grace_s,
+                cleanup_worktree=cleanup_worktree,
+                cascade=cascade,
+                submission_id=args.get("submission_id") or args.get("submissionId"),
+            )
+            data = {
+                "status": "closed",
+                "target": result.previous_state.agent_path,
+                "previous_status": self._subagent_state_payload(result.previous_state),
+                "closed_state": self._subagent_state_payload(result.closed_state),
+                "final_output_path": result.final_output_path,
+                "closed_descendants": result.closed_descendants,
+            }
+            if result.closed_descendants:
+                yield f"[Status] Closed subagent {result.previous_state.agent_path} and {len(result.closed_descendants)} descendant(s).\n"
+            else:
+                yield f"[Status] Closed subagent {result.previous_state.agent_path}.\n"
+        except Exception as e:
+            data = {"status": "error", "msg": format_error(e)}
+            yield f"[Status] Failed to close subagent: {data['msg']}\n"
+        return StepOutcome(data, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _retry_or_exit(self, prompt):
+        self._empty_ct = getattr(self, '_empty_ct', 0) + 1
+        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
+        return StepOutcome({}, next_prompt=prompt)
+
+    def do_no_tool(self, args, response):
+        '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。
+        当模型在一轮中未显式调用任何工具时，由引擎自动触发。
+        二次确认仅在回复几乎只包含<thinking>/<summary>和一段大代码块时触发。'''
+        content = getattr(response, 'content', '') or ""
+        thinking = getattr(response, 'thinking', '') or ""
+        if not response or (not content.strip() and not thinking.strip()):
+            yield "[Warn] LLM returned an empty response. Retrying...\n"
+            return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
+        if '[!!! 流异常中断' in content[-100:]:
+            yield "[Warn] Stream interrupted mid-response. Regenerating...\n"
+            return self._retry_or_exit("[System] Incomplete response. Regenerate and tooluse.")
+        if '!!!Error:' in content[-100:]:
+            # Deterministic provider/transport error surfaced by the LLM layer
+            # (e.g. a proxy returned a bare {"error": {...}} object with no content).
+            # Retrying the same payload is futile, so report it instead of looping.
+            self._empty_ct = 0
+            detail = content.strip()
+            if len(detail) > 600: detail = detail[:600] + '...'
+            yield f"[Error] LLM provider error: {detail}\n"
+            return StepOutcome(response, next_prompt=None)
+        if 'max_tokens !!!]' in content[-100:]:
+            return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
+        
+        if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
+            if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
+                yield "[Warn] Plan模式完成声明拦截。\n"
+                return StepOutcome({}, next_prompt="⛔ [验证拦截] 检测到你在plan模式下声称完成，但未执行[VERIFY]验证步骤。请先按plan_sop §四启动验证subagent，获得VERDICT后才能声称完成。")
+            
+        # 2. 检测"包含较大代码块但未调用工具"的情况
+        # 关键特征：恰好1个大代码块 + 代码块直接结尾（后面只有空白）
+        code_block_pattern = r"```[a-zA-Z0-9_]*\n[\s\S]{50,}?```"
+        blocks = re.findall(code_block_pattern, content)
+        if len(blocks) == 1:
+            m = re.search(code_block_pattern, content)
+            after_block = content[m.end():]
+            if not after_block.strip():
+                residual = content.replace(m.group(0), "")
+                residual = re.sub(r"<thinking>[\s\S]*?</thinking>", "", residual, flags=re.IGNORECASE)
+                residual = re.sub(r"<summary>[\s\S]*?</summary>", "", residual, flags=re.IGNORECASE)
+                clean_residual = re.sub(r"\s+", "", residual)
+                if len(clean_residual) <= 30:
+                    yield "[Info] Detected large code block without tool call and no extra natural language. Requesting clarification.\n"
+                    next_prompt = (
+                        "[System] 检测到你在上一轮回复中主要内容是较大代码块，且本轮未调用任何工具。\n"
+                        "如果这些代码需要执行、写入文件或进一步分析，请重新组织回复并显式调用相应工具"
+                        "（例如：code_run、file_write、file_patch 等）；\n"
+                        "如果只是向用户展示或讲解代码片段，请在回复中补充自然语言说明，"
+                        "并明确是否还需要额外的实际操作。"
+                    )
+                    return StepOutcome({}, next_prompt=next_prompt)
+                
+        if self._in_plan_mode():
+            remaining = self._check_plan_completion()
+            if remaining == 0:
+                self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
+        
+        yield "[Info] Final response to user.\n"
+        return StepOutcome(response, next_prompt=None)
+    
+    def do_start_long_term_update(self, args, response):
+        '''Agent觉得当前任务完成后有重要信息需要记忆时调用此工具。'''
+        prompt = '''### [总结提炼经验] 既然你觉得当前任务有重要信息需要记忆，请提取最近一次任务中【事实验证成功且长期有效】的环境事实、用户偏好、重要步骤，更新记忆。
+本工具是标记开启结算过程，若已在更新记忆过程或没有值得记忆的点，忽略本次调用。
+**如果没有经验证的，未来能用上的信息，忽略本次调用！**
+**只能提取行动验证成功的信息**：
+- **环境事实**（路径/凭证/配置）→ `file_patch` 更新 L2，同步 L1
+- **复杂任务经验**（关键坑点/前置条件/重要步骤）→ L3 精简 SOP（只记你被坑得多次重试的核心要点）
+**禁止**：临时变量、具体推理过程、未验证信息、通用常识、你可以轻松复现的细节、只是做了但没有验证的信息
+**操作**：严格遵循提供的L0的记忆更新SOP。先 `file_read` 看现有 → 判断类型 → 最小化更新 → 无新内容跳过，保证对记忆库最小局部修改。\n
+''' + get_global_memory()
+        yield "[Info] Start distilling good memory for long-term storage.\n"
+        path = './memory/memory_management_sop.md'
+        if os.path.exists(path): result = 'This is L0:\n' + file_read(path, show_linenos=False)
+        else: result = "Memory Management SOP not found. Do not update memory."
+        return StepOutcome(result, next_prompt=prompt)
+
+    def do_codex_lesson_update(self, args, response):
+        '''记录从Codex蒸馏packet中由LLM提议的候选经验；工具负责校验、去重和候选落盘。'''
+        try:
+            from memory.codex_session_distill import DistillState, codex_lesson_update
+        except Exception:
+            import codex_session_distill
+            DistillState = codex_session_distill.DistillState
+            codex_lesson_update = codex_session_distill.codex_lesson_update
+        state_dir = args.get("state_dir") or os.path.join(script_dir, "memory", "codex_distill")
+        evidence = args.get("evidence") or args.get("evidence_signals") or []
+        if isinstance(evidence, str): evidence = [evidence]
+        result = codex_lesson_update(
+            DistillState(state_dir),
+            title=args.get("title", ""),
+            guidance=args.get("guidance", ""),
+            category=args.get("category", "workflow"),
+            evidence=evidence,
+            source_hash=args.get("source_hash", ""),
+            confidence=args.get("confidence", 0.5),
+        )
+        if result.get("status") == "candidate_recorded":
+            yield f"[Info] Codex lesson candidate recorded: {result['candidate'].get('id')}\n"
+        else:
+            yield f"[Warn] Codex lesson candidate rejected: {result.get('reason')}\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+
+    def _fold_earlier(self, lines):
+        FALLBACK = '直接回答了用户问题'
+        parts, cnt, last = [], 0, ''
+        def flush():
+            if cnt:
+                if FALLBACK in last: parts.append(f'[Agent]（{cnt} turns）')
+                else: parts.append(f'{last}（{cnt} turns）')
+        for line in lines:
+            if line.startswith('[USER]'):
+                flush(); parts.append(line); cnt = 0; last = ''
+            else: cnt += 1; last = line
+        flush()
+        return "\n".join(parts[-150:])
+
+    def _get_anchor_prompt(self, skip=False):
+        if skip: return "\n"
+        h = self.history_info; W = 30
+        earlier = f'<earlier_context>\n{self._fold_earlier(h[:-W])}\n</earlier_context>\n' if len(h) > W else ""
+        h_str = "\n".join(h[-W:])
+        prompt = f"\n### [WORKING MEMORY]\n{earlier}<history>\n{h_str}\n</history>"
+        prompt += f"\nCurrent turn: {self.current_turn}\n"
+        if self.working.get('key_info'): prompt += f"\n<key_info>{self.working.get('key_info')}</key_info>"
+        if self.working.get('related_sop'): prompt += f"\n有不清晰的地方请再次读取{self.working.get('related_sop')}"
+        if self.working.get('active_skill'):
+            prompt += f"\n<active_skill>{self.working.get('active_skill')}</active_skill>"
+            if self.working.get('active_skill_allowed_tools'):
+                prompt += f"\n<active_skill_allowed_tools>{self.working.get('active_skill_allowed_tools')}</active_skill_allowed_tools>"
+        if getattr(self.parent, 'verbose', False):
+            try: print(prompt)
+            except: pass
+        return prompt
+    
+    def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
+        _c = re.sub(r'```.*?```|<thinking>.*?</thinking>', '', response.content, flags=re.DOTALL)
+        rsumm = re.search(r"<summary>(.*?)</summary>", _c, re.DOTALL)
+        if rsumm: summary = rsumm.group(1).strip()
+        else:
+            tc = tool_calls[0]; tool_name, args = tc['tool_name'], tc['args']   # at least one because no_tool
+            clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
+            summary = f"调用工具{tool_name}, args: {clean_args}"
+            if tool_name == 'no_tool': summary = "直接回答了用户问题"
+            next_prompt += "\n\n\n[SYSTEM] 必须在回复文本中包含<summary>！\n\n"
+        summary = smart_format(summary.replace('\n', ''), max_str_len=80)
+        self.history_info.append(f'[Agent] {summary}')
+        _plan = self._in_plan_mode()
+
+        if turn % 65 == 0 and (not _plan):
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user，不允许继续重试。"
+        elif turn % 7 == 0:
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
+        elif turn % 10 == 0: next_prompt += get_global_memory()
+
+        if _plan and turn >= 10 and turn % 5 == 0:
+            next_prompt = f"[Plan Hint] 正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
+        if _plan and turn >= 90: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
+
+        injkeyinfo = consume_file(self.parent.task_dir, '_keyinfo')
+        injprompt = consume_file(self.parent.task_dir, '_intervene')
+        if injkeyinfo: self.working['key_info'] = self.working.get('key_info', '') + f"\n[MASTER] {injkeyinfo}"
+        if injprompt: next_prompt += f"\n\n[MASTER] {injprompt}\n"
+        for hook in getattr(self.parent, '_turn_end_hooks', {}).values(): hook(locals())  # current readonly
+        return next_prompt
+
+def get_global_memory():
+    prompt = "\n"
+    try:
+        suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
+        with open(os.path.join(script_dir, 'memory/global_mem_insight.txt'), 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
+        with open(os.path.join(script_dir, f'assets/insight_fixed_structure{suffix}.txt'), 'r', encoding='utf-8') as f: structure = f.read()
+        prompt += f'cwd = {os.path.join(script_dir, "temp")} (./; tool scratch/output dir)\n'
+        prompt += f'workspace root = {script_dir} (..; project files such as README.md usually live here)\n'
+        prompt += f"\n[Memory] (../memory)\n"
+        prompt += structure + '\n../memory/global_mem_insight.txt:\n'
+        prompt += insight + "\n"
+    except FileNotFoundError: pass
+    return prompt

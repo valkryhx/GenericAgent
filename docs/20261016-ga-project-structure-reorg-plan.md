@@ -1,6 +1,6 @@
 # GA 项目目录重构方案
 
-> 状态：**方案已落盘，尚未实施代码迁移**
+> 状态：**后端主包迁移已实施（P1–P5 主体完成）；前端目录整理 P6 待继续**
 > 日期：2026-10-16
 > 目标仓库：`D:\git_codes\GenericAgent`
 > CC 证据仓库：`D:\git_codes\claudecode283_hack`
@@ -1025,3 +1025,85 @@ chore(structure): enforce package boundaries and update packaging
    - `docs/20261013-ga-workflow-隔离目录清理方案.md`
 
 实施时先执行 P0，不要直接开始 `git mv` 全部文件。任何新发现的 CC 结构事实，按 `AGENTS.md` 的“中途补充调研的持久化流程”先补记录，再改代码。
+
+---
+
+## 13. 实施结果（2026-10-16）
+
+> 状态：**P0–P5 主体已实施并通过回归；P6 前端目录整理仍待继续。**
+
+### 13.1 已完成
+
+1. **P0 结构门禁**
+   - 新增 `scripts/check_project_structure.py`。
+   - 当前输出：`project structure ok (73 allowed root Python shims/entrypoints)`。
+   - 检查规则：
+     - 根目录只允许既有入口/兼容 shim；
+     - 新增实现 `*.py` 必须进入 `genericagent/`；
+     - `genericagent/` 内禁止继续用 `Path(__file__).parent / "temp"` 这类猜项目根路径。
+
+2. **P1 包骨架与路径层**
+   - 新增 `genericagent/paths.py`，统一提供：
+     - `PROJECT_ROOT`、`TEMP_DIR`、`ASSETS_DIR`、`SKILLS_DIR`、`MEMORY_DIR`；
+     - `FRONTENDS_DIR`、`SESSIONS_DIR`、`RESOURCES_DIR`、`WORKFLOW_JS_DIR`；
+     - `MCP_CONFIG_PATH`、`LLM_CONFIG_PATH`。
+   - 支持 `GA_PROJECT_ROOT`、`GA_MCP_CONFIG`、`GA_LLM_CONFIG` 覆盖，便于测试、worktree 和打包后运行。
+
+3. **P2–P5 主包迁移**
+   - 将 73 个根级实现 `*.py` 通过 `git mv` 迁入 `genericagent/`。
+   - 根目录保留同名薄 shim，保证旧导入和旧启动方式不断。
+   - 主要落点：
+     - `agentmain.py` → `genericagent/core/app.py`
+     - `ga.py` → `genericagent/core/handler.py`
+     - `agent_loop.py` → `genericagent/core/loop.py`
+     - `llmcore.py` / `llm_client.py` / `llm_config.py` → `genericagent/llm/*`
+     - `mcp_runtime.py` → `genericagent/mcp/runtime.py`
+     - `workflow_*.py` → `genericagent/workflow/*`
+     - `subagent_*.py` → `genericagent/agents/*`
+     - `TMWebDriver.py` / `simphtml.py` → `genericagent/web/*`
+     - `image_codec.py` / `image_gc.py` → `genericagent/media/*`
+   - `assets/code_run_header.py` → `genericagent/resources/code_run_header.py`。
+   - `workflow_js_worker.js` / `workflow_script_contract.js` → `genericagent/workflow/js/*`。
+
+4. **路径与资源修复**
+   - `workflow` runtime 改用 `paths.WORKFLOW_JS_DIR / "worker.js"`。
+   - `workflow` script validation 改用 `paths.WORKFLOW_JS_DIR / "script_contract.js"`。
+   - `code_run` 头文件改用 `paths.RESOURCES_DIR`。
+   - subagent、workflow store、skills、MCP、LLM、transcript、media 等路径敏感模块统一改走 `genericagent.paths`。
+
+5. **打包与 CLI**
+   - `pyproject.toml` 改为包发现：`ga_cli*` + `genericagent*`。
+   - 增加 package-data：workflow JS、resources、LLM templates。
+   - `ga_cli/__init__.py` 改为从 `genericagent.core.handler` 重新导出稳定符号，避免重复模块身份。
+
+6. **测试契约修正**
+   - `tests/test_workflow_meta_contract.py` 更新到新 JS 资源路径与 `genericagent.*` 导入。
+   - p8 provider anomaly 旧断言曾要求 workflow 尾部发 `idle`，与 CC 对齐后的后台任务契约冲突。
+   - 已改为断言：**后台 workflow 不得翻转全局 session status**，避免锁住 Ink 输入框。
+
+### 13.2 已验证
+
+| 验证项 | 结果 |
+| --- | --- |
+| `python -m compileall -q genericagent ga_cli agentmain.py ga.py` | 通过 |
+| `python agentmain.py --help` | 通过 |
+| `python -m ga_cli list` | 通过 |
+| `python scripts/check_project_structure.py` | 通过 |
+| 关键 Python focused tests | 308 tests OK |
+| p8 provider anomaly + ink bridge | 139 tests OK |
+| Ink UI `npm test` | 431 pass |
+| Ink UI `npx tsc --noEmit` | 通过 |
+| 全量 Python `python -m unittest discover -s tests` | 1585 tests OK（3 skipped） |
+
+### 13.3 尚未完成
+
+- **P6 前端目录整理**：`frontends/ink_bridge.py`、`frontends/ink-ui/` 尚未迁入 `frontends/ink/`。
+- **P7 根 shim 清理**：本轮保留 73 个根级 shim/entrypoint，确保外部脚本和旧测试不中断；待确认无外部依赖后再逐批清理。
+- **真实 LLM E2E**：目录迁移本身已通过静态/单元/Ink UI 回归；如需发布前最终验收，仍应按 §8.5 跑默认 `deepseek-flash` 的 workflow / subagent / resume E2E。
+
+### 13.4 关键设计结论
+
+- **先路径层，后移动**：没有 `genericagent.paths`，任何 `git mv` 都会引入静默资源定位错误。
+- **兼容 shim 用模块别名，不复制实现**：根旧模块必须与新模块保持同一对象身份，避免测试 patch 和类身份分裂。
+- **迁移不夹带业务重构**：本轮只做目录、路径、打包和兼容层；workflow 语义、agent team 行为不在本提交中重写。
+- **云端边界不变**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**

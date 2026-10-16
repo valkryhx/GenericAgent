@@ -5,7 +5,8 @@ import sys, os, json, re, time, subprocess
 _code_run_root = os.environ.get('GA_CODE_RUN_ROOT')
 if _code_run_root and os.path.isdir(_code_run_root) and _code_run_root not in sys.path:
     sys.path.insert(0, _code_run_root)
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'memory'))
+if _code_run_root:
+    sys.path.append(os.path.join(_code_run_root, 'memory'))
 _r = subprocess.run
 def _d(b):
     if not b: return ''
@@ -31,6 +32,6 @@ def _pinit(self, *a, **k):
     _Pi(self, *a, **k)
 subprocess.Popen.__init__ = _pinit
 if os.environ.get('GA_WORKFLOW_WORKSPACE_ROOT'):
-    from workflow_workspace_guard import install as _install_workspace_guard
+    from genericagent.workflow.workspace_guard import install as _install_workspace_guard
     _install_workspace_guard(os.environ['GA_WORKFLOW_WORKSPACE_ROOT'])
 sys.excepthook = lambda t, v, tb: (sys.__excepthook__(t, v, tb), print(f"\n[Agent Hint]: NO GUESSING! You MUST probe first. If missing common package, pip.")) if issubclass(t, (ImportError, AttributeError)) else sys.__excepthook__(t, v, tb)

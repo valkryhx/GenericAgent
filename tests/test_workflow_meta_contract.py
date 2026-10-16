@@ -5,16 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_child_agent import FakeChildAgentRunner
-from workflow_models import WorkflowRun
-from workflow_script_validation import validate_rendered_workflow_script
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.workflow.child_agent import FakeChildAgentRunner
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.script_validation import validate_rendered_workflow_script
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_PATH = REPO_ROOT / "workflow_script_contract.js"
+CONTRACT_PATH = REPO_ROOT / "genericagent" / "workflow" / "js" / "script_contract.js"
 NODE = "node.exe" if sys.platform.startswith("win") else "node"
 
 

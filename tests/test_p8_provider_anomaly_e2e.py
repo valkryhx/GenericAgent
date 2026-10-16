@@ -171,8 +171,9 @@ class P8ProviderAnomalyE2ETest(unittest.TestCase):
         return rows
 
     def assert_bridge_idle(self, events):
-        self.assertEqual({"type": "activity", "label": None}, events[-2])
-        self.assertEqual({"type": "status", "status": "idle"}, events[-1])
+        # CC alignment: a dynamic workflow is a background task. It must not
+        # flip the global session status (that would lock the Ink composer).
+        self.assertFalse(any(event.get("type") == "status" for event in events))
 
     def make_bridge(self, tmp, runner, events):
         def runtime_factory(*, store, timeout_seconds=10.0):

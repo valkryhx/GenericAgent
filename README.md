@@ -166,17 +166,19 @@ GA_RUN_REAL_PROMPT_PLANNER_E2E=1 GA_WORKFLOW_LLM_PROFILE=terra GA_REAL_API_PROFI
 ## 项目结构
 
 ```text
-agentmain.py                 # GenericAgent 主体：任务队列、模型/会话选择、slash commands
-agent_loop.py                # LLM turn loop 与工具调用调度
-ga.py                        # 本地工具实现与 GenericAgentHandler
-llm_config.py                # llm.yaml 的 pydantic 配置层
-llm_client.py                # 从 llm.yaml 构造 runtime client/session
-llmcore.py                   # provider session、流式解析、历史/context 行为
-workflow_*.py                # 动态 workflow planner/compiler/runtime/权限/子 agent
-mcp_runtime.py               # MCP server 加载、工具发现、取消域
-skills_runtime.py            # Claude/Codex 风格 Skill 发现
-session_transcript.py        # JSONL 会话转录、恢复、rewind/compact 事件
-compact_context.py           # 自动/手动上下文压缩
+genericagent/
+  core/                      # Agent runtime、loop、handler、权限、transcript、compact
+  llm/                       # llm.yaml 配置、client、provider session、密钥模板
+  mcp/                       # MCP server 加载、工具发现、取消域
+  agents/                    # subagent、mailbox、task board、team、worktree
+  workflow/                  # dynamic workflow runtime/scheduler/store/JS worker
+  web/                       # TMWebDriver、simphtml
+  media/                     # image codec / image GC
+  resources/                 # 包内运行时资源（code_run header、prompt、schema）
+  paths.py                   # 项目根、temp、assets、skills、workflow JS 资源解析
+agentmain.py                 # 兼容入口 shim → genericagent.core.app
+ga.py                        # 兼容入口 shim → genericagent.core.handler
+ga_cli/                      # 可安装 CLI 门面
 frontends/ink_bridge.py      # Python 后端与 React/Ink UI 的 JSONL bridge
 frontends/ink-ui/            # React 18 + Ink 5 终端 UI
 tests/                       # Python unittest 与真实 API 诊断入口

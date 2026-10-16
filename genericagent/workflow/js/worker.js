@@ -3,7 +3,7 @@
 
 const readline = require('readline');
 const vm = require('vm');
-const { parseWorkflowScript } = require('./workflow_script_contract.js');
+const { parseWorkflowScript } = require('./script_contract.js');
 
 let nextRpcId = 1;
 const pending = new Map();
