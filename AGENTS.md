@@ -613,7 +613,11 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - P2：`skills_runtime.py` 支持 `on`/`name-only`/`user-invocable-only`/`off`、`disable-model-invocation`、目录作用域命名（`apps/web:deploy`）、`alwaysOnChars`/`onInvokeChars`；Ink 增加 `/skills` 成本视图。
   - compact：`compact_context.py` 回注 `<invoked_skills>`，只带 name/description/base_dir/state/字符数，不重注全文。
   - focused 验证：Python 相关测试通过；`frontends/ink-ui` 的 `tsc --noEmit` 通过；Ink UI 测试通过。
-  - 后续项：MCP `max_result_size_chars` 注解尚未接入（当前 GA MCP schema 转换未保留该字段）；`budget` token 预算对象按用户决定暂缓。
+  - MCP per-tool 结果上限：已接入 `_meta.maxResultSizeChars`（GA 规范 key，不使用 Anthropic 私有命名空间），
+    经 `McpToolRef` / MCP tools cache 投影到通用 `tool_result_limits` registry；
+    `tool_result_budget.budget_tool_result()` 自动查询 registry，值 clamp 到 `1..500000`，旧 cache / 非法值回退默认。
+    相关文件：`mcp_runtime.py`、`tool_result_limits.py`、`tool_result_budget.py`；focused tests 11 + 49 + 11 passed。
+  - 后续项：`budget` token 预算对象按用户决定暂缓；普通内置工具的 `maxResultSizeChars` 仅预留 registry 接口，本轮不改现有行为。
   - 详细实施记录：`docs/20261017-Skill渐进式披露对标CC.md` §5。
 - **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 
