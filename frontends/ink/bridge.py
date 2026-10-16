@@ -169,11 +169,11 @@ def make_stdout_emitter(stdout: TextIO) -> EmitFn:
 
 def default_agent_factory() -> Any:
     with backend_output_redirect():
-        from agentmain import GenericAgent
+        from genericagent.core.app import GenericAgent
 
     # Slice D3：启动时清理过期/超量的 GA 自产剪贴板图（不碰用户原图）
     try:
-        from image_gc import maybe_gc_ga_images_on_startup
+        from genericagent.media.image_gc import maybe_gc_ga_images_on_startup
 
         maybe_gc_ga_images_on_startup(quiet=True)
     except Exception:
@@ -186,7 +186,7 @@ def default_agent_factory() -> Any:
 
 
 try:
-    from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent
+    from genericagent.core.context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent
 except Exception:  # pragma: no cover - compact core import failures are reported at call sites
     compact_agent_context = None
     replace_log_with_compact_history = None
@@ -199,7 +199,7 @@ MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 
 try:
-    from continue_cmd import (
+    from frontends.terminal.continue_cmd import (
         extract_ui_messages as continue_extract,
         list_sessions as continue_list,
         reset_conversation as continue_reset,

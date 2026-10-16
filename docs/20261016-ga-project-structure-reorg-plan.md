@@ -1,6 +1,6 @@
 # GA 项目目录重构方案
 
-> 状态：**P0–P5 后端迁移完成；P6 Ink 前端迁移完成，其他前端分组与 P7 shim 清理待继续**
+> 状态：**P0–P6 目录迁移完成；P7 根 shim 清理待继续**
 > 日期：2026-10-16
 > 目标仓库：`D:\git_codes\GenericAgent`
 > CC 证据仓库：`D:\git_codes\claudecode283_hack`
@@ -1031,7 +1031,7 @@ chore(structure): enforce package boundaries and update packaging
 
 ## 13. 实施结果（2026-10-16）
 
-> 状态：**P0–P5 后端迁移、P6 Ink 前端迁移已实施并通过回归；其他前端分组与 P7 shim 清理待继续。**
+> 状态：**P0–P6 目录迁移已实施并通过回归；P7 根 shim 清理待继续。**
 
 ### 13.1 已完成
 
@@ -1101,7 +1101,6 @@ chore(structure): enforce package boundaries and update packaging
 
 ### 13.3 尚未完成
 
-- **P6 其他前端分组**：Ink 已迁入 `frontends/ink/`；`frontends/` 顶层的 TUI、桌面、Web、Bot、ACP 适配器尚未按运行形态继续分组。
 - **P7 根 shim 删除**：本轮保留 73 个根级 shim/entrypoint，确保外部脚本和旧测试不中断；已完成 wheel/package-data 验证与结构门禁，删除 shim 需等外部依赖确认后再逐批进行。
 - **真实 LLM E2E**：已完成显式 `/workflow` 的默认 `deepseek-flash` E2E；自主触发型 UI E2E 在默认模型下未触发 workflow，记录为 opt-in/模型行为观察，不作为目录迁移阻塞项。
 
@@ -1136,3 +1135,32 @@ chore(structure): enforce package boundaries and update packaging
   - `npm test`（新目录）→ 431 pass；
   - `npx tsc --noEmit` → 通过；
   - bridge 新旧路径 module identity smoke → 通过。
+
+### 13.6 P6 其他前端迁移结果（2026-10-16）
+
+- 新增运行形态目录：
+  - `frontends/common/`：`chatapp_common.py`、`tui_input_history.py`；
+  - `frontends/terminal/`：`btw_cmd.py`、`continue_cmd.py`、`export_cmd.py`、`tuiapp.py`、`tuiapp_v2.py`；
+  - `frontends/desktop/`：`qtapp.py`、`fsapp.py`、`desktop_pet.pyw`、`desktop_pet_v2.pyw`；
+  - `frontends/web/`：`stapp.py`、`stapp2.py`；
+  - `frontends/bots/`：`tgapp.py`、`qqapp.py`、`dcapp.py`、`dingtalkapp.py`、`wechatapp.py`、`wecomapp.py`；
+  - `frontends/acp/`：`genericagent_acp_bridge.py`。
+- 所有旧顶层路径保留 thin alias shim，使用 `frontends/_compat.py::alias_module`：
+  - 旧 import 与新模块保持同一 module object；
+  - 旧路径直接执行时通过 `runpy.run_module(..., run_name="__main__")` 转调 canonical 模块；
+  - 测试中的 `import tgapp`、`from frontends import continue_cmd` 等旧路径继续可用。
+- 路径处理统一到 `genericagent.paths`：
+  - `chatapp_common`、`continue_cmd`、`export_cmd`、桌面宠物、Bot 日志与媒体目录不再依赖移动后的 `__file__` 深度；
+  - `launch.pyw`、`assets/configure_mykey.py` 和 README/AGENTS/CLAUDE 的启动路径已同步。
+- 结构门禁扩展：
+  - `scripts/check_project_structure.py` 现在检查所有 canonical 前端模块存在；
+  - 所有旧顶层前端 shim 必须包含 `alias_module(__name__, ...)`；
+  - 继续检查旧 `frontends/ink-ui/` 不得存在。
+- 验证：
+  - `python -m compileall -q frontends/...` 通过；
+  - `python -m unittest tests.test_continue_cmd_resume tests.test_resume_listing_cache` 14 tests OK；
+  - `python -m unittest tests.test_tgapp_stream_segments` 3 tests OK；
+  - `python frontends/terminal/tuiapp.py --help`、`python frontends/tuiapp.py --help`、`python frontends/terminal/tuiapp_v2.py --help`、`python frontends/tuiapp_v2.py --help` 均通过；
+  - 全量 Python `python -m unittest discover -s tests`：1585 tests OK（3 skipped）；
+  - Ink UI `npm test`：431 pass；`npx tsc --noEmit`：通过；
+  - `python scripts/check_project_structure.py`：通过。

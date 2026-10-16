@@ -1,0 +1,509 @@
+"""`/continue` command: list & restore past model_responses sessions.
+Pure functions + one `install(cls)` monkey-patch entry. No side effects at import.
+"""
+import ast, glob, json, os, re, time
+
+from genericagent.paths import PROJECT_ROOT as _PROJECT_ROOT
+try:
+    from genericagent.core import transcripts as session_transcript
+except Exception:
+    session_transcript = None
+try:
+    from genericagent.core import listing_cache
+except Exception:
+    listing_cache = None
+_LOG_DIR = str(_PROJECT_ROOT / 'temp' / 'model_responses')
+_LOG_GLOB = os.path.join(_LOG_DIR, 'model_responses_*.txt')
+_SESSION_ROOT = str(_PROJECT_ROOT / 'temp' / 'sessions')
+# 标记行。用 re.split 而不是「惰性 .*? + 前瞻」的 findall：后者每个块都要回溯，
+# 在 temp/model_responses 这种上百 MB 的历史日志上，单次 /resume 打开要多花数秒。
+_BLOCK_SPLIT_RE = re.compile(r'^=== (Prompt|Response) ===.*\n', re.MULTILINE)
+_SUMMARY_RE = re.compile(r'<summary>\s*(.*?)\s*</summary>', re.DOTALL)
+
+def _rel_time(mtime):
+    d = int(time.time() - mtime)
+    if d < 60: return f'{d}秒前'
+    if d < 3600: return f'{d // 60}分前'
+    if d < 86400: return f'{d // 3600}小时前'
+    return f'{d // 86400}天前'
+
+def _pairs(content):
+    parts = _BLOCK_SPLIT_RE.split(content or '')
+    pairs, pending = [], None
+    for label, body in zip(parts[1::2], parts[2::2]):
+        if label == 'Prompt': pending = body.strip()
+        elif pending is not None:
+            pairs.append((pending, body.strip())); pending = None
+    return pairs
+
+def _first_user(pairs):
+    for p, _ in pairs:
+        try: msg = json.loads(p)
+        except Exception: continue
+        if not isinstance(msg, dict): continue
+        for blk in msg.get('content', []) or []:
+            if isinstance(blk, dict) and blk.get('type') == 'text':
+                t = (blk.get('text') or '').strip()
+                if t and '<history>' not in t and not t.startswith('### [WORKING MEMORY]'):
+                    return t
+    for p, _ in pairs[:1]:
+        for line in p.splitlines():
+            s = line.strip()
+            if s and not s.startswith('###'): return s
+    return ''
+
+
+def _last_summary(pairs):
+    for _, response_body in reversed(pairs):
+        try:
+            blocks = ast.literal_eval(response_body)
+        except Exception:
+            continue
+        if not isinstance(blocks, list):
+            continue
+        text_parts = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get('type') == 'text':
+                text = block.get('text', '')
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+        match = _SUMMARY_RE.search('\n'.join(text_parts))
+        if match:
+            summary = match.group(1).strip()
+            if summary:
+                return summary
+    return ''
+
+
+def _preview_text(pairs):
+    return _last_summary(pairs) or _first_user(pairs)
+
+
+def _session_fingerprint(first_user, rounds):
+    first = re.sub(r'\s+', ' ', str(first_user or '')).strip()
+    return (first, int(rounds or 0))
+
+
+def _ui_session_fingerprint(path):
+    users = _ui_session_users(path)
+    if not users:
+        return None
+    return _session_fingerprint(users[0], len(users))
+
+
+def _ui_session_users(path):
+    messages = extract_ui_messages(path)
+    return [str(m.get('content') or '').strip() for m in messages if m.get('role') == 'user' and str(m.get('content') or '').strip()]
+
+
+def _is_contiguous_subsequence(needle, haystack):
+    if not needle or len(needle) > len(haystack):
+        return False
+    n = len(needle)
+    return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+def _recent_context(my_pid, n=5):
+    """扫描最近 n 个 model_response 文件（排除自身），提取 lastQ / lastA。"""
+    out = []
+    for f in sorted(glob.glob(_LOG_GLOB), key=os.path.getmtime, reverse=True):
+        m = re.search(r'model_responses_(\d+)', os.path.basename(f))
+        if not m or m.group(1) == str(my_pid): continue
+        try: c = open(f, encoding='utf-8', errors='ignore').read()
+        except Exception: continue
+        q = s = ""
+        for hm in re.finditer(r'<history>(.*?)</history>', c, re.DOTALL):
+            u = re.search(r'\[USER\]:\s*(.+?)(?:\\n|<)', hm.group(1))
+            if u: q = u.group(1)
+        sm = _SUMMARY_RE.search(c)
+        if sm: s = sm.group(1).strip()
+        q, s = q[:60].strip(), s[:60].replace('\n', ' ').strip()
+        out.append(f'· {m.group(1)} | lastQ: {q or "-"} | lastA: {s or "-"}')
+        if len(out) >= n: break
+    return ('[RecentContext] 近期并行会话（非当前）:\n' + '\n'.join(out) + '\n[/RecentContext]') if out else ""
+
+def _parse_native_history(pairs):
+    history = []
+    for p, r in pairs:
+        try: user_msg = json.loads(p)
+        except Exception: return None
+        try: blocks = ast.literal_eval(r)
+        except Exception: return None
+        if not (isinstance(user_msg, dict) and user_msg.get('role') == 'user'): return None
+        if not isinstance(blocks, list): return None
+        history.append(user_msg)
+        history.append({'role': 'assistant', 'content': blocks})
+    return history
+
+def _legacy_listing_cache_path():
+    return os.path.join(os.path.dirname(os.path.abspath(_LOG_GLOB)), '.listing_cache.json')
+
+
+def _scan_legacy_summary(path, stat):
+    """Listing fields for one legacy ``model_responses_*.txt`` log.
+
+    ``users`` comes from the prompt bodies we already split out for ``pairs``;
+    the old path re-read the whole file and rebuilt every assistant bubble just
+    to read its user texts, which cost ~5s per /resume open across the corpus.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+    except Exception:
+        return None
+    pairs = _pairs(content)
+    if not pairs:
+        # 「没有可解析的对话」是内容决定的：记一个负结果，否则这种文件每次 /resume
+        # 都会被重读一遍（实测 1135 个 legacy 日志里有 367 个是这种）。
+        return {'mtime': stat.st_mtime, 'size': stat.st_size, 'empty': True}
+    users = [text for text in (_user_text(prompt) for prompt, _ in pairs) if text]
+    return {
+        'mtime': stat.st_mtime,
+        'size': stat.st_size,
+        'preview': _preview_text(pairs),
+        'rounds': len(pairs),
+        'users': users,
+    }
+
+
+def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
+    """Transcript sessions first, newest-first within each source."""
+    transcripts = []
+    transcript_keys = set()
+    # 只有「首个用户消息出现在该 transcript 里」的 legacy 日志才可能是它的连续子序列，
+    # 所以先按用户消息文本建索引：否则每个 legacy 文件都要和上千条 transcript 序列做
+    # 滑窗比较（/resume 打开时剩下的主要耗时）。这是必要条件，结果与全量比对等价。
+    sequences_by_first_user = {}
+    if session_transcript is not None:
+        for s in session_transcript.list_sessions(root=_SESSION_ROOT):
+            transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
+            users = [text.strip() for text in getattr(s, 'user_texts', []) if text.strip()]
+            if users:
+                for text in set(users):
+                    sequences_by_first_user.setdefault(text, []).append(users)
+            if exclude_session_id and s.session_id == exclude_session_id:
+                continue
+            transcripts.append((s.path, s.mtime, s.preview, s.rounds))
+    out = []
+    files = glob.glob(_LOG_GLOB)
+    if exclude_pid is not None:
+        tag = f'model_responses_{exclude_pid}.txt'
+        files = [f for f in files if not f.endswith(tag)]
+    if exclude_path:
+        excluded = os.path.abspath(exclude_path)
+        files = [f for f in files if os.path.abspath(f) != excluded]
+    cache_path = _legacy_listing_cache_path()
+    cached = listing_cache.load(cache_path) if listing_cache is not None else {}
+    entries = {}
+    changed = False
+    for f in files:
+        try:
+            stat = os.stat(f)
+        except OSError:
+            continue
+        entry = cached.get(f)
+        if listing_cache is None or not listing_cache.is_fresh(entry, stat):
+            entry = _scan_legacy_summary(f, stat)
+            if entry is None:
+                continue          # 读失败：不写负缓存，下次再试
+            changed = True
+        entries[f] = entry
+        if entry.get('empty'):
+            continue
+        users = entry.get('users') or []
+        if users and _session_fingerprint(users[0], len(users)) in transcript_keys:
+            continue
+        candidates = sequences_by_first_user.get(users[0]) if users else None
+        if candidates and any(_is_contiguous_subsequence(users, seq) for seq in candidates):
+            continue
+        out.append((f, stat.st_mtime, entry.get('preview') or '', int(entry.get('rounds') or 0)))
+    if listing_cache is not None and (changed or len(entries) != len(cached)):
+        listing_cache.save(cache_path, entries)
+    transcripts.sort(key=lambda x: x[1], reverse=True)
+    out.sort(key=lambda x: x[1], reverse=True)
+    return transcripts + out
+_MD_ESCAPE_RE = re.compile(r'([\\`*_\[\]])')
+def _escape_md(s): return _MD_ESCAPE_RE.sub(r'\\\1', s)
+
+
+def _agent_clients(agent):
+    clients = []
+    for client in getattr(agent, 'llmclients', []) or []:
+        if client not in clients:
+            clients.append(client)
+    current = getattr(agent, 'llmclient', None)
+    if current is not None and current not in clients:
+        clients.insert(0, current)
+    return clients
+
+
+def _replace_backend_history(agent, history):
+    backend = getattr(getattr(agent, 'llmclient', None), 'backend', None)
+    if backend is not None and hasattr(backend, 'history'):
+        backend.history = list(history or [])
+
+
+def _current_log_path(pid=None):
+    pid = os.getpid() if pid is None else pid
+    return os.path.join(_LOG_DIR, f'model_responses_{pid}.txt')
+
+
+def _snapshot_current_log(pid=None, path=None):
+    """Persist the current log as a standalone recoverable snapshot, then clear it."""
+    path = path or _current_log_path(pid)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+    except Exception:
+        return None
+    if not _pairs(content):
+        return None
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    pid = os.getpid() if pid is None else pid
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    snapshot = os.path.join(_LOG_DIR, f'model_responses_snapshot_{pid}_{stamp}_{time.time_ns() % 1_000_000_000:09d}.txt')
+    with open(snapshot, 'w', encoding='utf-8', errors='replace') as fh:
+        fh.write(content)
+    with open(path, 'w', encoding='utf-8', errors='replace'):
+        pass
+    return snapshot
+
+
+def reset_conversation(agent, message='🆕 已开启新对话，当前上下文已清空'):
+    """Abort current work and clear all known frontend-visible conversation state."""
+    try:
+        agent.abort()
+    except Exception:
+        pass
+    _snapshot_current_log(path=getattr(agent, 'log_path', None))
+    if hasattr(agent, 'history'):
+        agent.history = []
+    for client in _agent_clients(agent):
+        backend = getattr(client, 'backend', None)
+        if backend is not None and hasattr(backend, 'history'):
+            backend.history = []
+        if hasattr(client, 'last_tools'):
+            client.last_tools = ''
+    if hasattr(agent, 'handler'):
+        agent.handler = None
+    return message
+
+def format_list(sessions, limit=20):
+    if not sessions: return '✗ 没有可恢复的历史会话'
+    lines = ['**可恢复会话**（输入 `/continue N` 恢复第 N 个）：', '']
+    for i, (_, mtime, first, n) in enumerate(sessions[:limit], 1):
+        preview = _escape_md((first or '（无法预览）').replace('\n', ' ')[:60])
+        lines.append(f'{i}. `{_rel_time(mtime)}` · **{n} 轮** · {preview}')
+    return '\n'.join(lines)
+
+def restore(agent, path):
+    """Restore session at path. Returns (msg, is_full)."""
+    if session_transcript is not None and session_transcript.is_transcript_path(path):
+        try:
+            result = session_transcript.restore_agent_session(agent, path)
+        except Exception as e:
+            return f'✗ 读取结构化会话失败: {e}', False
+        return f'✓ {result.message}\n(已写入 backend.history，可直接继续)', True
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+    except Exception as e: return f'✗ 读取失败: {e}', False
+    pairs = _pairs(content)
+    if not pairs: return f'✗ {os.path.basename(path)} 为空或格式不符', False
+    history = _parse_native_history(pairs)
+    name = os.path.basename(path)
+    if history is not None:
+        agent.abort()
+        _replace_backend_history(agent, history)
+        return f'✓ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
+    from frontends.common.chatapp_common import _restore_native_history, _restore_text_pairs
+    summary = _restore_text_pairs(content) or _restore_native_history(content)
+    if not summary: return f'✗ {name} 无法解析（非 native 且无摘要可提取）', False
+    agent.abort()
+    agent.history.extend(summary)
+    n = sum(1 for l in summary if l.startswith('[USER]: '))
+    return f'⚠️ 非 native 格式，已降级恢复 {n} 轮摘要（{name}）\n(请输入新问题继续)', False
+
+def handle(agent, query, display_queue):
+    """Dispatch /continue or /continue N. Returns None if consumed else original query."""
+    s = (query or '').strip()
+    if s == '/continue':
+        display_queue.put({'done': format_list(list_sessions(exclude_pid=os.getpid())), 'source': 'system'})
+        return None
+    m = re.match(r'/continue\s+(\d+)\s*$', s)
+    if m:
+        sessions = list_sessions(exclude_pid=os.getpid())
+        idx = int(m.group(1)) - 1
+        if not (0 <= idx < len(sessions)):
+            display_queue.put({'done': f'✗ 索引越界（有效范围 1-{len(sessions)}）', 'source': 'system'})
+            return None
+        reset_conversation(agent, message=None)
+        msg, _ = restore(agent, sessions[idx][0])
+        display_queue.put({'done': msg, 'source': 'system'})
+        return None
+    return query
+
+
+_INJECT_MARKERS = ('### [WORKING MEMORY]', '[SYSTEM TIPS]', '[SYSTEM]', '[System]',
+                   '[DANGER]', '### [总结提炼经验]')
+
+
+def _user_text(prompt_body):
+    """User-typed text from a prompt JSON; '' if this is an agent auto-continuation.
+
+    A Prompt is auto-continue when it carries a tool_result block, or when all
+    text blocks are known system injections rather than a user-authored prompt.
+    """
+    try: msg = json.loads(prompt_body)
+    except Exception: return ''
+    if not isinstance(msg, dict): return ''
+    blocks = msg.get('content', []) or []
+    if any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in blocks):
+        return ''
+    for blk in blocks:
+        if isinstance(blk, dict) and blk.get('type') == 'text':
+            t = (blk.get('text') or '').strip()
+            if t and not any(mk in t for mk in _INJECT_MARKERS): return t
+    return ''
+
+
+def _assistant_text(response_body):
+    """Joined plain text from a response blocks repr; '' on parse failure."""
+    try: blocks = ast.literal_eval(response_body)
+    except Exception: return ''
+    if not isinstance(blocks, list): return ''
+    return '\n'.join(b['text'] for b in blocks
+                     if isinstance(b, dict) and b.get('type') == 'text'
+                     and isinstance(b.get('text'), str) and b['text'].strip())
+
+
+def _format_tool_use(block):
+    """Match agent_loop.py verbose tool-call header."""
+    name = block.get('name', '?')
+    args = block.get('input', {})
+    try: pretty = json.dumps(args, indent=2, ensure_ascii=False).replace('\\n', '\n')
+    except Exception: pretty = str(args)
+    return f"⏺ Tool: `{name}` args:\n````text\n{pretty}\n````\n"
+
+
+def _format_tool_result(content):
+    """Match agent_loop.py five-backtick fence around tool output."""
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get('type') == 'text':
+                parts.append(b.get('text', '') or '')
+            elif isinstance(b, str):
+                parts.append(b)
+        body = '\n'.join(parts)
+    else:
+        body = '' if content is None else str(content)
+    return f"`````\n{body}\n`````\n"
+
+
+def _tool_results_from_prompt(prompt_body):
+    """Return {tool_use_id: formatted_fence} from a Prompt JSON's content blocks."""
+    try: msg = json.loads(prompt_body)
+    except Exception: return {}
+    if not isinstance(msg, dict): return {}
+    out = {}
+    for blk in msg.get('content', []) or []:
+        if isinstance(blk, dict) and blk.get('type') == 'tool_result':
+            tid = blk.get('tool_use_id') or ''
+            if tid: out[tid] = _format_tool_result(blk.get('content'))
+    return out
+
+
+def _format_response_segment(response_body, tool_results):
+    """Rebuild one LLM call's transcript slice for restored UI replay."""
+    try: blocks = ast.literal_eval(response_body)
+    except Exception: return ''
+    if not isinstance(blocks, list): return ''
+    texts, tool_parts = [], []
+    for b in blocks:
+        if not isinstance(b, dict): continue
+        t = b.get('type')
+        if t == 'text':
+            s = b.get('text', '')
+            if isinstance(s, str) and s.strip(): texts.append(s)
+        elif t == 'tool_use':
+            tool_parts.append(_format_tool_use(b))
+            tid = b.get('id') or ''
+            if tid and tid in tool_results: tool_parts.append(tool_results[tid])
+    return '\n\n'.join(p for p in ['\n\n'.join(texts), '\n'.join(tool_parts)] if p)
+
+
+def extract_ui_messages(path):
+    """Parse a model_responses log into [{role, content}, ...] for UI replay.
+
+    Auto-continuation calls are concatenated into one assistant bubble with
+    Turn markers. Tool calls and tool results are replayed in the same textual
+    shape live agent_loop output uses.
+    """
+    if session_transcript is not None and session_transcript.is_transcript_path(path):
+        try:
+            return session_transcript.load_session(path).ui_messages
+        except Exception:
+            return []
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f: content = f.read()
+    except Exception: return []
+    pairs = _pairs(content)
+    if not pairs: return []
+    next_tr = [{} for _ in pairs]
+    for i in range(len(pairs) - 1):
+        next_tr[i] = _tool_results_from_prompt(pairs[i + 1][0])
+
+    out, assistant, round_turn = [], None, 0
+    for i, (prompt, response) in enumerate(pairs):
+        user = _user_text(prompt)
+        seg = _format_response_segment(response, next_tr[i])
+        if user:
+            if assistant is not None: out.append(assistant)
+            out.append({'role': 'user', 'content': user})
+            assistant = {'role': 'assistant',
+                         'content': f"\n\n**LLM Running (Turn 1) ...**\n\n{seg}"}
+            round_turn = 1
+        else:
+            if assistant is None:
+                assistant = {'role': 'assistant', 'content': ''}
+                round_turn = 1
+            round_turn += 1
+            marker = f"\n\n**LLM Running (Turn {round_turn}) ...**\n\n"
+            assistant['content'] = (assistant['content'] or '') + marker + seg
+    if assistant is not None: out.append(assistant)
+    return [m for m in out if (m.get('content') or '').strip()]
+
+
+def handle_frontend_command(agent, query, exclude_pid=None):
+    """Frontend-friendly /continue entry that returns text directly."""
+    s = (query or '').strip()
+    exclude_pid = os.getpid() if exclude_pid is None else exclude_pid
+    exclude_path = getattr(agent, 'log_path', None)
+    exclude_session_id = getattr(agent, 'session_id', None)
+    sessions = list_sessions(exclude_pid=exclude_pid, exclude_path=exclude_path, exclude_session_id=exclude_session_id)
+    if s == '/continue':
+        return format_list(sessions)
+    m = re.match(r'/continue\s+(\d+)\s*$', s)
+    if not m:
+        return '用法: /continue 或 /continue N'
+    idx = int(m.group(1)) - 1
+    if not (0 <= idx < len(sessions)):
+        return f'✗ 索引越界（有效范围 1-{len(sessions)}）'
+    reset_conversation(agent, message=None)
+    msg, _ = restore(agent, sessions[idx][0])
+    return msg
+
+
+def install(cls):
+    """Wrap cls._handle_slash_cmd so /continue is handled before original dispatch."""
+    orig = cls._handle_slash_cmd
+    if getattr(orig, '_continue_patched', False): return
+    def patched(self, raw_query, display_queue):
+        if (raw_query or '').startswith('/continue'):
+            r = handle(self, raw_query, display_queue)
+            if r is None: return None
+        return orig(self, raw_query, display_queue)
+    patched._continue_patched = True
+    cls._handle_slash_cmd = patched

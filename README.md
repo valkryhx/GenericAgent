@@ -52,9 +52,9 @@ GenericAgent 是一个面向本地开发与自动化任务的多前端 Agent Run
 - `ga cli`：纯 Python CLI。
 - `ga list`：查看/选择已有会话。
 - `python launch.pyw`：桌面启动入口。
-- `python frontends/tuiapp.py`：Textual TUI。
-- `streamlit run frontends/stapp2.py`：Streamlit Web UI。
-- `frontends/genericagent_acp_bridge.py`：供 Codeg 等外部桌面/Web UI 作为本地 ACP Agent 调用。
+- `python frontends/terminal/tuiapp.py`：Textual TUI。
+- `streamlit run frontends/web/stapp2.py`：Streamlit Web UI。
+- `frontends/acp/genericagent_acp_bridge.py`：供 Codeg 等外部桌面/Web UI 作为本地 ACP Agent 调用。
 
 ## 快速开始
 
@@ -123,8 +123,8 @@ ga ink
 ga cli
 ga list
 python launch.pyw
-python frontends/tuiapp.py
-streamlit run frontends/stapp2.py
+python frontends/terminal/tuiapp.py
+streamlit run frontends/web/stapp2.py
 ```
 
 Ink UI 的 npm 命令需要在 `frontends/ink/ui` 下执行：

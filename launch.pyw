@@ -18,7 +18,7 @@ def get_screen_width():
 
 def start_streamlit(port):
     global proc
-    cmd = [sys.executable, "-m", "streamlit", "run", os.path.join(frontends_dir, "stapp.py"), "--server.port", str(port), "--server.address", "localhost", "--server.headless", "true", "--client.toolbarMode", "viewer"]
+    cmd = [sys.executable, "-m", "streamlit", "run", os.path.join(frontends_dir, "web", "stapp.py"), "--server.port", str(port), "--server.address", "localhost", "--server.headless", "true", "--client.toolbarMode", "viewer"]
     proc = subprocess.Popen(cmd)
     atexit.register(proc.kill)
 
@@ -99,37 +99,37 @@ if __name__ == '__main__':
     threading.Thread(target=start_streamlit, args=(port,), daemon=True).start()
 
     if args.tg:
-        tgproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "tgapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        tgproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "bots", "tgapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(tgproc.kill)
         print('[Launch] Telegram Bot started')
     else: print('[Launch] Telegram Bot not enabled (use --tg to start)')
 
     if args.qq:
-        qqproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "qqapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        qqproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "bots", "qqapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(qqproc.kill)
         print('[Launch] QQ Bot started')
     else: print('[Launch] QQ Bot not enabled (use --qq to start)')
 
     if args.feishu:
-        fsproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "fsapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        fsproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "desktop", "fsapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(fsproc.kill)
         print('[Launch] Feishu Bot started')
     else: print('[Launch] Feishu Bot not enabled (use --feishu to start)')
 
     if args.wechat:
-        wxproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, 'wechatapp.py')], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        wxproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, 'bots', 'wechatapp.py')], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(wxproc.kill)
         print('[Launch] WeChat Bot started')
     else: print('[Launch] WeChat Bot not enabled (use --wechat to start)')
 
     if args.wecom:
-        wcproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "wecomapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        wcproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "bots", "wecomapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(wcproc.kill)
         print('[Launch] WeCom Bot started')
     else: print('[Launch] WeCom Bot not enabled (use --wecom to start)')
 
     if args.dingtalk:
-        dtproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "dingtalkapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        dtproc = subprocess.Popen([sys.executable, os.path.join(frontends_dir, "bots", "dingtalkapp.py")], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(dtproc.kill)
         print('[Launch] DingTalk Bot started')
     else: print('[Launch] DingTalk Bot not enabled (use --dingtalk to start)')

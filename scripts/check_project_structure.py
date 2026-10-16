@@ -69,6 +69,30 @@ def path_guess_findings() -> list[str]:
     return findings
 
 
+CANONICAL_FRONTEND_MODULES = {
+    'chatapp_common.py': 'frontends/common/chatapp_common.py',
+    'tui_input_history.py': 'frontends/common/tui_input_history.py',
+    'btw_cmd.py': 'frontends/terminal/btw_cmd.py',
+    'continue_cmd.py': 'frontends/terminal/continue_cmd.py',
+    'export_cmd.py': 'frontends/terminal/export_cmd.py',
+    'tuiapp.py': 'frontends/terminal/tuiapp.py',
+    'tuiapp_v2.py': 'frontends/terminal/tuiapp_v2.py',
+    'qtapp.py': 'frontends/desktop/qtapp.py',
+    'fsapp.py': 'frontends/desktop/fsapp.py',
+    'desktop_pet.pyw': 'frontends/desktop/desktop_pet.pyw',
+    'desktop_pet_v2.pyw': 'frontends/desktop/desktop_pet_v2.pyw',
+    'stapp.py': 'frontends/web/stapp.py',
+    'stapp2.py': 'frontends/web/stapp2.py',
+    'tgapp.py': 'frontends/bots/tgapp.py',
+    'qqapp.py': 'frontends/bots/qqapp.py',
+    'dcapp.py': 'frontends/bots/dcapp.py',
+    'dingtalkapp.py': 'frontends/bots/dingtalkapp.py',
+    'wechatapp.py': 'frontends/bots/wechatapp.py',
+    'wecomapp.py': 'frontends/bots/wecomapp.py',
+    'genericagent_acp_bridge.py': 'frontends/acp/genericagent_acp_bridge.py',
+}
+
+
 def frontend_layout_findings() -> list[str]:
     findings: list[str] = []
     canonical_bridge = ROOT / 'frontends' / 'ink' / 'bridge.py'
@@ -85,6 +109,18 @@ def frontend_layout_findings() -> list[str]:
         text = legacy_bridge.read_text(encoding='utf-8', errors='replace')
         if 'sys.modules[__name__] = _bridge' not in text:
             findings.append('frontends/ink_bridge.py must remain a thin module alias shim')
+
+    for shim_name, canonical_name in CANONICAL_FRONTEND_MODULES.items():
+        canonical = ROOT / canonical_name
+        shim = ROOT / 'frontends' / shim_name
+        if not canonical.is_file():
+            findings.append(f'missing canonical frontend module: {canonical_name}')
+        if not shim.is_file():
+            findings.append(f'missing legacy frontend shim: frontends/{shim_name}')
+            continue
+        shim_text = shim.read_text(encoding='utf-8', errors='replace')
+        if 'alias_module(__name__,' not in shim_text:
+            findings.append(f'frontends/{shim_name} must remain a thin alias shim')
     return findings
 
 

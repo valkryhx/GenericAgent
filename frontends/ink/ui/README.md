@@ -2,7 +2,7 @@
 
 Experimental React/Ink terminal frontend for GenericAgent.
 
-This frontend is intentionally parallel to `frontends/tuiapp_v2.py`. It talks to
+This frontend is intentionally parallel to `frontends/terminal/tuiapp_v2.py`. It talks to
 the Python runtime through `frontends/ink/bridge.py` over JSONL stdio and does
 not import or modify the Textual UI.
 

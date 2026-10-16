@@ -9,8 +9,8 @@ GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent
 - `python -m pip install -e .`：以 editable 模式安装核心包和 `ga` 命令。
 - `python -m pip install -e ".[ui]"`：安装核心依赖和桌面/TUI UI 依赖。
 - `python launch.pyw`：启动默认桌面界面。
-- `python frontends/tuiapp.py`：启动终端 UI。
-- `streamlit run frontends/stapp2.py`：启动 Streamlit 前端。
+- `python frontends/terminal/tuiapp.py`：启动终端 UI。
+- `streamlit run frontends/web/stapp2.py`：启动 Streamlit 前端。
 - `python -m unittest discover -s tests`：运行当前测试套件。
 
 只安装正在修改的前端或机器人适配器所需的可选依赖。
@@ -97,7 +97,7 @@ Ink v5 用 **legacy root**（`ink/build/ink.js` 里 `createContainer(..., 0, ...
 
 ### `/resume` 列表：只走轻量扫描 + `(mtime, size)` 缓存
 
-`frontends/continue_cmd.py::list_sessions()` 是 `/resume` 的列表入口，Ink bridge 一次 `/resume`
+`frontends/terminal/continue_cmd.py::list_sessions()` 是 `/resume` 的列表入口，Ink bridge 一次 `/resume`
 会调它两次（列列表、按序号恢复）。它**不得**调用 `session_transcript.load_session()`：
 `session_transcript.list_sessions()` 返回 `SessionSummary`（只含 session_id / preview / rounds /
 last_seq / 用户消息文本），turn 簿记与 `load_session` 逐条对齐。legacy 日志的用户消息文本从
@@ -1384,10 +1384,11 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   - 新增 `scripts/check_project_structure.py`，当前通过：`project structure ok (73 allowed root Python shims/entrypoints)`。
   - 验证：`compileall`、`agentmain.py --help`、`python -m ga_cli list`、关键 Python focused tests 308 OK、p8 provider anomaly + ink bridge 139 OK、Ink UI `npm test` 431 pass、`tsc --noEmit` 通过。
   - 契约修正：p8 旧测试曾要求 workflow 尾部发 `idle`，与 CC 对齐后的后台任务契约冲突；现统一断言**后台 workflow 不得翻转全局 session status**，避免锁住 Ink composer。
-  - P6 前端目录整理（`frontends/ink/bridge.py`、`frontends/ink/ui/` → `frontends/ink/`）与 P7 根 shim 清理仍待继续。
+  - P6 前端目录整理已完成：Ink、TUI、桌面、Web、Bot、ACP 适配器按运行形态迁入 `frontends/{ink,terminal,desktop,web,bots,acp,common}/`；旧顶层路径保留 thin alias shim。P7 根 shim 清理仍待继续。
   - P6 Ink 前端迁移已完成：`frontends/ink_bridge.py` → `frontends/ink/bridge.py`，`frontends/ink-ui/` → `frontends/ink/ui/`；旧 `frontends/ink_bridge.py` 保留为 module alias shim，旧 import/patch target 仍指向同一模块对象。
   - Ink UI 测试命令改为 `cd frontends/ink/ui && npm test`；`ga_cli/cli.py`、`install_ink_ui.cmd`、scripts/probes、测试与 README 路径已同步。验证：相关 Python 165 tests OK，Ink UI 431 pass，`tsc --noEmit` 通过。
-  - 结构门禁新增 Ink 路径检查：canonical `frontends/ink/bridge.py` + `frontends/ink/ui/package.json` 必须存在，旧 `frontends/ink-ui/` 必须不存在，旧 bridge shim 必须是 thin alias。
+  - 结构门禁新增前端路径检查：canonical Ink 路径必须存在，旧 `frontends/ink-ui/` 必须不存在；所有旧顶层前端模块必须保留为 thin alias shim，防止目录再次扁平化。
   - P7 打包验证：`python -m pip wheel . -w temp/wheels --no-deps` 成功；`genericagent-0.1.0-py3-none-any.whl` 含 89 个 Python 模块及 `workflow/js/worker.js`、`script_contract.js`、`resources/code_run_header.py`，required 资源 0 missing。根 shim 删除仍暂缓，避免破坏外部旧导入。
   - 真实 LLM E2E（2026-10-16，目录重构后）：默认 `default/deepseek-flash`，显式 `/workflow` 完成 4/4 job（2 路并行版本探测 + 串行写表 + 独立 verify），runId `wf_18a215a93a2942dcad977d81444c411a`，status `succeeded`，产物 `temp/workflow-runs/wf_18a215a93a2942dcad977d81444c411a/workflow-e2e-version-table.md`。证据见 `docs/20261016-GA-目录重构后真实workflow-e2e.md`。
+  - P6 其他前端迁移：`frontends/{common,terminal,desktop,web,bots,acp}/` 已建立并迁移实现；旧 `frontends/*.py|*.pyw` 顶层路径保留 alias shim，`launch.pyw`、`assets/configure_mykey.py`、README/AGENTS/CLAUDE 与结构门禁同步更新。验证：全量 Python 1585 tests OK（3 skipped）、Ink UI 431 pass、`tsc --noEmit` 通过、结构门禁通过。
   - 详细实施记录：`docs/20261016-ga-project-structure-reorg-plan.md` §13。

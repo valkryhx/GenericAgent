@@ -216,7 +216,7 @@ PLATFORMS = [
         'id': 'telegram',
         'name': 'Telegram 机器人',
         'desc': '通过 Telegram Bot 与 Agent 对话',
-        'file': 'frontends/tgapp.py',
+        'file': 'frontends/bots/tgapp.py',
         'deps': ['python-telegram-bot'],
         'env_vars': [
             {'key': 'tg_bot_token', 'label': 'Bot Token', 'hint': '从 @BotFather 获取'},
@@ -227,7 +227,7 @@ PLATFORMS = [
         'id': 'qq',
         'name': 'QQ 机器人',
         'desc': '通过 QQ 官方机器人 API 接入',
-        'file': 'frontends/qqapp.py',
+        'file': 'frontends/bots/qqapp.py',
         'deps': ['qq-botpy'],
         'env_vars': [
             {'key': 'qq_app_id', 'label': 'App ID', 'hint': 'QQ 开放平台获取'},
@@ -239,7 +239,7 @@ PLATFORMS = [
         'id': 'feishu',
         'name': '飞书机器人',
         'desc': '通过飞书应用与 Agent 对话',
-        'file': 'frontends/fsapp.py',
+        'file': 'frontends/desktop/fsapp.py',
         'deps': ['lark-oapi'],
         'env_vars': [
             {'key': 'fs_app_id', 'label': 'App ID', 'hint': '飞书开放平台获取'},
@@ -251,7 +251,7 @@ PLATFORMS = [
         'id': 'wecom',
         'name': '企业微信机器人',
         'desc': '通过企业微信 Bot 接入',
-        'file': 'frontends/wecomapp.py',
+        'file': 'frontends/bots/wecomapp.py',
         'deps': ['wecombot'],
         'env_vars': [
             {'key': 'wecom_bot_id', 'label': 'Bot ID'},
@@ -263,7 +263,7 @@ PLATFORMS = [
         'id': 'dingtalk',
         'name': '钉钉机器人',
         'desc': '通过钉钉应用接入',
-        'file': 'frontends/dingtalkapp.py',
+        'file': 'frontends/bots/dingtalkapp.py',
         'deps': ['dingtalk-sdk'],
         'env_vars': [
             {'key': 'dingtalk_client_id', 'label': 'Client ID (App Key)'},
@@ -275,7 +275,7 @@ PLATFORMS = [
         'id': 'discord',
         'name': 'Discord 机器人',
         'desc': '通过 Discord Bot 接入',
-        'file': 'frontends/dcapp.py',
+        'file': 'frontends/bots/dcapp.py',
         'deps': ['discord.py'],
         'env_vars': [
             {'key': 'dc_bot_token', 'label': 'Bot Token', 'hint': 'Discord Developer Portal 获取'},

@@ -95,10 +95,16 @@ def _install_import_stubs():
         "telegram.ext": ext,
         "telegram.helpers": helpers,
         "telegram.request": request,
+        # Legacy names are still used by the compatibility shim; canonical
+        # names are used by the moved frontend implementation.
         "agentmain": agentmain,
+        "genericagent.core.app": agentmain,
         "chatapp_common": chatapp_common,
+        "frontends.common.chatapp_common": chatapp_common,
         "continue_cmd": continue_cmd,
+        "frontends.terminal.continue_cmd": continue_cmd,
         "llmcore": llmcore,
+        "genericagent.llm.core": llmcore,
     }
     # 返回被覆盖前的真实模块（可能为 None），供导入 tgapp 后还原——否则 agentmain/
     # llmcore 等真实模块会被 stub 永久顶掉，污染后续测试（如 test_agentmain_compact）。

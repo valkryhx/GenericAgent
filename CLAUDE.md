@@ -22,8 +22,8 @@ ga ink
 ga cli
 ga list
 python launch.pyw
-python frontends/tuiapp.py
-streamlit run frontends/stapp2.py
+python frontends/terminal/tuiapp.py
+streamlit run frontends/web/stapp2.py
 ```
 
 `ga` with no subcommand starts the React/Ink terminal UI by default. `ga ink` uses `frontends/ink/ui` through the Python JSONL bridge. `ga cli` runs the plain Python CLI.
