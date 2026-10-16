@@ -1349,3 +1349,31 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   lead 对话）；任务「真的完成」才置 completed；`TeamCreate`/`TeamDelete` **不做**（本 build 无定义，隐式单例团队）。
 - 详细方案：`docs/20261014-ga-agent-team-复刻实施方案.md`。
 - 状态（2026-10-14）：**方案已落盘，待实施**（尚未改代码）。
+
+### 中途调研 2026-10-16：GA 项目目录扁平化 / 对齐 CC 的逻辑分层
+
+- **触发**：GA 根目录现有 73 个 `*.py`（其中 `workflow_*.py` 18 个、`subagent_*.py` 25 个、LLM/API 相关 6 个），
+  LLM、subagent、workflow、web、media、runtime 实现全部平铺在仓库根目录，入口、实现和兼容代码混在一起；
+  用户要求先调研 Claude Code 2.1.283 源码，再落盘一份可执行的目录重构方案。
+- **CC 源码坐标与证据**：
+  - `D:\git_codes\claudecode283_hack\claudecode283\extracted\README.md` §“模块地图”：CC 的 workflow 工具、引擎、
+    parser、launch 状态机、详情对话框、`/workflows` 历史列表、状态行分别落在 `m1502` / `m1569` / `m0869` /
+    `m0862` / `m1372` / `m1460` / `m1906` / `m2000` 等模块。
+  - `claudecode283\extracted\dynamic-workflow-internals.md`：工作流入口、执行引擎、VM、持久化、resume、
+    UI/交互被明确拆成不同职责层；其中 §9 覆盖 `/workflows`、详情进度树、历史重跑。
+  - `claudecode283\extracted\agent-team-internals.md` §5：`spawnTeammate`、Agent 工具、InProcessTeammateTask、
+    TaskCreate/Update/List/Get、SendMessage、team 文件持久化分别有独立模块职责。
+  - `claudecode283\extracted\hooks-internals.md` §1：hooks 执行引擎集中在共享 chunk，但匹配、spawn、超时、
+    异步注册表、结果分发、安全门禁仍是可辨识的逻辑层。
+  - `claudecode283\modules\INDEX.tsv`：`mNNNN_0x...js` 是 Bun `--compile` 提取索引，不是原始源码目录名；
+    **CC 原始目录树不可恢复**。本方案只复刻 CC 的逻辑分层，不伪造 `claudecode/...` 路径。
+- **结论**：GA 应建立 `genericagent/` 主包，按 `core` / `llm` / `mcp` / `agents` / `workflow` / `web` / `media`
+  分层；`ga_cli` 作为稳定 CLI 门面保留，根目录只保留薄入口与兼容 shim。迁移必须先做路径解析层和兼容层，
+  再按领域分批 `git mv`，不得一次性大爆炸。
+- **对 GA 的影响**：所有依赖 `__file__` 定位 `assets/`、`skills/`、`temp/`、`mcp.json`、`llm.yaml`、JS worker
+  的代码都必须改走 `genericagent.paths`；subagent 的 `agentmain.py` 启动路径、`workflow_js_worker.js` /
+  `workflow_script_contract.js` 资源路径、`pyproject.toml` 打包配置和测试中的旧模块名都是高风险点。
+- **待办**：先实施 P0 盘点与结构检查，再按 `docs/20261016-ga-project-structure-reorg-plan.md` 的 P1–P7
+  分批迁移；每批单独提交、单独验证，旧根模块通过兼容 shim 过渡，最后再清理。
+- **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
+- **详细方案**：`docs/20261016-ga-project-structure-reorg-plan.md`。
