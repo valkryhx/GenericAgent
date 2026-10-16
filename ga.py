@@ -1,4 +1,4 @@
-import sys, os, re, json, time, threading, importlib
+import sys, os, re, json, time, threading, importlib, hashlib
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib
@@ -742,7 +742,13 @@ class GenericAgentHandler(BaseHandler):
         return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
 
     def do_load_skill(self, args, response):
-        '''按名称加载 Claude/Codex 风格的 SKILL.md，将完整技能说明注入下一轮上下文。'''
+        """按名称加载 Claude/Codex 风格的 SKILL.md。
+
+        CC 的 Skill 工具只把 ``Launching skill: <name>`` 放进 tool_result，
+        SKILL.md 正文作为独立的 meta/user message 注入。这里沿用同一条通道：
+        tool_result 只保留短元数据，正文放进 ``next_prompt``，避免 17KB 级
+        正文被序列化成一个大 JSON tool_result。
+        """
         skill_name = args.get("skill") or args.get("name") or ""
         skill_args = args.get("args", "")
         search_roots = args.get("search_roots")
@@ -750,19 +756,45 @@ class GenericAgentHandler(BaseHandler):
             from skills_runtime import load_skill_content
             result = load_skill_content(skill_name, search_roots=search_roots, args=skill_args)
         except KeyError as e:
-            yield f"[Warn] {e}\n"
-            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+            yield f"[Warn] {e}" + chr(10)
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt=chr(10))
         except Exception as e:
-            yield f"[Warn] Failed to load skill: {e}\n"
-            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+            yield f"[Warn] Failed to load skill: {e}" + chr(10)
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt=chr(10))
+
+        content = result.pop("content", "") or ""
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        loaded_hashes = self.working.setdefault("_loaded_skill_hashes", {})
+        already_loaded = loaded_hashes.get(result["name"]) == content_hash
+        loaded_hashes[result["name"]] = content_hash
+        result["content_chars"] = len(content)
+        result["loaded"] = not already_loaded
+
         self.working['active_skill'] = result['name']
         if result.get('allowed_tools'):
             self.working['active_skill_allowed_tools'] = ', '.join(result['allowed_tools'])
         else:
             self.working.pop('active_skill_allowed_tools', None)
-        yield f"[Info] Loaded skill {result['name']} from {result.get('source', 'local')}: {result.get('path', '')}\n"
+        yield f"[Info] Loaded skill {result['name']} from {result.get('source', 'local')}: {result.get('path', '')}" + chr(10)
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-        next_prompt += "\n[SYSTEM TIPS] 已加载 skill。必须按上方 SKILL.md 内容执行；如技能引用相对路径，使用返回的 base_dir。"
+        if already_loaded:
+            next_prompt += chr(10) + (
+                f"[SYSTEM TIPS] Skill {result['name']} is already loaded above; "
+                "instructions unchanged. Do not treat this as a new request."
+            )
+        else:
+            next_prompt += (
+                chr(10)
+                + f"[SYSTEM TIPS] 已加载 skill {result['name']}。以下正文是独立注入内容，"
+                + "不是 tool_result；必须按它执行。若正文引用相对路径，使用上面的 base_dir。"
+                + chr(10)
+                + "<skill_content>"
+                + chr(10)
+                + content
+                + chr(10)
+                + "</skill_content>"
+                + chr(10)
+            )
         return StepOutcome(result, next_prompt=next_prompt)
 
     def do_workflow(self, args, response):

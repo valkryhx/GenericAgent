@@ -576,6 +576,25 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 
 
+#### 追加调研 2026-10-17：CC 的通用 tool_result 预算（JSON 不是问题，大小才是）
+
+- **结论**：CC 允许结构化 tool_result；问题不是 JSON，而是单个 `content` 字符串过大。
+- **统一预算**（`m0297_0xc5de28c.js`）：每个 tool 可声明 `maxResultSizeChars`；`oKe -> V` 对 content 做预算。
+  - 未超预算：原样返回；
+  - 超预算：`ZW` 持久化到文件，`Ime` 返回 `<persisted-output>...Full output saved to: ... Preview ...</persisted-output>`；
+  - 持久化失败：`j$n` 返回 `<truncated-output>...first N...</truncated-output>`；
+  - `image` / `document` 不计入字符预算（`F`），文本字符串/text blocks 计入（`D`）。
+- **具体工具**：`Write` 返回短确认；`Read` 有自身 `maxSizeBytes`/`maxTokens`/offset/limit；`Bash` 返回文本并支持 `persistedOutputPath`；`Grep` 返回文本；`Skill` 只返回 `Launching skill: <name>`；`Workflow` 返回 async 启动结果（runId/taskId），不返回完整日志。
+- **GA 修改方向**：
+  1. P0：`load_skill` 的正文从 tool_result 移出，放独立 `next_prompt`/meta 注入；tool_result 只留短元数据；重复加载去重。
+  2. P0：`workflow-authoring/SKILL.md` 瘦身到 `<5KB`，细节放 `references/`。
+  3. P1：`agent_loop.py` 增加通用 tool_result 预算：小结果保持 JSON/text；超阈值持久化到 `temp/tool-results/` 并返回 preview；无法持久化则截断；对已有自身分页的工具豁免。
+  4. 不全局禁用 JSON；只限制大 content。
+- **详细落盘**：CC 侧 `docs/20261017-CC-skill渐进式披露调研.md` §8；GA 侧 `docs/20261017-Skill渐进式披露对标CC.md` §1.2。
+- **实施状态 2026-10-17**：P0 已实施——`ga.py::do_load_skill` 的 tool_result 从 17.7KB 降到约 491 字符，正文改走独立 `next_prompt`；重复加载相同正文去重。focused 测试 `tests/test_load_skill_tool.py tests/test_skills_runtime.py -q` = 10 passed。待做：`workflow-authoring/SKILL.md` 瘦身 + `references/`；`agent_loop.py` 通用 tool_result 预算/持久化。
+- **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
+
+
 ### 中途调研 2026-10-15：agent team 的激活机制（不依赖用户正规输入）
 
 - **触发**：用户指出——真实 e2e 要求用户输入「先 task_create 再 spawn_agent(team_mode=true)」太正规；

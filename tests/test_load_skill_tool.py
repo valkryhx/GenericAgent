@@ -63,9 +63,40 @@ class LoadSkillToolTest(unittest.TestCase):
         self.assertEqual(outcome.data["status"], "success")
         self.assertEqual(outcome.data["name"], "demo")
         self.assertEqual(outcome.data["allowed_tools"], ["file_read", "code_run"])
-        self.assertIn("Base directory for this skill:", outcome.data["content"])
-        self.assertIn("Args: hello", outcome.data["content"])
+        self.assertNotIn("content", outcome.data)
+        self.assertGreater(outcome.data["content_chars"], 0)
+        self.assertTrue(outcome.data["loaded"])
+        self.assertIn("<skill_content>", outcome.next_prompt)
+        self.assertIn("Base directory for this skill:", outcome.next_prompt)
+        self.assertIn("Args: hello", outcome.next_prompt)
         self.assertEqual(handler.working["active_skill"], "demo")
+
+    def test_reloading_identical_skill_does_not_reinject_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_root = Path(tmp) / "skills"
+            skill_dir = skills_root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: demo\n"
+                "description: Demo skill\n"
+                "---\n"
+                "Stable instructions",
+                encoding="utf-8",
+            )
+            parent = type("Parent", (), {"task_dir": None, "verbose": False})()
+            handler = GenericAgentHandler(parent, last_history=[], cwd=tmp)
+            response = type("Response", (), {"content": ""})()
+            args = {"skill": "demo", "search_roots": [str(skills_root)]}
+
+            first = _exhaust(handler.do_load_skill(dict(args), response))
+            second = _exhaust(handler.do_load_skill(dict(args), response))
+
+        self.assertTrue(first.data["loaded"])
+        self.assertIn("Stable instructions", first.next_prompt)
+        self.assertFalse(second.data["loaded"])
+        self.assertNotIn("Stable instructions", second.next_prompt)
+        self.assertIn("already loaded", second.next_prompt)
 
 
 if __name__ == "__main__":
