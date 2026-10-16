@@ -55,6 +55,13 @@ Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + ts
   关键测试坑：自定义 stdio server 冷启动约 6 秒，首轮默认 discovery budget（约 2 秒）下模型看不到工具；
   真实自测需设 `GA_MCP_DISCOVERY_BUDGET=30`。SOP §3.4 已固化完整步骤。
 
+- **2026-10-16 真实 workflow E2E（17K authoring prompt 改造后）**：默认 `deepseek-flash` 完成
+  “3 路并行版本探测 -> 1 路串行综合 -> `file_write` 落盘 -> `file_read` 验证”，runId
+  `wf_9d31a557da1b42f684c999e3d969dc02`，4/4 jobs succeeded，脚本真实包含 `parallel()`。
+  `load_skill` 只返回短元数据，正文通过独立 `<skill_content>` 注入，references 按需读取；
+  普通工具 `code_run`/`structured_output`/`file_write`/`file_read` 均真实成功。证据：
+  `temp/workflow-selftest/20261016-153345/`；报告：`docs/20261016-GA-workflow-17k-prompt-真实e2e-并行串行.md`。
+
 注意：重型全链路脚本 `real_ink_ui_user_input_e2e.ts` **为 luna profile 硬编码**，用默认 `deepseek-flash` 跑会在子代理环节失败（`subagent child did not reach succeeded`）——默认模型下不要用它判定。
 
 ### Ink 终端 resize（reflow）：禁止依赖 ink 的相对 eraseLines

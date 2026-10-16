@@ -155,6 +155,50 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
    本次证据包：`temp/ink-selftest/20261016-152336/`；模型侧引用见 `temp/model_responses/model_responses_162902.txt`。
 
 
+### 3.5 真实 workflow 并行 + 串行 E2E（17K authoring prompt / 普通工具回归）
+
+适用：改动 `load_skill`、`workflow-authoring`、tool result 预算、workflow runtime 或 child
+tool profile 之后。目标是验证模型真实完成一个**有并行、有串行、有产物、有读回验证**的任务，
+而不是只看到 `workflow` 工具返回 `async_launched`。
+
+1. 用真实 `GenericAgentBridge` 提交显式 workflow 请求。任务应明确写出：
+
+   - 3 个独立 agent 并行做版本/资料探测；
+   - 每个 agent 真实调用 `code_run` 或目标工具，不允许猜；
+   - 三者完成后，串行 agent 汇总；
+   - 串行 agent `file_write` 产物并 `file_read` 验证；
+   - 脚本必须使用 `parallel()`，综合步骤依赖前面结果。
+
+2. 等待 bridge 的 `workflow_final` 事件，不要只等 `assistant_done`。终态后检查：
+
+   ```text
+   run.status == succeeded
+   jobStatuses: succeeded == jobCount
+   script 包含 parallel(
+   子 agent transcript 有真实 tool_call
+   最终产物存在且内容包含预期结果
+   ```
+
+3. 对 17K prompt 改造，额外检查：
+
+   - `load_skill` tool_result 只有短元数据，没有完整正文；
+   - 模型下一轮 prompt 中存在独立 `<skill_content>` 注入；
+   - 模型按需 `file_read` `references/*.md`；
+   - `workflow` tool_result 是 `async_launched`，随后 `workflow_final` 正常到达。
+
+4. 本次实测（默认 `deepseek-flash`）：
+
+   ```text
+   runId: wf_9d31a557da1b42f684c999e3d969dc02
+   status: succeeded
+   jobs: 4/4 succeeded
+   script: parallel() + serial synthesis
+   artifact: temp/workflow-runs/<runId>/temp/workflow-parallel-serial-report.md
+   ```
+
+   完整报告见 `docs/20261016-GA-workflow-17k-prompt-真实e2e-并行串行.md`。
+
+
 ---
 
 ## 4. L2：UI 版面级真实自测（真实 App + 伪 TTY）
