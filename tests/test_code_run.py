@@ -10,8 +10,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from ga import code_run  # noqa: E402
-import ga  # noqa: E402
+from genericagent.core.handler import code_run  # noqa: E402
+from genericagent.core import handler as ga  # noqa: E402
 
 
 class ExpandFileRefsWorkspaceTest(unittest.TestCase):

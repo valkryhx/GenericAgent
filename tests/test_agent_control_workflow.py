@@ -2,13 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_runtime_models import (
+from genericagent.core.models import (
     make_workflow_child_execution_id,
     make_workflow_run_execution_id,
 )
-from workflow_controller import WorkflowController
-from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
-from workflow_store import WorkflowStore
+from genericagent.workflow.controller import WorkflowController
+from genericagent.workflow.models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
+from genericagent.workflow.store import WorkflowStore
 
 
 class WorkflowAdapterTest(unittest.TestCase):
@@ -24,7 +24,7 @@ class WorkflowAdapterTest(unittest.TestCase):
 
     def test_workflow_adapter_exposes_run_container_and_child_records(self):
         self.make_run("wf_a", [WorkflowJob(job_id="agent_1", status="running")])
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         records = WorkflowChildAdapter(self.store, self.controller).list_records(include_terminal=True)
         self.assertEqual({"workflow_run", "workflow_child"}, {record.record_kind for record in records})
@@ -34,7 +34,7 @@ class WorkflowAdapterTest(unittest.TestCase):
     def test_same_job_id_in_two_runs_has_two_execution_ids(self):
         for run_id in ("wf_a", "wf_b"):
             self.make_run(run_id, [WorkflowJob(job_id="agent_1", status="queued")])
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         children = [
             record
@@ -57,7 +57,7 @@ class WorkflowAdapterTest(unittest.TestCase):
             },
         )
         self.make_run("wf_resumed", [job], status="succeeded")
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         children = [
             record
@@ -82,7 +82,7 @@ class WorkflowAdapterTest(unittest.TestCase):
             [WorkflowJob(job_id="agent_1", status="succeeded"), WorkflowJob(job_id="agent_2", status="failed")],
             status="succeeded",
         )
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         records = WorkflowChildAdapter(self.store, self.controller).list_records(include_terminal=True)
         run_record = next(record for record in records if record.record_kind == "workflow_run")
@@ -97,7 +97,7 @@ class WorkflowAdapterTest(unittest.TestCase):
             for index, status in enumerate(("cached", "stale", "failed", "cancelled"), start=1)
         ]
         self.make_run("wf_status", jobs)
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         children = [
             record
@@ -129,7 +129,7 @@ class WorkflowAdapterTest(unittest.TestCase):
             AgentResult(job_id="agent_1", payload={"summary": "done"}, transcript_ref="agents/agent_1/transcript.jsonl"),
         )
         self.store.write_agent_transcript(run, job, [{"type": "capability_snapshot", "capabilities": {"fileReadAvailable": True}}])
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         child = next(
             record
@@ -155,7 +155,7 @@ class WorkflowAdapterTest(unittest.TestCase):
                 payload={"resultRef": "agents/agent_1/result.json"},
             ),
         )
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         events = WorkflowChildAdapter(self.store, self.controller).events_since({"workflow:wf_events": 8})
         self.assertEqual(["workflow:wf_events:9"], [event.event_id for event in events.events])
@@ -164,7 +164,7 @@ class WorkflowAdapterTest(unittest.TestCase):
 
     def test_workflow_child_does_not_advertise_process_only_actions(self):
         self.make_run("wf_caps", [WorkflowJob(job_id="agent_1", status="running")])
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         child = next(
             record

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import token_meter
+from genericagent.core import tokens as token_meter
 
 
 SummarizeFn = Callable[[str, str], str]

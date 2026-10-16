@@ -16,10 +16,10 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tests import p8_real_api_e2e as base
-from workflow_models import WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", base.CONFIG_NAME)
 EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", base.EXPECTED_PROFILE_NAME)

@@ -34,15 +34,15 @@ GenericAgent 是一个面向本地开发与自动化任务的多前端 Agent Run
 
 - 主 agent 与 workflow 子 agent 共享读/写工具分类规则。
 - 支持 `ask`、`read_only`、`full_access` 等权限模式，并覆盖中途切档、审批循环等测试。
-- `mcp_runtime.py` 可从 `mcp.json` 或 `GA_MCP_CONFIG` 加载 MCP server，并将工具规范化为 `mcp__<server>__<tool>`。
+- `genericagent/mcp/runtime.py` 可从 `mcp.json` 或 `GA_MCP_CONFIG` 加载 MCP server，并将工具规范化为 `mcp__<server>__<tool>`。
 - 静态工具 schema、MCP 工具、Skill/Memory/Distillation 工具可以按场景组合暴露。
 - 遇到取消/停止时，MCP 调用会进入 cancellation scope，降低半关闭调用遗留状态的风险。
 
 ### 5. 会话转录、恢复与上下文压缩
 
-- `session_transcript.py` 记录 JSONL 会话事件：`session_start`、`turn`、`compact`、`rewind`。
+- `genericagent/core/transcripts.py` 记录 JSONL 会话事件：`session_start`、`turn`、`compact`、`rewind`。
 - 后端历史可在每轮前精确恢复，支持 rewind/resume 场景。
-- `/compact` 手动压缩和自动压缩共用 `compact_context.py` 核心逻辑。
+- `/compact` 手动压缩和自动压缩共用 `genericagent/core/context.py` 核心逻辑。
 - 压缩会把长历史替换为摘要 pair，并可更新 legacy log，便于长任务继续运行。
 
 ### 6. 多前端与集成入口
@@ -81,7 +81,7 @@ install_ink_ui.cmd
 复制模板并填写本地密钥：
 
 ```bash
-cp mykey_template.py mykey.py
+cp genericagent/llm/templates/mykey_template.py mykey.py
 ```
 
 当前推荐优先使用 `llm.yaml` 管理真实 provider/profile。`mykey.py` / `mykey.json` 仍可作为兼容配置来源，但新的 workflow 与 model/session 选择路径正在向 `llm.yaml` 收敛。
@@ -176,8 +176,7 @@ genericagent/
   media/                     # image codec / image GC
   resources/                 # 包内运行时资源（code_run header、prompt、schema）
   paths.py                   # 项目根、temp、assets、skills、workflow JS 资源解析
-agentmain.py                 # 兼容入口 shim → genericagent.core.app
-ga.py                        # 兼容入口 shim → genericagent.core.handler
+mykey.py                     # 本地配置（仓库根目录唯一允许的 Python 文件）
 ga_cli/                      # 可安装 CLI 门面
 frontends/ink/bridge.py      # Python 后端与 React/Ink UI 的 JSONL bridge
 frontends/ink/ui/            # React 18 + Ink 5 终端 UI

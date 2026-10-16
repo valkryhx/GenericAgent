@@ -51,7 +51,7 @@ def parse_json_object(raw: str) -> dict:
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
+        from genericagent.llm.core import reload_mykeys
 
         cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
     profile = {
@@ -67,14 +67,14 @@ def check_profile(summary: dict) -> bool:
 
 
 def role_prompt(task_dir: str | None) -> str:
-    import agentmain
+    from genericagent.core import app as agentmain
 
     agent = type("RolePromptAgent", (), {"task_dir": task_dir})()
     return agentmain.get_system_prompt(agent)
 
 
 def ask_real_model(system_prompt: str) -> tuple[str, dict]:
-    from llmcore import resolve_client
+    from genericagent.llm.core import resolve_client
 
     client = resolve_client(CONFIG_NAME)
     backend = getattr(client, "backend", None)

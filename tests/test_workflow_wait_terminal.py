@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from subagent_manager import SubagentManager
-from subagent_wait import (
+from genericagent.agents.manager import SubagentManager
+from genericagent.agents.wait import (
     is_workflow_run_id,
     workflow_run_is_terminal,
     workflow_run_turn_status,
@@ -114,7 +114,7 @@ class WorkflowWaitTerminalTest(unittest.TestCase):
 
 class UnknownWorkflowTargetFastFailTest(unittest.TestCase):
     def test_unknown_workflow_targets_lists_only_unresolved_runs(self):
-        from ga import GenericAgentHandler
+        from genericagent.core.handler import GenericAgentHandler
 
         class _Manager:
             def resolve_workflow_run(self, run_id):
@@ -144,8 +144,8 @@ class WorkflowStallGuardTest(unittest.TestCase):
 
     def _bridge(self, alive):
         from frontends.ink.bridge import GenericAgentBridge
-        from workflow_models import WorkflowRun
-        from workflow_store import WorkflowStore
+        from genericagent.workflow.models import WorkflowRun
+        from genericagent.workflow.store import WorkflowStore
 
         store = WorkflowStore(root=self.root)
         run = WorkflowRun(session_id="sess", script="// x", run_id=RUN_ID, status="running")

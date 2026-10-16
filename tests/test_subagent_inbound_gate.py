@@ -10,13 +10,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_inbound_gate import (  # noqa: E402
+from genericagent.agents.inbound_gate import (  # noqa: E402
     HOLD_BUFFER,
     InboundGate,
     normalize_policy,
     resolve_policy,
 )
-from subagent_swarm import MailboxLedger  # noqa: E402
+from genericagent.agents.swarm import MailboxLedger  # noqa: E402
 
 
 def _msg(msg_id, *, author="/root/agent_1", content="hi", origin=None, self_sent=False):
@@ -189,7 +189,7 @@ class IdempotentLedgerTest(unittest.TestCase):
 
 class ReceiptLedgerWiringTest(unittest.TestCase):
     def test_receipt_resolves_the_senders_outstanding_send(self):
-        from subagent_receipts import SubagentSendLedger
+        from genericagent.agents.receipts import SubagentSendLedger
 
         with tempfile.TemporaryDirectory() as td:
             receipts = SubagentSendLedger(td)

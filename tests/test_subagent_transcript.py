@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_transcript import SubagentTranscriptStore  # noqa: E402
+from genericagent.agents.transcript import SubagentTranscriptStore  # noqa: E402
 
 
 class SubagentTranscriptStoreTest(unittest.TestCase):

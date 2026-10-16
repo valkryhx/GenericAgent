@@ -116,8 +116,8 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
 
    ```bash
    GA_MCP_CONFIG=temp/mcp-limit-selftest/mcp.json python - <<'PY'
-   import mcp_runtime
-   from tool_result_limits import get_tool_result_max_chars
+   from genericagent.mcp import runtime as mcp_runtime
+   from genericagent.core.tool_results.limits import get_tool_result_max_chars
    tools = mcp_runtime.discover_mcp_tools(timeout=30)
    name = "mcp__limitprobe__big"
    print(name in {tool["function"]["name"] for tool in tools})

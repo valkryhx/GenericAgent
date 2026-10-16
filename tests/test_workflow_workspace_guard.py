@@ -9,7 +9,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from workflow_workspace_guard import normalize_bash_command_clamp
+from genericagent.workflow.workspace_guard import normalize_bash_command_clamp
 
 
 class NormalizeBashCommandClampTest(unittest.TestCase):
@@ -49,7 +49,7 @@ class WorkflowWorkspaceGuardTest(unittest.TestCase):
             import subprocess
             import sys
             from pathlib import Path
-            from workflow_workspace_guard import install
+            from genericagent.workflow.workspace_guard import install
             install({str(workspace)!r})
             result = {{"ok": False, "error": None}}
             try:

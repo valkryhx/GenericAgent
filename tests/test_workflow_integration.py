@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import session_transcript
-from workflow_controller import WorkflowController
-from workflow_scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.core import transcripts as session_transcript
+from genericagent.workflow.controller import WorkflowController
+from genericagent.workflow.scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 
 class WorkflowIntegrationTest(unittest.TestCase):

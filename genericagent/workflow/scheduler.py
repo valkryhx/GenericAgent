@@ -8,17 +8,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_child_agent import (
+from genericagent.core.redaction import redact_sensitive_text, sanitize
+from genericagent.workflow.child_agent import (
     AgentResult,
     ChildAgentRunner,
     FakeChildAgentRunner,
     bounded_structured_summary,
     loads_json_answer,
 )
-from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
-from workflow_store import WorkflowStore, build_artifact_ownership_index
-from workflow_workspace import (
+from genericagent.workflow.models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
+from genericagent.workflow.store import WorkflowStore, build_artifact_ownership_index
+from genericagent.workflow.workspace import (
     WorkspacePathError,
     artifact_ownership_index,
     normalize_workspace_relative,
@@ -26,7 +26,7 @@ from workflow_workspace import (
     resolve_workspace_child,
     workspace_writes_with_writer,
 )
-from subagent_state import atomic_write_json
+from genericagent.agents.state import atomic_write_json
 
 
 SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
@@ -160,7 +160,7 @@ def resolve_job_permission_profile(run_profile: str, options: dict | None) -> st
     profile is already strictly stronger, so it is never loosened.
     """
 
-    from workflow_permissions import EVIDENCE_ROLES, READ_ONLY, VERIFY
+    from genericagent.workflow.permissions import EVIDENCE_ROLES, READ_ONLY, VERIFY
 
     base = str(run_profile or "").strip() or "inherit-current-permissions"
     role = str((options or {}).get("role") or "").strip().lower()
@@ -558,7 +558,7 @@ class AgentScheduler:
         batch = _normalize_parallel_batch(metadata.get("parallelBatch"))
         if not batch:
             return
-        from workflow_tool_profiles import declares_writes
+        from genericagent.workflow.tool_profiles import declares_writes
 
         if not declares_writes(options):
             return
@@ -1338,7 +1338,7 @@ class AgentScheduler:
         run. Downstream gates read this instead of guessing.
         """
 
-        from workflow_permissions import MUTATING_TOOL_NAMES
+        from genericagent.workflow.permissions import MUTATING_TOOL_NAMES
 
         allowing = {"allow", "ask"}
         observed: list[str] = []

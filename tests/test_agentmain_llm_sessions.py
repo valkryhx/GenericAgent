@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import GenericAgent  # noqa: E402
+from genericagent.core.app import GenericAgent  # noqa: E402
 
 
 class AgentMainLLMSessionsTest(unittest.TestCase):
@@ -73,7 +73,7 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
         agent.llmclients = [client]
 
         def blocking_load_tool_schema(*_args, **_kwargs):
-            from mcp_runtime import _current_stop_signal
+            from genericagent.mcp.runtime import _current_stop_signal
 
             discovery_started.set()
             while not release_discovery.is_set():
@@ -115,7 +115,7 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
         })()
         agent = GenericAgent.__new__(GenericAgent)
         agent.llm_no = 0
-        import agentmain as agentmain_mod
+        import genericagent.core.app as agentmain_mod
         agentmain_mod._llm_yaml_path = None
         agentmain_mod._llm_yaml_mtime_ns = None
 

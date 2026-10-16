@@ -82,7 +82,7 @@ def sanitize(value: Any) -> Any:
 
 
 def resolve_profile() -> tuple[int, dict]:
-    from llm_client import load_clients_from_yaml
+    from genericagent.llm.client import load_clients_from_yaml
 
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
@@ -342,7 +342,7 @@ def check_malformed_history(manager, llm_no: int, summary: dict) -> None:
 def check_malformed_state(manager, llm_no: int, summary: dict) -> None:
     """H2: a corrupt `state.json` is copied aside before the child's first write replaces it.
 
-    Launches `agentmain.py` directly instead of going through `spawn_agent`, because the
+    Launches `genericagent.core.app` directly instead of going through `spawn_agent`, because the
     manager writes `state.json` twice *after* Popen (pid, then last_event_seq) — measured: a
     corruption injected at the Popen seam was overwritten by the parent before the child ever
     read it, so the check silently passed on healthy bytes. Driving the child directly is also
@@ -375,7 +375,8 @@ def check_malformed_state(manager, llm_no: int, summary: dict) -> None:
 
     cmd = [
         sys.executable,
-        str(REPO / "agentmain.py"),
+        "-m",
+        "genericagent.core.app",
         "--task",
         STATE_TASK,
         "--nobg",
@@ -444,7 +445,7 @@ def main() -> int:
     manager = None
     spawned: list[str] = []
     try:
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         llm_no, profile_row = resolve_profile()
         summary["profile"] = profile_row

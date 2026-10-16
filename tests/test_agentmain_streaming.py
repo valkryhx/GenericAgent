@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import normalize_display_assistant_text, should_flush_display_delta  # noqa: E402
+from genericagent.core.app import normalize_display_assistant_text, should_flush_display_delta  # noqa: E402
 
 
 class AgentMainStreamingTest(unittest.TestCase):

@@ -12,12 +12,12 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 
-from ink_bridge import GenericAgentBridge  # noqa: E402
-from workflow_child_agent import AgentResult  # noqa: E402
-from workflow_runtime import WorkflowRuntime  # noqa: E402
-from workflow_scheduler import SchedulerConfig  # noqa: E402
-from workflow_store import WorkflowStore  # noqa: E402
-from workflow_models import WorkflowRun as _WorkflowRun  # noqa: E402
+from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
+from genericagent.workflow.child_agent import AgentResult  # noqa: E402
+from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
+from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
+from genericagent.workflow.store import WorkflowStore  # noqa: E402
+from genericagent.workflow.models import WorkflowRun as _WorkflowRun  # noqa: E402
 
 
 _CC_META_PREFIX = "export const meta = { name: 'provider-anomaly-test', description: 'provider anomaly test workflow' }\n"

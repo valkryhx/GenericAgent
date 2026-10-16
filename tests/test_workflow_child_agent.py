@@ -8,14 +8,14 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from workflow_child_agent import (
+from genericagent.workflow.child_agent import (
     LiveJobTelemetry,
     NativeGPTChildAgentRunner,
     bounded_structured_summary,
     loads_json_answer,
     parse_json_answer,
 )
-from workflow_models import WorkflowJob
+from genericagent.workflow.models import WorkflowJob
 
 
 class StubSession:
@@ -238,7 +238,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
                     "options": {"bashCommandClamp": ["python", "pytest"]},
                 },
             )
-            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
             self.assertEqual(["python", "pytest"], handler.workflow_bash_clamp)
 
@@ -256,15 +256,15 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
                     "permissionProfile": "inherit-current-permissions",
                 },
             )
-            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
             self.assertFalse(getattr(handler, "workflow_bash_clamp", None))
 
     def test_child_agent_system_prompt_includes_optional_skill_listing(self):
         runner = NativeGPTChildAgentRunner(system_prompt="base prompt")
 
-        with mock.patch("ga_agents_runtime.build_ga_project_instructions", return_value="\n[GA_PROJECT_INSTRUCTIONS]\nproject fake\n[/GA_PROJECT_INSTRUCTIONS]\n"):
-            with mock.patch("skills_runtime.build_skill_prompt", return_value="\n[Available Skills]\nWhen matched, call load_skill.\n- using-superpowers\n"):
+        with mock.patch("genericagent.core.project_instructions.build_ga_project_instructions", return_value="\n[GA_PROJECT_INSTRUCTIONS]\nproject fake\n[/GA_PROJECT_INSTRUCTIONS]\n"):
+            with mock.patch("genericagent.core.skills.build_skill_prompt", return_value="\n[Available Skills]\nWhen matched, call load_skill.\n- using-superpowers\n"):
                 prompt = runner._build_system_prompt()
 
         self.assertIn("base prompt", prompt)
@@ -747,7 +747,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertNotIn(secret, serialized)
 
     def test_native_tool_runner_redacts_sensitive_tool_call_args_and_results_in_success_transcript(self):
-        from agent_loop import StepOutcome
+        from genericagent.core.loop import StepOutcome
         from unittest import mock
 
         secret_values = ["tool-secret", "bearer-tool-secret", "result-secret", "cookie_secret"]
@@ -770,7 +770,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         job = WorkflowJob(job_id="agent_tool_redact", prompt="read safely", metadata={"runId": "wf_test"})
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "token=result-secret Cookie: sid=cookie_secret request_id=req_123"})), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+        with mock.patch("genericagent.core.handler.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "token=result-secret Cookie: sid=cookie_secret request_id=req_123"})), mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             result = self.wait_for_result(runner, job)
 
@@ -809,7 +809,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
         def blocking_mcp_call(_name, _arguments):
-            from mcp_runtime import _current_stop_signal
+            from genericagent.mcp.runtime import _current_stop_signal
 
             tool_started.set()
             while not release_tool.is_set():
@@ -820,7 +820,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             return {"status": "error", "msg": "test cleanup released tool"}
 
         result = None
-        with mock.patch("mcp_runtime.call_mcp_tool", side_effect=blocking_mcp_call), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+        with mock.patch("genericagent.mcp.runtime.call_mcp_tool", side_effect=blocking_mcp_call), mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             self.assertTrue(tool_started.wait(timeout=2), "workflow child did not enter MCP dispatch")
             runner.cancel(job)
@@ -847,7 +847,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client)
 
         def blocking_discovery(*_args, **_kwargs):
-            from mcp_runtime import _current_stop_signal
+            from genericagent.mcp.runtime import _current_stop_signal
 
             discovery_started.set()
             while not release_discovery.is_set():
@@ -858,7 +858,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             return []
 
         result = None
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", side_effect=blocking_discovery):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", side_effect=blocking_discovery):
             runner.start(job)
             self.assertTrue(discovery_started.wait(timeout=2), "workflow child did not enter MCP discovery")
             runner.cancel(job)
@@ -898,7 +898,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
         runner = NativeGPTChildAgentRunner(enable_tools=True)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
             tools = runner._load_tools_schema()
 
         tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
@@ -912,7 +912,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         duplicate = {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}
         runner = NativeGPTChildAgentRunner(enable_tools=True)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[duplicate]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[duplicate]):
             tools = runner._load_tools_schema()
 
         tool_names = [(tool.get("function") or {}).get("name") for tool in tools]
@@ -928,7 +928,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
 
         runner = NativeGPTChildAgentRunner(enable_tools=True, tools_schema_factory=factory)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
             tools = runner._load_tools_schema()
 
         tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
@@ -944,7 +944,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         mcp_tool = {"type": "function", "function": {"name": "mcp__deterministic__read_marker", "parameters": {"type": "object", "properties": {}}}}
         runner = NativeGPTChildAgentRunner(enable_tools=True, tools_schema_factory=lambda: [selected_only_tool])
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
             tools = runner._load_tools_schema()
 
         tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
@@ -956,7 +956,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
     def test_mcp_discovery_failure_records_warning_without_dropping_base_tools(self):
         runner = NativeGPTChildAgentRunner(enable_tools=True)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", side_effect=RuntimeError("boom token=secret")):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", side_effect=RuntimeError("boom token=secret")):
             tools = runner._load_tools_schema()
 
         tool_names = {(tool.get("function") or {}).get("name") for tool in tools}
@@ -974,7 +974,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         job = WorkflowJob(job_id="agent_caps", prompt="finish", metadata={"runId": "wf_test"})
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[mcp_tool]):
             runner.start(job)
             result = self.wait_for_result(runner, job)
 
@@ -1001,7 +1001,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         ]
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             result = self.wait_for_result(runner, job)
 
@@ -1041,7 +1041,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             job = WorkflowJob(job_id="agent_tool_mcp", prompt="load skill and read marker", metadata={"runId": "wf_test"})
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "ok"}) as call_mcp, mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.call_mcp_tool", return_value={"status": "success", "marker": "ok"}) as call_mcp, mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 
@@ -1078,7 +1078,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             )
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("mcp_runtime.call_mcp_tool") as call_mcp, mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.call_mcp_tool") as call_mcp, mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 
@@ -1133,7 +1133,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             )
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 
@@ -1189,7 +1189,7 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
                 handler.tool_before_callback = before
                 return handler
 
-            with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]), \
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]), \
                  mock.patch.object(runner, "_build_handler", side_effect=build_handler_with_future_tool):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
@@ -1253,7 +1253,7 @@ class LiveJobTelemetryTest(unittest.TestCase):
         live.update(handler, types.SimpleNamespace(last_usage_tokens={}))
 
     def test_runner_publishes_live_telemetry_while_a_tool_job_runs(self):
-        from agent_loop import StepOutcome
+        from genericagent.core.loop import StepOutcome
 
         client = StubToolClient([
             StubToolResponse("<summary>read</summary>", [
@@ -1273,7 +1273,7 @@ class LiveJobTelemetryTest(unittest.TestCase):
         seen = []
         runner.set_telemetry_sink(lambda job_id, payload: seen.append((job_id, payload)))
 
-        with mock.patch("ga.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "hello"})), mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+        with mock.patch("genericagent.core.handler.GenericAgentHandler.do_file_read", return_value=StepOutcome({"status": "success", "content": "hello"})), mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             result = NativeGPTChildAgentRunnerTest().wait_for_result(runner, job)
 
@@ -1411,7 +1411,7 @@ class StructuredOutputEndToEndTest(unittest.TestCase):
     def _run(self, client):
         runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=self._tools)
         job = self._job()
-        with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[]):
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
             runner.start(job)
             return self.wait_for_result(runner, job)
 

@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import session_transcript
-from frontends import continue_cmd
+from genericagent.core import transcripts as session_transcript
+from frontends.terminal import continue_cmd
 
 
 class FakeBackend:

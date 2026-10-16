@@ -10,8 +10,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
 
-from sensitive_redaction import redact_sensitive_text
-from workflow_workspace import resolve_workspace_child
+from genericagent.core.redaction import redact_sensitive_text
+from genericagent.workflow.workspace import resolve_workspace_child
 
 
 MAX_OUTPUT_CHARS = 20_000

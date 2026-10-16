@@ -28,7 +28,7 @@ return {marker:'GA_WAIT_BARRIER_WORKFLOW_DONE', analysisLength:String(analysis.s
 
 
 def _profile():
-    from llm_client import load_clients_from_yaml
+    from genericagent.llm.client import load_clients_from_yaml
     clients, *_ = load_clients_from_yaml(start_dir=REPO)
     for index, client in enumerate(clients):
         backend = getattr(client, 'backend', None)
@@ -72,16 +72,16 @@ def _mcp_duration_ms(events):
 @unittest.skipUnless(OPT_IN, 'set GA_RUN_REAL_E2E=1 for live DeepSeek workflow E2E')
 class RealWorkflowWaitBarrierE2E(unittest.TestCase):
     def test_real_workflow_enforces_dependency_barrier_and_host_evidence(self):
-        from workflow_check_adapters import run_check
-        from workflow_child_agent import NativeGPTChildAgentRunner
-        from workflow_models import WorkflowRun
-        from workflow_runtime import WorkflowRuntime
-        from workflow_scheduler import SchedulerConfig
-        from workflow_store import WorkflowStore
+        from genericagent.workflow.check_adapters import run_check
+        from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+        from genericagent.workflow.models import WorkflowRun
+        from genericagent.workflow.runtime import WorkflowRuntime
+        from genericagent.workflow.scheduler import SchedulerConfig
+        from genericagent.workflow.store import WorkflowStore
 
         _llm_no, profile = _profile()
         if MCP_OPT_IN:
-            import mcp_runtime
+            from genericagent.mcp import runtime as mcp_runtime
             mcp_runtime.clear_mcp_cache()
             mcp_runtime.reset_mcp_manager()
             tools = mcp_runtime.discover_mcp_tools_cached(timeout=30)

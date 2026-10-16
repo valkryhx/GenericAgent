@@ -57,12 +57,12 @@ COMMANDS = {
     "gui": {
         "help": "启动桌面GUI (qtapp)",
         "desc": "启动基于 PyQt5 的完整桌面聊天界面（气泡代码高亮、文件拖拽、历史搜索）",
-        "cmd": ["python", "{FRONTENDS}/qtapp.py"],
+        "cmd": ["python", "{FRONTENDS}/desktop/qtapp.py"],
     },
     "web": {
         "help": "启动Web增强版 (stapp2)  加 --native 使用 webview 桌面壳",
         "desc": "启动 Streamlit Web 界面，浏览器访问，适合远程/跨设备",
-        "cmd": ["python", "-m", "streamlit", "run", "{FRONTENDS}/stapp2.py",
+        "cmd": ["python", "-m", "streamlit", "run", "{FRONTENDS}/web/stapp2.py",
                 "--server.headless", "true"],
         "flags": {"--native": {"help": "用 webview 原生窗口启动(stapp基础版)", "cmd": ["python", "{PROJECT_DIR}/launch.pyw"]}},
     },
@@ -79,12 +79,12 @@ COMMANDS = {
     "pet": {
         "help": "启动桌面宠物",
         "desc": "启动桌面宠物皮肤系统，桌面上陪伴你的虚拟宠物",
-        "cmd": ["python", "{FRONTENDS}/desktop_pet_v2.pyw"],
+        "cmd": ["python", "{FRONTENDS}/desktop/desktop_pet_v2.pyw"],
     },
     "tui": {
         "help": "启动终端 TUI (tuiapp)",
         "desc": "启动终端图形界面（Textual），适合纯终端环境或 SSH",
-        "cmd": ["python", "{FRONTENDS}/tuiapp.py"],
+        "cmd": ["python", "{FRONTENDS}/terminal/tuiapp.py"],
     },
     "ink": {
         "help": "启动实验性 React/Ink TUI",
@@ -96,9 +96,9 @@ COMMANDS = {
         ],
     },
     "cli": {
-        "help": "启动 CLI 对话 (agentmain)",
+        "help": "启动 CLI 对话 (genericagent.core.app)",
         "desc": "启动命令行交互对话模式，最轻量的使用方式",
-        "cmd": ["python", "{PROJECT_DIR}/agentmain.py"],
+        "cmd": ["python", "-m", "genericagent.core.app"],
     },
     "launch": {
         "help": "启动 webview 桌面壳 (launch.pyw)",
@@ -146,7 +146,7 @@ def cmd_status():
     """检查进程状态"""
     import psutil
     running = [p for p in psutil.process_iter(['pid', 'name', 'cmdline'])
-               if p.info['cmdline'] and any('agentmain' in c for c in p.info['cmdline'])]
+               if p.info['cmdline'] and any('genericagent.core.app' in c for c in p.info['cmdline'])]
     if running:
         print(f"[OK] 运行中: {len(running)} 个进程")
         for p in running:

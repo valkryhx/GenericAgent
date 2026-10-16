@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_idle import (  # noqa: E402
+from genericagent.agents.idle import (  # noqa: E402
     DRAIN_BUDGET,
     RESULT_BUDGET,
     build_idle_notification,

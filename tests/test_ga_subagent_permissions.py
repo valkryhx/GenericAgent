@@ -10,10 +10,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import run_task_worker_loop  # noqa: E402
-from agent_loop import StepOutcome, exhaust  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
-from subagent_permissions import (  # noqa: E402
+from genericagent.core.app import run_task_worker_loop  # noqa: E402
+from genericagent.core.loop import StepOutcome, exhaust  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler  # noqa: E402
+from genericagent.agents.permissions import (  # noqa: E402
     EXPLICIT_APPROVAL,
     INHERIT_CURRENT_PERMISSIONS,
     READ_ONLY,

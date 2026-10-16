@@ -14,7 +14,7 @@ agent 对同一工具的读/写认知一致。决策对象也复用 workflow_per
 
 from __future__ import annotations
 
-from workflow_permissions import (
+from genericagent.workflow.permissions import (
     DENIED_READ_ONLY_STATIC_TOOLS,
     PermissionDecision,
     is_mcp_tool_name,

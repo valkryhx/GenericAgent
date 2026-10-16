@@ -52,9 +52,9 @@ def _wait_for(predicate, *, timeout_s: float, interval_s: float = 0.25):
 
 def _resolve_target() -> tuple[int, dict[str, str]]:
     """Resolve both the process client index and the workflow binding from llm.yaml."""
-    from llm_client import load_clients_from_yaml
-    from llm_config import find_llm_config, load_llm_config
-    from workflow_llm import binding_from_profile
+    from genericagent.llm.client import load_clients_from_yaml
+    from genericagent.llm.config import find_llm_config, load_llm_config
+    from genericagent.workflow.llm import binding_from_profile
 
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
@@ -157,17 +157,17 @@ def main() -> int:
         process_index, target = _resolve_target()
         summary.update({"provider": target["provider"], "processClientIndex": process_index})
 
-        from agent_control import UnifiedAgentControl
-        from agent_control_process import ProcessSubagentAdapter
-        from agent_control_workflow import WorkflowChildAdapter
-        from agent_runtime_models import make_workflow_source_cursor
-        from subagent_manager import SubagentManager
-        from workflow_child_agent import NativeGPTChildAgentRunner
-        from workflow_controller import WorkflowController
-        from workflow_models import WorkflowRun
-        from workflow_runtime import WorkflowRuntime
-        from workflow_scheduler import SchedulerConfig
-        from workflow_store import WorkflowStore
+        from genericagent.core.control.control import UnifiedAgentControl
+        from genericagent.core.control.process import ProcessSubagentAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
+        from genericagent.core.models import make_workflow_source_cursor
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+        from genericagent.workflow.controller import WorkflowController
+        from genericagent.workflow.models import WorkflowRun
+        from genericagent.workflow.runtime import WorkflowRuntime
+        from genericagent.workflow.scheduler import SchedulerConfig
+        from genericagent.workflow.store import WorkflowStore
 
         try:
             temp_dir = tempfile.TemporaryDirectory(prefix="ga_real_p2_1_")

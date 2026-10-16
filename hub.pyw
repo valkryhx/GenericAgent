@@ -24,15 +24,21 @@ def discover_services():
             if f.endswith('.py') and not f.startswith('_') and f not in EXCLUDES:
                 services.append({
                     'name': 'reflect/' + f,
-                    'cmd': [sys.executable, 'agentmain.py', '--reflect', 'reflect/' + f],
+                    'cmd': [sys.executable, '-m', 'genericagent.core.app', '--reflect', 'reflect/' + f],
                 })
     frontends_dir = os.path.join(BASE_DIR, 'frontends')
     if os.path.isdir(frontends_dir):
-        for f in sorted(os.listdir(frontends_dir)):
-            if 'app' in f and f.endswith('.py') and f not in EXCLUDES:
-                if 'stapp' in f: cmd = [sys.executable, '-m', 'streamlit', 'run', 'frontends/' + f, '--server.headless=true']
-                else: cmd = [sys.executable, 'frontends/' + f]
-                services.append({'name': 'frontends/' + f, 'cmd': cmd})
+        for root, dirs, files in os.walk(frontends_dir):
+            dirs[:] = sorted(d for d in dirs if d not in {'__pycache__', 'ui'})
+            for f in sorted(files):
+                if 'app' not in f or not f.endswith('.py') or f in EXCLUDES:
+                    continue
+                rel = os.path.relpath(os.path.join(root, f), BASE_DIR).replace(os.sep, '/')
+                if 'stapp' in f:
+                    cmd = [sys.executable, '-m', 'streamlit', 'run', rel, '--server.headless=true']
+                else:
+                    cmd = [sys.executable, rel]
+                services.append({'name': rel, 'cmd': cmd})
     return services
 
 

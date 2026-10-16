@@ -12,7 +12,7 @@ if ROOT not in sys.path:
 if FRONTENDS not in sys.path:
     sys.path.insert(0, FRONTENDS)
 
-from tuiapp_v2 import ChatMessage, GenericAgentTUI, InputArea, build_user_body, StreamUpdateGate
+from frontends.terminal.tuiapp_v2 import ChatMessage, GenericAgentTUI, InputArea, build_user_body, StreamUpdateGate
 
 
 class StreamUpdateGateTest(unittest.TestCase):
@@ -66,7 +66,7 @@ class ChatMessageRenderStateTest(unittest.TestCase):
         app = self.make_unmounted_app()
         msg = ChatMessage("assistant", "**LLM Running (Turn 1) ...**\npartial", done=False)
 
-        with patch("tuiapp_v2.render_folded_text") as folded:
+        with patch("frontends.terminal.tuiapp_v2.render_folded_text") as folded:
             body = app._build_assistant_body(msg)
 
         folded.assert_not_called()
@@ -76,7 +76,7 @@ class ChatMessageRenderStateTest(unittest.TestCase):
         app = self.make_unmounted_app()
         msg = ChatMessage("assistant", "**LLM Running (Turn 1) ...**\nfinal", done=True)
 
-        with patch("tuiapp_v2.render_folded_text", return_value="folded") as folded:
+        with patch("frontends.terminal.tuiapp_v2.render_folded_text", return_value="folded") as folded:
             app._build_assistant_body(msg)
 
         folded.assert_called_once()
@@ -98,7 +98,7 @@ class InputAreaPasteTest(unittest.TestCase):
 
         inp._insert_via_keyboard = insert
 
-        with patch("tuiapp_v2._read_clipboard_text", return_value=text):
+        with patch("frontends.terminal.tuiapp_v2._read_clipboard_text", return_value=text):
             inp.action_paste()
 
         self.assertEqual(['[Copied text #1 +2 lines]'], inserted)
@@ -110,7 +110,7 @@ class InputAreaPasteTest(unittest.TestCase):
         text = "alpha\nbeta"
         inp._insert_via_keyboard = lambda text_to_insert: inserted.append(text_to_insert)
 
-        with patch("tuiapp_v2._read_clipboard_text", return_value=text):
+        with patch("frontends.terminal.tuiapp_v2._read_clipboard_text", return_value=text):
             inp.action_paste()
 
         self.assertEqual(["[Copied text #1 +1 lines]"], inserted)

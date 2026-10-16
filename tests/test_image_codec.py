@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import image_codec as ic  # noqa: E402
+import genericagent.media.image_codec as ic  # noqa: E402
 
 
 # 8x8 PNG（满足 MIN_DIMENSION=8；1x1 会被 Grok 等 provider 拒绝）

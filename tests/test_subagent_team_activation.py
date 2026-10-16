@@ -1,6 +1,6 @@
 import unittest
 
-from subagent_team_activation import (
+from genericagent.agents.team_activation import (
     TeamActivationState,
     agent_teams_env_enabled,
     resolve_team_activation,

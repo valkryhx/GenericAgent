@@ -9,8 +9,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_event_bus import SubagentEventBus  # noqa: E402
-from subagent_notifications import (  # noqa: E402
+from genericagent.agents.event_bus import SubagentEventBus  # noqa: E402
+from genericagent.agents.notifications import (  # noqa: E402
     ANTI_SPOOF_PREAMBLE,
     SYSTEM_NOTIFICATION_HEADER,
     build_subagent_notifications_prompt,
@@ -87,16 +87,16 @@ if __name__ == "__main__":
 
 class ResultBudgetTest(unittest.TestCase):
     def test_single_block_is_capped_at_the_result_budget(self):
-        from subagent_idle import RESULT_BUDGET
-        from subagent_notifications import apply_result_budget
+        from genericagent.agents.idle import RESULT_BUDGET
+        from genericagent.agents.notifications import apply_result_budget
 
         out = apply_result_budget(["x" * 5000])
         self.assertTrue(out[0].startswith("x" * RESULT_BUDGET))
         self.assertIn("truncated", out[0])
 
     def test_whole_drain_is_capped_at_the_drain_budget(self):
-        from subagent_idle import DRAIN_BUDGET, DRAIN_TRUNCATION_HINT
-        from subagent_notifications import apply_result_budget
+        from genericagent.agents.idle import DRAIN_BUDGET, DRAIN_TRUNCATION_HINT
+        from genericagent.agents.notifications import apply_result_budget
 
         out = apply_result_budget(["y" * 5000 for _ in range(5)])
         joined = "".join(out)
@@ -104,7 +104,7 @@ class ResultBudgetTest(unittest.TestCase):
         self.assertIn(DRAIN_TRUNCATION_HINT, joined)
 
     def test_under_budget_blocks_are_unchanged(self):
-        from subagent_notifications import apply_result_budget
+        from genericagent.agents.notifications import apply_result_budget
 
         self.assertEqual(apply_result_budget(["a", "b"]), ["a", "b"])
 

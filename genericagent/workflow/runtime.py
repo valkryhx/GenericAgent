@@ -14,22 +14,22 @@ from pathlib import Path
 from genericagent import paths
 from typing import Any
 
-from workflow_determinism import determinism_error
-from sensitive_redaction import is_sensitive_key, redact_sensitive_text, sanitize
-from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
-from workflow_models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
-from workflow_scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
-from workflow_store import WorkflowStore
-from workflow_workspace import (
+from genericagent.workflow.determinism import determinism_error
+from genericagent.core.redaction import is_sensitive_key, redact_sensitive_text, sanitize
+from genericagent.workflow.child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
+from genericagent.workflow.models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
+from genericagent.workflow.scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
+from genericagent.workflow.store import WorkflowStore
+from genericagent.workflow.workspace import (
     WorkspacePathError,
     normalize_workspace_relative,
     resolve_workspace_child,
     resolve_workspace_root,
     workspace_metadata,
 )
-from workflow_check_adapters import run_check
-from workflow_tool_profiles import CAPABILITY_CLASSES, tool_has_capability
-from workflow_verification import validate_verification_contract
+from genericagent.workflow.check_adapters import run_check
+from genericagent.workflow.tool_profiles import CAPABILITY_CLASSES, tool_has_capability
+from genericagent.workflow.verification import validate_verification_contract
 
 
 MAX_TEST_GATE_TIMEOUT_MS = 120_000
@@ -192,7 +192,7 @@ class WorkflowRuntime:
         self._last_worker_result = None
         # Record LLM binding snapshot for audit (best-effort; no secrets).
         try:
-            from workflow_llm import binding_from_env, resolve_binding
+            from genericagent.workflow.llm import binding_from_env, resolve_binding
 
             if self.llm_binding_provider is not None:
                 binding = resolve_binding(binding_provider=self.llm_binding_provider)
@@ -507,7 +507,7 @@ class WorkflowRuntime:
             # the normalized command prefixes are stored back so the child and
             # its guard never see the raw form. A malformed clamp is refused
             # rather than running the child un-clamped (fail-closed).
-            from workflow_workspace_guard import normalize_bash_command_clamp
+            from genericagent.workflow.workspace_guard import normalize_bash_command_clamp
 
             try:
                 options = {**options, "bashCommandClamp": normalize_bash_command_clamp(clamp)}
@@ -621,7 +621,7 @@ class WorkflowRuntime:
                 scheduler.run,
                 args,
             )
-            from workflow_script_validation import validate_rendered_workflow_script
+            from genericagent.workflow.script_validation import validate_rendered_workflow_script
 
             preflight = validate_rendered_workflow_script(script)
             if not preflight.get("ok"):

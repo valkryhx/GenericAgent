@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from agent_runtime_models import (
+from genericagent.core.models import (
     AgentCapabilities,
     AgentEvent,
     AgentEventBatch,
@@ -14,9 +14,9 @@ from agent_runtime_models import (
     ArtifactRef,
     make_process_execution_id,
 )
-from sensitive_redaction import redact_sensitive_text, sanitize
-from subagent_agent_path import AgentPath
-from subagent_state import read_json_or_none
+from genericagent.core.redaction import redact_sensitive_text, sanitize
+from genericagent.agents.agent_path import AgentPath
+from genericagent.agents.state import read_json_or_none
 
 
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "killed", "interrupted", "closed", "cached", "stale", "partial"})
@@ -110,7 +110,7 @@ class ProcessSubagentAdapter:
         )
 
     def control(self, execution_id: str, request):
-        from agent_control import ControlResult
+        from genericagent.core.control.control import ControlResult
 
         record = self.get_record(execution_id)
         if record is None:

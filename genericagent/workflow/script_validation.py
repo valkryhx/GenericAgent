@@ -19,7 +19,7 @@ from pathlib import Path
 from genericagent import paths
 from typing import Any
 
-from workflow_determinism import determinism_error
+from genericagent.workflow.determinism import determinism_error
 
 
 def workflow_script_contract_preflight(source: str) -> dict[str, Any]:

@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_loop import (  # noqa: E402
+from genericagent.core.loop import (  # noqa: E402
     StepOutcome,
     _batch_tool_calls,
     _run_single_tool,

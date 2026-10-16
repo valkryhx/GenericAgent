@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-import agentmain  # noqa: E402
+from genericagent.core import app as agentmain  # noqa: E402
 
 
 class AgentMainRolePromptsTest(unittest.TestCase):
@@ -42,7 +42,7 @@ class AgentMainRolePromptsTest(unittest.TestCase):
         self.assertLess(prompt.index("[Memory fake]"), prompt.index("[Skills fake]"))
 
     def test_root_agent_prompt_injects_subagent_notifications_before_memory(self):
-        with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n"):
+        with mock.patch("genericagent.agents.notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n"):
             prompt = self._system_prompt()
 
         self.assertIn("[GA_SUBAGENT_NOTIFICATIONS]", prompt)
@@ -50,7 +50,7 @@ class AgentMainRolePromptsTest(unittest.TestCase):
 
     def test_subagent_prompt_does_not_consume_parent_notifications(self):
         subagent = type("Subagent", (), {"task_dir": str(REPO_ROOT / "temp" / "demo_subagent")})()
-        with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n") as mocked:
+        with mock.patch("genericagent.agents.notifications.build_subagent_notifications_prompt", return_value="\n[GA_SUBAGENT_NOTIFICATIONS]\nfake\n") as mocked:
             prompt = self._system_prompt(subagent)
 
         self.assertNotIn("[GA_SUBAGENT_NOTIFICATIONS]", prompt)
@@ -66,7 +66,7 @@ class AgentMainRolePromptsTest(unittest.TestCase):
         """
         with mock.patch.object(agentmain, "load_base_system_prompt", return_value="[base]"):
             with mock.patch.object(agentmain, "build_ga_project_instructions", return_value="[project]"):
-                with mock.patch("subagent_notifications.build_subagent_notifications_prompt", return_value="[notify]"):
+                with mock.patch("genericagent.agents.notifications.build_subagent_notifications_prompt", return_value="[notify]"):
                     with mock.patch.object(agentmain, "get_global_memory", return_value="[memory]"):
                         with mock.patch.object(agentmain, "build_skill_prompt", return_value="[skills]"):
                             with mock.patch.object(agentmain, "build_agent_role_usage_hint", return_value="[role]"):

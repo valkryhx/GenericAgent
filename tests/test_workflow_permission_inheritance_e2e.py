@@ -7,15 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_loop import exhaust
-from ga import GenericAgentHandler
-from session_transcript import create_session, load_session, record_turn, record_workflow_event
-from workflow_child_agent import AgentResult
-from workflow_models import DEFAULT_PERMISSION_POLICY_VERSION, DEFAULT_PERMISSION_PROFILE, WorkflowRun as _WorkflowRun
-from workflow_permissions import ToolPermissionPolicy
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import AgentScheduler, SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.core.loop import exhaust
+from genericagent.core.handler import GenericAgentHandler
+from genericagent.core.transcripts import create_session, load_session, record_turn, record_workflow_event
+from genericagent.workflow.child_agent import AgentResult
+from genericagent.workflow.models import DEFAULT_PERMISSION_POLICY_VERSION, DEFAULT_PERMISSION_PROFILE, WorkflowRun as _WorkflowRun
+from genericagent.workflow.permissions import ToolPermissionPolicy
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import AgentScheduler, SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 
 _CC_META_PREFIX = "export const meta = { name: 'permission-inheritance-test', description: 'permission inheritance test workflow' }\n"
@@ -181,7 +181,7 @@ class WorkflowPermissionInheritanceE2ETest(unittest.TestCase):
                 runner.mcp_calls.append({"toolName": tool_name, "args": dict(args)})
                 return {"status": "success", "marker": "MCP_PERMISSION_INHERITED", "args": dict(args)}
 
-            with mock.patch("mcp_runtime.call_mcp_tool", side_effect=fake_mcp_call):
+            with mock.patch("genericagent.mcp.runtime.call_mcp_tool", side_effect=fake_mcp_call):
                 scheduler = AgentScheduler(store=store, run=run, runner=runner, config=SchedulerConfig(max_concurrent=1))
                 job = scheduler.register_agent(prompt="deterministic permission inheritance", label="permission-child")
                 scheduler.run_all()
@@ -239,7 +239,7 @@ class WorkflowPermissionInheritanceE2ETest(unittest.TestCase):
             )
             runner = SemiRealPermissionChildRunner(workdir=workdir, skills_root=skills_root)
 
-            with mock.patch("mcp_runtime.call_mcp_tool", side_effect=AssertionError("denied MCP tool must not execute")):
+            with mock.patch("genericagent.mcp.runtime.call_mcp_tool", side_effect=AssertionError("denied MCP tool must not execute")):
                 scheduler = AgentScheduler(store=store, run=run, runner=runner, config=SchedulerConfig(max_concurrent=1))
                 job = scheduler.register_agent(prompt="deterministic permission read only", label="permission-child")
                 scheduler.run_all()

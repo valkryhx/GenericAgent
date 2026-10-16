@@ -3,7 +3,7 @@ import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
-from agent_runtime_models import (
+from genericagent.core.models import (
     AgentCapabilities,
     AgentEvent,
     AgentEventBatch,
@@ -13,11 +13,11 @@ from agent_runtime_models import (
     make_workflow_child_execution_id,
     make_workflow_run_execution_id,
 )
-from agent_control import ControlRequest, ControlResult, UnifiedAgentControl
-from subagent_manager import AgentState
-from workflow_controller import WorkflowController
-from workflow_models import WorkflowJob, WorkflowRun
-from workflow_store import WorkflowStore
+from genericagent.core.control.control import ControlRequest, ControlResult, UnifiedAgentControl
+from genericagent.agents.manager import AgentState
+from genericagent.workflow.controller import WorkflowController
+from genericagent.workflow.models import WorkflowJob, WorkflowRun
+from genericagent.workflow.store import WorkflowStore
 
 
 def record(execution_id, *, record_kind="process_agent", run_id=None, job_id=None, actions=None):
@@ -196,7 +196,7 @@ class UnifiedAgentControlTest(unittest.TestCase):
     def test_process_interrupt_is_forwarded_with_reason(self):
         process_record = make_process_record("one")
         manager = RecordingProcessManager([process_record])
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         control = UnifiedAgentControl([ProcessSubagentAdapter(manager)])
         result = control.control(process_record.execution_id, ControlRequest(action="interrupt", reason="user stop"))
@@ -208,7 +208,7 @@ class UnifiedAgentControlTest(unittest.TestCase):
     def test_process_close_cascade_returns_closed_descendants(self):
         process_record = make_process_record("parent")
         manager = RecordingProcessManager([process_record])
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         control = UnifiedAgentControl([ProcessSubagentAdapter(manager)])
         result = control.control(process_record.execution_id, ControlRequest(action="close", payload={"cascade": True}))
@@ -220,7 +220,7 @@ class UnifiedAgentControlTest(unittest.TestCase):
 
     def test_workflow_run_stop_is_scoped_to_the_run_record(self):
         store, controller, run = self.recording_running_workflow("wf_a", child_count=2)
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
         result = control.control(make_workflow_run_execution_id(run.run_id), ControlRequest(action="stop", reason="test stop"))
@@ -232,7 +232,7 @@ class UnifiedAgentControlTest(unittest.TestCase):
 
     def test_workflow_child_cancel_returns_unsupported_without_cancelling_siblings(self):
         store, controller, run = self.recording_running_workflow("wf_b", child_count=2)
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
         child_id = make_workflow_child_execution_id(run.run_id, "agent_1")
@@ -247,7 +247,7 @@ class UnifiedAgentControlTest(unittest.TestCase):
 
     def test_workflow_child_resume_returns_unsupported_not_cached_resume(self):
         store, controller, run = self.recording_running_workflow("wf_c", child_count=1)
-        from agent_control_workflow import WorkflowChildAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
 
         control = UnifiedAgentControl([WorkflowChildAdapter(store, controller)])
         result = control.control(make_workflow_child_execution_id(run.run_id, "agent_1"), ControlRequest(action="resume"))

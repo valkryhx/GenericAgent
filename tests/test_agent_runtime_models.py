@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_runtime_models import AgentEvent, AgentStatus, ArtifactRef  # noqa: E402
+from genericagent.core.models import AgentEvent, AgentStatus, ArtifactRef  # noqa: E402
 
 
 class AgentRuntimeModelsTest(unittest.TestCase):
@@ -32,7 +32,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertEqual(event.artifact_ref.artifact_id, "final_output_round_0")
 
     def test_execution_ids_are_engine_scoped_and_do_not_equal_job_id(self):
-        from agent_runtime_models import (
+        from genericagent.core.models import (
             make_workflow_child_execution_id,
             make_workflow_run_execution_id,
             make_workflow_source_cursor,
@@ -46,7 +46,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertEqual("workflow:wf_a", make_workflow_source_cursor("wf_a"))
 
     def test_logical_identity_is_stable_across_physical_attempts(self):
-        from agent_runtime_models import AgentRecord, make_workflow_child_execution_id
+        from genericagent.core.models import AgentRecord, make_workflow_child_execution_id
 
         execution_id = make_workflow_child_execution_id("wf_retry", "agent_1")
         first = AgentRecord(
@@ -79,7 +79,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertNotEqual(current.attempt_id, current.execution_id)
 
     def test_cached_status_is_not_serialized_as_fresh_success(self):
-        from agent_runtime_models import AgentRecord
+        from genericagent.core.models import AgentRecord
 
         record = AgentRecord(
             execution_id="workflow-child:wf_cache:agent_1",
@@ -95,7 +95,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertTrue(restored.cached)
 
     def test_partial_status_round_trips_without_rewriting_source_status(self):
-        from agent_runtime_models import AgentRecord
+        from genericagent.core.models import AgentRecord
 
         record = AgentRecord(
             execution_id="workflow-run:wf_partial",
@@ -111,7 +111,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertEqual(1, restored.metadata["childSummary"]["failed"])
 
     def test_capabilities_report_unsupported_actions_explicitly(self):
-        from agent_runtime_models import AgentCapabilities
+        from genericagent.core.models import AgentCapabilities
 
         capabilities = AgentCapabilities(actions=frozenset({"read", "result"}))
         self.assertTrue(capabilities.supports("result"))
@@ -119,7 +119,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertFalse(capabilities.supports_action("resume"))
 
     def test_workflow_event_preserves_source_cursor_and_identity(self):
-        from agent_runtime_models import make_workflow_child_execution_id, make_workflow_run_execution_id
+        from genericagent.core.models import make_workflow_child_execution_id, make_workflow_run_execution_id
 
         execution_id = make_workflow_child_execution_id("wf_a", "agent_1")
         parent_id = make_workflow_run_execution_id("wf_a")
@@ -142,7 +142,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertEqual(parent_id, event.parent_execution_id)
 
     def test_process_conversion_adds_scoped_identity_without_changing_legacy_fields(self):
-        from agent_runtime_models import make_process_execution_id
+        from genericagent.core.models import make_process_execution_id
 
         execution_id = make_process_execution_id("run_1", "/root/demo")
         event = AgentEvent.from_subagent_event(
@@ -165,7 +165,7 @@ class AgentRuntimeModelsTest(unittest.TestCase):
         self.assertEqual("process:evt_000007", event.event_id)
 
     def test_event_batch_round_trips_per_source_cursors(self):
-        from agent_runtime_models import AgentEventBatch
+        from genericagent.core.models import AgentEventBatch
 
         batch = AgentEventBatch(next_cursors={"process": 4, "workflow:wf_a": 9})
         restored = AgentEventBatch.from_dict(batch.to_dict())

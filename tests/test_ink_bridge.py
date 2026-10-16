@@ -19,19 +19,19 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 
-from ink_bridge import (  # noqa: E402
+from frontends.ink.bridge import (  # noqa: E402
     GenericAgentBridge,
     backend_output_redirect,
     encode_event,
     make_stdout_emitter,
     run_jsonl_loop,
 )
-from workflow_child_agent import AgentResult, FakeChildAgentRunner  # noqa: E402
-from workflow_models import WorkflowJob, WorkflowRun  # noqa: E402
-from workflow_runtime import WorkflowRuntime  # noqa: E402
-from workflow_scheduler import SchedulerConfig  # noqa: E402
-from workflow_store import build_artifact_ownership_index  # noqa: E402
-from agent_runtime_models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
+from genericagent.workflow.child_agent import AgentResult, FakeChildAgentRunner  # noqa: E402
+from genericagent.workflow.models import WorkflowJob, WorkflowRun  # noqa: E402
+from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
+from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
+from genericagent.workflow.store import build_artifact_ownership_index  # noqa: E402
+from genericagent.core.models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
 
 
 _CC_META_PREFIX = "export const meta = { name: 'ink-test', description: 'ink test workflow' }\n"
@@ -163,7 +163,7 @@ class FakeAgent:
         self.llmclients = [self.llmclient]
         self.llm_no = 0
         self.permission_mode = "full_access"
-        from permission_runtime import PermissionRuntime
+        from genericagent.core.permissions.runtime import PermissionRuntime
 
         self.permission_runtime = PermissionRuntime()
 
@@ -171,7 +171,7 @@ class FakeAgent:
         return None
 
     def set_permission_mode(self, mode):
-        from permission_policy import normalize_permission_mode
+        from genericagent.core.permissions.policy import normalize_permission_mode
 
         self.permission_mode = normalize_permission_mode(mode)
         return self.permission_mode
@@ -552,11 +552,11 @@ class InkBridgeTest(unittest.TestCase):
 
     def test_submit_can_drive_resume_agent_tool_through_frontend_bridge(self):
         with tempfile.TemporaryDirectory() as td:
-            from agent_loop import exhaust
-            from ga import GenericAgentHandler
-            from subagent_manager import SubagentManager
-            from subagent_state import atomic_write_json
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.core.loop import exhaust
+            from genericagent.core.handler import GenericAgentHandler
+            from genericagent.agents.manager import SubagentManager
+            from genericagent.agents.state import atomic_write_json
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             calls = []
 
@@ -656,10 +656,10 @@ class InkBridgeTest(unittest.TestCase):
 
     def test_submit_can_drive_attach_detach_stream_through_frontend_bridge(self):
         with tempfile.TemporaryDirectory() as td:
-            from agent_loop import exhaust
-            from ga import GenericAgentHandler
-            from subagent_manager import SubagentManager
-            from subagent_state import atomic_write_json
+            from genericagent.core.loop import exhaust
+            from genericagent.core.handler import GenericAgentHandler
+            from genericagent.agents.manager import SubagentManager
+            from genericagent.agents.state import atomic_write_json
 
             task_dir = Path(td) / "temp" / "bridge_attach"
             task_dir.mkdir(parents=True)
@@ -801,7 +801,7 @@ class InkBridgeTest(unittest.TestCase):
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-        with patch("ink_bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]):
+        with patch("frontends.ink.bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]):
             bridge.list_resume_sessions()
 
         self.assertEqual(
@@ -826,7 +826,7 @@ class InkBridgeTest(unittest.TestCase):
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-        with patch("ink_bridge.continue_list", return_value=[]) as list_sessions:
+        with patch("frontends.ink.bridge.continue_list", return_value=[]) as list_sessions:
             bridge.list_resume_sessions()
 
         list_sessions.assert_called_once_with(
@@ -843,7 +843,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]) as list_sessions,
+            patch("frontends.ink.bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]) as list_sessions,
             patch.object(bridge, "resume_session") as resume_session,
         ):
             bridge.resume_session_by_index(1)
@@ -861,14 +861,14 @@ class InkBridgeTest(unittest.TestCase):
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.continue_reset") as reset,
-            patch("ink_bridge.continue_restore", side_effect=lambda agent, _path: (
+            patch("frontends.ink.bridge.continue_reset") as reset,
+            patch("frontends.ink.bridge.continue_restore", side_effect=lambda agent, _path: (
                 setattr(agent.llmclient.backend, "history", [
                     {"role": "user", "content": "old q"},
                     {"role": "assistant", "content": "old a"},
                 ]) or ("✅ 已恢复 1 轮完整对话", True)
             )) as restore,
-            patch("ink_bridge.continue_extract", return_value=[
+            patch("frontends.ink.bridge.continue_extract", return_value=[
                 {"role": "user", "content": "old q"},
                 {"role": "assistant", "content": "old a"},
             ]),
@@ -892,7 +892,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "rewind_done", "taskId": 1, "text": "old q"}, events[-1])
 
     def test_resume_transcript_uses_exact_backend_history_before_each_turn_for_rewind(self):
-        import session_transcript
+        from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
@@ -930,14 +930,14 @@ class InkBridgeTest(unittest.TestCase):
             events = []
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+            with patch("frontends.ink.bridge.continue_reset", lambda *_args, **_kwargs: None):
                 bridge.resume_session(str(transcript))
 
             self.assertEqual([], bridge._rewind_snapshots[1]["backend_history"])
             self.assertEqual(first_after, bridge._rewind_snapshots[2]["backend_history"])
 
     def test_resume_transcript_replaces_ui_with_full_conversation_from_start(self):
-        import session_transcript
+        from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
@@ -965,7 +965,7 @@ class InkBridgeTest(unittest.TestCase):
             events = []
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+            with patch("frontends.ink.bridge.continue_reset", lambda *_args, **_kwargs: None):
                 bridge.resume_session(str(transcript))
 
             history_replace = next(event for event in events if event["type"] == "history_replace")
@@ -980,7 +980,7 @@ class InkBridgeTest(unittest.TestCase):
             )
 
     def test_resume_transcript_switches_active_session_and_next_turn_appends_to_same_file(self):
-        import session_transcript
+        from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_old")
@@ -1002,7 +1002,7 @@ class InkBridgeTest(unittest.TestCase):
             events = []
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-            with patch("ink_bridge.continue_reset", lambda *_args, **_kwargs: None):
+            with patch("frontends.ink.bridge.continue_reset", lambda *_args, **_kwargs: None):
                 bridge.resume_session(str(transcript))
             agent.llmclient.backend.history = first_after + [{"role": "user", "content": "follow up"}]
             session_transcript.record_agent_turn(
@@ -1043,7 +1043,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "rewind_done", "taskId": 2, "text": "second"}, events[-1])
 
     def test_rewind_records_transcript_branch_boundary_and_resets_next_turn_id(self):
-        import session_transcript
+        from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
@@ -1122,8 +1122,8 @@ class InkBridgeTest(unittest.TestCase):
         }
 
         with (
-            patch("mcp_runtime.mcp_status_snapshot", return_value=payload),
-            patch("mcp_runtime.start_background_discovery"),
+            patch("genericagent.mcp.runtime.mcp_status_snapshot", return_value=payload),
+            patch("genericagent.mcp.runtime.start_background_discovery"),
         ):
             bridge.mcp_status()
 
@@ -1145,8 +1145,8 @@ class InkBridgeTest(unittest.TestCase):
             },
         ]
         with (
-            patch("mcp_runtime.start_background_discovery") as start_discovery,
-            patch("mcp_runtime.mcp_status_snapshot", side_effect=snapshots),
+            patch("genericagent.mcp.runtime.start_background_discovery") as start_discovery,
+            patch("genericagent.mcp.runtime.mcp_status_snapshot", side_effect=snapshots),
         ):
             bridge.start_mcp_status_watch()
             bridge._mcp_watch_thread.join(timeout=2)
@@ -1181,9 +1181,9 @@ class InkBridgeTest(unittest.TestCase):
             },
         ]
         with (
-            patch("mcp_runtime.start_background_discovery") as start_discovery,
-            patch("mcp_runtime.reconnect_mcp_server") as reconnect,
-            patch("mcp_runtime.mcp_status_snapshot", side_effect=snapshots),
+            patch("genericagent.mcp.runtime.start_background_discovery") as start_discovery,
+            patch("genericagent.mcp.runtime.reconnect_mcp_server") as reconnect,
+            patch("genericagent.mcp.runtime.mcp_status_snapshot", side_effect=snapshots),
         ):
             bridge.start_mcp_status_watch()
             bridge._mcp_watch_thread.join(timeout=3)
@@ -1201,9 +1201,9 @@ class InkBridgeTest(unittest.TestCase):
         }
 
         with (
-            patch("mcp_runtime.reconnect_mcp_server", return_value={"server": {"name": "demo", "status": "connected"}}),
-            patch("mcp_runtime.mcp_status_snapshot", return_value=payload),
-            patch("mcp_runtime.start_background_discovery"),
+            patch("genericagent.mcp.runtime.reconnect_mcp_server", return_value={"server": {"name": "demo", "status": "connected"}}),
+            patch("genericagent.mcp.runtime.mcp_status_snapshot", return_value=payload),
+            patch("genericagent.mcp.runtime.start_background_discovery"),
         ):
             bridge.mcp_reconnect("demo")
 
@@ -1330,7 +1330,7 @@ class InkBridgeTest(unittest.TestCase):
         ]
         bridge._rewind_snapshots[1] = {"backend_history": [{"role": "user", "content": "old"}]}
 
-        with patch("ink_bridge.compact_agent_context") as compact:
+        with patch("frontends.ink.bridge.compact_agent_context") as compact:
             compact.return_value.ok = True
             compact.return_value.summary = "summary text"
             compact.return_value.original_messages = 2
@@ -1356,7 +1356,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
     def test_compact_records_transcript_compact_event(self):
-        import session_transcript
+        from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
             transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
@@ -1367,7 +1367,7 @@ class InkBridgeTest(unittest.TestCase):
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
             compacted = [{"role": "user", "content": "summary"}]
 
-            with patch("ink_bridge.compact_agent_context") as compact:
+            with patch("frontends.ink.bridge.compact_agent_context") as compact:
                 compact.return_value.ok = True
                 compact.return_value.summary = "summary text"
                 compact.return_value.original_messages = 4
@@ -1394,7 +1394,7 @@ class InkBridgeTest(unittest.TestCase):
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
-        with patch("ink_bridge.compact_agent_context") as compact:
+        with patch("frontends.ink.bridge.compact_agent_context") as compact:
             compact.return_value.ok = False
             compact.return_value.message = "No conversation history to compact."
             bridge.compact("")
@@ -1414,8 +1414,8 @@ class InkBridgeTest(unittest.TestCase):
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.should_auto_compact_agent", return_value=True),
-            patch("ink_bridge.compact_agent_context") as compact,
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
         ):
             compact.return_value.ok = False
             compact.return_value.message = "summary failed"
@@ -1428,15 +1428,15 @@ class InkBridgeTest(unittest.TestCase):
     def test_auto_compact_circuit_breaker_disables_after_consecutive_failures(self):
         # 连续失败达上限后，熔断器停用自动压缩：不再调 compact_agent_context，
         # 并放行请求（返回非 -1），让用户仍能继续对话（硬裁剪安全网仍在 llmcore 层）。
-        from ink_bridge import MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+        from frontends.ink.bridge import MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
 
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.should_auto_compact_agent", return_value=True),
-            patch("ink_bridge.compact_agent_context") as compact,
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
         ):
             compact.return_value.ok = False
             compact.return_value.message = "summary failed"
@@ -1459,8 +1459,8 @@ class InkBridgeTest(unittest.TestCase):
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.should_auto_compact_agent", return_value=True),
-            patch("ink_bridge.compact_agent_context") as compact,
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
         ):
             compact.return_value.ok = False
             compact.return_value.message = "summary failed"
@@ -1480,8 +1480,8 @@ class InkBridgeTest(unittest.TestCase):
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
         with (
-            patch("ink_bridge.should_auto_compact_agent", return_value=True),
-            patch("ink_bridge.compact_agent_context") as compact,
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
         ):
             compact.return_value.ok = True
             compact.return_value.message = "Compacted 8 messages into summary context."
@@ -2458,7 +2458,7 @@ class InkBridgeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append, workflow_root=tmp)
             run_id = bridge.workflow_draft("return 'Bearer bridge-script-secret request_id=req_123'")
-            from workflow_models import WorkflowEvent
+            from genericagent.workflow.models import WorkflowEvent
             run = bridge.workflow_store.load_run(run_id)
             bridge.workflow_store.append_event(
                 run,
@@ -2490,7 +2490,7 @@ class InkBridgeTest(unittest.TestCase):
                 self.store = store
 
             def run(self, run, *, args=None, resume_from_run_id=None):
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
                 self.store.append_event(
                     run,
                     WorkflowEvent(
@@ -2535,7 +2535,7 @@ class InkBridgeTest(unittest.TestCase):
                 self.timeout_seconds = timeout_seconds
 
             def run(self, run, *, args=None, resume_from_run_id=None):
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
                 self.store.append_event(run, WorkflowEvent(run_id=run.run_id, session_id=run.session_id, event_type="workflow_log", sequence=99, payload={"message": "runtime saw args", "args": args, "resumeFromRunId": resume_from_run_id}))
                 payload = {"runId": run.run_id, "status": "succeeded", "result": {"ok": True, "args": args}}
                 self.store.write_final_result(run, payload)
@@ -3855,7 +3855,7 @@ return { marker: child.summary }
                 self.store = store
 
             def run(self, run, *, args=None, resume_from_run_id=None):
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
 
                 result_ref = "agents/agent_1/result.json"
                 result_path = Path(run.artifact_dir) / result_ref
@@ -3946,7 +3946,7 @@ return { marker: child.summary }
         )
         stdout = io.StringIO()
 
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+        with patch("frontends.ink.bridge.GenericAgentBridge") as bridge_cls:
             bridge = bridge_cls.return_value
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
@@ -3964,7 +3964,7 @@ return { marker: child.summary }
         )
         stdout = io.StringIO()
 
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+        with patch("frontends.ink.bridge.GenericAgentBridge") as bridge_cls:
             bridge = bridge_cls.return_value
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
@@ -3980,7 +3980,7 @@ return { marker: child.summary }
         )
         stdout = io.StringIO()
 
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+        with patch("frontends.ink.bridge.GenericAgentBridge") as bridge_cls:
             bridge = bridge_cls.return_value
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
@@ -3995,7 +3995,7 @@ return { marker: child.summary }
         )
         stdout = io.StringIO()
 
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+        with patch("frontends.ink.bridge.GenericAgentBridge") as bridge_cls:
             bridge = bridge_cls.return_value
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
@@ -4017,7 +4017,7 @@ return { marker: child.summary }
         )
         stdout = io.StringIO()
 
-        with patch("ink_bridge.GenericAgentBridge") as bridge_cls:
+        with patch("frontends.ink.bridge.GenericAgentBridge") as bridge_cls:
             bridge = bridge_cls.return_value
             bridge.emit.side_effect = make_stdout_emitter(stdout)
             run_jsonl_loop(stdin, stdout)
@@ -4035,7 +4035,7 @@ return { marker: child.summary }
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.run(
-            [sys.executable, str(FRONTENDS / "ink_bridge.py")],
+            [sys.executable, str(FRONTENDS / "ink" / "bridge.py")],
             input=json.dumps({"type": "shutdown"}) + "\n",
             text=True,
             encoding="utf-8",
@@ -4053,7 +4053,7 @@ return { marker: child.summary }
 
 
     def test_workflow_handoff_includes_results_and_refs_without_transcripts(self):
-        from workflow_models import WorkflowRun
+        from genericagent.workflow.models import WorkflowRun
 
         agent = FakeAgent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4096,7 +4096,7 @@ return { marker: child.summary }
             self.assertNotIn("TRANSCRIPT_BODY_MUST_NOT_BE_INJECTED", serialized)
 
     def test_workflow_handoff_is_bounded_and_retains_final_result_refs(self):
-        from workflow_models import WorkflowRun
+        from genericagent.workflow.models import WorkflowRun
 
         agent = FakeAgent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4325,9 +4325,9 @@ class InkBridgeTeamListTest(unittest.TestCase):
         self.addCleanup(bridge_patch.stop)
 
     def test_team_list_emits_roster_and_shared_task_board(self):
-        from subagent_agent_path import AgentPath
-        from subagent_registry import SubagentRegistry
-        from subagent_tasks import SubagentTaskStore
+        from genericagent.agents.agent_path import AgentPath
+        from genericagent.agents.registry import SubagentRegistry
+        from genericagent.agents.tasks import SubagentTaskStore
 
         agent = FakeAgent()
         events = []

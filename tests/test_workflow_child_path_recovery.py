@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_loop import exhaust
-from ga import GenericAgentHandler
+from genericagent.core.loop import exhaust
+from genericagent.core.handler import GenericAgentHandler
 
 
 class _ParentStub:

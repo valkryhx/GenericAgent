@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_activation import WorkflowActivationState, resolve_workflow_activation
+from genericagent.workflow.activation import WorkflowActivationState, resolve_workflow_activation
 
 
 class WorkflowActivationTest(unittest.TestCase):

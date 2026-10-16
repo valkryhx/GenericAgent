@@ -34,7 +34,7 @@ def sanitize(value: Any) -> Any:
 
 
 def drain_until(handle, expected_text: str, timeout_s: float = 240.0) -> dict:
-    from subagent_manager import SubagentManager
+    from genericagent.agents.manager import SubagentManager
 
     manager = SubagentManager(root_dir=REPO)
     deadline = time.monotonic() + timeout_s
@@ -89,10 +89,10 @@ def main() -> int:
         return 0
 
     try:
-        import agentmain
-        from llm_client import load_clients_from_yaml
-        from subagent_artifacts import SubagentArtifactStore
-        from subagent_manager import SubagentManager
+        import genericagent.core.app
+        from genericagent.llm.client import load_clients_from_yaml
+        from genericagent.agents.artifacts import SubagentArtifactStore
+        from genericagent.agents.manager import SubagentManager
 
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):

@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_policy import WorkflowCapacityError, normalize_delegation_policy
+from genericagent.workflow.policy import WorkflowCapacityError, normalize_delegation_policy
 
 
 class WorkflowCapacityTest(unittest.TestCase):

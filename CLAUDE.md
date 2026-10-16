@@ -47,10 +47,10 @@ On Windows, `install_ink_ui.cmd` installs the Ink UI dependencies from the repos
 
 GenericAgent is a compact Python autonomous agent runtime with multiple frontends.
 
-- `agentmain.py` owns `GenericAgent`: task queue, model/session selection, cancellation, slash commands, and transcript initialization.
-- `agent_loop.py` contains the LLM turn loop. `agent_runner_loop()` sends messages to the client, parses tool calls, dispatches them through handler methods, and feeds tool results back into the next turn.
-- `ga.py` contains local tool implementations and `GenericAgentHandler` behavior. Tools follow the `do_<tool_name>` dispatch pattern from `agent_loop.BaseHandler`.
-- `llmcore.py` loads `mykey.py` or `mykey.json`, expands provider/profile config, and abstracts provider clients, streaming parsing, and history/context behavior.
+- `genericagent/core/app.py` owns `GenericAgent`: task queue, model/session selection, cancellation, slash commands, and transcript initialization. Launch it with `python -m genericagent.core.app`.
+- `genericagent/core/loop.py` contains the LLM turn loop. `agent_runner_loop()` sends messages to the client, parses tool calls, dispatches them through handler methods, and feeds tool results back into the next turn.
+- `genericagent/core/handler.py` contains local tool implementations and `GenericAgentHandler` behavior. Tools follow the `do_<tool_name>` dispatch pattern from `genericagent.core.loop.BaseHandler`.
+- `genericagent/llm/core.py` loads `mykey.py` or `mykey.json`, expands provider/profile config, and abstracts provider clients, streaming parsing, and history/context behavior.
 - `assets/tools_schema*.json` defines static tool schemas. `assets/sys_prompt*.txt` provides the base system prompt.
 - `ga_cli/cli.py` implements the `ga` command dispatcher and launches GUI, web, TUI, Ink, and CLI frontends from the repository root.
 
@@ -64,15 +64,15 @@ Most UI adapters live under `frontends/`. The React/Ink UI is intentionally inde
 
 ## Persistence, compaction, MCP, and skills
 
-- `session_transcript.py` records resumable JSONL sessions under `temp/sessions` with `session_start`, `turn`, `compact`, and `rewind` events.
-- `compact_context.py` estimates backend history size and compacts old context when it exceeds the configured threshold.
-- `mcp_runtime.py` optionally loads MCP servers from `mcp.json` or `GA_MCP_CONFIG`, normalizing exposed tool names as `mcp__<server>__<tool>`.
-- `skills_runtime.py` discovers Claude/Codex-style `SKILL.md` packages from `~/.claude/skills`, `~/.codex/skills`, and `GA_SKILL_PATHS`.
+- `genericagent/core/transcripts.py` records resumable JSONL sessions under `temp/sessions` with `session_start`, `turn`, `compact`, and `rewind` events.
+- `genericagent/core/context.py` estimates backend history size and compacts old context when it exceeds the configured threshold.
+- `genericagent/mcp/runtime.py` optionally loads MCP servers from `mcp.json` or `GA_MCP_CONFIG`, normalizing exposed tool names as `mcp__<server>__<tool>`.
+- `genericagent/core/skills.py` discovers Claude/Codex-style `SKILL.md` packages from `~/.claude/skills`, `~/.codex/skills`, and `GA_SKILL_PATHS`.
 - `memory/` stores long-term memory, SOPs, and helper modules. `temp/` stores generated logs, sessions, transcripts, and runtime artifacts.
 
 ## Configuration
 
-Create `mykey.py` or `mykey.json` from the provided templates before using real LLM providers. The README documents `mykey_template.py`, `mykey_template_en.py`, and runtime `/model` or `/llm` switching commands.
+Create `mykey.py` or `mykey.json` from the provided templates before using real LLM providers. The README documents `genericagent/llm/templates/mykey_template.py`, `genericagent/llm/templates/mykey_template_en.py`, and runtime `/model` or `/llm` switching commands.
 
 ## Testing conventions
 

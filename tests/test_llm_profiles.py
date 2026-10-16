@@ -1,6 +1,6 @@
 import unittest
 
-from llmcore import expand_llm_profile_configs
+from genericagent.llm.core import expand_llm_profile_configs
 
 
 class LlmProfileConfigTests(unittest.TestCase):

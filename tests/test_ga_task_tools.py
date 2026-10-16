@@ -9,9 +9,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_loop import exhaust  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
-from subagent_manager import SubagentManager  # noqa: E402
+from genericagent.core.loop import exhaust  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler  # noqa: E402
+from genericagent.agents.manager import SubagentManager  # noqa: E402
 
 
 class FakeParent:

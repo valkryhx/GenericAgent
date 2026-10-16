@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_models import AgentResult, WorkflowRun
-from workflow_scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig, normalize_retry_policy
-from workflow_store import WorkflowStore
+from genericagent.workflow.models import AgentResult, WorkflowRun
+from genericagent.workflow.scheduler import AgentScheduler, FakeChildAgentRunner, SchedulerConfig, normalize_retry_policy
+from genericagent.workflow.store import WorkflowStore
 
 
 class FailedResultRunner:

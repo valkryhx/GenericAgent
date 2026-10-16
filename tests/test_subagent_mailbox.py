@@ -12,8 +12,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import run_task_worker_loop  # noqa: E402
-from subagent_mailbox import SubagentMailbox  # noqa: E402
+from genericagent.core.app import run_task_worker_loop  # noqa: E402
+from genericagent.agents.mailbox import SubagentMailbox  # noqa: E402
 
 
 class SubagentMailboxTest(unittest.TestCase):
@@ -166,7 +166,7 @@ class SubagentMailboxTest(unittest.TestCase):
         truncate-rewrote and consumed the trigger plus every preceding queue_only message.
         Keeping the unused fork around invites a future caller to pick the wrong one.
         """
-        import subagent_state
+        from genericagent.agents import state as subagent_state
 
         self.assertFalse(
             hasattr(subagent_state, "consume_mailbox_trigger"),
@@ -174,8 +174,8 @@ class SubagentMailboxTest(unittest.TestCase):
         )
         self.assertNotIn(
             "consume_mailbox_trigger",
-            (REPO_ROOT / "agentmain.py").read_text(encoding="utf-8"),
-            "agentmain still references the removed fork",
+            (REPO_ROOT / "genericagent" / "core" / "app.py").read_text(encoding="utf-8"),
+            "genericagent.core.app still references the removed fork",
         )
 
     def test_auto_message_id_never_reuses_an_existing_id(self):
@@ -275,7 +275,7 @@ class SubagentMailboxTest(unittest.TestCase):
             task_dir = Path(td) / "temp" / "demo"
             task_dir.mkdir(parents=True)
             (task_dir / "input.txt").write_text("initial", encoding="utf-8")
-            from subagent_receipts import ProvenanceLedger
+            from genericagent.agents.receipts import ProvenanceLedger
 
             # The child verifies provenance on consume (CC m0300), so a genuine message
             # must be recorded in the ledger, exactly as the manager does on enqueue.
@@ -311,7 +311,7 @@ class MailboxReliabilityTest(unittest.TestCase):
     """Receipts + provenance on the durable file bus (CC m0188 / m0300 / m1575)."""
 
     def _ledger(self, td):
-        from subagent_receipts import ProvenanceLedger
+        from genericagent.agents.receipts import ProvenanceLedger
 
         return ProvenanceLedger(Path(td) / "subagents")
 

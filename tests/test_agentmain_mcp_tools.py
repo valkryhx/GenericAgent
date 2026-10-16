@@ -13,19 +13,19 @@ if str(REPO_ROOT) not in sys.path:
 
 class AgentMainMcpToolsTest(unittest.TestCase):
     def test_load_tool_schema_hides_agent_type_when_no_roles_are_configured(self):
-        import agentmain
+        from genericagent.core import app as agentmain
 
-        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=[]):
+        with patch("genericagent.agents.roles.SubagentRoleRegistry.list_roles", return_value=[]):
             agentmain.load_tool_schema(include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
         self.assertNotIn("agent_type", spawn["parameters"]["properties"])
 
     def test_load_tool_schema_enumerates_only_configured_agent_types(self):
-        import agentmain
+        from genericagent.core import app as agentmain
 
         roles = [SimpleNamespace(name="auditor"), SimpleNamespace(name="researcher")]
-        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=roles):
+        with patch("genericagent.agents.roles.SubagentRoleRegistry.list_roles", return_value=roles):
             agentmain.load_tool_schema(include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
@@ -36,10 +36,10 @@ class AgentMainMcpToolsTest(unittest.TestCase):
         self.assertIn("not a free-form label", agent_type["description"])
 
     def test_load_chinese_tool_schema_describes_configured_agent_types(self):
-        import agentmain
+        from genericagent.core import app as agentmain
 
         roles = [SimpleNamespace(name="researcher")]
-        with patch("subagent_roles.SubagentRoleRegistry.list_roles", return_value=roles):
+        with patch("genericagent.agents.roles.SubagentRoleRegistry.list_roles", return_value=roles):
             agentmain.load_tool_schema("_cn", include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
@@ -49,7 +49,7 @@ class AgentMainMcpToolsTest(unittest.TestCase):
 
     def test_load_tool_schema_publishes_the_builtin_role_catalog(self):
         """The description must carry capability notes, not just bare names."""
-        import agentmain
+        from genericagent.core import app as agentmain
 
         agentmain.load_tool_schema(include_mcp_tools=False)
 
@@ -62,11 +62,11 @@ class AgentMainMcpToolsTest(unittest.TestCase):
 
     def test_load_tool_schema_can_skip_mcp_discovery(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
-        import agentmain
+        from genericagent.core import app as agentmain
 
         try:
             # load_tool_schema 走的是 discover_mcp_tools_cached_fast（带缓存且不阻塞），patch 它才有效。
-            with patch("mcp_runtime.discover_mcp_tools_cached_fast") as discover:
+            with patch("genericagent.mcp.runtime.discover_mcp_tools_cached_fast") as discover:
                 agentmain.load_tool_schema(include_mcp_tools=False)
                 discover.assert_not_called()
                 names = {tool["function"]["name"] for tool in agentmain.TOOLS_SCHEMA}
@@ -77,7 +77,7 @@ class AgentMainMcpToolsTest(unittest.TestCase):
 
     def test_load_tool_schema_appends_discovered_mcp_tools(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
-        import agentmain
+        from genericagent.core import app as agentmain
 
         fake_tool = {
             "type": "function",
@@ -90,11 +90,11 @@ class AgentMainMcpToolsTest(unittest.TestCase):
 
         try:
             # load_tool_schema 走的是 discover_mcp_tools_cached_fast（带缓存且不阻塞），patch 它才有效。
-            with patch("mcp_runtime.discover_mcp_tools_cached_fast", return_value=[fake_tool]):
+            with patch("genericagent.mcp.runtime.discover_mcp_tools_cached_fast", return_value=[fake_tool]):
                 agentmain.load_tool_schema()
                 names = {tool["function"]["name"] for tool in agentmain.TOOLS_SCHEMA}
         finally:
-            with patch("mcp_runtime.discover_mcp_tools_cached_fast", return_value=[]):
+            with patch("genericagent.mcp.runtime.discover_mcp_tools_cached_fast", return_value=[]):
                 agentmain.load_tool_schema()
             os.environ.pop("GA_MCP_CONFIG", None)
 

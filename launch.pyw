@@ -135,7 +135,7 @@ if __name__ == '__main__':
     else: print('[Launch] DingTalk Bot not enabled (use --dingtalk to start)')
     
     if args.sched:
-        scheduler_proc = subprocess.Popen([sys.executable, os.path.join(script_dir, "agentmain.py"), "--reflect", os.path.join(script_dir, "reflect", "scheduler.py"), "--llm_no", str(args.llm_no)], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+        scheduler_proc = subprocess.Popen([sys.executable, "-m", "genericagent.core.app", "--reflect", os.path.join(script_dir, "reflect", "scheduler.py"), "--llm_no", str(args.llm_no)], creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         atexit.register(scheduler_proc.kill)
         print('[Launch] Task Scheduler started (duplicate prevented by scheduler port lock)')
     else: print('[Launch] Task Scheduler not enabled (--sched)')

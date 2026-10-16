@@ -6,11 +6,11 @@ import time
 import unittest
 from pathlib import Path
 
-from workflow_child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
-from workflow_models import WorkflowJob, WorkflowRun as _WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import AgentScheduler, SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.workflow.child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
+from genericagent.workflow.models import WorkflowJob, WorkflowRun as _WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import AgentScheduler, SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 
 _CC_META_PREFIX = "export const meta = { name: 'runtime-test', description: 'runtime test workflow' }\n"

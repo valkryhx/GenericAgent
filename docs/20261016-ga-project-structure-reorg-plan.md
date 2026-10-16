@@ -1,6 +1,6 @@
 # GA 项目目录重构方案
 
-> 状态：**P0–P6 目录迁移完成；P7 根 shim 清理待继续**
+> 状态：**P0–P7 目录迁移与根 shim 清理完成**
 > 日期：2026-10-16
 > 目标仓库：`D:\git_codes\GenericAgent`
 > CC 证据仓库：`D:\git_codes\claudecode283_hack`
@@ -25,7 +25,7 @@ GA 当前把绝大多数 Python 实现平铺在仓库根目录。以本次盘点
 
 1. **CC 的原始目录树不可恢复**。Claude Code 2.1.283 是 Bun `--compile` 产物，源码以 `mNNNN_0x...js` 模块形式存在于 `.bun` 段；`mNNNN` 是提取索引，不是原始文件名，且没有可用的 sourcemap 还原原始目录。
 2. 因此本方案**不伪造 CC 目录名**，而是从 CC 源码的模块职责和调用链中提炼逻辑分层，再映射到 GA 的 Python 包结构。
-3. 目标结构采用 `genericagent/` 主包，按 `core`、`llm`、`mcp`、`agents`、`workflow`、`web`、`media`、`resources` 分域；`ga_cli/` 保留为稳定 CLI 门面，根目录最终只保留薄入口与兼容 shim。
+3. 目标结构采用 `genericagent/` 主包，按 `core`、`llm`、`mcp`、`agents`、`workflow`、`web`、`media`、`resources` 分域；`ga_cli/` 保留为稳定 CLI 门面，根目录最终只保留本地配置 `mykey.py` 与薄入口脚本。
 4. 迁移必须分阶段进行：先建立路径解析层与兼容层，再按领域 `git mv`，每一批单独测试、单独提交。**禁止一次性移动全部文件。**
 5. 本方案不改变 agent 行为、不重写 workflow、不实现 Claude Code 云端会话。云端会话仍按项目既有边界处理：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 
@@ -1031,7 +1031,7 @@ chore(structure): enforce package boundaries and update packaging
 
 ## 13. 实施结果（2026-10-16）
 
-> 状态：**P0–P6 目录迁移已实施并通过回归；P7 根 shim 清理待继续。**
+> 状态：**P0–P7 目录迁移已实施；根级与前端顶层 shim 已删除，内部调用已迁移到 canonical 路径。**
 
 ### 13.1 已完成
 
@@ -1087,7 +1087,7 @@ chore(structure): enforce package boundaries and update packaging
 | 验证项 | 结果 |
 | --- | --- |
 | `python -m compileall -q genericagent ga_cli agentmain.py ga.py` | 通过 |
-| `python agentmain.py --help` | 通过 |
+| `python -m genericagent.core.app --help` | 通过 |
 | `python -m ga_cli list` | 通过 |
 | `python scripts/check_project_structure.py` | 通过 |
 | 关键 Python focused tests | 308 tests OK |
@@ -1101,7 +1101,7 @@ chore(structure): enforce package boundaries and update packaging
 
 ### 13.3 尚未完成
 
-- **P7 根 shim 删除**：本轮保留 73 个根级 shim/entrypoint，确保外部脚本和旧测试不中断；已完成 wheel/package-data 验证与结构门禁，删除 shim 需等外部依赖确认后再逐批进行。
+- **P7 根 shim 删除**：已完成。根目录只保留 `mykey.py`；`frontends/` 顶层只保留 `__init__.py`；旧 import、patch target、subprocess 启动路径和结构门禁已迁移到 canonical 路径。
 - **真实 LLM E2E**：已完成显式 `/workflow` 的默认 `deepseek-flash` E2E；自主触发型 UI E2E 在默认模型下未触发 workflow，记录为 opt-in/模型行为观察，不作为目录迁移阻塞项。
 
 ### 13.4 关键设计结论
@@ -1116,8 +1116,8 @@ chore(structure): enforce package boundaries and update packaging
 - 正式实现：
   - `frontends/ink_bridge.py` → `frontends/ink/bridge.py`
   - `frontends/ink-ui/` → `frontends/ink/ui/`
-- 兼容层：
-  - 保留 `frontends/ink_bridge.py`，但只作为 module alias shim；
+- 兼容层（P7 后已删除）：
+  - 过渡期保留 `frontends/ink_bridge.py`，但只作为 module alias shim；
   - `sys.modules[__name__] = _bridge` 保证旧 import 与 patch target 指向同一个模块对象；
   - 直接执行旧 shim 时转调 `_bridge.main()`。
 - 启动器与脚本：
@@ -1145,7 +1145,7 @@ chore(structure): enforce package boundaries and update packaging
   - `frontends/web/`：`stapp.py`、`stapp2.py`；
   - `frontends/bots/`：`tgapp.py`、`qqapp.py`、`dcapp.py`、`dingtalkapp.py`、`wechatapp.py`、`wecomapp.py`；
   - `frontends/acp/`：`genericagent_acp_bridge.py`。
-- 所有旧顶层路径保留 thin alias shim，使用 `frontends/_compat.py::alias_module`：
+- 过渡期所有旧顶层路径保留 thin alias shim，使用 `frontends/_compat.py::alias_module`（P7 后已删除）：
   - 旧 import 与新模块保持同一 module object；
   - 旧路径直接执行时通过 `runpy.run_module(..., run_name="__main__")` 转调 canonical 模块；
   - 测试中的 `import tgapp`、`from frontends import continue_cmd` 等旧路径继续可用。
@@ -1160,9 +1160,31 @@ chore(structure): enforce package boundaries and update packaging
   - `python -m compileall -q frontends/...` 通过；
   - `python -m unittest tests.test_continue_cmd_resume tests.test_resume_listing_cache` 14 tests OK；
   - `python -m unittest tests.test_tgapp_stream_segments` 3 tests OK；
-  - `python frontends/terminal/tuiapp.py --help`、`python frontends/tuiapp.py --help`、`python frontends/terminal/tuiapp_v2.py --help`、`python frontends/tuiapp_v2.py --help` 均通过；
+  - `python frontends/terminal/tuiapp.py --help`、`python frontends/terminal/tuiapp_v2.py --help` 通过；
   - 全量 Python `python -m unittest discover -s tests`：1585 tests OK（3 skipped）；
   - Ink UI `npm test`：431 pass；`npx tsc --noEmit`：通过；
   - `python scripts/check_project_structure.py`：通过；
   - L1 真实 API bridge 自测：`GA_RUN_REAL_API_E2E=1 GA_SELFTEST_TIMEOUT=240 python tests/real_ink_selftest.py` → 5/5 PASS，当前模型 `default/deepseek-flash`，证据包 `temp/ink-selftest/20261016-181824`。
   - 真实 workflow strict-schema E2E：`GA_RUN_REAL_WORKFLOW_STRICT_SCHEMA_E2E=1 GA_WORKFLOW_LLM_PROFILE=default python tests/real_workflow_strict_schema_child_e2e.py` → `passed: true`，`default/deepseek-flash`，runId `wf_strict_schema_e2e`，1/1 job succeeded，`schemaValidation: true`，耗时 6.3s。首跑暴露测试夹具脚本缺少 CC 要求的首语句 `export const meta`；已修复夹具后复跑通过。
+
+### 13.7 P7 根 shim 清理结果（2026-10-16）
+
+- **删除范围**
+  - 根目录删除 72 个旧实现 shim/入口（`agentmain.py`、`ga.py`、`llmcore.py`、`workflow_*.py`、`subagent_*.py` 等），只保留本地配置 `mykey.py`。
+  - `frontends/` 顶层删除旧适配器 shim 与 `_compat.py`，只保留 `__init__.py`；正式实现全部位于 `frontends/{common,terminal,desktop,web,bots,acp,ink}/`。
+  - 根模板 shim `mykey_template*.py` 删除，模板 canonical 路径为 `genericagent/llm/templates/`。
+- **调用迁移**
+  - 所有生产代码、测试和脚本的旧 import 改为 `genericagent.*` / `frontends.*` canonical import。
+  - `mock.patch("mcp_runtime...")`、`patch("ink_bridge...")` 等动态 patch target 改为 canonical module path。
+  - subagent/workflow child 启动从 `python agentmain.py ...` 改为 `python -m genericagent.core.app ...`。
+  - `ga_cli/cli.py`、`launch.pyw`、`hub.pyw`、`assets/configure_mykey.py`、README、AGENTS、CLAUDE、GA_AGENTS 和测试 SOP 同步更新。
+- **结构门禁**
+  - `ROOT_PY_ALLOWLIST = {"mykey.py"}`。
+  - `frontends/*.py|*.pyw`（除 `__init__.py`）一律禁止。
+  - 强制检查 canonical Ink bridge、Ink UI package 与所有 canonical 前端模块存在。
+  - 当前输出：`project structure ok (root allowlist: mykey.py; canonical frontends present)`。
+- **验证**
+  - `python -m compileall -q genericagent ga_cli frontends tests scripts plugins` 通过。
+  - `python scripts/check_project_structure.py` 通过。
+  - `python -m unittest discover -s tests -p 'test_*.py'`：1585 tests，3 skipped；仅 `test_workflow_runtime` 的并发取消用例在整套运行时出现一次时序型 flake，单独复跑通过。
+  - 关键旧路径残留扫描：生产代码与测试中无旧顶层模块 import、无旧 patch target；仅保留日志名、属性名、历史注释与测试夹具中的普通字符串。

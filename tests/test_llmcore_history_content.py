@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from llmcore import ClaudeSession, NativeClaudeSession  # noqa: E402
+from genericagent.llm.core import ClaudeSession, NativeClaudeSession  # noqa: E402
 
 
 CFG = {"apikey": "sk-test-not-a-real-key", "apibase": "https://example.test/v1", "model": "claude-opus-5"}
@@ -106,7 +106,7 @@ class StringContentHistoryTest(unittest.TestCase):
         `ValueError: dictionary update sequence element #0 has length 1; 2 is required
         @ llmcore.py:842, raw_ask`.
         """
-        import llmcore
+        from genericagent.llm import core as llmcore
 
         session = NativeClaudeSession(dict(CFG))
         session.tools = []

@@ -9,11 +9,11 @@ for path in (str(REPO_ROOT), str(FRONTENDS)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from tuiapp import AgentSession as TuiSession  # noqa: E402
-from tuiapp import GenericAgentTUI as TuiApp  # noqa: E402
-from tuiapp_v2 import COMMANDS as V2_COMMANDS  # noqa: E402
-from tuiapp_v2 import AgentSession as TuiV2Session  # noqa: E402
-from tuiapp_v2 import GenericAgentTUI as TuiAppV2  # noqa: E402
+from frontends.terminal.tuiapp import AgentSession as TuiSession  # noqa: E402
+from frontends.terminal.tuiapp import GenericAgentTUI as TuiApp  # noqa: E402
+from frontends.terminal.tuiapp_v2 import COMMANDS as V2_COMMANDS  # noqa: E402
+from frontends.terminal.tuiapp_v2 import AgentSession as TuiV2Session  # noqa: E402
+from frontends.terminal.tuiapp_v2 import GenericAgentTUI as TuiAppV2  # noqa: E402
 
 
 class FakeAgent:

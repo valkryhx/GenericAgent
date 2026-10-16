@@ -1,8 +1,8 @@
 import unittest
 from types import SimpleNamespace
 
-from workflow_child_agent import NativeGPTChildAgentRunner
-from workflow_permissions import ToolPermissionPolicy
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+from genericagent.workflow.permissions import ToolPermissionPolicy
 
 
 OBJECT_SCHEMA = {
@@ -55,7 +55,7 @@ class StructuredOutputToolInjectionTest(unittest.TestCase):
 
 class StructuredOutputDispatchTest(unittest.TestCase):
     def _handler(self, schema):
-        from ga import GenericAgentHandler
+        from genericagent.core.handler import GenericAgentHandler
 
         handler = GenericAgentHandler(SimpleNamespace(task_dir=None))
         handler.workflow_output_schema = schema

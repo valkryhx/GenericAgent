@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_roles import (  # noqa: E402
+from genericagent.agents.roles import (  # noqa: E402
     BUILTIN_ROLES,
     SubagentRoleRegistry,
     build_role_task_message,

@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import (  # noqa: E402
+from genericagent.core.app import (  # noqa: E402
     _build_user_content_with_images,
     _native_image_input_enabled,
     supports_image_input,
@@ -20,8 +20,8 @@ from agentmain import (  # noqa: E402
     content_has_native_images,
     user_query_looks_like_vision_followup,
 )
-from agent_loop import agent_runner_loop  # noqa: E402
-from llmcore import (  # noqa: E402
+from genericagent.core.loop import agent_runner_loop  # noqa: E402
+from genericagent.llm.core import (  # noqa: E402
     NativeClaudeSession,
     NativeOAISession,
     NativeToolClient,
@@ -210,7 +210,7 @@ class NativeImageInputTest(unittest.TestCase):
             def dispatch(self, *args, **kwargs):
                 if False:
                     yield None
-                from agent_loop import StepOutcome
+                from genericagent.core.loop import StepOutcome
 
                 return StepOutcome("done", next_prompt=None)
 

@@ -28,7 +28,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from subagent_state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
+from genericagent.agents.state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
 
 
 # CC `m0188` be=200
@@ -212,7 +212,7 @@ def build_roster(temp_dir):
     """Agent paths currently known to the registry, for provenance verification."""
     paths = {"/root"}
     try:
-        from subagent_registry import SubagentRegistry
+        from genericagent.agents.registry import SubagentRegistry
 
         registry = SubagentRegistry(Path(temp_dir) / "subagents")
         for state in registry.list_agents(include_closed=True):

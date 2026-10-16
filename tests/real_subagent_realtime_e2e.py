@@ -47,7 +47,7 @@ def sanitize(value: Any) -> Any:
 
 
 def resolve_profile() -> tuple[int, dict]:
-    from llm_client import load_clients_from_yaml
+    from genericagent.llm.client import load_clients_from_yaml
 
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
@@ -127,8 +127,8 @@ def main() -> int:
         os.environ["GA_SUBAGENT_POLL_INTERVAL_S"] = "30"
         os.environ["GA_SUBAGENT_IDLE_TIMEOUT_S"] = "600"
 
-        from subagent_manager import SubagentManager
-        from subagent_realtime_ipc import AUTHKEY_FILENAME
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.agents.realtime_ipc import AUTHKEY_FILENAME
 
         llm_no, profile_row = resolve_profile()
         summary["profile"] = profile_row

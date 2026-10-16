@@ -12,8 +12,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from compact_context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent  # noqa: E402
-from compact_context import DEFAULT_CONTEXT_WIN, _source_char_budget, _content_to_text, _history_to_text  # noqa: E402
+from genericagent.core.context import compact_agent_context, replace_log_with_compact_history, should_auto_compact_agent  # noqa: E402
+from genericagent.core.context import DEFAULT_CONTEXT_WIN, _source_char_budget, _content_to_text, _history_to_text  # noqa: E402
 
 
 class FakeBackend:

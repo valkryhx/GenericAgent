@@ -4,9 +4,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from subagent_agent_path import AgentPath
-from subagent_permissions import normalize_permission_metadata
-from workflow_permissions import READ_ONLY
+from genericagent.agents.agent_path import AgentPath
+from genericagent.agents.permissions import normalize_permission_metadata
+from genericagent.workflow.permissions import READ_ONLY
 
 
 _ROLE_OPTION_KEYS = (

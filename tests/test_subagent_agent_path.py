@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_agent_path import AgentPath  # noqa: E402
+from genericagent.agents.agent_path import AgentPath  # noqa: E402
 
 
 class AgentPathTest(unittest.TestCase):

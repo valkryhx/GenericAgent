@@ -1,9 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from agent_loop import StepOutcome, exhaust
-from ga import GenericAgentHandler
-from workflow_permissions import PermissionDecision, ToolPermissionPolicy, parse_mcp_tool_name
+from genericagent.core.loop import StepOutcome, exhaust
+from genericagent.core.handler import GenericAgentHandler
+from genericagent.workflow.permissions import PermissionDecision, ToolPermissionPolicy, parse_mcp_tool_name
 
 
 class ToolPermissionPolicyTest(unittest.TestCase):

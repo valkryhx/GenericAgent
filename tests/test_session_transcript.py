@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import session_transcript
+from genericagent.core import transcripts as session_transcript
 
 
 class FakeBackend:

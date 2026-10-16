@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_path_acl import (
+from genericagent.workflow.path_acl import (
     EXECUTE,
     READ,
     WRITE,

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from workflow_llm import (
+from genericagent.workflow.llm import (
     WorkflowLlmBinding,
     binding_from_agent,
     binding_from_env,
@@ -116,7 +116,7 @@ class WorkflowLlmBindingTest(unittest.TestCase):
 
 class WorkflowChildUsesBindingTest(unittest.TestCase):
     def test_native_runner_uses_binding_provider_not_mykey(self):
-        from workflow_child_agent import NativeGPTChildAgentRunner
+        from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
 
         calls = []
 
@@ -138,8 +138,8 @@ class WorkflowChildUsesBindingTest(unittest.TestCase):
         self.assertEqual("client_factory", meta.get("llmSource"))
 
     def test_native_runner_binding_provider_builds_meta(self):
-        from workflow_child_agent import NativeGPTChildAgentRunner
-        from workflow_llm import WorkflowLlmBinding
+        from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+        from genericagent.workflow.llm import WorkflowLlmBinding
 
         binding = WorkflowLlmBinding(profile_name="grok", model_id="grok-4.5", source="agent")
         built = []
@@ -148,9 +148,9 @@ class WorkflowChildUsesBindingTest(unittest.TestCase):
             built.append(b)
             return SimpleNamespace(backend=SimpleNamespace(history=[], model=b.model_id, name=b.profile_name))
 
-        with patch("workflow_llm.make_tool_client", side_effect=fake_make_tool_client):
+        with patch("genericagent.workflow.llm.make_tool_client", side_effect=fake_make_tool_client):
             # patch where used inside child module path — child imports make_tool_client inside method
-            with patch("workflow_child_agent.NativeGPTChildAgentRunner._new_executable") as mocked:
+            with patch("genericagent.workflow.child_agent.NativeGPTChildAgentRunner._new_executable") as mocked:
                 # exercise real method by not mocking — patch workflow_llm.make_tool_client via import site
                 pass
 
@@ -158,7 +158,7 @@ class WorkflowChildUsesBindingTest(unittest.TestCase):
             pass
 
         # Directly patch symbols imported inside _new_executable
-        import workflow_llm as wllm
+        import genericagent.workflow.llm as wllm
 
         original = wllm.make_tool_client
         try:
@@ -183,7 +183,7 @@ class WorkflowChildUsesBindingTest(unittest.TestCase):
 class InkBridgeDefaultRunnerTest(unittest.TestCase):
     def test_make_workflow_runtime_uses_native_runner_bound_to_agent(self):
         from frontends.ink.bridge import GenericAgentBridge
-        from workflow_child_agent import FakeChildAgentRunner, NativeGPTChildAgentRunner
+        from genericagent.workflow.child_agent import FakeChildAgentRunner, NativeGPTChildAgentRunner
 
         class Agent:
             is_running = False

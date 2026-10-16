@@ -9,13 +9,13 @@ for path in (str(REPO_ROOT), str(FRONTENDS)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-for name in ("agentmain", "chatapp_common", "continue_cmd", "llmcore"):
+for name in ("genericagent.core.app", "frontends.common.chatapp_common", "frontends.terminal.continue_cmd", "genericagent.llm.core"):
     module = sys.modules.get(name)
     if module is not None and not getattr(module, "__file__", None):
         sys.modules.pop(name)
 
 
-from tuiapp_v2 import (  # noqa: E402
+from frontends.terminal.tuiapp_v2 import (  # noqa: E402
     AgentSession,
     _clamp_sidebar_width,
     _is_sidebar_resizer_hit,

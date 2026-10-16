@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_models import (
+from genericagent.workflow.models import (
     AgentResult,
     DEFAULT_PERMISSION_POLICY_VERSION,
     DEFAULT_PERMISSION_PROFILE,

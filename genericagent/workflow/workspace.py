@@ -17,7 +17,7 @@ def default_workspace_root() -> Path:
     Product decision (2026-10-03): artifacts must not land next to GA's own
     source. ``os.getcwd()`` did exactly that for the normal ``ga`` launch, which
     starts in the repository root, so a finished report showed up beside
-    ``agentmain.py``. The default root is the repository ``temp/`` directory --
+    ``genericagent/core/app.py``. The default root is the repository ``temp/`` directory --
     already the project's scratch-output location and already gitignored -- and
     children may create subdirectories under it (or write a file directly in
     it). ``GA_WORKFLOW_WORKSPACE_ROOT`` overrides the location for tests and

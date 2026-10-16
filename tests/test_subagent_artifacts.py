@@ -10,9 +10,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_artifacts import SubagentArtifactStore  # noqa: E402
-from subagent_manager import SubagentManager  # noqa: E402
-from subagent_state import atomic_write_json  # noqa: E402
+from genericagent.agents.artifacts import SubagentArtifactStore  # noqa: E402
+from genericagent.agents.manager import SubagentManager  # noqa: E402
+from genericagent.agents.state import atomic_write_json  # noqa: E402
 
 
 class SubagentArtifactStoreTest(unittest.TestCase):

@@ -5,8 +5,8 @@ import time
 import unittest
 from pathlib import Path
 
-from workflow_models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
-from workflow_store import WorkflowStore
+from genericagent.workflow.models import AgentResult, WorkflowEvent, WorkflowJob, WorkflowRun
+from genericagent.workflow.store import WorkflowStore
 
 
 class WorkflowStoreTest(unittest.TestCase):

@@ -7,7 +7,7 @@ GA LLM 接入层 —— YAML + pydantic 配置层（阶段 1）。
 可独立单测、无重依赖）；把配置喂进 Session 类的薄封装在 build_client() 里
 惰性 import llmcore。
 
-核心取代的东西：agentmain.py:188-201 的「变量名魔法」——过去靠 mykey.py 里
+核心取代的东西：genericagent/core/app.py:188-201 的「变量名魔法」——过去靠 mykey.py 里
 变量名是否含 native/claude/oai 决定实例化哪个 Session 类。现在由 provider 的
 显式 wire_api 字段决定。
 

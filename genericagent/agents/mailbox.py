@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from subagent_state import atomic_write_lines, cross_process_lock, now_iso
+from genericagent.agents.state import atomic_write_lines, cross_process_lock, now_iso
 
 
 QUEUE_ONLY = "queue_only"

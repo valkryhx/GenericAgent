@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_policy import (
+from genericagent.workflow.policy import (
     build_forward_test_matrix,
     normalize_delegation_policy,
     plan_required_waves,

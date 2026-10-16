@@ -29,7 +29,7 @@ for _p in (REPO_ROOT, FRONTENDS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from sensitive_redaction import sanitize  # noqa: E402
+from genericagent.core.redaction import sanitize  # noqa: E402
 from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
 
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"

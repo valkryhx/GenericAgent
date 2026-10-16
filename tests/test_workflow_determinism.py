@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_determinism import (
+from genericagent.workflow.determinism import (
     DETERMINISM_ERROR_MESSAGE,
     determinism_error,
     find_nondeterminism,

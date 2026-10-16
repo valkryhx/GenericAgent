@@ -10,14 +10,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_capabilities import (  # noqa: E402
+from genericagent.agents.capabilities import (  # noqa: E402
     INTERNAL_SENTINEL_TOOLS,
     ORCHESTRATION_TOOLS,
     build_subagent_capability_profile,
     filter_tool_schema_for_capabilities,
 )
-from agent_loop import exhaust  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
+from genericagent.core.loop import exhaust  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler  # noqa: E402
 
 
 class SubagentCapabilityProfileTest(unittest.TestCase):

@@ -14,11 +14,11 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from workflow_child_agent import NativeGPTChildAgentRunner
-from workflow_models import WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
 EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
@@ -69,7 +69,7 @@ def read_jsonl(path: Path) -> list[dict]:
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
+        from genericagent.llm.core import reload_mykeys
         cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
     profile = {
         "configName": CONFIG_NAME,

@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from subagent_state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
+from genericagent.agents.state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
 
 
 STATUSES = ("pending", "in_progress", "completed")

@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_verification import normalize_verification_contract, validate_verification_contract
+from genericagent.workflow.verification import normalize_verification_contract, validate_verification_contract
 
 
 class WorkflowVerificationContractTest(unittest.TestCase):

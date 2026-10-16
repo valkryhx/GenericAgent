@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow_workspace import (
+from genericagent.workflow.workspace import (
     WorkspacePathError,
     artifact_ownership_index,
     create_run_workspace,

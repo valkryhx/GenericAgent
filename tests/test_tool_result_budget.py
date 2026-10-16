@@ -9,14 +9,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tool_result_budget import budget_tool_result  # noqa: E402
-from tool_result_limits import (  # noqa: E402
+from genericagent.core.tool_results.budget import budget_tool_result  # noqa: E402
+from genericagent.core.tool_results.limits import (  # noqa: E402
     clear_tool_result_max_chars,
     get_tool_result_max_chars,
     replace_tool_result_max_chars,
     set_tool_result_max_chars,
 )
-from agent_loop import StepOutcome, agent_runner_loop  # noqa: E402
+from genericagent.core.loop import StepOutcome, agent_runner_loop  # noqa: E402
 
 
 class _ToolCall:
@@ -114,7 +114,7 @@ class ToolResultBudgetTest(unittest.TestCase):
             self.assertNotIn("...", result.split("Preview:", 1)[1])
 
     def test_persist_failure_falls_back_to_bounded_truncation(self):
-        import tool_result_budget
+        from genericagent.core.tool_results import budget as tool_result_budget
         from unittest import mock
 
         with tempfile.TemporaryDirectory() as tmp:

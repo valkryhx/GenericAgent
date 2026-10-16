@@ -60,7 +60,7 @@ def _install_import_stubs():
     request = types.ModuleType("telegram.request")
     request.HTTPXRequest = object
 
-    agentmain = types.ModuleType("agentmain")
+    agentmain = types.ModuleType("genericagent.core.app")
 
     class GeneraticAgent:
         def __init__(self):
@@ -69,7 +69,7 @@ def _install_import_stubs():
 
     agentmain.GeneraticAgent = GeneraticAgent
 
-    chatapp_common = types.ModuleType("chatapp_common")
+    chatapp_common = types.ModuleType("frontends.common.chatapp_common")
     chatapp_common.FILE_HINT = ""
     chatapp_common.HELP_TEXT = ""
     chatapp_common.TELEGRAM_MENU_COMMANDS = []
@@ -81,11 +81,11 @@ def _install_import_stubs():
     chatapp_common.require_runtime = lambda *args, **kwargs: None
     chatapp_common.split_text = lambda text, limit: [text[i : i + limit] for i in range(0, len(text), limit)]
 
-    continue_cmd = types.ModuleType("continue_cmd")
+    continue_cmd = types.ModuleType("frontends.terminal.continue_cmd")
     continue_cmd.handle_frontend_command = lambda *args, **kwargs: ""
     continue_cmd.reset_conversation = lambda *args, **kwargs: ""
 
-    llmcore = types.ModuleType("llmcore")
+    llmcore = types.ModuleType("genericagent.llm.core")
     llmcore.mykeys = {}
 
     stubs = {
@@ -95,19 +95,13 @@ def _install_import_stubs():
         "telegram.ext": ext,
         "telegram.helpers": helpers,
         "telegram.request": request,
-        # Legacy names are still used by the compatibility shim; canonical
-        # names are used by the moved frontend implementation.
-        "agentmain": agentmain,
         "genericagent.core.app": agentmain,
-        "chatapp_common": chatapp_common,
         "frontends.common.chatapp_common": chatapp_common,
-        "continue_cmd": continue_cmd,
         "frontends.terminal.continue_cmd": continue_cmd,
-        "llmcore": llmcore,
         "genericagent.llm.core": llmcore,
     }
-    # 返回被覆盖前的真实模块（可能为 None），供导入 tgapp 后还原——否则 agentmain/
-    # llmcore 等真实模块会被 stub 永久顶掉，污染后续测试（如 test_agentmain_compact）。
+    # 返回被覆盖前的真实模块（可能为 None），供导入 tgapp 后还原——否则 canonical
+    # app/llmcore 等真实模块会被 stub 永久顶掉，污染后续测试（如 test_agentmain_compact）。
     saved = {name: sys.modules.get(name) for name in stubs}
     sys.modules.update(stubs)
     return saved
@@ -125,7 +119,7 @@ def _restore_modules(saved):
 # 使 stub 只对 tgapp 内部可见，不外泄污染其它测试模块。
 _saved_modules = _install_import_stubs()
 try:
-    tgapp = importlib.import_module("tgapp")
+    tgapp = importlib.import_module("frontends.bots.tgapp")
 finally:
     _restore_modules(_saved_modules)
 

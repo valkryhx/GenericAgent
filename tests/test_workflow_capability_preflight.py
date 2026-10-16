@@ -1,8 +1,8 @@
 import unittest
 from unittest import mock
 
-from workflow_child_agent import NativeGPTChildAgentRunner
-from workflow_tool_profiles import (
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+from genericagent.workflow.tool_profiles import (
     filter_schema_for_profile,
     resolve_tool_profile,
     tool_capabilities,

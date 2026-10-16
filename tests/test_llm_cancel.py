@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from llmcore import LLMSession  # noqa: E402
+from genericagent.llm.core import LLMSession  # noqa: E402
 
 
 class BlockingStreamResponse:
@@ -71,7 +71,7 @@ class StubHttpSession:
 @contextmanager
 def patch_transport(impl):
     stub = StubHttpSession(impl)
-    with patch("llmcore._get_http_session", return_value=stub):
+    with patch("genericagent.llm.core._get_http_session", return_value=stub):
         yield stub
 
 

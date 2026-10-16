@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from subagent_state import atomic_write_json, now_iso
+from genericagent.agents.state import atomic_write_json, now_iso
 
 
 _SECRET_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password)=([^\s,;]+)")

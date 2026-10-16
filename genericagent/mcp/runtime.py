@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Optional
 from genericagent import paths
 
-from sensitive_redaction import redact_sensitive_text
-from tool_result_limits import (
+from genericagent.core.redaction import redact_sensitive_text
+from genericagent.core.tool_results.limits import (
     clear_tool_result_max_chars,
     get_tool_result_max_chars,
     normalize_tool_result_max_chars,

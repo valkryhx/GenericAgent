@@ -17,13 +17,13 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_child_agent import NativeGPTChildAgentRunner
-from workflow_llm import binding_from_profile
-from workflow_models import WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
-from workflow_store import WorkflowStore
+from genericagent.core.redaction import redact_sensitive_text, sanitize
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+from genericagent.workflow.llm import binding_from_profile
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 
 PROFILE = "luna"

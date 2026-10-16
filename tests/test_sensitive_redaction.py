@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from sensitive_redaction import REDACTION, redact_sensitive_text, sanitize
+from genericagent.core.redaction import REDACTION, redact_sensitive_text, sanitize
 
 
 class SensitiveRedactionTest(unittest.TestCase):

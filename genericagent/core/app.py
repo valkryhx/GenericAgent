@@ -59,21 +59,21 @@ def _configure_stdio_utf8():
 _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from llmcore import NativeClaudeSession, NativeOAISession
-from llm_client import load_clients_from_yaml
-from agent_loop import agent_runner_loop
-from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
-from skills_runtime import build_skill_prompt
-import session_transcript
-import image_codec
+from genericagent.llm.core import NativeClaudeSession, NativeOAISession
+from genericagent.llm.client import load_clients_from_yaml
+from genericagent.core.loop import agent_runner_loop
+from genericagent.core.handler import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
+from genericagent.core.skills import build_skill_prompt
+from genericagent.core import transcripts as session_transcript
+from genericagent.media import image_codec
 try:
-    from compact_context import compact_agent_context, replace_log_with_compact_history
+    from genericagent.core.context import compact_agent_context, replace_log_with_compact_history
 except Exception:  # 压缩核心导入失败时降级：/compact 报不可用，不影响主流程
     compact_agent_context = None
     replace_log_with_compact_history = None
-from ga_agents_runtime import build_ga_project_instructions, load_base_system_prompt
-from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
-from subagent_prompts import build_agent_role_usage_hint
+from genericagent.core.project_instructions import build_ga_project_instructions, load_base_system_prompt
+from genericagent.agents.state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
+from genericagent.agents.prompts import build_agent_role_usage_hint
 
 _record_startup_phase('imports_complete')
 
@@ -341,7 +341,7 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
     from each role's own ``permission_profile`` for the same reason.
     """
 
-    from subagent_roles import SubagentRoleRegistry, format_role_catalog
+    from genericagent.agents.roles import SubagentRoleRegistry, format_role_catalog
 
     roles = sorted(
         SubagentRoleRegistry(root_dir).list_roles(),
@@ -390,7 +390,7 @@ def load_tool_schema(suffix='', include_mcp_tools=True):
     if not include_mcp_tools:
         return
     try:
-        from mcp_runtime import discover_mcp_tools_cached_fast
+        from genericagent.mcp.runtime import discover_mcp_tools_cached_fast
         append_mcp_tools(TOOLS_SCHEMA, discover_mcp_tools_cached_fast())
         start_mcp_schema_warmup()
     except Exception as e:
@@ -436,7 +436,7 @@ def start_mcp_schema_warmup():
         return None
     _MCP_SCHEMA_WARMUP_STARTED = True
     try:
-        from mcp_runtime import on_mcp_discovery_complete, start_background_discovery
+        from genericagent.mcp.runtime import on_mcp_discovery_complete, start_background_discovery
         on_mcp_discovery_complete(_on_background_mcp_discovery)
         return start_background_discovery()
     except Exception as e:
@@ -484,7 +484,7 @@ def build_system_prompt_sections(agent=None):
     notifications = ""
     if not is_subagent:
         try:
-            from subagent_notifications import build_subagent_notifications_prompt
+            from genericagent.agents.notifications import build_subagent_notifications_prompt
             notifications = build_subagent_notifications_prompt(script_dir)
         except Exception:
             pass
@@ -551,7 +551,7 @@ def build_permission_mode_hint(mode):
     full_access（默认）不注入任何内容，保持历史「工具全开」提示词不变。
     '''
     try:
-        from permission_policy import ASK, FULL_ACCESS, READ_ONLY, normalize_permission_mode
+        from genericagent.core.permissions.policy import ASK, FULL_ACCESS, READ_ONLY, normalize_permission_mode
     except Exception:
         return ""
     mode = normalize_permission_mode(mode)
@@ -578,7 +578,7 @@ class GenericAgent:
         _record_startup_phase('agent_image_gc_started')
         image_gc_status, image_gc_error = 'ok', None
         try:
-            from image_gc import maybe_gc_ga_images_on_startup
+            from genericagent.media.image_gc import maybe_gc_ga_images_on_startup
             maybe_gc_ga_images_on_startup(quiet=True)
         except Exception as e:
             image_gc_status, image_gc_error = 'error', f'{type(e).__name__}: {e}'
@@ -596,13 +596,13 @@ class GenericAgent:
         self.capability_team_mode = False
         # 三档权限：默认 full_access（等于历史「工具全开」行为），可切到 ask / read_only
         _record_startup_phase('agent_permission_init_started')
-        from permission_policy import DEFAULT_PERMISSION_MODE
+        from genericagent.core.permissions.policy import DEFAULT_PERMISSION_MODE
         self.permission_mode = DEFAULT_PERMISSION_MODE
         self.subagent_permission_policy = None
         # ask 档阻塞审批 runtime（可无 emit = headless deny）；bridge 会 set_emit
         permission_status, permission_error = 'ok', None
         try:
-            from permission_runtime import PermissionRuntime
+            from genericagent.core.permissions.runtime import PermissionRuntime
             self.permission_runtime = PermissionRuntime()
         except Exception as e:
             self.permission_runtime = None
@@ -652,7 +652,7 @@ class GenericAgent:
         # Rebuilding the clients orphans the previous pooled HTTP sessions.
         for old_client in (getattr(self, "llmclients", None) or []):
             try:
-                from llmcore import close_http_session
+                from genericagent.llm.core import close_http_session
                 close_http_session(getattr(old_client, "backend", None))
             except Exception:
                 pass
@@ -853,7 +853,7 @@ class GenericAgent:
         下一轮 put_task 新建 handler 时生效；若当前已有 handler 也同步更新，
         让运行中的会话立刻感知（下一次 dispatch 即按新档评估）。
         '''
-        from permission_policy import build_permission_mode_policy, normalize_permission_mode
+        from genericagent.core.permissions.policy import build_permission_mode_policy, normalize_permission_mode
         mode = normalize_permission_mode(mode)
         self.permission_mode = mode
         if self.handler is not None:
@@ -992,7 +992,7 @@ class GenericAgent:
             # 挂上 mode policy，让 dispatch 在工具执行前按档位放行/拒绝/请求审批。
             # workflow 子 agent 有独立的 workflow_permission_policy，优先级更高，互不影响。
             try:
-                from permission_policy import build_permission_mode_policy
+                from genericagent.core.permissions.policy import build_permission_mode_policy
                 handler.permission_mode_policy = build_permission_mode_policy(
                     getattr(self, 'permission_mode', None)
                 )
@@ -1067,10 +1067,10 @@ class GenericAgent:
             if _inject:
                 sys_prompt += build_vision_direct_answer_sys_prompt(image_count=_n_img, via=_via)
             name = self.get_llm_name(model=True)
-            from mcp_runtime import mcp_cancellation_scope
+            from genericagent.mcp.runtime import mcp_cancellation_scope
             with mcp_cancellation_scope(handler.code_stop_signal):
                 load_tool_schema('_cn' if ('glm' in name or 'minimax' in name or 'kimi' in name) else '', include_mcp_tools=True)
-            from subagent_capabilities import (
+            from genericagent.agents.capabilities import (
                 build_subagent_capability_profile,
                 filter_tool_schema_for_capabilities,
             )
@@ -1295,7 +1295,7 @@ def _subagent_transcript_append(task_dir, event_type, payload):
         parent_session_id = state.get('parent_session_id') or payload.get('parent_session_id')
         run_id = state.get('run_id') or payload.get('run_id')
         if parent_session_id and run_id:
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
             SubagentTranscriptStore(os.path.join(os.path.dirname(task_dir), 'sessions')).append_event(
                 parent_session_id,
                 run_id,
@@ -1344,7 +1344,7 @@ def _release_subagent_slot(task_dir):
         agent_path = state.get('agent_path')
         if not agent_path:
             return None
-        from subagent_registry import SubagentRegistry, _default_process_identity
+        from genericagent.agents.registry import SubagentRegistry, _default_process_identity
 
         pid = os.getpid()
         try:
@@ -1374,7 +1374,7 @@ def _subagent_event(task_dir, event):
     bus_status = 'ok'
     bus_error = None
     try:
-        from subagent_event_bus import SubagentEventBus
+        from genericagent.agents.event_bus import SubagentEventBus
         SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
             event.get('type') or 'subagent_update',
             agent_path=agent_path,
@@ -1501,10 +1501,10 @@ def _teammate_idle_hook(task_dir, task_name):
     unless a lead DM already went out this round (CC m1448).
     """
     try:
-        from subagent_idle import build_idle_notification, sent_lead_dm_since_last_turn
-        from subagent_state import append_jsonl_event, append_parent_inbox_event
-        from subagent_tasks import SubagentTaskStore, next_task_prompt
-        from subagent_team import team_name_for
+        from genericagent.agents.idle import build_idle_notification, sent_lead_dm_since_last_turn
+        from genericagent.agents.state import append_jsonl_event, append_parent_inbox_event
+        from genericagent.agents.tasks import SubagentTaskStore, next_task_prompt
+        from genericagent.agents.team import team_name_for
 
         state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
         root_dir = os.path.dirname(os.path.dirname(task_dir))
@@ -1595,7 +1595,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     permission_status = 'ok'
     permission_error = None
     try:
-        from subagent_permissions import load_subagent_permission_policy
+        from genericagent.agents.permissions import load_subagent_permission_policy
         agent.subagent_permission_policy = load_subagent_permission_policy(task_dir)
     except Exception as e:
         permission_status = 'error'
@@ -1611,7 +1611,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     realtime_subscriber = None
     child_ipc_status, child_ipc_fallback_reason = 'file', None
     try:
-        from subagent_realtime_ipc import resolve_child_subscription
+        from genericagent.agents.realtime_ipc import resolve_child_subscription
         realtime_subscriber, child_ipc_status, child_ipc_fallback_reason = resolve_child_subscription(task_dir, existing_state)
     except Exception as e:
         realtime_subscriber = None
@@ -1710,7 +1710,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             state_before_final = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
             final_output_ref = None
             try:
-                from subagent_artifacts import SubagentArtifactStore
+                from genericagent.agents.artifacts import SubagentArtifactStore
                 run_id = state_before_final.get('run_id') or f"legacy_{task_name}"
                 artifact_dir = state_before_final.get('artifact_dir') or os.path.join(os.path.dirname(task_dir), 'subagents', 'runs', run_id)
                 artifact = SubagentArtifactStore(artifact_dir).record_final_output(output_path, round_no=int(nround) if isinstance(nround, int) else 0)
@@ -1746,7 +1746,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             # Provenance + receipts for the durable file bus (CC m0300 / m0188): a row that
             # was not written through the ledger is not a genuine teammate message.
             try:
-                from subagent_receipts import ProvenanceLedger, build_roster
+                from genericagent.agents.receipts import ProvenanceLedger, build_roster
 
                 _prov_ledger = ProvenanceLedger(os.path.join(os.path.dirname(task_dir), 'subagents'))
                 _roster = build_roster(os.path.dirname(task_dir))
@@ -1755,7 +1755,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
 
             def _consume_child_mailbox():
                 try:
-                    from subagent_mailbox import SubagentMailbox
+                    from genericagent.agents.mailbox import SubagentMailbox
 
                     return SubagentMailbox(os.path.join(task_dir, 'mailbox.jsonl')).consume_trigger_turn(
                         provenance=_prov_ledger, roster=_roster
@@ -1834,7 +1834,7 @@ def start_task_background(
     permission_options=None,
     capability_options=None,
 ):
-    from subagent_manager import SubagentManager
+    from genericagent.agents.manager import SubagentManager
 
     root_dir = os.path.abspath(root_dir or script_dir)
     manager = SubagentManager(root_dir=root_dir, popen=popen, python_executable=python_executable or sys.executable)
@@ -1842,7 +1842,7 @@ def start_task_background(
     if fork_turns is None:
         fork_turns = 'all' if fork_history is not None else 'none'
     fork_mode, history_to_write = manager._select_fork_history(fork_turns, fork_history)
-    from subagent_permissions import normalize_permission_metadata
+    from genericagent.agents.permissions import normalize_permission_metadata
     permission_metadata = normalize_permission_metadata(
         {'permission_profile': permission_profile, 'permission_options': permission_options or {}, 'parent_permission_mode': parent_permission_mode}
     )

@@ -3,10 +3,10 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from agent_loop import StepOutcome, exhaust
-from ga import GenericAgentHandler
-from permission_policy import ASK, FULL_ACCESS, READ_ONLY, build_permission_mode_policy
-from permission_runtime import (
+from genericagent.core.loop import StepOutcome, exhaust
+from genericagent.core.handler import GenericAgentHandler
+from genericagent.core.permissions.policy import ASK, FULL_ACCESS, READ_ONLY, build_permission_mode_policy
+from genericagent.core.permissions.runtime import (
     ACCEPT,
     DENY,
     PermissionRuntime,

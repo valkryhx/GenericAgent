@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_tasks import SubagentTaskStore, next_task_prompt  # noqa: E402
+from genericagent.agents.tasks import SubagentTaskStore, next_task_prompt  # noqa: E402
 
 
 class SubagentTaskStoreTest(unittest.TestCase):

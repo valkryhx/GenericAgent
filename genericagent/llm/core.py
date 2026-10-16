@@ -1,8 +1,8 @@
 import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
 from genericagent import paths
-import token_meter
-from cache_stats import format_trace, record_usage as record_cache_usage
+from genericagent.core import tokens as token_meter
+from genericagent.core.cache_stats import format_trace, record_usage as record_cache_usage
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 DEFAULT_CONTEXT_WIN = 400_000
@@ -33,7 +33,7 @@ def _load_mykeys():
         return expand_llm_profile_configs({k: v for k, v in vars(mykey).items() if not k.startswith('_')})
     except ImportError: pass
     _mykey_path = p = str(paths.PROJECT_ROOT / 'mykey.json')
-    if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
+    if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from genericagent/llm/templates/mykey_template.py.')
     with open(p, encoding='utf-8') as f: return expand_llm_profile_configs(json.load(f))
 
 _mykey_path = _mykey_mtime = None

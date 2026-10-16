@@ -26,7 +26,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from workflow_activation import _is_conversational_turn
+from genericagent.workflow.activation import _is_conversational_turn
 
 
 TEAM_ENV = "GA_AGENT_TEAMS"

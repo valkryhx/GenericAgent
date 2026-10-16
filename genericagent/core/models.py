@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
-from sensitive_redaction import sanitize
+from genericagent.core.redaction import sanitize
 
 
 def _encoded(value) -> str:

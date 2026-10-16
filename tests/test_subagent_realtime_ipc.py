@@ -15,14 +15,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_mailbox import SubagentMailbox  # noqa: E402
-from subagent_realtime_ipc import (  # noqa: E402
+from genericagent.agents.mailbox import SubagentMailbox  # noqa: E402
+from genericagent.agents.realtime_ipc import (  # noqa: E402
     SubagentRealtimeChannel,
     connect_realtime_channel,
     default_channel_address,
     write_channel_authkey,
 )
-from subagent_state import atomic_write_json  # noqa: E402
+from genericagent.agents.state import atomic_write_json  # noqa: E402
 
 
 def _enqueue_with_provenance(
@@ -33,7 +33,7 @@ def _enqueue_with_provenance(
     The child verifies provenance on consume (CC m0300), so a message written straight
     to the mailbox without a ledger record is treated as forged.
     """
-    from subagent_receipts import ProvenanceLedger
+    from genericagent.agents.receipts import ProvenanceLedger
 
     ledger = ProvenanceLedger(Path(task_dir).parent / "subagents")
     ledger.record(author=author, recipient=recipient, content=content, message_id=message_id)
@@ -121,7 +121,7 @@ class SubagentRealtimeChannelTest(unittest.TestCase):
 
 class SubagentManagerRealtimeIntegrationTest(unittest.TestCase):
     def test_manager_pushes_durable_events_to_a_live_subscriber_over_real_channel(self):
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         with tempfile.TemporaryDirectory() as td:
             channels = []
@@ -167,7 +167,7 @@ class SubagentRealtimeChannelAuthTest(unittest.TestCase):
         guessable. Events carry task content, tool arguments and permission decisions, so
         the channel has to authenticate rather than rely on the address being secret.
         """
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         with tempfile.TemporaryDirectory() as td:
             with mock.patch.dict(os.environ, {"GA_SUBAGENT_REALTIME_IPC": "1"}):
@@ -200,8 +200,8 @@ class SubagentRealtimeChannelAuthTest(unittest.TestCase):
         the key travels in a separate task-dir file that only the parent and that child
         touch.
         """
-        from subagent_manager import SubagentManager
-        from subagent_realtime_ipc import read_channel_authkey
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.agents.realtime_ipc import read_channel_authkey
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"k" * 32
@@ -235,8 +235,8 @@ class SubagentRealtimeChannelAuthTest(unittest.TestCase):
         close_agent() tears the listener down, so the key can no longer authenticate
         anything; keeping the file only widens the window for it to be read.
         """
-        from subagent_manager import SubagentManager
-        from subagent_realtime_ipc import read_channel_authkey
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.agents.realtime_ipc import read_channel_authkey
 
         with tempfile.TemporaryDirectory() as td:
             channels = []
@@ -299,7 +299,7 @@ class SubagentChildSubscriptionTest(unittest.TestCase):
         return task_dir
 
     def test_worker_loop_subscribes_to_the_parent_channel(self):
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"s" * 32
@@ -317,7 +317,7 @@ class SubagentChildSubscriptionTest(unittest.TestCase):
             self.assertEqual(observed, [1], "child never subscribed to the parent realtime channel")
 
     def test_subscribed_child_waits_on_the_channel_instead_of_blind_sleeping(self):
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"s" * 32
@@ -343,8 +343,8 @@ class MailboxTriggerOverRealtimeTest(unittest.TestCase):
     """R2: parent to child latency drops to the notify round-trip, durable stays authoritative."""
 
     def test_send_message_persists_first_then_signals_the_subscribed_child(self):
-        from subagent_manager import SubagentManager
-        from subagent_realtime_ipc import open_child_subscription
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.agents.realtime_ipc import open_child_subscription
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"t" * 32
@@ -397,7 +397,7 @@ class MailboxTriggerOverRealtimeTest(unittest.TestCase):
 
     def test_signal_loss_degrades_to_polling_instead_of_losing_the_message(self):
         """A dropped notification must cost latency, never correctness."""
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"t" * 32
@@ -444,7 +444,7 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
     """
 
     def _run_child(self, task_dir, *, iterations=1, sleep_s=0):
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         class DoneQueue:
             def get(self, timeout=None):
@@ -507,7 +507,7 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
 
     def test_mid_flight_disconnect_is_recorded_and_falls_back_to_polling(self):
         """The parent closing its channel mid-run must be visible, not just tolerated."""
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         with tempfile.TemporaryDirectory() as td:
             authkey = b"o" * 32
@@ -610,7 +610,7 @@ class ChannelTransportHardeningTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "named pipe owner validation is Windows-only")
     def test_pipe_owned_by_another_user_is_refused_and_the_handle_is_closed(self):
         """A guessable address plus a first-mover impostor is the whole attack; fail closed."""
-        import subagent_realtime_ipc
+        from genericagent.agents import realtime_ipc as subagent_realtime_ipc
 
         with tempfile.TemporaryDirectory() as td:
             channel = self._channel(td, "run_owner_foreign")
@@ -633,7 +633,7 @@ class ChannelTransportHardeningTest(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "named pipe owner validation is Windows-only")
     def test_owner_lookup_failure_fails_closed_rather_than_trusting_the_pipe(self):
-        import subagent_realtime_ipc
+        from genericagent.agents import realtime_ipc as subagent_realtime_ipc
 
         with tempfile.TemporaryDirectory() as td:
             channel = self._channel(td, "run_owner_unknown")
@@ -644,8 +644,8 @@ class ChannelTransportHardeningTest(unittest.TestCase):
 
     def test_a_refused_owner_check_degrades_the_child_to_polling_with_a_reason(self):
         """Refusing the channel must not stall the child: the durable mailbox still delivers."""
-        import subagent_realtime_ipc
-        from subagent_realtime_ipc import resolve_child_subscription
+        from genericagent.agents import realtime_ipc as subagent_realtime_ipc
+        from genericagent.agents.realtime_ipc import resolve_child_subscription
 
         with tempfile.TemporaryDirectory() as td:
             channel = self._channel(td, "run_owner_child")
@@ -666,7 +666,7 @@ class ChannelTransportHardeningTest(unittest.TestCase):
 
     def test_owner_validation_is_skipped_for_non_pipe_addresses(self):
         """POSIX sockets are guarded by the 0o700 directory, so the SID lookup must not run there."""
-        from subagent_realtime_ipc import validate_channel_owner
+        from genericagent.agents.realtime_ipc import validate_channel_owner
 
         self.assertIsNone(validate_channel_owner(object(), "/tmp/ga_subagent_run_x.sock"))
 
@@ -732,7 +732,7 @@ class ChannelSlowSubscriberTest(unittest.TestCase):
 
     def test_a_lagging_subscriber_is_told_it_lagged_instead_of_silently_losing_its_place(self):
         """A silent gap is indistinguishable from "nothing happened"; the marker forces a re-read."""
-        from subagent_realtime_ipc import CHANNEL_LAGGED
+        from genericagent.agents.realtime_ipc import CHANNEL_LAGGED
 
         with tempfile.TemporaryDirectory() as td:
             channel = self._channel(td, "run_b1_lag", queue_size=4)
@@ -749,7 +749,7 @@ class ChannelSlowSubscriberTest(unittest.TestCase):
 
     def test_the_lagged_marker_carries_no_message_body(self):
         """R2: realtime payloads are signals. A marker that carried text would leak past the mailbox."""
-        from subagent_realtime_ipc import CHANNEL_LAGGED
+        from genericagent.agents.realtime_ipc import CHANNEL_LAGGED
 
         with tempfile.TemporaryDirectory() as td:
             channel = self._channel(td, "run_b1_body", queue_size=4)
@@ -819,7 +819,7 @@ class ChannelUpstreamSignalTest(unittest.TestCase):
         return channel
 
     def _subscriber(self, channel):
-        from subagent_realtime_ipc import SubagentRealtimeSubscriber
+        from genericagent.agents.realtime_ipc import SubagentRealtimeSubscriber
 
         conn = connect_realtime_channel(channel.address, authkey=self.AUTHKEY)
         subscriber = SubagentRealtimeSubscriber(conn, address=channel.address)
@@ -900,7 +900,7 @@ class ChildEventSignalsTheParentTest(unittest.TestCase):
     AUTHKEY = b"b3c" * 10 + b"aa"
 
     def test_worker_loop_signals_the_parent_when_it_appends_an_event(self):
-        from agentmain import run_task_worker_loop
+        from genericagent.core.app import run_task_worker_loop
 
         with tempfile.TemporaryDirectory() as td:
             channel = SubagentRealtimeChannel(

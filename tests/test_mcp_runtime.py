@@ -17,10 +17,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_loop import exhaust  # noqa: E402
-from agentmain import GenericAgent  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
-from mcp_runtime import (  # noqa: E402
+from genericagent.core.loop import exhaust  # noqa: E402
+from genericagent.core.app import GenericAgent  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler  # noqa: E402
+from genericagent.mcp.runtime import (  # noqa: E402
     build_mcp_tool_name,
     call_mcp_tool,
     clear_mcp_cache,
@@ -46,7 +46,7 @@ from mcp_runtime import (  # noqa: E402
     _redact_sensitive,
     _write_mcp_tools_cache,
 )
-from tool_result_limits import clear_tool_result_max_chars  # noqa: E402
+from genericagent.core.tool_results.limits import clear_tool_result_max_chars  # noqa: E402
 
 
 TEMP_ROOT = REPO_ROOT / "temp" / "test_mcp_runtime"
@@ -376,7 +376,7 @@ class McpRuntimeTest(unittest.TestCase):
         # cached; measured 4-8s per stdio server versus a stable ~2s without the
         # lookup. The host injects the flag so it also applies to a user's
         # (gitignored) mcp.json.
-        from mcp_runtime import _normalize_server_config
+        from genericagent.mcp.runtime import _normalize_server_config
 
         injected = _normalize_server_config(
             {"type": "stdio", "command": "npx", "args": ["-y", "mcp-fetch-server"]}
@@ -980,7 +980,7 @@ class McpRuntimeTest(unittest.TestCase):
         # tracked config file + server names, never which servers connected).
         # A transient remote timeout then hid that server's tools forever.
         # Fix: partial results are marked complete=false and expire by a short TTL.
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1038,7 +1038,7 @@ class McpRuntimeTest(unittest.TestCase):
         # Complete results (every server connected) stay cached as long as the
         # config signature matches — no TTL — to avoid paying discovery cost each
         # turn. Only partial results self-heal via TTL.
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1228,7 +1228,7 @@ class McpFastDiscoveryTest(unittest.TestCase):
     """The user-facing discovery path must not block a turn on a slow server."""
 
     def test_fast_discovery_reuses_partial_cache_without_blocking(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1279,7 +1279,7 @@ class McpFastDiscoveryTest(unittest.TestCase):
         background pass, the worker wrote an empty complete=False entry over a
         healthy 25-tool cache, and the following turns ran with no MCP tools.
         """
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1326,7 +1326,7 @@ class McpFastDiscoveryTest(unittest.TestCase):
         self.assertIn("mcp__good__echo", {tool["function"]["name"] for tool in fast})
     def test_partial_discovery_keeps_failed_server_tools(self):
         """A pass that connects to only one server must not drop the other's tools."""
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1374,7 +1374,7 @@ class McpFastDiscoveryTest(unittest.TestCase):
         a server that is already connected would otherwise stay invisible for
         turns, which is how a real task ran with no MCP tools at all.
         """
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1406,7 +1406,7 @@ class McpFastDiscoveryTest(unittest.TestCase):
 
 
     def test_fast_discovery_without_cache_respects_budget(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1481,7 +1481,7 @@ class McpStartupResilienceTest(unittest.TestCase):
 
     @contextmanager
     def _patched_connect(self, behavior):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         original_method = mcp_runtime.McpManager._connect_and_fetch_tools
         original_delays = mcp_runtime._MCP_REMOTE_CONNECT_RETRY_DELAYS
@@ -1494,7 +1494,7 @@ class McpStartupResilienceTest(unittest.TestCase):
             mcp_runtime._MCP_REMOTE_CONNECT_RETRY_DELAYS = original_delays
 
     def test_default_discovery_timeout_matches_codex_startup_budget(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         os.environ.pop("GA_MCP_DISCOVERY_TIMEOUT", None)
         self.assertEqual(mcp_runtime._MCP_DISCOVERY_TIMEOUT_DEFAULT, 30.0)
@@ -1505,7 +1505,7 @@ class McpStartupResilienceTest(unittest.TestCase):
         )
 
     def test_remote_server_initialize_is_retried_then_connects(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1544,7 +1544,7 @@ class McpStartupResilienceTest(unittest.TestCase):
         self.assertEqual(tools, 1)
 
     def test_remote_server_retries_are_bounded_and_end_failed(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1635,7 +1635,7 @@ class McpStartupResilienceTest(unittest.TestCase):
         self.assertEqual(status_after, "connected")
 
     def test_background_pass_retries_a_failed_server_and_recovers_it(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             tmp_path = Path(tmp)
@@ -1681,7 +1681,7 @@ class McpStartupResilienceTest(unittest.TestCase):
         self.assertGreater(final_calls, calls_after_discover)
 
     def test_stderr_log_rotates_when_it_exceeds_the_cap(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         name = "rotate_" + uuid.uuid4().hex[:8]
         log_path = mcp_runtime._MCP_LOG_DIR / (name + ".stderr.log")
@@ -1699,7 +1699,7 @@ class McpStartupResilienceTest(unittest.TestCase):
         self.assertEqual(size, len("fresh"))
 
     def test_local_connect_concurrency_is_bounded_and_configurable(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         original = os.environ.pop("GA_MCP_LOCAL_CONNECT_CONCURRENCY", None)
         try:
@@ -1726,13 +1726,13 @@ class McpToolResultLimitTest(unittest.TestCase):
         clear_tool_result_max_chars()
 
     def test_tool_meta_extracts_ga_camel_case_key(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         tool = SimpleNamespace(name="echo", meta={"maxResultSizeChars": 12345})
         self.assertEqual(mcp_runtime._tool_max_result_size_chars(tool), 12345)
 
     def test_tool_meta_accepts_dict_and_model_dump(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         self.assertEqual(
             mcp_runtime._tool_max_result_size_chars({"_meta": {"maxResultSizeChars": 77}}),
@@ -1746,7 +1746,7 @@ class McpToolResultLimitTest(unittest.TestCase):
         self.assertEqual(mcp_runtime._tool_max_result_size_chars(DumpedTool()), 88)
 
     def test_tool_meta_clamps_and_rejects_invalid_values(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         cases = {
             12.9: 12,
@@ -1762,7 +1762,7 @@ class McpToolResultLimitTest(unittest.TestCase):
                 self.assertEqual(mcp_runtime._tool_max_result_size_chars(tool), expected)
 
     def test_tool_schema_does_not_leak_private_metadata(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         tool = SimpleNamespace(
             name="echo",
@@ -1774,7 +1774,7 @@ class McpToolResultLimitTest(unittest.TestCase):
         self.assertNotIn("maxResultSizeChars", json.dumps(schema))
 
     def test_cache_round_trip_registers_limit(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             cache_path = Path(tmp) / "cache.json"
@@ -1804,7 +1804,7 @@ class McpToolResultLimitTest(unittest.TestCase):
             self.assertEqual(get_mcp_tool_max_result_chars("mcp__demo__echo"), 12345)
 
     def test_old_cache_without_tool_metadata_is_compatible(self):
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
 
         with _tempdir() as tmp:
             cache_path = Path(tmp) / "cache.json"

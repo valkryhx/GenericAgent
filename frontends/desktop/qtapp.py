@@ -2,7 +2,7 @@
 桌面前端单文件版 – PySide6 聊天面板 + 悬浮按钮   thanks to GaoZhiCheng
 依赖: pip install PySide6
 可选: pip install markdown  (Markdown 渲染)
-用法: python frontends/qtapp.py
+用法: python frontends/desktop/qtapp.py
 """
 from __future__ import annotations
 

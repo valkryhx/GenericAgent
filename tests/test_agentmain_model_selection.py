@@ -1,7 +1,7 @@
 import types
 import unittest
 
-from agentmain import GenericAgent, resolve_reasoning_effort_for_model
+from genericagent.core.app import GenericAgent, resolve_reasoning_effort_for_model
 
 
 class FakeBackend:

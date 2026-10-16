@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 class SkillsRuntimeTest(unittest.TestCase):
     def test_discovers_claude_and_codex_skills_from_home(self):
-        from skills_runtime import discover_skills
+        from genericagent.core.skills import discover_skills
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -49,7 +49,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertTrue(str(skills[1].path).endswith(os.path.join(".codex", "skills", "imagegen", "SKILL.md")))
 
     def test_default_roots_include_repository_workflow_authoring_skill(self):
-        from skills_runtime import discover_skills
+        from genericagent.core.skills import discover_skills
 
         skills = discover_skills()
         names = {skill.name for skill in skills}
@@ -59,7 +59,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertTrue(str(workflow_skill.path).endswith(os.path.join("skills", "workflow-authoring", "SKILL.md")))
 
     def test_discovers_nested_codex_system_skills(self):
-        from skills_runtime import discover_skills
+        from genericagent.core.skills import discover_skills
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".codex" / "skills"
@@ -79,7 +79,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertEqual([s.name for s in skills], ["openai-docs"])
 
     def test_directory_scoped_skill_names_nested_claude_project(self):
-        from skills_runtime import clear_skill_cache, discover_skills, load_skill_content
+        from genericagent.core.skills import clear_skill_cache, discover_skills, load_skill_content
 
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -101,7 +101,7 @@ class SkillsRuntimeTest(unittest.TestCase):
             self.assertEqual(["deploy"], [skill.qualified_name for skill in unscoped])
 
     def test_deduplicates_skills_by_name_using_root_order(self):
-        from skills_runtime import discover_skills
+        from genericagent.core.skills import discover_skills
 
         with tempfile.TemporaryDirectory() as tmp:
             first_root = Path(tmp) / "first"
@@ -128,7 +128,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertEqual(skills[0].description, "First wins")
 
     def test_discovery_cache_reuses_parsed_skills_until_files_change(self):
-        import skills_runtime
+        from genericagent.core import skills as skills_runtime
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "skills"
@@ -158,7 +158,7 @@ class SkillsRuntimeTest(unittest.TestCase):
                 self.assertEqual(parser.call_count, 2)
 
     def test_skill_listing_is_budgeted_and_uses_when_to_use(self):
-        from skills_runtime import SkillSpec, format_skill_listing
+        from genericagent.core.skills import SkillSpec, format_skill_listing
 
         skills = [
             SkillSpec(
@@ -189,7 +189,7 @@ class SkillsRuntimeTest(unittest.TestCase):
     def test_skill_overrides_and_frontmatter_control_visibility(self):
         import os
         from unittest.mock import patch
-        from skills_runtime import clear_skill_cache, discover_skills, format_skill_listing
+        from genericagent.core.skills import clear_skill_cache, discover_skills, format_skill_listing
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "skills"
@@ -217,7 +217,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertIn("user-hidden", listing)
 
     def test_load_skill_content_enforces_invocation_state(self):
-        from skills_runtime import clear_skill_cache, load_skill_content
+        from genericagent.core.skills import clear_skill_cache, load_skill_content
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "skills"
@@ -234,7 +234,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertEqual("user-invocable-only", loaded["state"])
 
     def test_skill_status_rows_report_context_cost(self):
-        from skills_runtime import clear_skill_cache, skill_status_rows
+        from genericagent.core.skills import clear_skill_cache, skill_status_rows
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "skills"
@@ -252,7 +252,7 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertTrue(row["model_visible"])
 
     def test_load_skill_content_adds_base_directory_and_args(self):
-        from skills_runtime import load_skill_content
+        from genericagent.core.skills import load_skill_content
 
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "demo"

@@ -2,8 +2,8 @@ import types
 import unittest
 from types import SimpleNamespace
 
-from agentmain import GenericAgent, build_permission_mode_hint
-from permission_policy import ASK, DEFAULT_PERMISSION_MODE, FULL_ACCESS, READ_ONLY
+from genericagent.core.app import GenericAgent, build_permission_mode_hint
+from genericagent.core.permissions.policy import ASK, DEFAULT_PERMISSION_MODE, FULL_ACCESS, READ_ONLY
 
 
 class PermissionModeTests(unittest.TestCase):

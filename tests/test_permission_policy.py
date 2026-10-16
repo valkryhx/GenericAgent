@@ -1,9 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from agent_loop import StepOutcome, exhaust
-from ga import GenericAgentHandler
-from permission_policy import (
+from genericagent.core.loop import StepOutcome, exhaust
+from genericagent.core.handler import GenericAgentHandler
+from genericagent.core.permissions.policy import (
     ASK,
     DEFAULT_PERMISSION_MODE,
     FULL_ACCESS,
@@ -183,7 +183,7 @@ class HandlerModeGateTest(unittest.TestCase):
 
     def test_workflow_policy_takes_precedence_over_mode_policy(self):
         # workflow child policy must win when both happen to be set
-        from workflow_permissions import ToolPermissionPolicy
+        from genericagent.workflow.permissions import ToolPermissionPolicy
 
         handler = SpyHandler()
         handler.workflow_permission_policy = ToolPermissionPolicy()  # inherit -> allow
@@ -194,7 +194,7 @@ class HandlerModeGateTest(unittest.TestCase):
 
     def test_mid_session_switch_full_access_to_ask_requires_approval(self):
         """默认 full_access 可直接写；中途切到 ask 后写操作须 accept 才执行。"""
-        from permission_runtime import PermissionRuntime
+        from genericagent.core.permissions.runtime import PermissionRuntime
 
         handler = SpyHandler()
         # 与 agentmain 一致：先挂 full_access policy
@@ -251,8 +251,8 @@ class MidSessionSwitchViaAgentTest(unittest.TestCase):
         return SimpleNamespace(content="")
 
     def test_agent_set_permission_mode_switches_live_dispatch_gate(self):
-        from agentmain import GenericAgent
-        from permission_runtime import PermissionRuntime
+        from genericagent.core.app import GenericAgent
+        from genericagent.core.permissions.runtime import PermissionRuntime
 
         agent = GenericAgent.__new__(GenericAgent)
         agent.permission_mode = FULL_ACCESS
@@ -313,8 +313,8 @@ class MidSessionSwitchViaAgentTest(unittest.TestCase):
         import threading
         import time
 
-        from agentmain import GenericAgent
-        from permission_runtime import PermissionRuntime
+        from genericagent.core.app import GenericAgent
+        from genericagent.core.permissions.runtime import PermissionRuntime
 
         agent = GenericAgent.__new__(GenericAgent)
         agent.permission_mode = FULL_ACCESS

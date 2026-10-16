@@ -4,9 +4,9 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from subagent_wait import evaluate_wait_condition
-from subagent_manager import SubagentManager
-from subagent_state import atomic_write_json
+from genericagent.agents.wait import evaluate_wait_condition
+from genericagent.agents.manager import SubagentManager
+from genericagent.agents.state import atomic_write_json
 
 
 def fake_state(task_name, *, turn_status, process_status, result_status, result_ref=None):

@@ -17,12 +17,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import GenericAgent  # noqa: E402
+from genericagent.core.app import GenericAgent  # noqa: E402
 
-# 捕获真实 agentmain 模块对象。别的测试（如 test_tgapp_stream_segments）会把
-# sys.modules["agentmain"] 替换成 stub 且不还原，patch("agentmain.xxx") 会打到 stub、
-# 与 GenericAgent 实际读取的真实模块脱节。用类的 __module__ 拿到真实模块对象，
-# patch.object 直接作用其上，免疫 sys.modules 污染。
+# 捕获真实 canonical app 模块对象。别的测试（如 test_tgapp_stream_segments）会临时替换
+# sys.modules 中的依赖模块；用类的 __module__ 拿到真实模块对象，patch.object 直接作用其上，
+# 可避免 patch 目标与实际运行的模块对象脱节。
 _AGENTMAIN = sys.modules[GenericAgent.__module__]
 
 

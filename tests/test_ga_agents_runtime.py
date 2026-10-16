@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-from ga_agents_runtime import (
+from genericagent.core.project_instructions import (
     DEFAULT_GA_AGENTS_FILENAME,
     LOCAL_GA_AGENTS_FILENAME,
     build_ga_project_instructions,
@@ -172,7 +172,7 @@ class RepoPromptLayersTest(unittest.TestCase):
         self.assertNotIn("## 检索与信息获取", self.doc)
 
     def test_project_doc_fits_the_default_injection_budget(self):
-        from ga_agents_runtime import DEFAULT_PROJECT_DOC_MAX_BYTES
+        from genericagent.core.project_instructions import DEFAULT_PROJECT_DOC_MAX_BYTES
 
         self.assertLessEqual(len(self.doc.encode("utf-8")), DEFAULT_PROJECT_DOC_MAX_BYTES)
 
@@ -182,7 +182,7 @@ class RepoPromptLayersTest(unittest.TestCase):
         self.assertIn("避免与给外部 agent", self.doc)
 
     def test_workflow_child_prompt_includes_both_layers(self):
-        from workflow_child_agent import NativeGPTChildAgentRunner
+        from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
 
         prompt = NativeGPTChildAgentRunner()._build_system_prompt()
         self.assertIn("You are a workflow child agent", prompt)

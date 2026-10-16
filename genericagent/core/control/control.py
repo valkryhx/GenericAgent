@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from agent_runtime_models import AgentEventBatch, AgentRecord, AgentResultRecord
-from sensitive_redaction import redact_sensitive_text
+from genericagent.core.models import AgentEventBatch, AgentRecord, AgentResultRecord
+from genericagent.core.redaction import redact_sensitive_text
 
 
 @dataclass(frozen=True)

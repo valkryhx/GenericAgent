@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from subagent_state import read_json_or_none
-from workflow_permissions import (
+from genericagent.agents.state import read_json_or_none
+from genericagent.workflow.permissions import (
     EXPLICIT_APPROVAL,
     INHERIT_CURRENT_PERMISSIONS,
     READ_ONLY,
@@ -75,7 +75,7 @@ class SubagentPermissionPolicy:
                 tool_name=tool_name,
             )
         if self.profile == INHERIT_CURRENT_PERMISSIONS and self.parent_permission_mode:
-            from permission_policy import build_permission_mode_policy
+            from genericagent.core.permissions.policy import build_permission_mode_policy
 
             inherited = build_permission_mode_policy(self.parent_permission_mode).evaluate(tool_name, args or {})
             return PermissionDecision(

@@ -2,16 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workflow_models import WorkflowRun as _WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import (
+from genericagent.workflow.models import WorkflowRun as _WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import (
     AgentScheduler,
     FakeChildAgentRunner,
     SchedulerConfig,
     _normalize_parallel_batch,
 )
-from workflow_store import WorkflowStore
-from workflow_tool_profiles import declares_writes
+from genericagent.workflow.store import WorkflowStore
+from genericagent.workflow.tool_profiles import declares_writes
 
 
 _CC_META_PREFIX = "export const meta = { name: 'iso-test', description: 'implicit isolation test' }" + chr(10)

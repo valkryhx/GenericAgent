@@ -9,10 +9,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_loop import exhaust  # noqa: E402
-from ga import GenericAgentHandler  # noqa: E402
-from subagent_manager import SubagentManager, normalize_task_name  # noqa: E402
-from subagent_team import (  # noqa: E402
+from genericagent.core.loop import exhaust  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler  # noqa: E402
+from genericagent.agents.manager import SubagentManager, normalize_task_name  # noqa: E402
+from genericagent.agents.team import (  # noqa: E402
     LEAD_AGENT_NAME,
     SubagentTeam,
     is_reserved_name,

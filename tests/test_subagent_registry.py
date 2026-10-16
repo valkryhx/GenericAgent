@@ -11,8 +11,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_agent_path import AgentPath  # noqa: E402
-from subagent_registry import SubagentRegistry  # noqa: E402
+from genericagent.agents.agent_path import AgentPath  # noqa: E402
+from genericagent.agents.registry import SubagentRegistry  # noqa: E402
 
 
 class SubagentRegistryTest(unittest.TestCase):
@@ -78,7 +78,7 @@ class SubagentRegistryTest(unittest.TestCase):
 
         Codex refuses the same situation (`codex-rs/core/src/agent/registry.rs:247-250`).
         """
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             registry = SubagentRegistry(Path(td) / "temp" / "subagents", process_exists=lambda _pid: True)
@@ -102,7 +102,7 @@ class SubagentRegistryTest(unittest.TestCase):
 
     def test_reject_if_live_is_a_read_only_pre_check(self):
         """The manager needs the answer before it derives a task dir, so it must not write."""
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             registry = SubagentRegistry(Path(td) / "temp" / "subagents", process_exists=lambda _pid: True)
@@ -243,7 +243,7 @@ class SubagentTreeLimitsTest(unittest.TestCase):
         return registry.create_child(parent, name, Path(td) / "temp" / name, Path(td) / "temp" / name / "state.json")
 
     def test_depth_limit_rejects_a_grandchild_beyond_the_cap(self):
-        from subagent_registry import SubagentTreeLimitError
+        from genericagent.agents.registry import SubagentTreeLimitError
 
         with tempfile.TemporaryDirectory() as td:
             registry = self._registry(td, max_depth=2)
@@ -258,7 +258,7 @@ class SubagentTreeLimitsTest(unittest.TestCase):
             self.assertEqual(len(registry.list_agents()), 2)
 
     def test_active_agent_limit_rejects_one_too_many(self):
-        from subagent_registry import SubagentTreeLimitError
+        from genericagent.agents.registry import SubagentTreeLimitError
 
         with tempfile.TemporaryDirectory() as td:
             registry = self._registry(td, max_active_agents=2)
@@ -276,7 +276,7 @@ class SubagentTreeLimitsTest(unittest.TestCase):
             self.assertEqual(str(revived.agent_path), "/root/c")
 
     def test_limits_default_to_conservative_values_and_are_env_overridable(self):
-        from subagent_registry import resolve_tree_limits_from_env
+        from genericagent.agents.registry import resolve_tree_limits_from_env
 
         with tempfile.TemporaryDirectory() as td:
             registry = self._registry(td)
@@ -301,7 +301,7 @@ class NestedSpawnDepthTest(unittest.TestCase):
     """
 
     def _manager(self, td, **kwargs):
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         return SubagentManager(
             root_dir=td,
@@ -335,7 +335,7 @@ class NestedSpawnDepthTest(unittest.TestCase):
             self.assertIn("PATH", captured["env"], "child env must extend the parent env, not replace it")
 
     def test_manager_reads_its_own_identity_from_the_environment(self):
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         with tempfile.TemporaryDirectory() as td:
             with unittest.mock.patch.dict("os.environ", {"GA_SUBAGENT_AGENT_PATH": "/root/a/b"}):
@@ -413,7 +413,7 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
     def test_a_row_with_no_pid_yet_is_still_active(self):
         """spawn registers the child before Popen, so pid=None means "starting", not "dead"."""
         with tempfile.TemporaryDirectory() as td:
-            from subagent_registry import SubagentTreeLimitError
+            from genericagent.agents.registry import SubagentTreeLimitError
 
             registry = self._registry(td, max_active_agents=1, process_exists=lambda _pid: False)
             self._child(registry, "/root", "not_launched_yet", td)
@@ -429,7 +429,7 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
         correctness problem, so the probe failure is contained but the row is kept.
         """
         with tempfile.TemporaryDirectory() as td:
-            from subagent_registry import SubagentTreeLimitError
+            from genericagent.agents.registry import SubagentTreeLimitError
 
             def flaky(_pid):
                 raise OSError("access denied")
@@ -489,7 +489,7 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
         with rows that never got a pid at all, and every later spawn was refused.
         """
         with tempfile.TemporaryDirectory() as td:
-            from subagent_registry import SubagentTreeLimitError
+            from genericagent.agents.registry import SubagentTreeLimitError
 
             registry = self._registry(
                 td,
@@ -506,7 +506,7 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
 
     def test_a_pid_less_row_still_counts_as_starting_within_the_grace_window(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_registry import SubagentTreeLimitError
+            from genericagent.agents.registry import SubagentTreeLimitError
 
             registry = self._registry(td, max_active_agents=1, process_exists=lambda _pid: False, startup_grace_s=60.0)
             self._child(registry, "/root", "just_registered", td)
@@ -549,7 +549,7 @@ class StaleActiveAgentReapingTest(unittest.TestCase):
             self.assertEqual(registry.get(current.agent_path).status, "running")
 
     def test_manager_gives_the_registry_its_own_liveness_probe(self):
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         with tempfile.TemporaryDirectory() as td:
             probe = lambda _pid: False  # noqa: E731

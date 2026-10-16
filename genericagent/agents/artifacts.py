@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from subagent_state import atomic_write_json, now_iso, read_json_or_none, sha256_file
+from genericagent.agents.state import atomic_write_json, now_iso, read_json_or_none, sha256_file
 
 
 class SubagentArtifactStore:

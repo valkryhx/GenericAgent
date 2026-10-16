@@ -34,7 +34,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from subagent_state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
+from genericagent.agents.state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
 
 
 # CC `m0184` h = 2048
@@ -199,8 +199,8 @@ class SubagentSwarm:
     """The GA host singleton: one object owning the shared collaboration state."""
 
     def __init__(self, base_dir, *, policy=None, hold_buffer=None, max_outstanding=None, receipts=None):
-        from subagent_inbound_gate import HOLD_BUFFER, InboundGate
-        from subagent_receipts import DEFAULT_MAX_OUTSTANDING, SubagentSendLedger
+        from genericagent.agents.inbound_gate import HOLD_BUFFER, InboundGate
+        from genericagent.agents.receipts import DEFAULT_MAX_OUTSTANDING, SubagentSendLedger
 
         self.base_dir = Path(base_dir)
         self.receipts = receipts if receipts is not None else SubagentSendLedger(

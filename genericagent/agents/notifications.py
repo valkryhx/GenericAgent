@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from subagent_event_bus import SubagentEventBus
+from genericagent.agents.event_bus import SubagentEventBus
 
 
 # CC `m0280` SNe
@@ -76,7 +76,7 @@ def build_subagent_notifications_prompt(root_dir):
 
 def apply_result_budget(blocks):
     """Cap one result at 4000 and a whole drain at 16000 (CC m0300 xB / eTo)."""
-    from subagent_idle import DRAIN_BUDGET, RESULT_BUDGET, truncate_drain, truncate_result
+    from genericagent.agents.idle import DRAIN_BUDGET, RESULT_BUDGET, truncate_drain, truncate_result
 
     capped = [truncate_result(block, RESULT_BUDGET) for block in blocks]
     return truncate_drain(capped, DRAIN_BUDGET)

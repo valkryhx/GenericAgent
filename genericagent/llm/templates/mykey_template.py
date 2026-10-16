@@ -6,12 +6,12 @@
 #  │ 快速上手：只需 3 步                                                      │
 #  │  1. 把本文件复制为 mykey.py                                              │
 #  │  2. 在下面的"推荐最优配置"区域填入你的 apikey                              │
-#  │  3. 运行 python agentmain.py / python launch.pyw                        │
+#  │  3. 运行 python -m genericagent.core.app / python launch.pyw                        │
 #  └─────────────────────────────────────────────────────────────────────────┘
 #
 #  ────────── Session 类型速查 ──────────
 #
-#  agentmain.py 只扫描变量名同时包含 'api' / 'config' / 'cookie' 的条目，
+#  genericagent/core/app.py 只扫描变量名同时包含 'api' / 'config' / 'cookie' 的条目，
 #  根据变量名里的关键字决定实例化哪个 Session 类型：
 #
 #      变量名关键字                          → Session 类             → 工具协议
@@ -377,13 +377,13 @@ native_oai_config = {
 
 
 # ── 4b. Kimi / Moonshot (OAI 兼容) ──────────────────────────────────────────
-#  注意：Kimi/Moonshot 温度会被 llmcore.py 强制改为 1.0，写什么都会被覆盖。
+#  注意：Kimi/Moonshot 温度会被 genericagent/llm/core.py 强制改为 1.0，写什么都会被覆盖。
 # oai_config_kimi = {
 #     'name': 'kimi-k2',                             # /llms 显示名
 #     'apikey': 'sk-<your-moonshot-key>',            # Bearer 鉴权
 #     'apibase': 'https://api.moonshot.cn/v1',       # Moonshot OAI 端点
 #     'model': 'kimi-k2-turbo-preview',              # 名含 'kimi' 或 'moonshot' → temperature 被强制 1.0
-#     # 'temperature': 0.3,                          # ← 无效，会被 llmcore 覆盖为 1.0
+#     # 'temperature': 0.3,                          # ← 无效，会被 genericagent/llm/core.py 覆盖为 1.0
 #     # 'max_tokens': 8192,                          # int 默认 8192
 # }
 

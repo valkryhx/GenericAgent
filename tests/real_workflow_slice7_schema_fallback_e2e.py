@@ -15,12 +15,12 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from sensitive_redaction import sanitize  # noqa: E402
-from workflow_child_agent import NativeGPTChildAgentRunner  # noqa: E402
-from workflow_models import WorkflowRun  # noqa: E402
-from workflow_runtime import WorkflowRuntime  # noqa: E402
-from workflow_scheduler import SchedulerConfig  # noqa: E402
-from workflow_store import WorkflowStore  # noqa: E402
+from genericagent.core.redaction import sanitize  # noqa: E402
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner  # noqa: E402
+from genericagent.workflow.models import WorkflowRun  # noqa: E402
+from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
+from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
+from genericagent.workflow.store import WorkflowStore  # noqa: E402
 
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
@@ -66,7 +66,7 @@ return {
 def check_profile(summary: dict[str, Any]) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
+        from genericagent.llm.core import reload_mykeys
 
         cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
     profile = {

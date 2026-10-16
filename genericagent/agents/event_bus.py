@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
-from subagent_state import (
+from genericagent.agents.state import (
     append_jsonl_event,
     atomic_write_json,
     cross_process_lock,

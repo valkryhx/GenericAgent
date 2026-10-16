@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from subagent_state import now_iso
+from genericagent.agents.state import now_iso
 
 
 # CC `m0300` xB / eTo

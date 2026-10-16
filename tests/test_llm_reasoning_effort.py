@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import llmcore
+from genericagent.llm import core as llmcore
 
 
 class ReasoningEffortWireTests(unittest.TestCase):

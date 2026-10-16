@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import session_transcript
-from frontends import continue_cmd
+from genericagent.core import transcripts as session_transcript
+from frontends.terminal import continue_cmd
 
 
 def write_native_log(path, user_text="hello", assistant_text="hi"):

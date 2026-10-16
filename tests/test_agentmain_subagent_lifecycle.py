@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import _subagent_event, run_task_worker_loop, start_task_background  # noqa: E402
+from genericagent.core.app import _subagent_event, run_task_worker_loop, start_task_background  # noqa: E402
 
 
 class FakeAgent:
@@ -116,7 +116,7 @@ class PermissionTranscriptBackend:
 
 class TranscriptGenericAgent:
     def __init__(self, backend):
-        from agentmain import GenericAgent
+        from genericagent.core.app import GenericAgent
 
         self._agent = GenericAgent.__new__(GenericAgent)
         self._agent.lock = threading.Lock()
@@ -560,7 +560,7 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             def sleep_fn(_):
                 sleep_calls["count"] += 1
                 if sleep_calls["count"] == 1:
-                    from subagent_receipts import ProvenanceLedger
+                    from genericagent.agents.receipts import ProvenanceLedger
 
                     ProvenanceLedger(Path(td) / "temp" / "subagents").record(
                         author="/root",
@@ -619,7 +619,7 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             def sleep_fn(_):
                 sleep_calls["count"] += 1
                 if sleep_calls["count"] == 1:
-                    from subagent_receipts import ProvenanceLedger
+                    from genericagent.agents.receipts import ProvenanceLedger
 
                     ProvenanceLedger(Path(td) / "temp" / "subagents").record(
                         author="/root",
@@ -784,7 +784,7 @@ class InterruptDuringRunningTurnTest(unittest.TestCase):
     """
 
     def _agent(self, task_dir, client, permission_mode="read_only"):
-        from agentmain import GenericAgent
+        from genericagent.core.app import GenericAgent
 
         agent = GenericAgent.__new__(GenericAgent)
         agent.lock = threading.Lock()
@@ -875,7 +875,7 @@ class InterruptDuringRunningTurnTest(unittest.TestCase):
         saw_stop_signal = threading.Event()
 
         def blocking_tool(handler_self, args, response=None, **kwargs):
-            from agent_loop import StepOutcome
+            from genericagent.core.loop import StepOutcome
 
             entered.set()
             if handler_self.code_stop_signal.wait(20.0):
@@ -889,7 +889,7 @@ class InterruptDuringRunningTurnTest(unittest.TestCase):
             client = ToolThenDoneClient()
             agent = self._agent(task_dir, client, permission_mode="full_access")
 
-            from ga import GenericAgentHandler
+            from genericagent.core.handler import GenericAgentHandler
 
             with unittest.mock.patch.object(GenericAgentHandler, "do_code_run", blocking_tool):
                 threading.Thread(target=agent.run, daemon=True).start()
@@ -983,7 +983,7 @@ class ReplyWaitSchedulingTest(unittest.TestCase):
         Nothing in the spawn command line carries timing, so without an env path the split
         would only be reachable from tests.
         """
-        from agentmain import resolve_reply_wait_schedule_from_env
+        from genericagent.core.app import resolve_reply_wait_schedule_from_env
 
         with unittest.mock.patch.dict(
             "os.environ", {"GA_SUBAGENT_POLL_INTERVAL_S": "0.25", "GA_SUBAGENT_IDLE_TIMEOUT_S": "900"}

@@ -10,9 +10,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import _teammate_idle_hook  # noqa: E402
-from subagent_tasks import SubagentTaskStore  # noqa: E402
-from subagent_team import team_name_for  # noqa: E402
+from genericagent.core.app import _teammate_idle_hook  # noqa: E402
+from genericagent.agents.tasks import SubagentTaskStore  # noqa: E402
+from genericagent.agents.team import team_name_for  # noqa: E402
 
 
 class TeammateIdleHookTest(unittest.TestCase):

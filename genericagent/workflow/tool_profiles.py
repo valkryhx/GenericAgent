@@ -21,7 +21,7 @@ stale.
 
 from __future__ import annotations
 
-from subagent_capabilities import ORCHESTRATION_TOOLS
+from genericagent.agents.capabilities import ORCHESTRATION_TOOLS
 
 
 CAPABILITY_CLASSES = (

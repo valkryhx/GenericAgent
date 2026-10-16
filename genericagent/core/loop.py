@@ -1,6 +1,6 @@
 import json, re, os, queue, threading
 
-from tool_result_budget import budget_tool_result
+from genericagent.core.tool_results.budget import budget_tool_result
 from dataclasses import dataclass
 from typing import Any, Optional
 @dataclass

@@ -8,8 +8,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-import cache_stats  # noqa: E402
-from cache_stats import (  # noqa: E402
+from genericagent.core import cache_stats  # noqa: E402
+from genericagent.core.cache_stats import (  # noqa: E402
     CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS,
     CacheStats,
     NOISE_FLOOR_TOKENS,

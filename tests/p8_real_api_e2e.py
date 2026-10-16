@@ -20,13 +20,13 @@ FRONTENDS = REPO / "frontends"
 if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
-from ink_bridge import GenericAgentBridge
-from workflow_child_agent import AgentResult, NativeGPTChildAgentRunner
-from workflow_controller import WorkflowController
-from workflow_models import WorkflowRun
-from workflow_runtime import WorkflowRuntime
-from workflow_scheduler import SchedulerConfig
-from workflow_store import WorkflowStore
+from frontends.ink.bridge import GenericAgentBridge
+from genericagent.workflow.child_agent import AgentResult, NativeGPTChildAgentRunner
+from genericagent.workflow.controller import WorkflowController
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.runtime import WorkflowRuntime
+from genericagent.workflow.scheduler import SchedulerConfig
+from genericagent.workflow.store import WorkflowStore
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
 EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
@@ -502,7 +502,7 @@ def _resolve_profile_metadata(profile_name: str, *, config_path: str | None = No
     if not name:
         return None
     try:
-        from llm_config import find_llm_config, load_llm_config
+        from genericagent.llm.config import find_llm_config, load_llm_config
 
         path = config_path or find_llm_config(start_dir=str(REPO))
         if path:
@@ -524,7 +524,7 @@ def _resolve_profile_metadata(profile_name: str, *, config_path: str | None = No
     if config_path:
         return None
     try:
-        from llmcore import reload_mykeys
+        from genericagent.llm.core import reload_mykeys
 
         cfg = reload_mykeys()[0].get(name) or {}
     except Exception:
@@ -550,7 +550,7 @@ def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
         try:
-            from workflow_llm import binding_from_env
+            from genericagent.workflow.llm import binding_from_env
 
             binding = binding_from_env()
             profile = _resolve_profile_metadata(binding.profile_name)
@@ -695,7 +695,7 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
         timeout_seconds=360.0,
     )
     start = time.time()
-    with mock.patch("mcp_runtime.discover_mcp_tools_cached", return_value=[mcp_schema]), mock.patch("mcp_runtime.call_mcp_tool", return_value={"status": "success", "marker": "GA_P8_REAL_TOOL_MCP_MARKER", "input": "GA_P8_REAL_TOOL_MCP_INPUT"}) as call_mcp:
+    with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[mcp_schema]), mock.patch("genericagent.mcp.runtime.call_mcp_tool", return_value={"status": "success", "marker": "GA_P8_REAL_TOOL_MCP_MARKER", "input": "GA_P8_REAL_TOOL_MCP_INPUT"}) as call_mcp:
         outcome = runtime.run(run, args={"suite": "p8-real-api", "case": "native-tool-calling-file-skill-mcp", "markerPath": str(marker_path), "skillRoot": str(skill_root)})
     elapsed = time.time() - start
     loaded = store.load_run(run.run_id)
@@ -766,7 +766,7 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
 
 def _pick_real_mcp_diagnostic_tool() -> tuple[str | None, dict, dict]:
     try:
-        import mcp_runtime
+        from genericagent.mcp import runtime as mcp_runtime
         mcp_runtime.clear_mcp_cache()
         mcp_runtime.reset_mcp_manager()
         tools = mcp_runtime.discover_mcp_tools_cached(timeout=20)

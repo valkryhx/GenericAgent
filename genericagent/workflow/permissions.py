@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from workflow_models import DEFAULT_PERMISSION_PROFILE
+from genericagent.workflow.models import DEFAULT_PERMISSION_PROFILE
 
 
 INHERIT_CURRENT_PERMISSIONS = DEFAULT_PERMISSION_PROFILE

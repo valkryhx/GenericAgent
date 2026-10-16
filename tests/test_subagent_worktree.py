@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_worktree import _run_git, create_subagent_worktree, remove_subagent_worktree, summarize_subagent_worktree  # noqa: E402
+from genericagent.agents.worktree import _run_git, create_subagent_worktree, remove_subagent_worktree, summarize_subagent_worktree  # noqa: E402
 
 
 class SubagentWorktreeTest(unittest.TestCase):

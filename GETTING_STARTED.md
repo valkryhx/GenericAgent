@@ -54,7 +54,7 @@ python3 --version
 
 ### 创建配置文件
 
-进入项目文件夹，把 `mykey_template.py` 复制一份，重命名为 `mykey.py`。
+进入项目文件夹，把 `genericagent/llm/templates/mykey_template.py` 复制一份，重命名为 `mykey.py`。
 
 用任意文本编辑器打开 `mykey.py`，填入你的 API 信息。**选一种填就行**，不用的配置删掉或留着不管都行。
 
@@ -103,7 +103,7 @@ native_claude_config = {
 }
 ```
 
-> 💡 还支持 `native_oai_config`（OpenAI 标准工具调用）、`sider_cookie`（Sider）等，详见 `mykey_template.py` 中的注释。
+> 💡 还支持 `native_oai_config`（OpenAI 标准工具调用）、`sider_cookie`（Sider）等，详见 `genericagent/llm/templates/mykey_template.py` 中的注释。
 
 ### 关键规则
 
@@ -135,7 +135,7 @@ native_claude_config = {
 
 ```bash
 cd 你的解压路径
-python3 agentmain.py
+python -m genericagent.core.app
 ```
 
 这就是**命令行模式**，已经可以用了。你会看到一个输入提示符，直接打字发送任务即可。
@@ -146,7 +146,7 @@ python3 agentmain.py
 帮我在桌面创建一个 hello.txt，内容是 Hello World
 ```
 
-> 💡 Windows 上如果 `python3` 不识别，换成 `python agentmain.py`。
+> 💡 Windows 上如果 `python3` 不识别，换成 `python -m genericagent.core.app`。
 
 ---
 

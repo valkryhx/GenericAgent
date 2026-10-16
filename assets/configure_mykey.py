@@ -209,7 +209,7 @@ PLATFORMS = [
     {
         'id': 'none',
         'name': '不使用消息平台（纯终端 REPL）',
-        'desc': '直接用 python agentmain.py 在终端交互',
+        'desc': '直接用 python -m genericagent.core.app 在终端交互',
         'deps': [],
     },
     {
@@ -832,7 +832,7 @@ def generate_mykey(llm_cfgs, platform_configs):
 
     # 尾部
     lines.append("# ══════════════════════════════════════════════════════════════════════════════")
-    lines.append("#  配置完毕！运行: python agentmain.py  (终端 REPL)")
+    lines.append("#  配置完毕！运行: python -m genericagent.core.app  (终端 REPL)")
     if platform_configs:
         for pc in platform_configs:
             p = pc['platform']
@@ -950,7 +950,7 @@ def main():
     print(f"╚══════════════════════════════════════╝{C['reset']}")
     print()
     if llm_cfgs:
-        print(f"  {C['cyan']}  终端 REPL:{C['reset']}  python agentmain.py")
+        print(f"  {C['cyan']}  终端 REPL:{C['reset']}  python -m genericagent.core.app")
     if platform_configs:
         for i, pc in enumerate(platform_configs, 1):
             p = pc['platform']

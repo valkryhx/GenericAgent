@@ -14,9 +14,9 @@ def _configure_stdio_utf8():
 _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent_loop import BaseHandler, StepOutcome, json_default, try_call_generator
-from workflow_workspace import WorkspacePathError
-from subagent_wait import is_workflow_run_id
+from genericagent.core.loop import BaseHandler, StepOutcome, json_default, try_call_generator
+from genericagent.workflow.workspace import WorkspacePathError
+from genericagent.agents.wait import is_workflow_run_id
 script_dir = str(paths.PROJECT_ROOT)
 
 
@@ -162,11 +162,11 @@ def ask_user(question, candidates=None):
     return {"status": "INTERRUPT", "intent": "HUMAN_INTERVENTION",
         "data": {"question": question, "candidates": candidates or []}}
 
-import simphtml
+from genericagent.web import simphtml
 driver = None
 def first_init_driver():
     global driver
-    from TMWebDriver import TMWebDriver
+    from genericagent.web.tmwebdriver import TMWebDriver
     driver = TMWebDriver()
     for i in range(20):
         time.sleep(1)
@@ -247,7 +247,7 @@ def expand_file_refs(text, base_dir=None, workspace_root=None):
         workspace 之外的文件。"""
     workspace = None
     if workspace_root:
-        from workflow_workspace import WorkspacePathError, resolve_workspace_child
+        from genericagent.workflow.workspace import WorkspacePathError, resolve_workspace_child
         workspace = Path(workspace_root)
     pattern = r'\{\{file:(.+?):(\d+):(\d+)\}\}'
     def replacer(match):
@@ -418,7 +418,7 @@ class GenericAgentHandler(BaseHandler):
                     return ret
                 if decision.action == 'ask':
                     # 阻塞审批：accept 后继续执行工具；deny / 无 UI / stop → 不执行。
-                    from permission_runtime import ACCEPT, DENY
+                    from genericagent.core.permissions.runtime import ACCEPT, DENY
                     runtime = getattr(self, 'permission_runtime', None)
                     yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})\n"
                     user_decision = DENY
@@ -492,13 +492,13 @@ class GenericAgentHandler(BaseHandler):
 
         if not self.workspace_root:
             return None
-        from workflow_path_acl import check_tool_call
+        from genericagent.workflow.path_acl import check_tool_call
 
         decision = check_tool_call(self.workspace_root, tool_name, args or {})
         if not decision.allowed:
             callback = getattr(self, 'workflow_permission_event_callback', None)
             if callback:
-                from workflow_permissions import PermissionDecision, build_permission_event
+                from genericagent.workflow.permissions import PermissionDecision, build_permission_event
 
                 event = build_permission_event(
                     'tool_denied',
@@ -532,7 +532,7 @@ class GenericAgentHandler(BaseHandler):
         callback = getattr(self, 'workflow_permission_event_callback', None)
         if not callback:
             return
-        from workflow_permissions import build_permission_event
+        from genericagent.workflow.permissions import build_permission_event
         event = build_permission_event(
             event_type,
             context=getattr(self, 'workflow_permission_context', None),
@@ -545,7 +545,7 @@ class GenericAgentHandler(BaseHandler):
         call_args = {k: v for k, v in (args or {}).items() if not str(k).startswith('_')}
         yield f"[Action] Calling MCP tool: {tool_name}\n"
         try:
-            from mcp_runtime import call_mcp_tool, mcp_cancellation_scope
+            from genericagent.mcp.runtime import call_mcp_tool, mcp_cancellation_scope
             with mcp_cancellation_scope(self.code_stop_signal):
                 result = call_mcp_tool(tool_name, call_args)
         except Exception as e:
@@ -560,7 +560,7 @@ class GenericAgentHandler(BaseHandler):
     def _get_abs_path(self, path):
         if not path: return ""
         if self.workspace_root:
-            from workflow_workspace import resolve_workspace_child
+            from genericagent.workflow.workspace import resolve_workspace_child
             return str(resolve_workspace_child(path, Path(self.workspace_root)))
         return os.path.abspath(os.path.join(self.cwd, path))
 
@@ -754,7 +754,7 @@ class GenericAgentHandler(BaseHandler):
         skill_args = args.get("args", "")
         search_roots = args.get("search_roots")
         try:
-            from skills_runtime import load_skill_content
+            from genericagent.core.skills import load_skill_content
             result = load_skill_content(skill_name, search_roots=search_roots, args=skill_args)
         except KeyError as e:
             yield f"[Warn] {e}" + chr(10)
@@ -856,7 +856,7 @@ class GenericAgentHandler(BaseHandler):
         payload = {key: value for key, value in (args or {}).items() if not str(key).startswith("_")}
         schema = getattr(self, "workflow_output_schema", None)
         if isinstance(schema, dict) and schema:
-            from workflow_scheduler import validate_agent_payload_against_schema
+            from genericagent.workflow.scheduler import validate_agent_payload_against_schema
 
             issues = validate_agent_payload_against_schema(payload, schema)
             if issues:
@@ -877,7 +877,7 @@ class GenericAgentHandler(BaseHandler):
         Without it, a ``wf_<id>`` target falls through to the subagent state
         machine and is answered by a synthesised, never-terminal state (GA
         defect A). The resolver lives on the agent because the bridge binds it
-        there (``ink_bridge._bind_agent``); headless agents simply have none and
+        there (``frontends.ink.bridge._bind_agent``); headless agents simply have none and
         keep the subagent-only behaviour.
         """
         resolver = getattr(self.parent, "workflow_run_resolver", None)
@@ -905,7 +905,7 @@ class GenericAgentHandler(BaseHandler):
         if manager is not None:
             manager.team_name = self._team_name()
             return manager
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
 
         created = SubagentManager(root_dir=script_dir, python_executable=sys.executable)
         created.team_name = self._team_name()
@@ -985,7 +985,7 @@ class GenericAgentHandler(BaseHandler):
         role = None
         role_source_path = None
         if agent_type:
-            from subagent_roles import SubagentRoleRegistry, build_role_task_message
+            from genericagent.agents.roles import SubagentRoleRegistry, build_role_task_message
 
             manager_for_roles = self._get_subagent_manager()
             role_registry = SubagentRoleRegistry(manager_for_roles.root_dir)
@@ -1084,7 +1084,7 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         bound_task = None
         if team_mode:
-            from subagent_tasks import team_task_protocol
+            from genericagent.agents.tasks import team_task_protocol
 
             owner_path = "/root/" + str(task_name)
             bound_task = self._bind_team_task(manager, task_name, owner_path)
@@ -1207,8 +1207,8 @@ class GenericAgentHandler(BaseHandler):
         suffix only invites the model to read a deliberate refusal as a GA bug and retry with a
         mangled task_name. Every other exception keeps the traceback context.
         """
-        from subagent_manager import SubagentStartupError
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.manager import SubagentStartupError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         if isinstance(exc, SubagentNameConflictError):
             return {"status": "error", "reason": "name_conflict", "agent_path": getattr(exc, "agent_path", None), "msg": str(exc)}
@@ -1244,7 +1244,7 @@ class GenericAgentHandler(BaseHandler):
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def _team_name(self):
-        from subagent_team import team_name_for
+        from genericagent.agents.team import team_name_for
 
         return team_name_for(getattr(self.parent, "session_id", None))
 
@@ -1258,7 +1258,7 @@ class GenericAgentHandler(BaseHandler):
 
     def _get_task_store(self, list_id=None):
         manager = self._get_subagent_manager()
-        from subagent_tasks import SubagentTaskStore
+        from genericagent.agents.tasks import SubagentTaskStore
 
         return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name())
 
@@ -1337,7 +1337,7 @@ class GenericAgentHandler(BaseHandler):
 
     def do_team_status(self, args, response):
         '''查看当前隐式团队：team 名、lead、成员。'''
-        from subagent_team import SubagentTeam
+        from genericagent.agents.team import SubagentTeam
 
         manager = self._get_subagent_manager()
         team = SubagentTeam(manager.registry, manager.self_agent_path, team_name=self._team_name())
@@ -1507,7 +1507,7 @@ class GenericAgentHandler(BaseHandler):
             state = manager.read_agent(target)
             payload = self._subagent_state_payload(state, include_output=not bool(artifact_id), max_output_chars=max_output_chars)
             if artifact_id:
-                from subagent_artifacts import SubagentArtifactStore
+                from genericagent.agents.artifacts import SubagentArtifactStore
 
                 artifact = SubagentArtifactStore(state.artifact_dir).get(artifact_id)
                 artifact_path = artifact.get("path")
@@ -1537,7 +1537,7 @@ class GenericAgentHandler(BaseHandler):
                 parent_session_id = getattr(state, "parent_session_id", None)
                 run_id = getattr(state, "run_id", None)
                 if parent_session_id and run_id:
-                    from subagent_transcript import SubagentTranscriptStore
+                    from genericagent.agents.transcript import SubagentTranscriptStore
 
                     transcript_store = SubagentTranscriptStore(manager.temp_dir / "sessions")
                     if include_transcript_replay:

@@ -7,19 +7,19 @@ from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 from genericagent import paths
 
-from subagent_agent_path import AgentPath
-from subagent_artifacts import SubagentArtifactStore
-from subagent_event_bus import SubagentEventBus
-from subagent_mailbox import QUEUE_ONLY, TRIGGER_TURN, SubagentMailbox
-from subagent_permissions import INHERIT_CURRENT_PERMISSIONS, normalize_permission_metadata
-from subagent_registry import SubagentRegistry, _default_process_identity
-from subagent_submissions import SubagentSubmissionLog
-from subagent_transcript import SubagentTranscriptStore
-from subagent_state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
-from subagent_receipts import ProvenanceLedger, SubagentSendLedger
-from subagent_idle import build_idle_notification, sent_lead_dm_since_last_turn
-from subagent_swarm import get_swarm
-from subagent_wait import (
+from genericagent.agents.agent_path import AgentPath
+from genericagent.agents.artifacts import SubagentArtifactStore
+from genericagent.agents.event_bus import SubagentEventBus
+from genericagent.agents.mailbox import QUEUE_ONLY, TRIGGER_TURN, SubagentMailbox
+from genericagent.agents.permissions import INHERIT_CURRENT_PERMISSIONS, normalize_permission_metadata
+from genericagent.agents.registry import SubagentRegistry, _default_process_identity
+from genericagent.agents.submissions import SubagentSubmissionLog
+from genericagent.agents.transcript import SubagentTranscriptStore
+from genericagent.agents.state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
+from genericagent.agents.receipts import ProvenanceLedger, SubagentSendLedger
+from genericagent.agents.idle import build_idle_notification, sent_lead_dm_since_last_turn
+from genericagent.agents.swarm import get_swarm
+from genericagent.agents.wait import (
     evaluate_wait_condition,
     is_workflow_run_id,
     workflow_run_is_terminal,
@@ -47,7 +47,7 @@ def normalize_task_name(target):
         target = target.rstrip("/").split("/")[-1]
     if not target.replace("_", "").isalnum() or target.lower() != target:
         raise ValueError("task_name must contain lowercase letters, digits, and underscores")
-    from subagent_team import is_reserved_name
+    from genericagent.agents.team import is_reserved_name
 
     if is_reserved_name(target):
         raise ValueError("task_name %r is reserved" % target)
@@ -250,7 +250,7 @@ class SubagentManager:
     def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None):
         self.root_dir = Path(root_dir or paths.PROJECT_ROOT)
         self.temp_dir = self.root_dir / "temp"
-        from subagent_registry import resolve_tree_limits_from_env
+        from genericagent.agents.registry import resolve_tree_limits_from_env
 
         self.registry = SubagentRegistry(
             self.temp_dir / "subagents",
@@ -304,7 +304,7 @@ class SubagentManager:
             return None
 
         def factory(run_id, task_name):
-            from subagent_realtime_ipc import SubagentRealtimeChannel, default_channel_address, new_channel_authkey
+            from genericagent.agents.realtime_ipc import SubagentRealtimeChannel, default_channel_address, new_channel_authkey
 
             channel_dir = self.temp_dir / "subagents" / "channels"
             # Per-run key, because the address is derived from a sequential run_id and is
@@ -314,7 +314,7 @@ class SubagentManager:
         return factory
 
     def _open_realtime_ipc(self, ipc_mode, *, run_id, task_name, agent_path):
-        from subagent_ipc import normalize_ipc_metadata
+        from genericagent.agents.ipc import normalize_ipc_metadata
 
         factory = self.realtime_channel_factory
         channel_factory = (lambda: factory(run_id, task_name)) if factory is not None else None
@@ -330,7 +330,7 @@ class SubagentManager:
         authkey = getattr(channel, "authkey", None) if channel is not None else None
         if not authkey:
             return None
-        from subagent_realtime_ipc import write_channel_authkey
+        from genericagent.agents.realtime_ipc import write_channel_authkey
 
         try:
             return write_channel_authkey(task_dir, authkey)
@@ -346,7 +346,7 @@ class SubagentManager:
     def _close_realtime_channel(self, agent_path, task_dir=None):
         channel = self._realtime_channels.pop(str(agent_path or ""), None)
         if task_dir is not None:
-            from subagent_realtime_ipc import remove_channel_authkey
+            from genericagent.agents.realtime_ipc import remove_channel_authkey
 
             remove_channel_authkey(task_dir)
         if channel is None:
@@ -357,13 +357,13 @@ class SubagentManager:
             pass
 
     def _child_popen_kwargs(self, worktree_path, stdout, stderr, agent_path):
-        """Launch kwargs for a child agentmain.py process.
+        """Launch kwargs for a child genericagent.core.app process.
 
         The child runs the same code against the same registry, so it has to be told which
         agent it is; otherwise its own spawns would register under /root and the depth guard
         would see a flat tree.
         """
-        from subagent_team import TEAM_NAME_ENV
+        from genericagent.agents.team import TEAM_NAME_ENV
 
         env = {**os.environ, self.AGENT_PATH_ENV: str(agent_path)}
         # A child gets its OWN session id (session_transcript.ensure_agent_session), so it
@@ -380,7 +380,7 @@ class SubagentManager:
             "stderr": stderr,
             # The Ink bridge's main thread owns a blocking read on its stdin pipe.  Letting a
             # child inherit that handle can leave Windows' console/pipe startup suspended until
-            # the parent read completes, before agentmain can emit process_entry.
+            # the parent read completes, before the child app can emit process_entry.
             "stdin": subprocess.DEVNULL,
             "env": env,
         }
@@ -552,7 +552,7 @@ class SubagentManager:
         A refused spawn that leaves no trace is indistinguishable from one that was never
         attempted, which is exactly what makes runaway-spawn incidents hard to reconstruct.
         """
-        from subagent_registry import SubagentNameConflictError, SubagentTreeLimitError
+        from genericagent.agents.registry import SubagentNameConflictError, SubagentTreeLimitError
 
         attempts = 0
         while True:
@@ -833,7 +833,7 @@ class SubagentManager:
         task_dir = Path(registry_entry.task_dir)
         state_path = Path(registry_entry.state_path)
         if isolation == "worktree" and not worktree_path:
-            from subagent_worktree import create_subagent_worktree
+            from genericagent.agents.worktree import create_subagent_worktree
             creator = self.worktree_creator or create_subagent_worktree
             try:
                 worktree = creator(self.root_dir, self.temp_dir / "subagents" / "worktrees", registry_entry.run_id)
@@ -983,10 +983,10 @@ class SubagentManager:
                 )
             except Exception:
                 pass
-        agentmain_path = Path(worktree_path) / "agentmain.py" if isolation == "worktree" and worktree_path else self.repo_dir / "agentmain.py"
         cmd = [
             self.python_executable,
-            str(agentmain_path),
+            "-m",
+            "genericagent.core.app",
             "--task",
             task_name,
             "--nobg",
@@ -1233,10 +1233,10 @@ class SubagentManager:
         parent_permission_mode = raw.get("parent_permission_mode") if raw.get("parent_permission_mode") is not None else previous.parent_permission_mode
         isolation = raw.get("isolation") or previous.isolation
         worktree_path = raw.get("worktree_path") or previous.worktree_path
-        agentmain_path = Path(worktree_path) / "agentmain.py" if isolation == "worktree" and worktree_path else self.repo_dir / "agentmain.py"
         cmd = [
             self.python_executable,
-            str(agentmain_path),
+            "-m",
+            "genericagent.core.app",
             "--task",
             previous.task_name,
             "--nobg",
@@ -1396,7 +1396,7 @@ class SubagentManager:
         """
         if not self._is_live_state(previous):
             return
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         message = (
             f"agent path `{previous.agent_path}` is still live "
@@ -1909,7 +1909,7 @@ class SubagentManager:
         if raw.get("isolation") == "worktree" and raw.get("worktree_path"):
             raw["worktree_summary"] = self._summarize_worktree(raw.get("worktree_path"))
             if cleanup_worktree:
-                from subagent_worktree import remove_subagent_worktree
+                from genericagent.agents.worktree import remove_subagent_worktree
 
                 raw["worktree_cleanup"] = remove_subagent_worktree(self.root_dir, raw.get("worktree_path"), runner=self.worktree_runner)
         atomic_write_json(task_dir / "state.json", raw)
@@ -2062,7 +2062,7 @@ class SubagentManager:
         return paths
 
     def task_store(self, list_id=None):
-        from subagent_tasks import SubagentTaskStore
+        from genericagent.agents.tasks import SubagentTaskStore
 
         return SubagentTaskStore(self.root_dir, list_id=list_id or self.team_name)
 
@@ -2401,7 +2401,7 @@ class SubagentManager:
         """
         base = self._task_name_from_target(task_name)
         parent = str(self.self_agent_path).rstrip("/")
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         try:
             self.registry.reject_if_live(f"{parent}/{base}")
@@ -2660,7 +2660,7 @@ class SubagentManager:
 
     def _summarize_worktree(self, worktree_path):
         try:
-            from subagent_worktree import summarize_subagent_worktree
+            from genericagent.agents.worktree import summarize_subagent_worktree
 
             return summarize_subagent_worktree(worktree_path, runner=self.worktree_runner)
         except Exception as e:

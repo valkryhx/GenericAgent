@@ -10,9 +10,9 @@ from pathlib import Path
 from genericagent import paths
 from typing import Protocol
 
-from sensitive_redaction import sanitize, redact_sensitive_text
-from workflow_models import AgentResult, DEFAULT_PERMISSION_PROFILE, DEFAULT_PERMISSION_POLICY_VERSION
-from workflow_tool_profiles import (
+from genericagent.core.redaction import sanitize, redact_sensitive_text
+from genericagent.workflow.models import AgentResult, DEFAULT_PERMISSION_PROFILE, DEFAULT_PERMISSION_POLICY_VERSION
+from genericagent.workflow.tool_profiles import (
     capability_coverage,
     effective_tool_profile,
     filter_schema_for_denied,
@@ -775,7 +775,7 @@ class NativeGPTChildAgentRunner:
             except TypeError:
                 return self.session_factory(), False, {"llmProfile": str(factory_key), "llmModel": "", "llmSource": "session_factory"}
 
-        from workflow_llm import (
+        from genericagent.workflow.llm import (
             binding_from_env,
             binding_from_profile,
             make_session,
@@ -875,8 +875,8 @@ class NativeGPTChildAgentRunner:
             state["done"] = True
 
     def _run_tool_job(self, job, state: dict, client, prompt: str, transcript_events: list[dict], profile: str, version: str):
-        from agent_loop import agent_runner_loop
-        from mcp_runtime import mcp_cancellation_scope
+        from genericagent.core.loop import agent_runner_loop
+        from genericagent.mcp.runtime import mcp_cancellation_scope
         handler = self._build_handler(job, transcript_events, profile, version)
         live = LiveJobTelemetry(
             self._telemetry_sink,
@@ -904,7 +904,7 @@ class NativeGPTChildAgentRunner:
         # file_write, file_patch, code_run, or a tool added later -- changes the
         # filesystem, so the before/after difference is the artifact ground truth
         # without hard-coding which tools are "writers".
-        from workflow_workspace import diff_workspace, snapshot_workspace
+        from genericagent.workflow.workspace import diff_workspace, snapshot_workspace
 
         workspace_root = self._child_cwd(job)
         workspace_before = snapshot_workspace(workspace_root)
@@ -957,8 +957,8 @@ class NativeGPTChildAgentRunner:
         live.update(handler, force=force)
 
     def _build_handler(self, job, transcript_events: list[dict], profile: str, version: str):
-        from ga import GenericAgentHandler
-        from workflow_permissions import ToolPermissionPolicy
+        from genericagent.core.handler import GenericAgentHandler
+        from genericagent.workflow.permissions import ToolPermissionPolicy
         parent = SimpleNamespace(
             task_dir=self._child_cwd(job),
             verbose=False,
@@ -982,7 +982,7 @@ class NativeGPTChildAgentRunner:
         # scopes this child's subprocess commands to these declared forms.
         bash_clamp = (job.metadata.get("options") or {}).get("bashCommandClamp")
         if isinstance(bash_clamp, list):
-            from workflow_workspace_guard import normalize_bash_command_clamp
+            from genericagent.workflow.workspace_guard import normalize_bash_command_clamp
 
             handler.workflow_bash_clamp = normalize_bash_command_clamp(bash_clamp)
 
@@ -1069,7 +1069,7 @@ class NativeGPTChildAgentRunner:
             tools = json.loads(json.dumps(tools, ensure_ascii=False).replace("powershell", "bash"))
         mcp_discovery = {"status": "ok", "injectedToolCount": 0}
         try:
-            from mcp_runtime import discover_mcp_tools_cached
+            from genericagent.mcp.runtime import discover_mcp_tools_cached
             discovered = discover_mcp_tools_cached()
             before = {_tool_name(tool) for tool in tools}
             tools = _merge_tools_by_name(tools, discovered)
@@ -1164,14 +1164,14 @@ class NativeGPTChildAgentRunner:
         script_dir = str(paths.PROJECT_ROOT)
         identity = self.system_prompt or "You are a workflow child agent. Complete only this assigned job and return a concise result."
         try:
-            from ga_agents_runtime import build_ga_project_instructions, load_base_system_prompt
+            from genericagent.core.project_instructions import build_ga_project_instructions, load_base_system_prompt
             base_prompt = load_base_system_prompt(script_dir, "_en" if os.environ.get("GA_LANG") == "en" else "")
             project_prompt = build_ga_project_instructions(script_dir, os.getcwd())
         except Exception:
             base_prompt = ""
             project_prompt = ""
         try:
-            from skills_runtime import build_skill_prompt
+            from genericagent.core.skills import build_skill_prompt
             skill_prompt = build_skill_prompt()
         except Exception:
             skill_prompt = ""
@@ -1265,7 +1265,7 @@ class NativeGPTChildAgentRunner:
         shared = self._shared_workspace(job)
         if not shared:
             return
-        from workflow_workspace import HOST_OWNED_WORKSPACE_DIRS
+        from genericagent.workflow.workspace import HOST_OWNED_WORKSPACE_DIRS
 
         import shutil
 

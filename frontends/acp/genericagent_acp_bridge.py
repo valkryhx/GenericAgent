@@ -7,10 +7,10 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-# Must run BEFORE importing agentmain — it reconfigures stdout at import time,
+# Must run BEFORE importing genericagent.core.app — it reconfigures stdout at import time,
 # and its submodules may print() during init.  We capture the raw binary stdout
 # for ACP JSON-RPC, then redirect the text-mode stdout to stderr so any stray
-# prints from agentmain/llmcore don't pollute the ACP channel.
+# prints from the app/LLM core don't pollute the ACP channel.
 if sys.platform == "win32":
     import msvcrt
     _stdout_fd = os.dup(sys.__stdout__.fileno())
@@ -30,7 +30,7 @@ else:
 
 
 class _StdoutToStderrRouter(io.TextIOBase):
-    """Redirect text-mode stdout to stderr so agentmain prints don't leak."""
+    """Redirect text-mode stdout to stderr so app prints don't leak."""
     def writable(self): return True
     def write(self, s):
         if s:

@@ -11,8 +11,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-import subagent_state  # noqa: E402
-from subagent_state import append_jsonl_event, atomic_write_json, atomic_write_text, read_json_or_none, sha256_file  # noqa: E402
+from genericagent.agents import state as subagent_state  # noqa: E402
+from genericagent.agents.state import append_jsonl_event, atomic_write_json, atomic_write_text, read_json_or_none, sha256_file  # noqa: E402
 
 
 class SubagentStateTest(unittest.TestCase):

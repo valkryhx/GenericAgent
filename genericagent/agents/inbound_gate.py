@@ -28,7 +28,7 @@ import json
 import os
 from pathlib import Path
 
-from subagent_state import cross_process_lock, now_iso
+from genericagent.agents.state import cross_process_lock, now_iso
 
 
 # CC `m1356` f = {accept:0, hold:1, refuse:2}

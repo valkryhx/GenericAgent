@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_receipts import (  # noqa: E402
+from genericagent.agents.receipts import (  # noqa: E402
     ProvenanceLedger,
     SubagentSendLedger,
     build_roster,

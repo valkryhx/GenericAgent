@@ -15,8 +15,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_state import append_jsonl_event, atomic_write_json, read_json_or_none  # noqa: E402
-from subagent_manager import SubagentManager  # noqa: E402
+from genericagent.agents.state import append_jsonl_event, atomic_write_json, read_json_or_none  # noqa: E402
+from genericagent.agents.manager import SubagentManager  # noqa: E402
 
 
 class SubagentManagerReadTest(unittest.TestCase):
@@ -818,7 +818,7 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             self.assertTrue(handle.worktree_path.endswith(handle.run_id))
             self.assertEqual(calls["worktree"][0][0], Path(td))
             cmd, kwargs = calls["popen"][0]
-            self.assertEqual(Path(cmd[1]), Path(handle.worktree_path) / "agentmain.py")
+            self.assertEqual(cmd[1:3], ["-m", "genericagent.core.app"])
             self.assertEqual(Path(kwargs["cwd"]), Path(handle.worktree_path))
             self.assertIn("--task_root", cmd)
             self.assertIn(str(Path(td)), cmd)
@@ -1024,7 +1024,7 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             output_path.write_text("old answer\n\n[ROUND END]\n", encoding="utf-8")
             (task_dir / "_stop").write_text("old stop", encoding="utf-8")
             (task_dir / "reply.txt").write_text("old reply", encoding="utf-8")
-            from subagent_artifacts import SubagentArtifactStore
+            from genericagent.agents.artifacts import SubagentArtifactStore
 
             run_dir = Path(td) / "temp" / "subagents" / "runs" / "run_resume_child"
             old_artifact = SubagentArtifactStore(run_dir).record_final_output(output_path, round_no=0)
@@ -1055,7 +1055,7 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
                     "ipc_fallback_reason": None,
                 },
             )
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             store = SubagentTranscriptStore(Path(td) / "temp" / "sessions")
             store.write_metadata(session_id="session_resume", run_id="run_resume_child", agent_path="/root/resume_child")
@@ -1403,9 +1403,9 @@ class WaitAgentsWriteAmplificationTest(unittest.TestCase):
 
     def _count_writes(self):
         """Count atomic_write_json across every module the wait loop can reach."""
-        import subagent_manager
-        import subagent_registry
-        import subagent_state
+        from genericagent.agents import manager as subagent_manager
+        from genericagent.agents import registry as subagent_registry
+        from genericagent.agents import state as subagent_state
 
         counts = []
         patches = []
@@ -1702,7 +1702,7 @@ class SubmissionIdempotencyTest(unittest.TestCase):
         )
 
     def _mailbox_rows(self, td, name="worker"):
-        from subagent_mailbox import SubagentMailbox
+        from genericagent.agents.mailbox import SubagentMailbox
 
         return SubagentMailbox(Path(td) / "temp" / name / "mailbox.jsonl")._read_rows()
 
@@ -1873,7 +1873,7 @@ class MulticastMessageTest(unittest.TestCase):
         )
 
     def _rows(self, td, name):
-        from subagent_mailbox import SubagentMailbox
+        from genericagent.agents.mailbox import SubagentMailbox
 
         return SubagentMailbox(Path(td) / "temp" / name / "mailbox.jsonl")._read_rows()
 
@@ -2024,7 +2024,7 @@ class SpawnNameConflictTest(unittest.TestCase):
         )
 
     def test_spawning_over_a_live_agent_is_refused_instead_of_silently_renamed(self):
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             spawned = []
@@ -2040,7 +2040,7 @@ class SpawnNameConflictTest(unittest.TestCase):
 
     def test_the_refusal_tells_the_model_what_to_do_instead(self):
         """A bare "already exists" makes the model retry with a mangled name; it needs the verbs."""
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             manager = self._manager(td, alive_pids="all")
@@ -2055,7 +2055,7 @@ class SpawnNameConflictTest(unittest.TestCase):
 
     def test_the_refusal_is_recorded_as_a_spawn_rejected_event(self):
         """Same reason the tree-limit refusal is recorded: an unrecorded refusal is invisible."""
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             manager = self._manager(td, alive_pids="all")
@@ -2174,7 +2174,7 @@ class ResumeAgentGuardTest(unittest.TestCase):
         return manager
 
     def test_resuming_a_still_running_agent_is_refused_instead_of_orphaning_its_process(self):
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.registry import SubagentNameConflictError
 
         with tempfile.TemporaryDirectory() as td:
             launched = []
@@ -2259,7 +2259,7 @@ class ResidencyEvictionTest(unittest.TestCase):
             process_exists=process_exists or (lambda pid: pid in set(alive_pids) or alive_pids == "all"),
         )
         manager.STARTUP_HANDSHAKE_TIMEOUT_S = 0
-        from subagent_registry import resolve_tree_limits_from_env
+        from genericagent.agents.registry import resolve_tree_limits_from_env
         manager.registry.max_active_agents = 2
         return manager
 
@@ -2291,7 +2291,7 @@ class ResidencyEvictionTest(unittest.TestCase):
 
     def test_an_agent_mid_turn_is_never_evicted_to_admit_a_sibling(self):
         """Only idle-and-finished agents qualify; sacrificing a working agent would lose work."""
-        from subagent_registry import SubagentTreeLimitError
+        from genericagent.agents.registry import SubagentTreeLimitError
 
         with tempfile.TemporaryDirectory() as td:
             manager = self._manager(td)
@@ -2505,7 +2505,7 @@ class LeadMessageInboundGateTest(unittest.TestCase):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def test_default_policy_accepts_and_receipts(self):
-        from subagent_swarm import reset_swarm_cache
+        from genericagent.agents.swarm import reset_swarm_cache
 
         with tempfile.TemporaryDirectory() as td:
             reset_swarm_cache()
@@ -2519,7 +2519,7 @@ class LeadMessageInboundGateTest(unittest.TestCase):
             self.assertEqual(manager.swarm.inbound.receipts_log()[-1]["state"], "accepted")
 
     def test_hold_policy_parks_the_message(self):
-        from subagent_swarm import reset_swarm_cache
+        from genericagent.agents.swarm import reset_swarm_cache
 
         with tempfile.TemporaryDirectory() as td:
             os.environ["GA_CROSS_SESSION_INBOUND"] = "hold"

@@ -3,9 +3,9 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
-from agent_runtime_models import make_process_execution_id
-from subagent_artifacts import SubagentArtifactStore
-from subagent_manager import AgentState
+from genericagent.core.models import make_process_execution_id
+from genericagent.agents.artifacts import SubagentArtifactStore
+from genericagent.agents.manager import AgentState
 
 
 class FakeEventBus:
@@ -132,7 +132,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
 
     def test_completed_process_turn_maps_to_succeeded_but_keeps_waiting_process_status(self):
         state, _artifact = self.make_state(turn_status="completed", process_status="waiting_reply")
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         record = ProcessSubagentAdapter(FakeManager([state], temp_dir=self.tmp.name)).list_records(include_terminal=True)[0]
         self.assertEqual("succeeded", record.status)
@@ -148,7 +148,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
             permission_profile="read_only",
             worktree_path="C:/ga/worktrees/run_0007",
         )
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         record = ProcessSubagentAdapter(FakeManager([state], temp_dir=self.tmp.name)).list_records(include_terminal=True)[0]
         self.assertEqual("run_0007", record.run_id)
@@ -159,7 +159,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
 
     def test_process_capabilities_include_only_real_process_actions(self):
         state, _artifact = self.make_state()
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         record = ProcessSubagentAdapter(FakeManager([state], temp_dir=self.tmp.name)).list_records(include_terminal=True)[0]
         for action in ("read", "events", "result", "artifacts", "interrupt", "close", "message", "followup", "resume", "attach", "detach"):
@@ -180,7 +180,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
             "task_name": "demo",
         }
         manager = FakeManager([state], events=[raw], temp_dir=self.tmp.name)
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         events = ProcessSubagentAdapter(manager).events_since({"process": 11})
         self.assertEqual([12], [event.source_sequence for event in events.events])
@@ -190,7 +190,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
     def test_process_result_is_reference_only_by_default(self):
         state, _artifact = self.make_state(run_id="run_0009")
         manager = FakeManager([state], temp_dir=self.tmp.name)
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         result = ProcessSubagentAdapter(manager).read_result(make_process_execution_id(state.run_id, state.agent_path))
         self.assertEqual({}, result.payload)
@@ -206,7 +206,7 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
                 {"agent_path": child.agent_path, "task_name": child.task_name},
             ]
         )
-        from agent_control_process import ProcessSubagentAdapter
+        from genericagent.core.control.process import ProcessSubagentAdapter
 
         adapter = ProcessSubagentAdapter(manager)
         self.assertEqual(

@@ -4,8 +4,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from workflow_check_adapters import run_check
-from workflow_models import WorkflowJob, WorkflowRun
+from genericagent.workflow.check_adapters import run_check
+from genericagent.workflow.models import WorkflowJob, WorkflowRun
 
 
 class WorkflowCheckAdapterTest(unittest.TestCase):
@@ -219,7 +219,7 @@ class HostAuthoredEvidenceTest(unittest.TestCase):
     """
 
     def test_host_writes_evidence_for_a_read_only_writer(self):
-        from workflow_runtime import write_contract_evidence_if_needed
+        from genericagent.workflow.runtime import write_contract_evidence_if_needed
 
         with tempfile.TemporaryDirectory() as tmp:
             run = WorkflowRun(
@@ -260,7 +260,7 @@ class HostAuthoredEvidenceTest(unittest.TestCase):
             self.assertEqual("Verifier", payload["evidenceAuthor"])
 
     def test_host_does_not_write_for_a_mutating_writer(self):
-        from workflow_runtime import write_contract_evidence_if_needed
+        from genericagent.workflow.runtime import write_contract_evidence_if_needed
 
         with tempfile.TemporaryDirectory() as tmp:
             run = WorkflowRun(
@@ -290,7 +290,7 @@ class HostAuthoredEvidenceTest(unittest.TestCase):
             self.assertFalse((Path(tmp) / "report.html").exists())
 
     def test_host_does_not_overwrite_an_artifact_the_writer_already_produced(self):
-        from workflow_runtime import write_contract_evidence_if_needed
+        from genericagent.workflow.runtime import write_contract_evidence_if_needed
 
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "evidence" / "verification_result.json"

@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from subagent_agent_path import AgentPath
-from subagent_state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
+from genericagent.agents.agent_path import AgentPath
+from genericagent.agents.state import atomic_write_json, cross_process_lock, now_iso, read_json_or_none
 
 
 DEFAULT_MAX_DEPTH = 3
@@ -153,7 +153,7 @@ class SubagentRegistry:
         self.path = self.registry_dir / "registry.json"
         # Every read-modify-write on registry.json goes through this lock. One shared
         # registry.json backs the whole agent tree, and each child that spawns children of
-        # its own builds a SubagentManager (agentmain.py) and thus a second writer, so the
+        # its own builds a SubagentManager (genericagent/core/app.py) and thus a second writer, so the
         # unlocked _load/_save cycle lost rows and handed the same run_id to several agents.
         self.lock_path = self.registry_dir / "registry.json.lock"
         self.max_depth = int(max_depth)

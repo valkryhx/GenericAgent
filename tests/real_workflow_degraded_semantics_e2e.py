@@ -30,13 +30,13 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from sensitive_redaction import sanitize  # noqa: E402
-from workflow_llm import binding_from_profile  # noqa: E402
-from workflow_models import WorkflowRun  # noqa: E402
-from workflow_child_agent import FakeChildAgentRunner, NativeGPTChildAgentRunner  # noqa: E402
-from workflow_runtime import WorkflowRuntime  # noqa: E402
-from workflow_scheduler import SchedulerConfig  # noqa: E402
-from workflow_store import WorkflowStore  # noqa: E402
+from genericagent.core.redaction import sanitize  # noqa: E402
+from genericagent.workflow.llm import binding_from_profile  # noqa: E402
+from genericagent.workflow.models import WorkflowRun  # noqa: E402
+from genericagent.workflow.child_agent import FakeChildAgentRunner, NativeGPTChildAgentRunner  # noqa: E402
+from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
+from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
+from genericagent.workflow.store import WorkflowStore  # noqa: E402
 
 PROFILE = os.environ.get("GA_WORKFLOW_LLM_PROFILE") or "default"
 OPT_IN = os.environ.get("GA_RUN_REAL_WORKFLOW_DEGRADED_E2E") == "1"

@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from agent_runtime_models import (
+from genericagent.core.models import (
     AgentCapabilities,
     AgentEvent,
     AgentEventBatch,
@@ -15,15 +15,15 @@ from agent_runtime_models import (
     make_workflow_run_execution_id,
     make_workflow_source_cursor,
 )
-from sensitive_redaction import redact_sensitive_text, sanitize
-from workflow_models import (
+from genericagent.core.redaction import redact_sensitive_text, sanitize
+from genericagent.workflow.models import (
     WorkflowEvent,
     WorkflowJob,
     WorkflowRun,
     project_workflow_execution_outcome,
     summarize_workflow_jobs,
 )
-from workflow_store import WorkflowStore, preview_text
+from genericagent.workflow.store import WorkflowStore, preview_text
 
 
 _TERMINAL_STATUSES = frozenset(
@@ -179,7 +179,7 @@ class WorkflowChildAdapter:
         )
 
     def control(self, execution_id: str, request):
-        from agent_control import ControlResult
+        from genericagent.core.control.control import ControlResult
 
         record = self.get_record(execution_id)
         if record is None:

@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_submissions import SubagentSubmissionLog  # noqa: E402
+from genericagent.agents.submissions import SubagentSubmissionLog  # noqa: E402
 
 
 class SubmissionLogTest(unittest.TestCase):

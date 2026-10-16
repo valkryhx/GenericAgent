@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
-from sensitive_redaction import sanitize  # noqa: E402
+from genericagent.core.redaction import sanitize  # noqa: E402
 from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
@@ -63,7 +63,7 @@ class FakeAgent:
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from llmcore import reload_mykeys
+        from genericagent.llm.core import reload_mykeys
 
         cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
     summary["profile"] = sanitize({"configName": CONFIG_NAME, "name": cfg.get("name"), "model": cfg.get("model")})

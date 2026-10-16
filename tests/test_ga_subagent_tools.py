@@ -10,10 +10,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agent_loop import exhaust  # noqa: E402
-from ga import GenericAgentHandler, get_global_memory  # noqa: E402
-from subagent_manager import AgentState, SubagentManager, SubagentStartupError, WaitResult  # noqa: E402
-from subagent_state import atomic_write_json  # noqa: E402
+from genericagent.core.loop import exhaust  # noqa: E402
+from genericagent.core.handler import GenericAgentHandler, get_global_memory  # noqa: E402
+from genericagent.agents.manager import AgentState, SubagentManager, SubagentStartupError, WaitResult  # noqa: E402
+from genericagent.agents.state import atomic_write_json  # noqa: E402
 
 
 class FakeParent:
@@ -61,7 +61,7 @@ class GaSubagentToolsTest(unittest.TestCase):
                 {"target": "agent_2", "message": "sync"}, response=None
             ))
 
-            from subagent_mailbox import SubagentMailbox
+            from genericagent.agents.mailbox import SubagentMailbox
             rows = SubagentMailbox(Path(td) / "temp" / "agent_2" / "mailbox.jsonl")._read_rows()
             self.assertEqual(rows[-1]["author"], "/root/agent_1")
 
@@ -922,7 +922,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_read_agent_result_supports_artifact_id(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_artifacts import SubagentArtifactStore
+            from genericagent.agents.artifacts import SubagentArtifactStore
 
             task_dir = Path(td) / "temp" / "artifact_worker"
             task_dir.mkdir(parents=True)
@@ -966,7 +966,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_read_agent_result_can_include_transcript_replay_summary(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             task_dir = Path(td) / "temp" / "replay_worker"
             task_dir.mkdir(parents=True)
@@ -1018,7 +1018,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_read_agent_result_can_include_resume_context_from_transcript(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             task_dir = Path(td) / "temp" / "resume_worker"
             task_dir.mkdir(parents=True)
@@ -1073,7 +1073,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_read_agent_result_can_include_replay_timeline_and_edited_resume_context(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             task_dir = Path(td) / "temp" / "timeline_worker"
             task_dir.mkdir(parents=True)
@@ -1129,7 +1129,7 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_resume_agent_tool_restarts_closed_subagent_from_transcript(self):
         with tempfile.TemporaryDirectory() as td:
-            from subagent_transcript import SubagentTranscriptStore
+            from genericagent.agents.transcript import SubagentTranscriptStore
 
             calls = []
 

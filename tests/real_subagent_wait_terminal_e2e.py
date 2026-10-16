@@ -20,7 +20,7 @@ PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "deepseek-v4.1-flash")
 
 
 def _profile():
-    from llm_client import load_clients_from_yaml
+    from genericagent.llm.client import load_clients_from_yaml
     sink = io.StringIO()
     with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
         clients, *_ = load_clients_from_yaml(start_dir=REPO)
@@ -58,7 +58,7 @@ def _child_metrics(task_dir):
 @unittest.skipUnless(OPT_IN, "set GA_RUN_REAL_E2E=1 for live DeepSeek test")
 class RealSubagentWaitTerminalE2E(unittest.TestCase):
     def test_serial_children_wait_for_terminal_and_expose_results(self):
-        from subagent_manager import SubagentManager
+        from genericagent.agents.manager import SubagentManager
         llm_no, profile = _profile()
         manager = SubagentManager(root_dir=REPO, python_executable=sys.executable)
         suffix = f"{os.getpid()}_{time.time_ns()}"

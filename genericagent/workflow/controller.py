@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from workflow_models import WorkflowEvent, WorkflowRun
-from workflow_store import WorkflowStore
+from genericagent.workflow.models import WorkflowEvent, WorkflowRun
+from genericagent.workflow.store import WorkflowStore
 
 
 class WorkflowController:

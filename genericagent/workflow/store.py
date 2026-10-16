@@ -8,15 +8,15 @@ import re
 import shutil
 from pathlib import Path
 
-from sensitive_redaction import redact_sensitive_text, sanitize
-from subagent_state import (
+from genericagent.core.redaction import redact_sensitive_text, sanitize
+from genericagent.agents.state import (
     atomic_write_json,
     atomic_write_text,
     cross_process_lock,
     read_json_retrying,
     read_text_retrying,
 )
-from workflow_models import (
+from genericagent.workflow.models import (
     AgentResult,
     WorkflowEvent,
     WorkflowJob,
@@ -35,7 +35,7 @@ def copy_token_usage(value) -> dict:
     return copy.deepcopy(value) if isinstance(value, dict) else {}
 
 
-from workflow_workspace import artifact_ownership_index, workspace_writes_with_writer
+from genericagent.workflow.workspace import artifact_ownership_index, workspace_writes_with_writer
 
 PROJECT_ROOT = paths.PROJECT_ROOT
 DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"

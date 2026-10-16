@@ -5,12 +5,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from workflow_child_agent import (
+from genericagent.workflow.child_agent import (
     NativeGPTChildAgentRunner,
     _guarded_remove_tree,
     prune_isolated_workspaces,
 )
-from workflow_models import WorkflowJob
+from genericagent.workflow.models import WorkflowJob
 
 
 def _job(tmp_root, job_id="agent_iso", run_id="wf_test", **options):

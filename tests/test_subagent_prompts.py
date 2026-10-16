@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from subagent_prompts import build_agent_role_usage_hint  # noqa: E402
+from genericagent.agents.prompts import build_agent_role_usage_hint  # noqa: E402
 
 
 class RoleUsageHintTest(unittest.TestCase):

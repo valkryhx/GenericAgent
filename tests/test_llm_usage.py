@@ -2,7 +2,7 @@ import unittest
 
 import json
 
-from llmcore import _parse_claude_sse, normalize_usage_tokens
+from genericagent.llm.core import _parse_claude_sse, normalize_usage_tokens
 
 
 class LLMUsageTest(unittest.TestCase):

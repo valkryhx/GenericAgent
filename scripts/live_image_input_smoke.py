@@ -20,10 +20,10 @@ PROMPT = "用一句话描述这张图片里主要有什么（中文）。不要�
 
 
 def main() -> int:
-    from llm_client import load_clients_from_yaml
-    from agentmain import supports_image_input, _build_user_content_with_images
-    from image_codec import encode_image_for_prompt
-    from llmcore import _msgs_claude2oai, _to_responses_input
+    from genericagent.llm.client import load_clients_from_yaml
+    from genericagent.core.app import supports_image_input, _build_user_content_with_images
+    from genericagent.media.image_codec import encode_image_for_prompt
+    from genericagent.llm.core import _msgs_claude2oai, _to_responses_input
 
     if not IMAGE_PATH.is_file():
         print(f"FAIL: image missing: {IMAGE_PATH}")

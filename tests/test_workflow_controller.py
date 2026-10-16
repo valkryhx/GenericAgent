@@ -1,8 +1,8 @@
 import tempfile
 import unittest
-from workflow_controller import WorkflowController
-from workflow_models import WorkflowRun
-from workflow_store import WorkflowStore
+from genericagent.workflow.controller import WorkflowController
+from genericagent.workflow.models import WorkflowRun
+from genericagent.workflow.store import WorkflowStore
 
 
 class WorkflowControllerTest(unittest.TestCase):

@@ -31,10 +31,10 @@ if hasattr(sys.stdout, "buffer"):
 if hasattr(sys.stderr, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-import compact_context  # noqa: E402
-import token_meter  # noqa: E402
-from llm_client import build_client  # noqa: E402
-from llm_config import find_llm_config, load_llm_config  # noqa: E402
+from genericagent.core import context as compact_context  # noqa: E402
+from genericagent.core import tokens as token_meter  # noqa: E402
+from genericagent.llm.client import build_client  # noqa: E402
+from genericagent.llm.config import find_llm_config, load_llm_config  # noqa: E402
 
 
 class MiniAgent:

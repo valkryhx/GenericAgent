@@ -136,11 +136,11 @@ def build_bridge(events: list[dict], summary: dict):
     `default_agent_factory` is not used because the profile has to be selected before the first
     turn; `select_llm` is the same call the UI's `/model` command makes.
     """
-    from ink_bridge import GenericAgentBridge
+    from frontends.ink.bridge import GenericAgentBridge
 
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from agentmain import GenericAgent
+        from genericagent.core.app import GenericAgent
 
         agent = GenericAgent()
         agent.inc_out = True

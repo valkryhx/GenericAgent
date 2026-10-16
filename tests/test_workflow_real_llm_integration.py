@@ -2,8 +2,8 @@ import os
 import time
 import unittest
 
-from workflow_child_agent import NativeGPTChildAgentRunner
-from workflow_models import WorkflowJob
+from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+from genericagent.workflow.models import WorkflowJob
 
 
 @unittest.skipUnless(os.environ.get("GA_RUN_REAL_LLM_TESTS") == "1", "set GA_RUN_REAL_LLM_TESTS=1 to run real LLM integration tests")

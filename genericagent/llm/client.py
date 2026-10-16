@@ -2,7 +2,7 @@
 GA LLM 接入层 —— 客户端构造桥（阶段 2）。
 
 把 llm_config 的「配置态」（ResolvedModel）转成可用的 llmcore ToolClient/
-NativeToolClient「运行态」。这是取代 agentmain.py:188-201 变量名魔法的单一
+NativeToolClient「运行态」。这是取代 genericagent/core/app.py:188-201 变量名魔法的单一
 构造入口：过去靠 cfg_name 里的 native/claude/oai 子串选 Session 类，现在完全
 由 provider 的显式 wire_api 字段决定。
 
@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from llm_config import LLMConfig, ResolvedModel, load_llm_config, find_llm_config
+from genericagent.llm.config import LLMConfig, ResolvedModel, load_llm_config, find_llm_config
 
 
 def _make_session(resolved: ResolvedModel):
     """按 wire_api 实例化对应的 Session 类，喂入 to_legacy_cfg() 生成的 cfg。"""
-    import llmcore
+    from genericagent.llm import core as llmcore
 
     cfg = resolved.to_legacy_cfg()
     if resolved.wire_api == "anthropic":
@@ -49,7 +49,7 @@ def _make_session(resolved: ResolvedModel):
 
 def _wrap_client(session):
     """套 NativeToolClient（三种 wire 都是 Native 系列）。"""
-    import llmcore
+    from genericagent.llm import core as llmcore
 
     return llmcore.NativeToolClient(session)
 
@@ -76,7 +76,7 @@ def build_mixin_client(config: LLMConfig, mixin_name: str):
     做故障转移 + spring-back。要求 chain 里的 model 全走 Native 系列（本层
     产出的 Session 都是 Native，天然满足 MixinSession 的同组约束）。
     """
-    import llmcore
+    from genericagent.llm import core as llmcore
 
     if mixin_name not in config.mixin:
         raise ValueError(f"mixin '{mixin_name}' 不存在：{sorted(config.mixin)}")
@@ -115,7 +115,7 @@ def _resolve_model_directly(config: LLMConfig, model_key: str) -> ResolvedModel:
     model = config.models[model_key]
     provider = config.providers[model.provider]
 
-    from llm_config import _PROFILE_OVERRIDABLE, apply_thinking_translation
+    from genericagent.llm.config import _PROFILE_OVERRIDABLE, apply_thinking_translation
 
     params: dict[str, Any] = {}
     d = config.defaults

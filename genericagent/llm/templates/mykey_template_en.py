@@ -5,7 +5,7 @@
 #  Quick start:
 #    1. Copy this file to mykey.py
 #    2. Uncomment one of the configs below and fill in your apikey
-#    3. Run `python agentmain.py` or `python launch.pyw`
+#    3. Run `python -m genericagent.core.app` or `python launch.pyw`
 #
 #  GA auto-detects any variable whose name contains 'api'/'config'/'cookie'
 #  and picks the session class by keyword:

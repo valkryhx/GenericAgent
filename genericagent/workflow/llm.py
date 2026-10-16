@@ -29,7 +29,7 @@ class WorkflowLlmBinding:
 
 
 def _load_config(config_path: str | None = None):
-    from llm_config import find_llm_config, load_llm_config
+    from genericagent.llm.config import find_llm_config, load_llm_config
 
     path = config_path or find_llm_config()
     if not path:
@@ -114,7 +114,7 @@ def binding_from_env(*, config_path: str | None = None) -> WorkflowLlmBinding:
 
 def make_tool_client(binding: WorkflowLlmBinding, *, config_path: str | None = None):
     """Build a fresh NativeToolClient for this profile (isolated history)."""
-    from llm_client import build_client
+    from genericagent.llm.client import build_client
 
     config, _ = _load_config(config_path)
     return build_client(config, binding.profile_name)
@@ -122,7 +122,7 @@ def make_tool_client(binding: WorkflowLlmBinding, *, config_path: str | None = N
 
 def make_session(binding: WorkflowLlmBinding, *, config_path: str | None = None):
     """Build a fresh Session (no ToolClient wrap) — planner-friendly."""
-    from llm_client import build_session
+    from genericagent.llm.client import build_session
 
     config, _ = _load_config(config_path)
     return build_session(config, binding.profile_name)

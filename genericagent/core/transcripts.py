@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-import listing_cache
+from genericagent.core import listing_cache
 from genericagent import paths
 
 

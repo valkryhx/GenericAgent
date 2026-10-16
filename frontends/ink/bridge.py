@@ -25,10 +25,10 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from sensitive_redaction import sanitize, redact_sensitive_text
-from workflow_store import build_artifact_ownership_index, preview_text
-from subagent_wait import workflow_run_is_terminal
-from workflow_workspace import (
+from genericagent.core.redaction import sanitize, redact_sensitive_text
+from genericagent.workflow.store import build_artifact_ownership_index, preview_text
+from genericagent.agents.wait import workflow_run_is_terminal
+from genericagent.workflow.workspace import (
     WorkspacePathError,
     artifact_ownership_index,
     default_workspace_root,
@@ -213,7 +213,7 @@ except Exception:  # pragma: no cover - exercised only when optional frontend he
 
 
 try:
-    import session_transcript
+    from genericagent.core import transcripts as session_transcript
 except Exception:  # pragma: no cover - transcript resume falls back to legacy replay
     session_transcript = None
 
@@ -231,7 +231,7 @@ class GenericAgentBridge:
         self.agent_factory = agent_factory
         # Artifacts must not land in GA's own source tree. ``os.getcwd()`` was
         # the repository root for a normal ``ga`` launch, so a generated report
-        # appeared next to agentmain.py. The canonical root is the project's
+        # appeared next to genericagent/core/app.py. The canonical root is the project's
         # gitignored temp/ directory.
         self.workspace_root = resolve_workspace_root(workspace_root or default_workspace_root())
         raw_emit = emit or make_stdout_emitter(sys.stdout)
@@ -252,11 +252,11 @@ class GenericAgentBridge:
         # Bridge-scoped session opt-in (``/workflow on|off``); per-turn opt-in is
         # still stateless and resolved from the request text.
         with backend_output_redirect():
-            from workflow_activation import WorkflowActivationState
+            from genericagent.workflow.activation import WorkflowActivationState
 
         self._workflow_activation = WorkflowActivationState()
         with backend_output_redirect():
-            from subagent_team_activation import TeamActivationState
+            from genericagent.agents.team_activation import TeamActivationState
 
         # Bridge-scoped agent-team session switch (``/team on|off``); ``GA_AGENT_TEAMS=1``
         # seeds it enabled. Per-turn activation stays stateless and is resolved from the
@@ -267,8 +267,8 @@ class GenericAgentBridge:
         self._mcp_watch_thread: threading.Thread | None = None
         self.workflow_runtime_factory = workflow_runtime_factory
         with backend_output_redirect():
-            from workflow_controller import WorkflowController
-            from workflow_store import WorkflowStore
+            from genericagent.workflow.controller import WorkflowController
+            from genericagent.workflow.store import WorkflowStore
 
         # Project root the bridge reads shared state from (subagents/teams).
         # Overridable so tests can point the team view at a temp tree.
@@ -277,10 +277,10 @@ class GenericAgentBridge:
         self.workflow_controller = WorkflowController(store=self.workflow_store)
         if agent_control is None:
             with backend_output_redirect():
-                from agent_control import UnifiedAgentControl
-                from agent_control_process import ProcessSubagentAdapter
-                from agent_control_workflow import WorkflowChildAdapter
-                from subagent_manager import SubagentManager
+                from genericagent.core.control.control import UnifiedAgentControl
+                from genericagent.core.control.process import ProcessSubagentAdapter
+                from genericagent.core.control.workflow import WorkflowChildAdapter
+                from genericagent.agents.manager import SubagentManager
 
             process_manager = SubagentManager(root_dir=PROJECT_DIR, python_executable=sys.executable)
             agent_control = UnifiedAgentControl(
@@ -350,8 +350,8 @@ class GenericAgentBridge:
             # tool. GA no longer auto-plans; the main agent is the script author
             # (Claude Code's direct-JS model). A merely workflow-friendly task is
             # not opt-in, so a ``recommended`` verdict does nothing special.
-            from subagent_team_activation import team_activation_reminder
-            from workflow_activation import workflow_opt_in_reminder
+            from genericagent.agents.team_activation import team_activation_reminder
+            from genericagent.workflow.activation import workflow_opt_in_reminder
 
             stripped = raw_text.strip()
             lowered = stripped.lower()
@@ -470,7 +470,7 @@ class GenericAgentBridge:
     def mcp_status(self) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import mcp_status_snapshot
+                from genericagent.mcp.runtime import mcp_status_snapshot
 
                 payload = mcp_status_snapshot()
             self.emit({"type": "mcp_status", **payload})
@@ -492,7 +492,7 @@ class GenericAgentBridge:
     def _watch_mcp_status(self) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import mcp_status_snapshot, start_background_discovery
+                from genericagent.mcp.runtime import mcp_status_snapshot, start_background_discovery
 
                 start_background_discovery()
             recovery_done = False
@@ -516,7 +516,7 @@ class GenericAgentBridge:
                     # every user because one flaky server had failed.
                     recovery_done = True
                     with backend_output_redirect():
-                        from mcp_runtime import reconnect_mcp_server
+                        from genericagent.mcp.runtime import reconnect_mcp_server
                         for server in failed:
                             try:
                                 reconnect_mcp_server(str(server.get("name") or ""))
@@ -540,7 +540,7 @@ class GenericAgentBridge:
     def mcp_reconnect(self, server_name: str) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import reconnect_mcp_server
+                from genericagent.mcp.runtime import reconnect_mcp_server
 
                 result = reconnect_mcp_server(str(server_name or ""))
             status = result.get("server", {}).get("status", "unknown")
@@ -552,7 +552,7 @@ class GenericAgentBridge:
     def mcp_enable(self, server_name: str) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import enable_mcp_server
+                from genericagent.mcp.runtime import enable_mcp_server
 
                 result = enable_mcp_server(str(server_name or ""))
             status = result.get("server", {}).get("status", "unknown")
@@ -564,7 +564,7 @@ class GenericAgentBridge:
     def mcp_disable(self, server_name: str) -> None:
         try:
             with backend_output_redirect():
-                from mcp_runtime import disable_mcp_server
+                from genericagent.mcp.runtime import disable_mcp_server
 
                 result = disable_mcp_server(str(server_name or ""))
             status = result.get("server", {}).get("status", "unknown")
@@ -619,7 +619,7 @@ class GenericAgentBridge:
         '''上报当前权限档与可选档位列表，供 Ink 面板渲染。'''
         try:
             with backend_output_redirect():
-                from permission_policy import (
+                from genericagent.core.permissions.policy import (
                     DEFAULT_PERMISSION_MODE,
                     PERMISSION_MODES,
                     normalize_permission_mode,
@@ -689,7 +689,7 @@ class GenericAgentBridge:
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
             with backend_output_redirect():
-                from skills_runtime import skill_status_rows
+                from genericagent.core.skills import skill_status_rows
 
                 skills = skill_status_rows(search_roots=search_roots)
             self.emit(
@@ -720,7 +720,7 @@ class GenericAgentBridge:
             return -1
         try:
             with backend_output_redirect():
-                from skills_runtime import load_skill_content
+                from genericagent.core.skills import load_skill_content
 
                 loaded = load_skill_content(
                     str(skill_name or ""),
@@ -835,7 +835,7 @@ class GenericAgentBridge:
             return ""
         try:
             with backend_output_redirect():
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
 
                 source = self.workflow_store.load_run(source_run_id)
                 if source.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
@@ -963,7 +963,7 @@ class GenericAgentBridge:
                 raise ValueError("workflow requires script, scriptPath, name, or resumeFromRunId")
             if not workflow_script.strip():
                 raise ValueError("workflow script is empty")
-            from workflow_script_validation import validate_rendered_workflow_script
+            from genericagent.workflow.script_validation import validate_rendered_workflow_script
 
             preflight = validate_rendered_workflow_script(workflow_script)
             if not preflight.get("ok"):
@@ -993,7 +993,7 @@ class GenericAgentBridge:
                 if not self._assign_run_workspace(run):
                     run.metadata.update(workspace_metadata(self.workspace_root))
                 self.workflow_store.save_run(run)
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
 
                 self.workflow_store.append_event(
                     run,
@@ -1072,7 +1072,7 @@ class GenericAgentBridge:
             return ""
         try:
             with backend_output_redirect():
-                from workflow_models import WorkflowEvent
+                from genericagent.workflow.models import WorkflowEvent
 
                 record = self.workflow_store.load_named_workflow(requested)
                 session_id = str(getattr(self.agent, "session_id", "") or "ink-session")
@@ -1149,9 +1149,9 @@ class GenericAgentBridge:
 
     def _team_roster_payload(self) -> dict[str, Any]:
         with backend_output_redirect():
-            from subagent_registry import SubagentRegistry
-            from subagent_tasks import SubagentTaskStore
-            from subagent_team import SubagentTeam, team_name_for
+            from genericagent.agents.registry import SubagentRegistry
+            from genericagent.agents.tasks import SubagentTaskStore
+            from genericagent.agents.team import SubagentTeam, team_name_for
 
         project_dir = getattr(self, "project_dir", PROJECT_DIR)
         registry = SubagentRegistry(Path(project_dir) / "temp" / "subagents")
@@ -1351,7 +1351,7 @@ class GenericAgentBridge:
             try:
                 current = self.workflow_store.load_run(run_id)
                 if current.status not in {"succeeded", "degraded", "failed", "killed", "interrupted"}:
-                    from workflow_models import WorkflowEvent
+                    from genericagent.workflow.models import WorkflowEvent
 
                     reason = redact_sensitive_text(str(exc))
                     current.status = "failed"
@@ -1488,9 +1488,9 @@ class GenericAgentBridge:
         # for unit-test doubles that predate this keyword.
         kwargs["workspace_root"] = str(self.workspace_root)
         with backend_output_redirect():
-            from workflow_child_agent import NativeGPTChildAgentRunner
-            from workflow_llm import binding_from_agent
-            from workflow_runtime import WorkflowRuntime
+            from genericagent.workflow.child_agent import NativeGPTChildAgentRunner
+            from genericagent.workflow.llm import binding_from_agent
+            from genericagent.workflow.runtime import WorkflowRuntime
 
             agent = self.agent
 
@@ -1542,7 +1542,7 @@ class GenericAgentBridge:
                 # historical workflow event into the bounded UI event list.
                 store = getattr(adapter, "store", None)
                 try:
-                    from agent_runtime_models import make_workflow_source_cursor
+                    from genericagent.core.models import make_workflow_source_cursor
                     for run in store.list_runs() if store is not None else ():
                         rows = store.replay_events(run.run_id)
                         cursors[make_workflow_source_cursor(run.run_id)] = max(
@@ -1786,7 +1786,7 @@ class GenericAgentBridge:
         per-run workspace in one place keeps one rule for every entry point: a
         run's deliverables never share a directory with another run's.
         """
-        from workflow_workspace import create_run_workspace, workspace_metadata
+        from genericagent.workflow.workspace import create_run_workspace, workspace_metadata
 
         try:
             directory = create_run_workspace(self.workspace_root, run.run_id)
@@ -2195,7 +2195,7 @@ class GenericAgentBridge:
             return True
         # 熔断器：连续失败达上限后，本 session 停用自动压缩，避免摘要模型宕机时
         # 每次请求都空打一发（对齐 Claude Code）。放行请求（返回 True），让用户
-        # 仍能继续对话（硬裁剪安全网在 llmcore 层仍生效）。
+        # 仍能继续对话（硬裁剪安全网在 genericagent.llm.core 层仍生效）。
         if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             return True
         try:
@@ -2609,7 +2609,7 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.stop()
             try:
                 with backend_output_redirect():
-                    from mcp_runtime import reset_mcp_manager
+                    from genericagent.mcp.runtime import reset_mcp_manager
 
                     reset_mcp_manager()
             except Exception:

@@ -14,8 +14,8 @@ import os
 import re
 from pathlib import Path
 
-from sensitive_redaction import redact_sensitive_text
-from tool_result_limits import get_tool_result_max_chars, normalize_tool_result_max_chars
+from genericagent.core.redaction import redact_sensitive_text
+from genericagent.core.tool_results.limits import get_tool_result_max_chars, normalize_tool_result_max_chars
 
 
 DEFAULT_MAX_RESULT_CHARS = 50_000
@@ -79,7 +79,7 @@ def _structured_preview(text: str, limit: int, ref: str) -> str:
     try:
         # Imported lazily: workflow_child_agent imports agent_loop, so a
         # module-level import here would create a cycle.
-        from workflow_child_agent import bounded_structured_summary
+        from genericagent.workflow.child_agent import bounded_structured_summary
 
         return bounded_structured_summary(text, limit=limit, ref=ref)
     except Exception:

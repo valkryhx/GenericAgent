@@ -60,7 +60,7 @@ def sanitize(value: Any) -> Any:
 
 
 def resolve_profile() -> tuple[int, dict]:
-    from llm_client import load_clients_from_yaml
+    from genericagent.llm.client import load_clients_from_yaml
 
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
@@ -101,7 +101,7 @@ def output_contains(task_dir: Path, marker: str):
 
 
 def live_child_pids(task_name: str) -> set[int]:
-    """Real agentmain.py child processes for one task, straight from the OS.
+    """Real genericagent.core.app child processes for one task, straight from the OS.
 
     The point of this script is that liveness is not stubbed, so the process count that decides
     "did the refused op still launch something" has to come from the OS too, not from a popen
@@ -117,7 +117,7 @@ def live_child_pids(task_name: str) -> set[int]:
             cmdline = proc.info.get("cmdline") or []
         except Exception:
             continue
-        if any("agentmain.py" in str(part) for part in cmdline) and any(task_name == str(part) for part in cmdline):
+        if any("genericagent.core.app" in str(part) for part in cmdline) and any(task_name == str(part) for part in cmdline):
             pids.add(int(proc.info["pid"]))
     return pids
 
@@ -145,8 +145,8 @@ def spawn_via_tool_layer(manager, task_name: str, message: str, llm_no: int) -> 
     fixed on top of it is `_subagent_error_result()` stripping `format_error`'s traceback
     suffix, and that only exists on the tool path.
     """
-    from agent_loop import exhaust
-    from ga import GenericAgentHandler
+    from genericagent.core.loop import exhaust
+    from genericagent.core.handler import GenericAgentHandler
 
     class Parent:
         verbose = False
@@ -180,8 +180,8 @@ def main() -> int:
     manager = None
     spawned_names: list[str] = []
     try:
-        from subagent_manager import SubagentManager
-        from subagent_registry import SubagentNameConflictError
+        from genericagent.agents.manager import SubagentManager
+        from genericagent.agents.registry import SubagentNameConflictError
 
         llm_no, profile_row = resolve_profile()
         summary["profile"] = profile_row

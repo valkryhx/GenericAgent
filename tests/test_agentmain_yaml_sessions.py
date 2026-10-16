@@ -11,8 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agentmain import GenericAgent  # noqa: E402
-import agentmain as agentmain_mod  # noqa: E402
+from genericagent.core.app import GenericAgent  # noqa: E402
+import genericagent.core.app as agentmain_mod  # noqa: E402
 
 
 class _FakeBackend:
@@ -77,7 +77,7 @@ class LoadLlmSessionsYamlTest(unittest.TestCase):
 
         with patch.object(agentmain_mod, "_record_startup_phase", side_effect=record), \
              patch.object(agentmain_mod, "load_clients_from_yaml", side_effect=fake_load), \
-             patch("image_gc.maybe_gc_ga_images_on_startup", return_value=None), \
+             patch("genericagent.media.image_gc.maybe_gc_ga_images_on_startup", return_value=None), \
              patch.object(agentmain_mod.session_transcript, "ensure_agent_session", return_value=None):
             GenericAgent()
 

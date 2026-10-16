@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-import llmcore  # noqa: E402
+from genericagent.llm import core as llmcore  # noqa: E402
 
 
 class _Backend:

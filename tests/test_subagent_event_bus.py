@@ -11,10 +11,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-from agentmain import run_task_worker_loop  # noqa: E402
-from subagent_event_bus import SubagentEventBus  # noqa: E402
-from subagent_manager import SubagentManager  # noqa: E402
-from subagent_state import atomic_write_json  # noqa: E402
+from genericagent.core.app import run_task_worker_loop  # noqa: E402
+from genericagent.agents.event_bus import SubagentEventBus  # noqa: E402
+from genericagent.agents.manager import SubagentManager  # noqa: E402
+from genericagent.agents.state import atomic_write_json  # noqa: E402
 
 
 class SubagentEventBusTest(unittest.TestCase):
