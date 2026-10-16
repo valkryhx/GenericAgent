@@ -1163,4 +1163,5 @@ chore(structure): enforce package boundaries and update packaging
   - `python frontends/terminal/tuiapp.py --help`、`python frontends/tuiapp.py --help`、`python frontends/terminal/tuiapp_v2.py --help`、`python frontends/tuiapp_v2.py --help` 均通过；
   - 全量 Python `python -m unittest discover -s tests`：1585 tests OK（3 skipped）；
   - Ink UI `npm test`：431 pass；`npx tsc --noEmit`：通过；
-  - `python scripts/check_project_structure.py`：通过。
+  - `python scripts/check_project_structure.py`：通过；
+  - L1 真实 API bridge 自测：`GA_RUN_REAL_API_E2E=1 GA_SELFTEST_TIMEOUT=240 python tests/real_ink_selftest.py` → 5/5 PASS，当前模型 `default/deepseek-flash`，证据包 `temp/ink-selftest/20261016-181824`。
