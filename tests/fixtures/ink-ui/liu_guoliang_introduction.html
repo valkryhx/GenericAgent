@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>刘国梁 · 人物介绍</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a212b;
+    --panel-alt: #202a36;
+    --text: #e8edf2;
+    --text-dim: #a8b4c0;
+    --accent: #e63946;
+    --accent-soft: #ff6b78;
+    --gold: #e0b352;
+    --border: #2e3944;
+    --green: #4caf82;
+    --amber: #e0a23c;
+    --gray-tag: #7a8a99;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px 80px; }
+
+  /* Hero */
+  header.hero {
+    background: linear-gradient(135deg, #1a212b 0%, #2a1418 60%, #1a212b 100%);
+    border-bottom: 3px solid var(--accent);
+    padding: 64px 24px 48px;
+    text-align: center;
+  }
+  header.hero h1 {
+    margin: 0 0 12px;
+    font-size: 2.8rem;
+    letter-spacing: 6px;
+    color: #fff;
+    text-shadow: 0 2px 18px rgba(230,57,70,.35);
+  }
+  header.hero .subtitle {
+    color: var(--text-dim);
+    font-size: 1.05rem;
+    letter-spacing: 1px;
+    margin: 0 0 20px;
+  }
+  .badges { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  .badge {
+    background: rgba(230,57,70,.14);
+    border: 1px solid rgba(230,57,70,.45);
+    color: var(--accent-soft);
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: .85rem;
+    letter-spacing: .5px;
+  }
+
+  nav.toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    margin: 32px 0 0;
+  }
+  nav.toc a {
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: .9rem;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    transition: .2s;
+  }
+  nav.toc a:hover { color: #fff; border-color: var(--accent); background: var(--panel-alt); }
+
+  /* Sections */
+  section { margin-top: 56px; }
+  section > h2 {
+    font-size: 1.6rem;
+    color: #fff;
+    border-left: 5px solid var(--accent);
+    padding-left: 16px;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+  }
+  section > h2 .en {
+    font-size: .8rem;
+    color: var(--gray-tag);
+    font-weight: 400;
+    letter-spacing: 1px;
+    margin-left: 10px;
+  }
+  .lead { color: var(--text-dim); margin-top: 0; }
+
+  /* Card */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 26px;
+    margin: 18px 0;
+  }
+  .card h3 {
+    margin: 0 0 10px;
+    color: var(--gold);
+    font-size: 1.12rem;
+    letter-spacing: .5px;
+  }
+  .card p { margin: 0 0 8px; }
+  .card p:last-child { margin-bottom: 0; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* Timeline */
+  ul.timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+  ul.timeline::before {
+    content: ""; position: absolute; left: 9px; top: 6px; bottom: 6px;
+    width: 2px; background: var(--border);
+  }
+  ul.timeline li {
+    position: relative; padding: 0 0 18px 36px;
+  }
+  ul.timeline li::before {
+    content: ""; position: absolute; left: 4px; top: 8px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 0 4px rgba(230,57,70,.15);
+  }
+  ul.timeline li:last-child { padding-bottom: 0; }
+  ul.timeline .year {
+    display: inline-block; min-width: 78px;
+    color: var(--gold); font-weight: 700; letter-spacing: .5px;
+  }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: .93rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--gold); background: var(--panel-alt); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+
+  /* Insights list */
+  ul.plain { margin: 10px 0; padding-left: 22px; }
+  ul.plain li { margin-bottom: 8px; }
+
+  /* Pro / Con */
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 10px; }
+  @media (max-width: 720px) { .duo { grid-template-columns: 1fr; } }
+  .duo .pos, .duo .neg {
+    border-radius: 10px; padding: 16px 20px; border: 1px solid var(--border);
+  }
+  .duo .pos { background: rgba(76,175,130,.08); border-color: rgba(76,175,130,.35); }
+  .duo .neg { background: rgba(230,57,70,.08); border-color: rgba(230,57,70,.35); }
+  .duo h4 { margin: 0 0 10px; font-size: 1rem; letter-spacing: .5px; }
+  .duo .pos h4 { color: var(--green); }
+  .duo .neg h4 { color: var(--accent-soft); }
+  .duo ul { margin: 0; padding-left: 20px; }
+  .duo li { margin-bottom: 6px; }
+
+  /* Sources */
+  .source-group { margin: 18px 0; }
+  .source-group > h3 {
+    color: var(--gold); font-size: 1.05rem; margin: 22px 0 10px;
+    border-bottom: 1px dashed var(--border); padding-bottom: 6px;
+  }
+  ol.sources { list-style: none; counter-reset: src; margin: 0; padding: 0; }
+  ol.sources li {
+    counter-increment: src;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px 14px 54px;
+    margin-bottom: 12px;
+    position: relative;
+  }
+  ol.sources li::before {
+    content: counter(src);
+    position: absolute; left: 14px; top: 14px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--panel-alt); border: 1px solid var(--border);
+    color: var(--gold); font-size: .8rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  ol.sources a { color: var(--accent-soft); text-decoration: none; word-break: break-all; }
+  ol.sources a:hover { text-decoration: underline; }
+  ol.sources .snip { color: var(--text-dim); font-size: .88rem; margin: 6px 0 8px; }
+  .cred {
+    display: inline-block; font-size: .76rem; padding: 2px 10px; border-radius: 6px;
+    border: 1px solid; letter-spacing: .3px;
+  }
+  .cred.high { color: var(--green); border-color: rgba(76,175,130,.5); background: rgba(76,175,130,.08); }
+  .cred.mid { color: var(--amber); border-color: rgba(224,162,60,.5); background: rgba(224,162,60,.08); }
+  .cred.low { color: var(--accent-soft); border-color: rgba(230,57,70,.5); background: rgba(230,57,70,.08); }
+
+  footer {
+    margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border);
+    color: var(--gray-tag); font-size: .85rem; text-align: center;
+  }
+  footer a { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>刘国梁</h1>
+  <p class="subtitle">Liu Guoliang · 中国男子乒乓球运动员 · 教练 · 中国乒协原主席 · 国际乒联第一副主席</p>
+  <div class="badges">
+    <span class="badge">中国首位男子乒坛“大满贯”</span>
+    <span class="badge">直拍横打第一人</span>
+    <span class="badge">金牌教头</span>
+    <span class="badge">乒乓改革推手</span>
+    <span class="badge">1976年1月10日 · 河南新乡</span>
+  </div>
+  <nav class="toc">
+    <a href="#overview">概述</a>
+    <a href="#career">体育生涯与成就</a>
+    <a href="#influence">公共影响与评价</a>
+    <a href="#sources">来源列表</a>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <!-- 概述 -->
+  <section id="overview">
+    <h2>概述<span class="en">Overview</span></h2>
+    <p class="lead">刘国梁（1976年1月10日生，河南新乡人），是中国男子乒乓球运动员、教练，2005年入选国际乒联名人堂，被视为乒乓球史上最伟大的球员与教练之一。他集运动员、主教练、总教练、中国乒协主席、国际乒联第一副主席、WTT理事会主席等多重身份于一身，横跨竞技、执教与体育治理三大领域，连续征战八届奥运会共32年。</p>
+
+    <div class="card">
+      <h3>一句话定位</h3>
+      <p>作为运动员，他是中国首位（世界男子乒坛第二位，继瓦尔德内尔之后）集奥运会、世乒赛、世界杯男单冠军于一身的“大满贯”得主，并以“直拍横打”革新了直拍打法；作为教练，他率中国男乒四夺奥运男团冠军、执教14年仅丢一金；作为管理者，他推动乒乓球商业化、职业化与国际化，成为国际乒坛最具影响力的人物之一。</p>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>基本信息</h3>
+        <ul class="plain">
+          <li><strong>出生：</strong>1976年1月10日，河南新乡</li>
+          <li><strong>打法：</strong>右手直拍两面近台快攻</li>
+          <li><strong>标志技术：</strong>直拍横打、反面发球</li>
+          <li><strong>退役：</strong>2002年（26岁）</li>
+          <li><strong>名人堂：</strong>2005年入选国际乒联名人堂</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>核心荣誉与人脉</h3>
+        <ul class="plain">
+          <li><strong>奥运：</strong>1996亚特兰大男单+男双双金；2000悉尼男单铜牌、男双银牌</li>
+          <li><strong>大满贯：</strong>1999年第45届世乒赛完成，并成首位“超大满贯”</li>
+          <li><strong>执教战绩：</strong>率队夺30余项世界冠军</li>
+          <li><strong>培养选手：</strong>马龙、张继科、许昕、樊振东</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 体育生涯 -->
+  <section id="career">
+    <h2>体育生涯与成就<span class="en">Sports Career &amp; Achievements</span></h2>
+    <p class="lead">从运动员到总教练，刘国梁的竞技生涯可分为两条主线：球员时代的“大满贯”传奇，与执教时代的“金牌教头”霸业。</p>
+
+    <div class="card">
+      <h3>一、运动员时期（1989–2002）</h3>
+      <p>1989年入选国家青年队，1991年15岁破格入选国家队。1994年随队获世界杯男团冠军（生涯首个世界冠军）；1996年亚特兰大奥运会包揽男单、男双（搭档孔令辉）两枚金牌，同年获第17届世界杯男单冠军并登上世界排名第一；1997年第44届世乒赛独得男团、男双、混双三冠；1999年第45届世乒赛夺得男单、男双冠军，完成“大满贯”，并成为首位实现“超大满贯”（奥运会、世乒赛、世界杯所有项目冠军）的选手。</p>
+      <p>1999—2000年曾遭遇“兴奋剂”风波，最终被证明清白；2000年悉尼奥运会获男单铜牌、男双银牌。因国际乒联改用40毫米大球及无遮挡发球规则削弱其前三板优势，2001赛季后状态下滑，2002年26岁宣布退役。</p>
+    </div>
+
+    <div class="card">
+      <h3>二、教练生涯（2002–2017）</h3>
+      <p>2002年出任教练，2003年6月成为中国男乒最年轻主教练；2013年兼任中国乒乓球队总教练（队史第五位总教练，此前蔡振华卸任后该职位空缺约八年）。执教14年间，中国队在奥运会上只丢一金，率队夺得30多个世界冠军，培养出马龙、张继科、许昕、樊振东等顶尖选手。2017年因队伍架构调整卸任总教练转任乒协副主席，一度引发队员集体退赛风波而暂离乒坛。</p>
+    </div>
+
+    <div class="card">
+      <h3>三、管理与国际职务（2018–至今）</h3>
+      <p>2018年12月至2025年4月任中国乒乓球协会主席，推动WTT（世界乒乓球职业大联盟）赛事改革并推行“养狼计划”。现任国际乒联第一副主席、WTT理事会主席。2025年4月23日主动辞去中国乒协主席职务，由王励勤接任。</p>
+    </div>
+
+    <h3 style="color:var(--gold); font-size:1.05rem; margin-top:34px;">生涯时间线</h3>
+    <ul class="timeline">
+      <li><span class="year">1989</span>入选国家青年队</li>
+      <li><span class="year">1991</span>15岁破格入选国家队</li>
+      <li><span class="year">1994</span>世界杯男团冠军 —— 生涯首个世界冠军</li>
+      <li><span class="year">1996</span>亚特兰大奥运会男单、男双双金（搭档孔令辉）；世界杯男单冠军；登顶世界第一</li>
+      <li><span class="year">1997</span>第44届世乒赛男团、男双、混双三冠</li>
+      <li><span class="year">1999</span>第45届世乒赛男单、男双夺冠，完成“大满贯”与“超大满贯”</li>
+      <li><span class="year">2000</span>悉尼奥运会男单铜牌、男双银牌</li>
+      <li><span class="year">2002</span>26岁宣布退役，转任教练</li>
+      <li><span class="year">2003</span>6月出任中国男乒最年轻主教练</li>
+      <li><span class="year">2008</span>起率队连续夺得奥运会男团冠军（2008/2012/2016/2021）</li>
+      <li><span class="year">2013</span>兼任中国乒乓球队总教练（队史第五位）</li>
+      <li><span class="year">2017</span>卸任总教练转任乒协副主席，引发队员集体退赛风波</li>
+      <li><span class="year">2018</span>12月当选中国乒协主席</li>
+      <li><span class="year">2020</span>任WTT理事会主席</li>
+      <li><span class="year">2021</span>任国际乒联（ITTF）第一副主席</li>
+      <li><span class="year">2025</span>4月主动辞去中国乒协主席，王励勤接任</li>
+    </ul>
+
+    <h3 style="color:var(--gold); font-size:1.05rem; margin-top:34px;">主要荣誉一览</h3>
+    <table>
+      <thead>
+        <tr><th>赛事</th><th>成绩</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1996 亚特兰大奥运会</td><td>男单金牌、男双金牌（搭档孔令辉）</td></tr>
+        <tr><td>2000 悉尼奥运会</td><td>男单铜牌、男双银牌</td></tr>
+        <tr><td>1999 第45届世乒赛（埃因霍温）</td><td>男单冠军、男双冠军 —— 完成“大满贯”</td></tr>
+        <tr><td>1997 第44届世乒赛</td><td>男团、男双、混双冠军</td></tr>
+        <tr><td>1996 世界杯（尼姆）</td><td>男单冠军</td></tr>
+        <tr><td>1994 世界杯（尼姆）</td><td>男团冠军</td></tr>
+        <tr><td>1995 / 1997 世乒赛团体</td><td>中国男团冠军成员</td></tr>
+      </tbody>
+    </table>
+
+    <div class="card">
+      <h3>技术特点：直拍横打的开创者</h3>
+      <p>刘国梁是第一位在正式比赛中成功使用“直拍横打”技术的选手。1992年中国公开赛（成都公开赛），16岁的他横扫金泽洙、姜熙灿等亚洲高手，并击败当时统治乒坛的瑞典名将瓦尔德内尔，其快速多变加直板横打的打法让对手很不适应，挽救了直拍打法并使之重获生机。直拍选手的反手弱点被其克服，央视评价他为“直板横打的第一人”。技术涵盖快拨、快带、快撕、挑打、弹击、拉球、反拉等。</p>
+    </div>
+  </section>
+
+  <!-- 公共影响 -->
+  <section id="influence">
+    <h2>公共影响与评价<span class="en">Public Influence &amp; Evaluation</span></h2>
+    <p class="lead">刘国梁的公共评价呈现明显的“功过并存”特点：他既是推动乒乓球商业化、职业化和国际化的改革者与国乒霸业的奠基人，也是伴随诸多争议前行的复杂人物。</p>
+
+    <div class="duo">
+      <div class="pos">
+        <h4>正面评价 / 改革推动</h4>
+        <ul>
+          <li>被誉为推动乒乓球商业化、职业化、国际化的改革者</li>
+          <li>执教成绩获官方与球迷高度认可</li>
+          <li>ITTF官方称其为“乒乓球界最具影响力的人物”</li>
+          <li>为运动员争取更高奖金与出场费</li>
+          <li>2025年辞职时新华社以《特写：刘国梁落泪》报道，引发广泛惋惜</li>
+        </ul>
+      </div>
+      <div class="neg">
+        <h4>争议 / 批评</h4>
+        <ul>
+          <li>饭圈文化侵蚀队伍（粉丝干扰、运动员遭骚扰）</li>
+          <li>WTT赛制被指隐性剥削运动员（樊振东、陈梦退赛风波）</li>
+          <li>国内乒超与直通赛生态受到冲击</li>
+          <li>2017年卸任总教练引发球员集体罢赛事件</li>
+          <li>早期“打人事件”等负面舆情</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>改革举措</h3>
+      <p>从执教到执掌国乒，刘国梁的重要贡献之一是大力推进乒乓球项目的改革与商业化：主导WTT赛事体系落地，推行“养狼计划”提升项目国际竞争力，并致力于将乒乓球商业赛事提升到接近网球四大满贯的水平，吸引更多赞助商和球迷，通过门票和转播权提高收入，最终让运动员获得更高出场费和奖金。</p>
+    </div>
+
+    <div class="card">
+      <h3>2017年“罢赛事件”</h3>
+      <p>2017年6月20日，中国乒协发布公告称刘国梁不再担任国乒总教练；3天后，国乒男队大部分教练和球员退赛，并在微博集体写下“这一刻我们无心恋战，只因想念你，刘国梁”，张继科、马龙、许昕、樊振东及教练秦志戬、马琳随后退出2017中国公开赛。国家体育总局声明称弃赛“极其错误”。6月27日晚刘国梁发微博表态“坚决拥护……深化改革方针”，并称对弃赛“事先毫不知情，但在思想教育和管理上还是有不可推卸的责任”。该事件成为其公共舆论中的重要争议节点，网民与舆论多对卸任主帅表达支持与同情。</p>
+    </div>
+
+    <div class="card">
+      <h3>国际影响与官方评价</h3>
+      <p>在国际层面，ITTF与WTT官方均高度评价刘国梁。国际乒联称其为“乒乓球界——不仅在中国、而且在全球——最具影响力的人物”；WTT官网称其为“全球乒乓球界备受尊敬的领袖”。国际球迷社区也普遍认为他被视为史上最伟大球员之一，其影响已超越球台上的表现。职务履历显示他曾任WTT董事会首任主席、ITTF第一副主席，并任第十四届全国政协委员。</p>
+    </div>
+  </section>
+
+  <!-- 来源 -->
+  <section id="sources">
+    <h2>来源列表<span class="en">Sources</span></h2>
+    <p class="lead">下列来源综合自两份调研文件（体育生涯与成就 14 条、公共影响与评价 17 条），按主题归类，并标注可信度分级。可信度分级为调研过程中的主观评估，供交叉验证参考。</p>
+
+    <div class="source-group">
+      <h3>一、体育生涯 · 权威事实类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://zh.wikipedia.org/wiki/%E5%88%98%E5%9B%BD%E6%A2%81" target="_blank" rel="noopener">刘国梁 - 维基百科，自由的百科全书</a>
+          <p class="snip">中文维基百科，含完整奖牌记录表、职务继任信息和参考来源，与英文维基、百度百科交叉一致。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://en.wikipedia.org/wiki/Liu_Guoliang" target="_blank" rel="noopener">Liu Guoliang - Wikipedia (English)</a>
+          <p class="snip">英文维基百科，国际视角，奖牌记录完整（奥运会/世乒赛/世界杯），可交叉验证“首位中国男子大满贯”。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://baike.baidu.com/item/%E5%88%98%E5%9B%BD%E6%A2%81/9513" target="_blank" rel="noopener">刘国梁 - 百度百科</a>
+          <p class="snip">信息密度大、细节丰富，与央视等官方媒体评价交叉引用；含“超大满贯”“直拍横打第一人”等说法。</p>
+          <span class="cred mid">可信度：中高</span>
+        </li>
+        <li>
+          <a href="https://www.ourchinastory.com/zh/1403/" target="_blank" rel="noopener">从大满贯球员到中国乒协主席 刘国梁的半生传奇（当代中国）</a>
+          <p class="snip">时间线清晰，对“大满贯”“规则改革导致退役”的因果阐述较完整。</p>
+          <span class="cred mid">可信度：中高</span>
+        </li>
+        <li>
+          <a href="https://tabletennis.media/players/liu-guoliang" target="_blank" rel="noopener">Liu Guoliang – Table Tennis Media (player profile)</a>
+          <p class="snip">专业乒乓球媒体，按赛事类别系统梳理荣誉，数据结构化清晰。</p>
+          <span class="cred mid">可信度：中高</span>
+        </li>
+        <li>
+          <a href="https://www.chinadailyhk.com/hk/article/135327" target="_blank" rel="noopener">Liu leading a new era (China Daily HK)</a>
+          <p class="snip">中国日报香港版官方英文报道，佐证奥运金牌数、世锦赛冠军数及WTT理事会主席身份，含本人引语。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="http://sports.sina.com.cn/star/liu_guoliang" target="_blank" rel="noopener">刘国梁_体育明星（新浪竞技风暴）</a>
+          <p class="snip">新浪体育明星档案页，技术特点（右手直拍、两面近台快攻、直拍横打、反面发球）描述完整。</p>
+          <span class="cred mid">可信度：中高</span>
+        </li>
+        <li>
+          <a href="http://sports.people.com.cn/n/2013/0629/c22176-22019210.html" target="_blank" rel="noopener">王皓之后“直拍横打”何去何从？（人民网体育）</a>
+          <p class="snip">人民网官方体育报道，直接印证“直拍横打首次公开亮相并击败瓦尔德内尔”这一关键技术/关键比赛事实。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://zqb.cyol.com/html/2011-06/26/nw.D110000zgqnb_20110626_7-03.htm" target="_blank" rel="noopener">直横打法强弱仍存争议（中国青年报）</a>
+          <p class="snip">中国青年报官方报道，佐证其作为直拍打法代表人物的技术理念及创办“直横大战”的推广作用。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="source-group">
+      <h3>二、教练生涯 · 战绩补充类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://m.haiwainet.cn/middle/232657/2017/0621/content_30977724_37.html" target="_blank" rel="noopener">刘国梁卸任总教练 曾率队37次夺冠无愧金牌教头（海外网/国际在线）</a>
+          <p class="snip">教练战绩与执教风格描述具体，可交叉验证“三届奥运只丢一金”“总教练职位空缺八年”。</p>
+          <span class="cred mid">可信度：中高</span>
+        </li>
+        <li>
+          <a href="https://sports.ifeng.com/c/7olVHDYydGa" target="_blank" rel="noopener">不懂球的胖子身居大校一职 刘国梁是中国乒坛领军人物（凤凰网体育）</a>
+          <p class="snip">教练任内逐年战绩详尽（2004–2013），含2005上海世乒赛包揽7金、2011鹿特丹世乒赛包揽5金等。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="https://sports.sina.cn/2026-09-26/detail-initcqmh0635041.d.html" target="_blank" rel="noopener">刘国梁在乒乓球领域取得过哪些成就？（新浪体育·体育先锋眼）</a>
+          <p class="snip">概括性强，涵盖教练成就与国际乒坛推动作用；部分表述（如“世界乒坛首位”）需谨慎。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="https://cj.sina.cn/articles/view/7879995911/1d5af320706802lte0" target="_blank" rel="noopener">刘国梁获得过几次奥运会冠军？（新浪财经/新浪体育）</a>
+          <p class="snip">作“奥运2金（均在1996年）”的佐证，信息与主来源一致。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="source-group">
+      <h3>三、技术特点 · 辅助类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://www.sohu.com/a/206386372_169261" target="_blank" rel="noopener">刘国梁青涩时期直拍横打教学 | 直板不倒！（搜狐）</a>
+          <p class="snip">技术教学类内容，对直拍横打技术动作（快拨、快带、快撕、挑打、弹击、拉球、反拉）的归纳有价值。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="source-group">
+      <h3>四、公共影响 · 媒体评论类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://www.zaobao.com.sg/news/china/story20250426-6238850" target="_blank" rel="noopener">新闻人间：从“不懂球的胖子”到改革推手——刘国梁（联合早报）</a>
+          <p class="snip">新加坡主流媒体专栏，专业体育评论，观点平衡，评价其推动乒乓球市场化、国际化的贡献。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://news.qq.com/rain/a/20250423A031JZ00" target="_blank" rel="noopener">刘国梁的乒乓江湖：开拓者，改革者，争议者（腾讯新闻）</a>
+          <p class="snip">深度报道，叙事详实、多方引述，梳理改革争议三大焦点；结论“责任是责任，功绩也是功绩”。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="http://www.news.cn/sports/20250423/c54d353e16b141c4a6d143ca4563e62e/c.html" target="_blank" rel="noopener">特写：刘国梁落泪（新华网/新华社）</a>
+          <p class="snip">新华社官方权威报道，官方定调视角，含其辞职自述与“无怨无悔”等本人引语。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://www.scmp.com/sport/china/article/3308037/ex-chinese-table-tennis-head-liu-guoliang-tipped-leave-federation-role-focus-wtt" target="_blank" rel="noopener">Ex-Chinese table tennis head Liu Guoliang tipped to leave federation role to focus on WTT（南华早报 SCMP）</a>
+          <p class="snip">具国际影响力的英文媒体，聚焦国际影响与WTT战略布局、为运动员争取更高奖金。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://www.kaiwind.com/n1790/c632239/content.html" target="_blank" rel="noopener">刘国梁：支持乒乓球改革 男乒退赛不知情（凯风网）</a>
+          <p class="snip">转载内容，权威性有限，仅作其本人对改革表态的引用参考。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="source-group">
+      <h3>五、争议事件类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://www.dw.com/zh/%E5%88%98%E5%9B%BD%E6%A2%81%E7%BD%A2%E8%B5%9B%E5%92%8C-%E8%8B%9F%E5%B1%80%E9%95%BF/a-39395433" target="_blank" rel="noopener">“刘国梁”、“罢赛”和“苟局长”（德国之声 DW）</a>
+          <p class="snip">国际公共广播机构报道，涉及中国体育政治敏感话题，含“能打败国乒队的只有体育总局”等网络热评。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="https://www.dw.com/zh/%E4%BB%8E%E5%AD%94%E4%BB%A4%E8%BE%89%E5%88%B0%E5%88%98%E5%9B%BD%E6%A2%81%E4%B9%92%E5%8D%8F%E7%BB%99%E5%87%BA%E8%BF%99%E7%A7%8D%E8%AF%B4%E6%B3%95/a-39403045" target="_blank" rel="noopener">从孔令辉到刘国梁：乒协给出这种说法（德国之声 DW）</a>
+          <p class="snip">详录乒协声明、球队致歉信及网民反应，可交叉印证罢赛事件的公共舆论。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="https://www.sbs.com.au/language/chinese/zh-hans/article/zhe-yi-ke-wo-men-wu-xin-lian-zhan-zhi-yin-xiang-nian-nin-liu-guo-liang/8v7mr82w9" target="_blank" rel="noopener">“这一刻我们无心恋战……只因想念您 刘国梁！”（SBS 中文，澳大利亚）</a>
+          <p class="snip">事实梳理清晰、时间线完整，含刘国梁本人微博原文引述（“坚决拥护……中国体育改革势在必行”）。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://baike.baidu.com/item/%E5%88%98%E5%9B%BD%E6%A2%81%E6%89%93%E4%BA%BA%E4%BA%8B%E4%BB%B6/16630254" target="_blank" rel="noopener">刘国梁打人事件（百度百科）</a>
+          <p class="snip">众包用户生成内容，权威性较低，仅作早期负面舆情事件索引。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+        <li>
+          <a href="https://zhuanlan.zhihu.com/p/27611517" target="_blank" rel="noopener">关于刘国梁事件，那些你不知道的事实...（知乎专栏）</a>
+          <p class="snip">个人观点平台，观点强烈，仅反映部分网络舆情，不可作为事实性结论。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+        <li>
+          <a href="https://www.163.com/dy/article/KU29NN300556J6PQ.html" target="_blank" rel="noopener">欧媒罕见力挺樊振东，直言刘国梁该被批评（网易号）</a>
+          <p class="snip">自媒体转述外媒（意大利记者博扎）观点，属二手转述，需回溯原始采访。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+        <li>
+          <a href="https://www.sohu.com/a/804204938_403336" target="_blank" rel="noopener">通过陈梦、樊振东、孙颖莎的事，球迷对刘国梁的表现产生疑问（搜狐）</a>
+          <p class="snip">自媒体号，观点性强、标题党倾向明显，仅作球迷舆论风向参考。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="source-group">
+      <h3>六、国际影响 · 官方机构类</h3>
+      <ol class="sources">
+        <li>
+          <a href="https://www.ittf.com/2020/06/29/liu-guoliang-accepts-position-chair-wtt-council" target="_blank" rel="noopener">ITTF: Liu Guoliang accepts position as Chair of WTT Council（国际乒联官网）</a>
+          <p class="snip">国际乒联官方第一手来源，评价其为“乒乓球界最具影响力的人物”，具高可信度。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://www.worldtabletennis.com/teamarticle?article_no=team_council" target="_blank" rel="noopener">WTT Council - World Table Tennis 官网</a>
+          <p class="snip">WTT官方第一手来源，官方评价其为“全球乒乓球界备受尊敬的领袖”。</p>
+          <span class="cred high">可信度：高</span>
+        </li>
+        <li>
+          <a href="https://baike.baidu.com/en/item/Liu%20Guoliang/951832" target="_blank" rel="noopener">Liu Guoliang（百度百科英文版）- ITTF第一副主席、WTT理事会主席</a>
+          <p class="snip">职务履历汇总参考（2017–2025），主要事实可与维基、官方报道交叉验证。</p>
+          <span class="cred mid">可信度：中</span>
+        </li>
+        <li>
+          <a href="https://www.tabletennisdaily.com/forum/topics/is-liu-guoliang-%E2%80%9Cfairly%E2%80%9D-one-of-the-greatest-players-of-all-time.31753" target="_blank" rel="noopener">TableTennisDaily 论坛：Is Liu Guoliang 'fairly' one of the greatest players of all time?</a>
+          <p class="snip">国际乒乓球爱好者社区，用户生成内容，反映国际球迷对其历史地位的整体评价，作舆情参考。</p>
+          <span class="cred low">可信度：低</span>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <footer>
+    <p>本页面由调研文件 <code>research_liu_guoliang_sports.json</code> 与 <code>research_liu_guoliang_influence.json</code> 综合生成，仅供信息参考。</p>
+    <p>说明：可信度分级为调研过程的主观评估；部分来源对“首位大满贯”表述不一（“中国首位” vs “世界首位”），引用时需区分。生成时间戳为估算值。</p>
+    <p>共收录 31 条来源 · 主题：刘国梁 · 体育生涯与公共影响</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

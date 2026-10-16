@@ -18,9 +18,9 @@ import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 // and asserts the team really formed (task board + team_mode teammates) and
 // produced real artifacts.
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
-const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink_bridge.py')
+const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const RUN_ID = process.env.GA_TEAM_E2E_RUNID || String(Date.now())
 const ART_DIR = path.join(REPO, 'temp', `team_e2e_${RUN_ID}`)
 const MIN_MEMBERS = Number(process.env.GA_TEAM_E2E_MIN_MEMBERS || 2)

@@ -18,7 +18,7 @@ if str(FRONTENDS) not in sys.path:
     sys.path.insert(0, str(FRONTENDS))
 
 from sensitive_redaction import sanitize  # noqa: E402
-from frontends.ink_bridge import GenericAgentBridge  # noqa: E402
+from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
 
 CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
 EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")

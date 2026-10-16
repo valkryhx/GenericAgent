@@ -91,8 +91,8 @@ COMMANDS = {
         "desc": "启动独立 React/Ink 终端前端，通过 JSONL bridge 调用 Python 后端",
         "cmd": [
             "node",
-            "{FRONTENDS}/ink-ui/node_modules/tsx/dist/cli.mjs",
-            "{FRONTENDS}/ink-ui/src/main.tsx",
+            "{FRONTENDS}/ink/ui/node_modules/tsx/dist/cli.mjs",
+            "{FRONTENDS}/ink/ui/src/main.tsx",
         ],
     },
     "cli": {

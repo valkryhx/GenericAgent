@@ -9,14 +9,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "frontends\ink-ui\package.json" (
-    echo [ERROR] frontends\ink-ui\package.json was not found.
+if not exist "frontends\ink\ui\package.json" (
+    echo [ERROR] frontends\ink\ui\package.json was not found.
     echo Run this script from the GenericAgent repository root.
     exit /b 1
 )
 
 echo Installing Ink UI npm dependencies...
-pushd "frontends\ink-ui"
+pushd "frontends\ink\ui"
 npm install
 set "NPM_EXIT=%ERRORLEVEL%"
 popd

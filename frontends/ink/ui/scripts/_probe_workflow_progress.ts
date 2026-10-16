@@ -3,16 +3,16 @@
 //   1. does /workflow planning block the JSONL command loop?
 //   2. do live turn/token counters reach the UI while children run?
 //   3. does the bridge return to idle after the terminal workflow event?
-// Run: GA_PROBE_PROFILE=<profile> npx tsx frontends/ink-ui/scripts/_probe_workflow_progress.ts
+// Run: GA_PROBE_PROFILE=<profile> npx tsx frontends/ink/ui/scripts/_probe_workflow_progress.ts
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { writeFileSync } from 'node:fs'
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
-const BRIDGE = path.join(REPO, 'frontends', 'ink_bridge.py')
+const BRIDGE = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const PROFILE = process.env.GA_PROBE_PROFILE || 'cc-deepseek-v4.1-flash-chat'
 const TASK = process.env.GA_PROBE_TASK
   || '使用 Tavily 搜索 Python 官方文档中 pathlib.Path.write_text 的行为，然后生成一份介绍该 API 的 HTML 文件并验证文件'

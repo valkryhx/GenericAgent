@@ -3,7 +3,7 @@
 Experimental React/Ink terminal frontend for GenericAgent.
 
 This frontend is intentionally parallel to `frontends/tuiapp_v2.py`. It talks to
-the Python runtime through `frontends/ink_bridge.py` over JSONL stdio and does
+the Python runtime through `frontends/ink/bridge.py` over JSONL stdio and does
 not import or modify the Textual UI.
 
 ## Run
@@ -11,7 +11,7 @@ not import or modify the Textual UI.
 Install dependencies once:
 
 ```powershell
-npm install --prefix frontends/ink-ui
+npm install --prefix frontends/ink/ui
 ```
 
 Start from the repository root:

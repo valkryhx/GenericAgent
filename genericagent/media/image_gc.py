@@ -6,7 +6,7 @@
 - Claude Code：可扫 image-cache 目录 + MAX ~200 条
 - Codex：clipboard 短生命周期落盘
 
-根目录解析与 frontends/ink-ui/src/clipboardImage.ts 的 resolveGaImageRoot 一致：
+根目录解析与 frontends/ink/ui/src/clipboardImage.ts 的 resolveGaImageRoot 一致：
 1. env GA_IMAGE_TEMP
 2. {repo}/temp/ga-images
 3. fallback {tmpdir}/ga-images

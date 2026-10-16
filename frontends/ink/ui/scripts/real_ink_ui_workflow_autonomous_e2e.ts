@@ -11,9 +11,9 @@ import { createCursorParkStdout } from '../src/stdoutCursorPark.js'
 import { applyBridgeEvent, initialState, type AppState } from '../src/state.js'
 import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
-const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink_bridge.py')
+const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const PROFILE = process.env.GA_WORKFLOW_E2E_PROFILE || 'deepseek-v4.1-flash'
 const TASK = process.env.GA_WORKFLOW_E2E_TASK || '使用 Tavily 搜索 Python 官方文档中 pathlib.Path.write_text 的行为，然后生成一份介绍该 API 的 HTML 文件并验证文件'
 const EXPECTED_MCP_TOOL = process.env.GA_WORKFLOW_E2E_MCP_TOOL || 'mcp__tavily__tavily_search'

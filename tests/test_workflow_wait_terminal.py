@@ -143,7 +143,7 @@ class WorkflowStallGuardTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _bridge(self, alive):
-        from frontends.ink_bridge import GenericAgentBridge
+        from frontends.ink.bridge import GenericAgentBridge
         from workflow_models import WorkflowRun
         from workflow_store import WorkflowStore
 

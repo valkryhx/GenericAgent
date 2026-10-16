@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { startBridge, type BridgeClient } from '../frontends/ink-ui/src/bridgeClient.js'
-import { applyBridgeEvent, initialState, type AppState } from '../frontends/ink-ui/src/state.js'
-import type { BridgeEvent } from '../frontends/ink-ui/src/protocol.js'
+import { startBridge, type BridgeClient } from '../frontends/ink/ui/src/bridgeClient.js'
+import { applyBridgeEvent, initialState, type AppState } from '../frontends/ink/ui/src/state.js'
+import type { BridgeEvent } from '../frontends/ink/ui/src/protocol.js'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink_bridge.py')
+const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const PYTHON = process.env.PYTHON || 'python'
 const OPT_IN = process.env.GA_RUN_REAL_INK_WORKFLOW_FINAL_E2E === '1'
 const TARGET_SELECTOR = 'luna'

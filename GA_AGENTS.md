@@ -36,7 +36,7 @@
 ## 测试
 
 - Python 测试使用标准库 `unittest`，位于 `tests/`。改运行时路径时先跑聚焦测试，再跑 `python -m unittest discover -s tests`。
-- Ink UI 的 npm 命令必须在 `frontends/ink-ui` 目录下运行，不要在仓库根目录运行。
+- Ink UI 的 npm 命令必须在 `frontends/ink/ui` 目录下运行，不要在仓库根目录运行。
 - 真实 LLM API 测试必须显式 opt-in，并且只使用用户明确授权的 provider / model。
 
 ## 安全
@@ -49,7 +49,7 @@
 
 - 核心运行时位于仓库根目录：`agentmain.py`（入口与系统提示词装配）、`agent_loop.py`（agent 循环）、`ga.py`（工具实现与 `do_<tool_name>` 分发）、`llmcore.py` / `llm_config.py` / `llm_client.py`（provider 与流式协议）。
 - `ga_cli/` 是可安装 CLI 包，`ga` 命令映射到 `ga_cli.cli:main`；`launch.pyw` 启动默认桌面界面。
-- 界面与适配器在 `frontends/`：`ink_bridge.py` 是 Ink 桥接入口，React/Ink UI 在 `frontends/ink-ui`。
+- 界面与适配器在 `frontends/`：`ink_bridge.py` 是 Ink 桥接入口，React/Ink UI 在 `frontends/ink/ui`。
 - 动态 workflow 模块在根目录：`workflow_planner.py`、`workflow_runtime.py`、`workflow_scheduler.py`、`workflow_child_agent.py`、`workflow_tool_profiles.py`、`workflow_path_acl.py`。
 - 子代理能力边界在 `subagent_capabilities.py`；提示词装配在 `ga_agents_runtime.py`（`load_base_system_prompt` + `build_ga_project_instructions`）。
 - 长期记忆、SOP 和沉淀工具在 `memory/`；运行期日志、会话、transcript 和临时产物在 `temp/`。

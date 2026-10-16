@@ -38,7 +38,7 @@ test('validateCapturedImageFile rejects 1x1', () => {
 test('validateCapturedImageFile accepts 64x64 fixture', () => {
   const candidates = [
     join(process.cwd(), 'scripts', 'fixture_clip_64.png'),
-    join(process.cwd(), 'frontends', 'ink-ui', 'scripts', 'fixture_clip_64.png'),
+    join(process.cwd(), 'frontends', 'ink', 'ui', 'scripts', 'fixture_clip_64.png'),
   ]
   const src = candidates.find((c) => existsSync(c))
   if (!src) {

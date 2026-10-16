@@ -16,7 +16,7 @@ class GaAgentsRuntimeTest(unittest.TestCase):
     def test_discovers_docs_from_workspace_root_to_current_dir(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            child = root / "frontends" / "ink-ui"
+            child = root / "frontends" / "ink" / "ui"
             child.mkdir(parents=True)
             (root / DEFAULT_GA_AGENTS_FILENAME).write_text("root rules", encoding="utf-8")
             (root / "frontends" / DEFAULT_GA_AGENTS_FILENAME).write_text("frontend rules", encoding="utf-8")

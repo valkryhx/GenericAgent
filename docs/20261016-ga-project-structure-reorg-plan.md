@@ -1,6 +1,6 @@
 # GA 项目目录重构方案
 
-> 状态：**后端主包迁移已实施（P1–P5 主体完成）；前端目录整理 P6 待继续**
+> 状态：**P0–P5 后端迁移完成；P6 Ink 前端迁移完成，其他前端分组与 P7 shim 清理待继续**
 > 日期：2026-10-16
 > 目标仓库：`D:\git_codes\GenericAgent`
 > CC 证据仓库：`D:\git_codes\claudecode283_hack`
@@ -352,8 +352,8 @@ frontends/
     btw_cmd.py
     export_cmd.py
   ink/
-    bridge.py                 # 原 frontends/ink_bridge.py
-    ui/                       # 原 frontends/ink-ui/ 的正式源码
+    bridge.py                 # 原 frontends/ink/bridge.py
+    ui/                       # 原 frontends/ink/ui/ 的正式源码
       src/
       scripts/
       package.json
@@ -380,8 +380,8 @@ frontends/
 
 注意：
 
-- `frontends/ink-ui/node_modules/` 是本地依赖，不提交；迁移后运行 `npm ci` 或 `npm install` 重建。
-- `frontends/ink-ui/_verify_liu.py`、`liu_guoliang_introduction.html`、
+- `frontends/ink/ui/node_modules/` 是本地依赖，不提交；迁移后运行 `npm ci` 或 `npm install` 重建。
+- `frontends/ink/ui/_verify_liu.py`、`liu_guoliang_introduction.html`、
   `research_liu_guoliang_*.json` 属于测试/研究产物，应移到 `tests/fixtures/ink-ui/` 或
   `dev_ideas/`，不要与正式前端源码混放。
 - 前端迁移放 P6，优先级低于后端包分层；如果 P0–P5 尚未稳定，不要先动前端目录。
@@ -500,9 +500,9 @@ workflow_script_contract.js     → workflow/js/script_contract.js
 | `assets/` 中的图片、模板、浏览器扩展 | 继续留在 `assets/`，`assets/` 不再承载运行时 Python 实现 |
 | `workflow_js_worker.js` | `genericagent/workflow/js/worker.js` |
 | `workflow_script_contract.js` | `genericagent/workflow/js/script_contract.js` |
-| `frontends/ink_bridge.py` | `frontends/ink/bridge.py` |
-| `frontends/ink-ui/` | `frontends/ink/ui/`（P6，单独迁移） |
-| `frontends/ink-ui/_verify_liu.py` 等研究产物 | `tests/fixtures/ink-ui/` 或 `dev_ideas/` |
+| `frontends/ink/bridge.py` | `frontends/ink/bridge.py` |
+| `frontends/ink/ui/` | `frontends/ink/ui/`（P6，单独迁移） |
+| `frontends/ink/ui/_verify_liu.py` 等研究产物 | `tests/fixtures/ink-ui/` 或 `dev_ideas/` |
 
 ---
 
@@ -804,8 +804,8 @@ paths.WORKFLOW_JS_DIR / "script_contract.js"
 
 1. 建立 `frontends/{common,terminal,ink,desktop,web,bots,acp}`。
 2. 按 §3.3 迁移 Python 前端。
-3. `frontends/ink_bridge.py` → `frontends/ink/bridge.py`。
-4. `frontends/ink-ui/` → `frontends/ink/ui/`，更新 npm scripts、TS imports、启动器路径、文档和测试。
+3. `frontends/ink/bridge.py` → `frontends/ink/bridge.py`。
+4. `frontends/ink/ui/` → `frontends/ink/ui/`，更新 npm scripts、TS imports、启动器路径、文档和测试。
 5. 把 `_verify_liu.py` 和研究 JSON/HTML 移到测试夹具或 `dev_ideas/`。
 6. 更新 `ga_cli/cli.py` 的 frontend 命令映射。
 
@@ -895,7 +895,7 @@ assert old is new
 ### 8.4 Ink UI
 
 ```bash
-cd frontends/ink-ui
+cd frontends/ink/ui
 npm test
 npx tsc --noEmit
 ```
@@ -1005,6 +1005,7 @@ chore(structure): enforce package boundaries and update packaging
 - `scripts/check_project_structure.py` 能阻止目录再次扁平化。
 - 文档中的路径、启动命令、测试命令与重构后结构一致。
 
+
 ---
 
 ## 12. 给后续实施 Codex 的阅读顺序
@@ -1030,7 +1031,7 @@ chore(structure): enforce package boundaries and update packaging
 
 ## 13. 实施结果（2026-10-16）
 
-> 状态：**P0–P5 主体已实施并通过回归；P6 前端目录整理仍待继续。**
+> 状态：**P0–P5 后端迁移、P6 Ink 前端迁移已实施并通过回归；其他前端分组与 P7 shim 清理待继续。**
 
 ### 13.1 已完成
 
@@ -1094,12 +1095,15 @@ chore(structure): enforce package boundaries and update packaging
 | Ink UI `npm test` | 431 pass |
 | Ink UI `npx tsc --noEmit` | 通过 |
 | 全量 Python `python -m unittest discover -s tests` | 1585 tests OK（3 skipped） |
+| 真实 workflow E2E（默认 `deepseek-flash`） | runId `wf_18a215a93a2942dcad977d81444c411a`，4/4 succeeded，产物已核验 |
+| wheel 构建 | `genericagent-0.1.0-py3-none-any.whl` 构建成功；89 个 Python 模块 + JS/resources 入包，required 资源 0 missing |
+| L2 Ink 面板 | `real_ink_team_panel_e2e.ts` PASS（新路径下真实 App + 伪 TTY） |
 
 ### 13.3 尚未完成
 
-- **P6 前端目录整理**：`frontends/ink_bridge.py`、`frontends/ink-ui/` 尚未迁入 `frontends/ink/`。
-- **P7 根 shim 清理**：本轮保留 73 个根级 shim/entrypoint，确保外部脚本和旧测试不中断；待确认无外部依赖后再逐批清理。
-- **真实 LLM E2E**：目录迁移本身已通过静态/单元/Ink UI 回归；如需发布前最终验收，仍应按 §8.5 跑默认 `deepseek-flash` 的 workflow / subagent / resume E2E。
+- **P6 其他前端分组**：Ink 已迁入 `frontends/ink/`；`frontends/` 顶层的 TUI、桌面、Web、Bot、ACP 适配器尚未按运行形态继续分组。
+- **P7 根 shim 删除**：本轮保留 73 个根级 shim/entrypoint，确保外部脚本和旧测试不中断；已完成 wheel/package-data 验证与结构门禁，删除 shim 需等外部依赖确认后再逐批进行。
+- **真实 LLM E2E**：已完成显式 `/workflow` 的默认 `deepseek-flash` E2E；自主触发型 UI E2E 在默认模型下未触发 workflow，记录为 opt-in/模型行为观察，不作为目录迁移阻塞项。
 
 ### 13.4 关键设计结论
 
@@ -1107,3 +1111,28 @@ chore(structure): enforce package boundaries and update packaging
 - **兼容 shim 用模块别名，不复制实现**：根旧模块必须与新模块保持同一对象身份，避免测试 patch 和类身份分裂。
 - **迁移不夹带业务重构**：本轮只做目录、路径、打包和兼容层；workflow 语义、agent team 行为不在本提交中重写。
 - **云端边界不变**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**
+
+### 13.5 P6 Ink 前端迁移结果（2026-10-16）
+
+- 正式实现：
+  - `frontends/ink_bridge.py` → `frontends/ink/bridge.py`
+  - `frontends/ink-ui/` → `frontends/ink/ui/`
+- 兼容层：
+  - 保留 `frontends/ink_bridge.py`，但只作为 module alias shim；
+  - `sys.modules[__name__] = _bridge` 保证旧 import 与 patch target 指向同一个模块对象；
+  - 直接执行旧 shim 时转调 `_bridge.main()`。
+- 启动器与脚本：
+  - `ga_cli/cli.py` 的 `ga` / `ink` 命令改走 `frontends/ink/ui/`；
+  - `install_ink_ui.cmd`、Ink UI scripts/probes、测试脚本和 README 路径已更新；
+  - 研究/演示产物移到 `tests/fixtures/ink-ui/`。
+- 结构门禁：
+  - `scripts/check_project_structure.py` 现在检查：
+    - `frontends/ink/bridge.py` 存在；
+    - `frontends/ink/ui/package.json` 存在；
+    - 旧 `frontends/ink-ui/` 目录不存在；
+    - 旧 `frontends/ink_bridge.py` 必须是 thin alias shim。
+- 验证：
+  - `python -m unittest tests.test_ga_cli_launcher tests.test_ink_bridge tests.test_p8_provider_anomaly_e2e tests.test_workflow_meta_contract` → 165 tests OK；
+  - `npm test`（新目录）→ 431 pass；
+  - `npx tsc --noEmit` → 通过；
+  - bridge 新旧路径 module identity smoke → 通过。

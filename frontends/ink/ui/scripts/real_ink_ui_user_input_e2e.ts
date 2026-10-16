@@ -11,9 +11,9 @@ import { createCursorParkStdout } from '../src/stdoutCursorPark.js'
 import { applyBridgeEvent, initialState, type AppState } from '../src/state.js'
 import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
-const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink_bridge.py')
+const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const EXPECTED_PROFILE = process.env.GA_UI_EXPECTED_PROFILE || 'luna'
 const EXPECTED_MODEL = process.env.GA_UI_EXPECTED_MODEL || `${EXPECTED_PROFILE}/gpt-5.6-luna`
 const EXPECTED_PROVIDER = process.env.GA_UI_EXPECTED_PROVIDER || 'gpt-super-responses'

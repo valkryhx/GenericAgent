@@ -26,14 +26,14 @@ python frontends/tuiapp.py
 streamlit run frontends/stapp2.py
 ```
 
-`ga` with no subcommand starts the React/Ink terminal UI by default. `ga ink` uses `frontends/ink-ui` through the Python JSONL bridge. `ga cli` runs the plain Python CLI.
+`ga` with no subcommand starts the React/Ink terminal UI by default. `ga ink` uses `frontends/ink/ui` through the Python JSONL bridge. `ga cli` runs the plain Python CLI.
 
 ### Ink UI setup and checks
 
-Run npm commands from `frontends/ink-ui` rather than the repository root.
+Run npm commands from `frontends/ink/ui` rather than the repository root.
 
 ```bash
-cd frontends/ink-ui
+cd frontends/ink/ui
 npm install
 npm run test
 npm run typecheck
@@ -58,8 +58,8 @@ GenericAgent is a compact Python autonomous agent runtime with multiple frontend
 
 Most UI adapters live under `frontends/`. The React/Ink UI is intentionally independent from the Textual frontend:
 
-- `frontends/ink-ui` is a React 18 + Ink 5 terminal UI run by `tsx`.
-- `frontends/ink_bridge.py` exposes a JSONL stdio protocol so the Node/Ink process can drive `GenericAgent` without importing Textual UI code.
+- `frontends/ink/ui` is a React 18 + Ink 5 terminal UI run by `tsx`.
+- `frontends/ink/bridge.py` exposes a JSONL stdio protocol so the Node/Ink process can drive `GenericAgent` without importing Textual UI code.
 - The bridge redirects backend stdout/stderr to `temp/ink_bridge_backend.log` so stdout remains valid JSONL protocol output.
 
 ## Persistence, compaction, MCP, and skills
@@ -78,10 +78,10 @@ Create `mykey.py` or `mykey.json` from the provided templates before using real 
 
 Python tests use the standard library `unittest` and live under `tests/` as `test_*.py`. Stub external services and avoid real credentials in tests.
 
-Ink UI tests live beside the TypeScript sources as `frontends/ink-ui/src/*.test.ts` and run with Node's test runner through `tsx`.
+Ink UI tests live beside the TypeScript sources as `frontends/ink/ui/src/*.test.ts` and run with Node's test runner through `tsx`.
 
 For Ink UI bugs (cursor/IME, layout, wrapping, duplicate rendering, streaming), prefer program-driven regression tests over eyeballing screenshots. The core idea: terminal UI bugs reduce to deterministic facts in the emitted stdout bytes or the laid-out row/column geometry, both of which are machine-assertable. Reach for the matching technique — virtual-terminal cursor tracker for relative-cursor arithmetic, byte-level ANSI assertions (match + doesNotMatch + indexOf-slice for ordering) for control sequences, in-memory terminal (`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`) with frame-geometry parsers for layout, pure functions for layout/partition decisions, `string-width` (never `.length`) for CJK/emoji wrapping, and unique-probe counting for duplicate rendering. The full playbook, decision table, and reusable helpers are in `docs/ga_ink_ui_testing_playbook_2026-07-16.md` — read it before adding or debugging Ink UI tests. Its one blind spot: cross-terminal behavior (e.g. IME anchoring to the visible native cursor) can only be caught by real-terminal screenshots, then reduced back into a byte-level contract.
-For real end-to-end self-tests against a real LLM API (a recurring need), follow `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`: three tiers (L1 event-level `tests/real_ink_selftest.py`, L2 UI-layout `frontends/ink-ui/scripts/real_ink_team_panel_e2e.ts`, L3 interactive `./ga`), judged by evidence (event stream / logs / artifacts / real UI frames) + invariant assertions, never by fixed expected output. Note `scripts/real_ink_ui_user_input_e2e.ts` is luna-profile hardwired and fails on the default `deepseek-flash` model (subagent never reaches succeeded) — do not use it to judge the default model.
+For real end-to-end self-tests against a real LLM API (a recurring need), follow `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`: three tiers (L1 event-level `tests/real_ink_selftest.py`, L2 UI-layout `frontends/ink/ui/scripts/real_ink_team_panel_e2e.ts`, L3 interactive `./ga`), judged by evidence (event stream / logs / artifacts / real UI frames) + invariant assertions, never by fixed expected output. Note `scripts/real_ink_ui_user_input_e2e.ts` is luna-profile hardwired and fails on the default `deepseek-flash` model (subagent never reaches succeeded) — do not use it to judge the default model.
 
 
 ## Repository guidance
@@ -90,7 +90,7 @@ When the user asks Claude Code to reference or learn from Claude Code's own impl
 
 Claude Code is a React + Ink terminal UI and forks Ink under `claude-code-fork/src/ink`. For GA Ink UI cursor/IME/layout work, it is the highest-value reference: it solves the same native-cursor/IME problem GA hit. Key files: `src/ink/components/CursorDeclarationContext.ts` and `src/ink/hooks/use-declared-cursor.ts` (frame-declared cursor model), `src/ink/frame.ts` (Frame carries `cursor`), `src/ink/ink.tsx` + `src/ink/log-update.ts` (single stdout writer, diff + final cursor). GA's analysis lives in `docs/superpowers/specs/2026-07-15-ga-self-managed-terminal-design.md` and `docs/ga_claude_code_cursor_handling_2026-07-16.md`.
 
-For the GA Ink UI IME/cursor bug, the authoritative root-cause writeup is `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`: Windows Terminal anchors the IME candidate window to the **visible** native cursor (DECTCEM `\x1b[?25h`), so the cursor-park writer (`frontends/ink-ui/src/stdoutCursorPark.ts`) must SHOW the native cursor once it lands on the caret and HIDE it before the next frame write. Earlier 2026-07-14/07-15 diagnoses that concluded "keep the native cursor hidden, use the inverse-video block only" are wrong and are corrected there.
+For the GA Ink UI IME/cursor bug, the authoritative root-cause writeup is `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`: Windows Terminal anchors the IME candidate window to the **visible** native cursor (DECTCEM `\x1b[?25h`), so the cursor-park writer (`frontends/ink/ui/src/stdoutCursorPark.ts`) must SHOW the native cursor once it lands on the caret and HIDE it before the next frame write. Earlier 2026-07-14/07-15 diagnoses that concluded "keep the native cursor hidden, use the inverse-video block only" are wrong and are corrected there.
 
 When the user asks to reference or learn from Codex's own implementation — subagent lifecycle, TUI/stdout ownership, scrollback/selection, terminal draw/cursor, or related control-plane design — inspect the local Codex source at `D:\git_codes\codex`. Prefer `D:\git_codes\codex\codex-rs\tui` for TUI/terminal behavior, and the rest of `codex-rs` for agent/runtime control-plane. Do not rely only on secondary notes when the question is about how Codex actually works; open the source. GA analysis notes: `docs/ga_subagent_codex_reference_2026-07-13.md`, `docs/ga_codex_vs_ink_stdout_ownership_2026-07-15.md`, `docs/ga_ink_ui_text_selection_copy_diagnosis_2026-07-14.md`.
 

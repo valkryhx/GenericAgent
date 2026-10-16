@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { workflowAgentDetailPanelFromOverview, workflowOverviewFromDetail, workflowOverviewRows, workflowPanelFromDetail, workflowPanelRows } from '../frontends/ink-ui/src/workflowPanel.js'
+import { workflowAgentDetailPanelFromOverview, workflowOverviewFromDetail, workflowOverviewRows, workflowPanelFromDetail, workflowPanelRows } from '../frontends/ink/ui/src/workflowPanel.js'
 
 const detailPath = process.argv[2]
 if (!detailPath) {

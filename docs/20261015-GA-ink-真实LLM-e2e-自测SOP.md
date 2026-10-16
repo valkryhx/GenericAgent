@@ -25,7 +25,7 @@
 | 层 | 名字 | 驱动什么 | 需真实 LLM？ | 判定对象 | 入口 |
 | --- | --- | --- | --- | --- | --- |
 | **L1** | 事件级（bridge） | 真实 `GenericAgentBridge` + 真实 agent | 可选 | 事件流 / token / 产物文件 | `tests/real_ink_selftest.py` |
-| **L2** | UI 版面级 | 真实 `App`（伪 TTY）+ 真实 bridge | 否（布局）/ 可选 | 渲染帧（宽度/边框/面板文本） | `frontends/ink-ui/scripts/real_ink_*.ts` |
+| **L2** | UI 版面级 | 真实 `App`（伪 TTY）+ 真实 bridge | 否（布局）/ 可选 | 渲染帧（宽度/边框/面板文本） | `frontends/ink/ui/scripts/real_ink_*.ts` |
 | **L3** | 交互式手动 | 真实终端里跑 `./ga` | 是 | 人眼 + 会话产物 | `./ga` |
 
 **推荐顺序**：先 L2 快速验证 UI 改动没把版面搞坏 → 再 L1 跑一次真实 LLM 回合确认链路 →
@@ -39,7 +39,7 @@
 - 列出现有模型（不泄露密钥）：
 
   ```bash
-  cd frontends/ink-ui && timeout 120 npx tsx scripts/_probe_models.ts
+  cd frontends/ink/ui && timeout 120 npx tsx scripts/_probe_models.ts
   ```
 
   输出形如 `14 "cc-deepseek-v4.1-flash-chat/deepseek-flash"`，`CURRENT` 标注当前模型。
@@ -209,7 +209,7 @@ tool profile 之后。目标是验证模型真实完成一个**有并行、有�
 ### 4.1 现有脚本
 
 ```bash
-cd frontends/ink-ui
+cd frontends/ink/ui
 npx tsx scripts/real_ink_team_panel_e2e.ts     # /team 面板：头部 + 任务板 + 页脚 + 宽度
 npx tsx scripts/real_ink_ui_user_input_e2e.ts  # 输入/光标/子代理/workflow 全链路（需真实 API）
 npx tsx scripts/real_ink_team_swarm_e2e.ts     # agent team 全链路：输入框驱动 + 真实 API + 默认模型
@@ -314,10 +314,10 @@ cd /d/git_codes/GenericAgent
 export LANG=C.UTF-8; export LC_ALL=C.UTF-8
 
 # 列模型
-cd /d/git_codes/GenericAgent/frontends/ink-ui && timeout 120 npx tsx scripts/_probe_models.ts
+cd /d/git_codes/GenericAgent/frontends/ink/ui && timeout 120 npx tsx scripts/_probe_models.ts
 
 # L2 UI 版面（快）
-cd /d/git_codes/GenericAgent/frontends/ink-ui && npx tsx scripts/real_ink_team_panel_e2e.ts
+cd /d/git_codes/GenericAgent/frontends/ink/ui && npx tsx scripts/real_ink_team_panel_e2e.ts
 
 # L1 结构 + 真实回合
 cd /d/git_codes/GenericAgent
@@ -325,7 +325,7 @@ python tests/real_ink_selftest.py
 GA_RUN_REAL_API_E2E=1 python tests/real_ink_selftest.py
 
 # 回归（不调真实模型）
-cd frontends/ink-ui && npm test && npm run typecheck
+cd frontends/ink/ui && npm test && npm run typecheck
 cd ../.. && python -m pytest tests/test_ink_bridge.py -q
 ```
 

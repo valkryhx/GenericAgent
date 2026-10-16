@@ -63,7 +63,7 @@ class GaCliLauncherTest(unittest.TestCase):
 
         self.assertEqual("node", cmd[0])
         self.assertIn("node_modules/tsx/dist/cli.mjs", cmd[1].replace("\\", "/"))
-        self.assertIn("ink-ui/src/main.tsx", cmd[2].replace("\\", "/"))
+        self.assertIn("ink/ui/src/main.tsx", cmd[2].replace("\\", "/"))
 
 
 if __name__ == "__main__":

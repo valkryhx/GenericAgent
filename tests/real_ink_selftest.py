@@ -30,7 +30,7 @@ for _p in (REPO_ROOT, FRONTENDS):
         sys.path.insert(0, str(_p))
 
 from sensitive_redaction import sanitize  # noqa: E402
-from frontends.ink_bridge import GenericAgentBridge  # noqa: E402
+from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
 
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 PROMPT = os.environ.get("GA_SELFTEST_PROMPT", "Reply with exactly one word: PONG")

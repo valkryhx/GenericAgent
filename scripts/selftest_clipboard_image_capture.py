@@ -30,7 +30,7 @@ print("set_clipboard:", r.returncode, r.stdout.strip(), (r.stderr or "")[:400])
 # capture via node
 node = subprocess.run(
     ["npx", "tsx", "-e", "import { captureClipboardImage } from './src/clipboardImage.ts'; console.log(JSON.stringify(captureClipboardImage()))"],
-    cwd=str(REPO / "frontends" / "ink-ui"),
+    cwd=str(REPO / "frontends" / "ink" / "ui"),
     capture_output=True,
     text=True,
 )

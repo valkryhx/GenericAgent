@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { workflowStatusBarFromState, workflowStatusBarRows } from '../frontends/ink-ui/src/workflowStatusBar.js'
-import type { AppState } from '../frontends/ink-ui/src/state.js'
+import { workflowStatusBarFromState, workflowStatusBarRows } from '../frontends/ink/ui/src/workflowStatusBar.js'
+import type { AppState } from '../frontends/ink/ui/src/state.js'
 
 const detailPath = process.argv[2]
 if (!detailPath) {

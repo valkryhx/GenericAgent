@@ -4,15 +4,15 @@
 //   readyMs      - bridge handshake done (input box is live from here)
 //   perServer    - when each server first reported connected
 //   mcpReadyMs   - discovery finished (loading=false)
-// Run: node frontends/ink-ui/node_modules/tsx/dist/cli.mjs frontends/ink-ui/scripts/_probe_mcp_startup.ts
+// Run: node frontends/ink/ui/node_modules/tsx/dist/cli.mjs frontends/ink/ui/scripts/_probe_mcp_startup.ts
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const NL = String.fromCharCode(10)
-const child = spawn(process.env.PYTHON || 'python', [path.join(REPO, 'frontends', 'ink_bridge.py')], { cwd: REPO, stdio: ['pipe','pipe','pipe'] })
+const child = spawn(process.env.PYTHON || 'python', [path.join(REPO, 'frontends', 'ink', 'bridge.py')], { cwd: REPO, stdio: ['pipe','pipe','pipe'] })
 child.stderr.on('data', () => {})
 const rl = readline.createInterface({ input: child.stdout })
 const t0 = Date.now()

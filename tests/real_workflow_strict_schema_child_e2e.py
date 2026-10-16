@@ -165,7 +165,7 @@ def run_artifact_handoff_case(store: WorkflowStore, workspace: Path) -> dict[str
     # must be visible there too.
     handoff_document = {}
     try:
-        from frontends.ink_bridge import GenericAgentBridge
+        from frontends.ink.bridge import GenericAgentBridge
 
         # ``GenericAgentBridge`` builds its agent eagerly, so hand it an inert
         # stub: this check only needs the pure payload builder.

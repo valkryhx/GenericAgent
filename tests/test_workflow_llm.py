@@ -182,7 +182,7 @@ class WorkflowChildUsesBindingTest(unittest.TestCase):
 
 class InkBridgeDefaultRunnerTest(unittest.TestCase):
     def test_make_workflow_runtime_uses_native_runner_bound_to_agent(self):
-        from frontends.ink_bridge import GenericAgentBridge
+        from frontends.ink.bridge import GenericAgentBridge
         from workflow_child_agent import FakeChildAgentRunner, NativeGPTChildAgentRunner
 
         class Agent:

@@ -1,17 +1,17 @@
 // Ad-hoc real E2E (not a CI test): drives the real ink bridge with the default
 // (model-authored) planner and reports the plan shape, the run status and the
 // artifact bookkeeping. Proves the /workflow default path executes.
-// Run: node frontends/ink-ui/node_modules/tsx/dist/cli.mjs frontends/ink-ui/scripts/_probe_workflow_default_planner.ts
+// Run: node frontends/ink/ui/node_modules/tsx/dist/cli.mjs frontends/ink/ui/scripts/_probe_workflow_default_planner.ts
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const NL = String.fromCharCode(10)
 const TASK = process.env.GA_PROBE_TASK
   || '分别用python写3个demo：1.hello word程序 2. 1-100内的质数 3. html展示你好二字 然后检验结果'
-const child = spawn(process.env.PYTHON || 'python', [path.join(REPO, 'frontends', 'ink_bridge.py')], { cwd: REPO, stdio: ['pipe','pipe','pipe'] })
+const child = spawn(process.env.PYTHON || 'python', [path.join(REPO, 'frontends', 'ink', 'bridge.py')], { cwd: REPO, stdio: ['pipe','pipe','pipe'] })
 child.stderr.on('data', () => {})
 const rl = readline.createInterface({ input: child.stdout })
 const t0 = Date.now()

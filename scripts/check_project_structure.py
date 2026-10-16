@@ -69,6 +69,25 @@ def path_guess_findings() -> list[str]:
     return findings
 
 
+def frontend_layout_findings() -> list[str]:
+    findings: list[str] = []
+    canonical_bridge = ROOT / 'frontends' / 'ink' / 'bridge.py'
+    canonical_ui = ROOT / 'frontends' / 'ink' / 'ui' / 'package.json'
+    legacy_bridge = ROOT / 'frontends' / 'ink_bridge.py'
+    legacy_ui = ROOT / 'frontends' / 'ink-ui'
+    if not canonical_bridge.is_file():
+        findings.append('missing canonical Ink bridge: frontends/ink/bridge.py')
+    if not canonical_ui.is_file():
+        findings.append('missing canonical Ink UI package: frontends/ink/ui/package.json')
+    if legacy_ui.exists():
+        findings.append('legacy frontends/ink-ui directory must not exist after P6')
+    if legacy_bridge.exists():
+        text = legacy_bridge.read_text(encoding='utf-8', errors='replace')
+        if 'sys.modules[__name__] = _bridge' not in text:
+            findings.append('frontends/ink_bridge.py must remain a thin module alias shim')
+    return findings
+
+
 def main() -> int:
     failures: list[str] = []
     unexpected = root_implementation_files()
@@ -78,6 +97,7 @@ def main() -> int:
             + ', '.join(p.name for p in unexpected)
         )
     failures.extend(path_guess_findings())
+    failures.extend(frontend_layout_findings())
     if failures:
         for item in failures:
             print(f'FAIL: {item}')

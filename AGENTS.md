@@ -35,7 +35,7 @@ GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent
 
 ### Ink UI 测试：优先「无截图」的程序化手段
 
-Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
+Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
 
 ### GA ink 真实 LLM API e2e 自测：先读 SOP
 
@@ -44,8 +44,8 @@ Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + ts
 靠**证据（事件流 / 日志 / 产物 / 真实 UI 帧）+ 不变量断言**。分三层：
 
 - **L1 事件级**：`python tests/real_ink_selftest.py`（结构检查，秒级）；真实回合加 `GA_RUN_REAL_API_E2E=1`（走默认模型即可），证据包落 `temp/ink-selftest/<ts>/`。
-- **L2 UI 版面级**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_panel_e2e.ts`（真实 App + 伪 TTY，不需 API，秒级）。
-- **L2 agent team 全链路**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_swarm_e2e.ts`（真实 App + 伪 TTY，从输入框输入硬任务 + 真实 API + 默认模型；断言 team_mode teammate / 共享任务板 / 产物）。
+- **L2 UI 版面级**：`cd frontends/ink/ui && npx tsx scripts/real_ink_team_panel_e2e.ts`（真实 App + 伪 TTY，不需 API，秒级）。
+- **L2 agent team 全链路**：`cd frontends/ink/ui && npx tsx scripts/real_ink_team_swarm_e2e.ts`（真实 App + 伪 TTY，从输入框输入硬任务 + 真实 API + 默认模型；断言 team_mode teammate / 共享任务板 / 产物）。
 - **L3 交互式手动**：`./ga`（人眼 + 会话产物）。
 
 - **2026-10-16 真实自测记录（MCP 结果预算）**：用 FastMCP 真实 stdio server 声明
@@ -92,7 +92,7 @@ Ink v5 用 **legacy root**（`ink/build/ink.js` 里 `createContainer(..., 0, ...
 2. 历史变短的路径（`/rewind`）必须先整屏重置（`resetTranscriptViewport()`）再重印，否则留在
    scrollback 上的旧行会与新印的行叠加。
 
-回归测试 `frontends/ink-ui/src/resumeTranscriptDuplication.test.ts`（屏幕级断言用
+回归测试 `frontends/ink/ui/src/resumeTranscriptDuplication.test.ts`（屏幕级断言用
 `src/resizeReflowModel.ts`）。复盘见 `docs/20261010-ink-resume-duplication-and-list-latency.md`。
 
 ### `/resume` 列表：只走轻量扫描 + `(mtime, size)` 缓存
@@ -121,7 +121,7 @@ last_seq / 用户消息文本），turn 簿记与 `load_session` 逐条对齐。
 
 Claude Code 本地源码位于 `D:\git_codes\claude-reviews-claude\claude-code-fork\src`。它是 React + Ink 终端 UI，并在 `src/ink` 下 fork 了 Ink。处理 GA Ink UI 的光标 / IME / 布局问题时，这是最高价值的参考——它解决了 GA 遇到的同一个原生光标/IME 问题。关键文件：`src/ink/components/CursorDeclarationContext.ts`、`src/ink/hooks/use-declared-cursor.ts`（frame 声明 cursor 模型）、`src/ink/frame.ts`、`src/ink/ink.tsx`、`src/ink/log-update.ts`（单一 stdout writer：diff 帧后统一放 cursor）。GA 侧分析见 `docs/superpowers/specs/2026-07-15-ga-self-managed-terminal-design.md` 与 `docs/ga_claude_code_cursor_handling_2026-07-16.md`。
 
-GA Ink UI 的 IME/光标 bug，权威根因文档是 `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`：Windows Terminal 的输入法候选框锚定在**可见**的原生光标上（DECTCEM `\x1b[?25h`），因此 cursor-park 包裹流（`frontends/ink-ui/src/stdoutCursorPark.ts`）必须在光标停到 caret 后 SHOW、在下一帧写入前 HIDE。2026-07-14/07-15 早期诊断得出的「保持原生光标隐藏、只用反显块」结论是错的，已在该文档中修正。
+GA Ink UI 的 IME/光标 bug，权威根因文档是 `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`：Windows Terminal 的输入法候选框锚定在**可见**的原生光标上（DECTCEM `\x1b[?25h`），因此 cursor-park 包裹流（`frontends/ink/ui/src/stdoutCursorPark.ts`）必须在光标停到 caret 后 SHOW、在下一帧写入前 HIDE。2026-07-14/07-15 早期诊断得出的「保持原生光标隐藏、只用反显块」结论是错的，已在该文档中修正。
 
 ## 参考实现：Pi agent（提速参考）
 
@@ -178,7 +178,7 @@ Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI�
 
 两个反复踩到的坑，改 workflow UI/handoff 前先确认：
 
-1. **实时进度**：`frontends/ink_bridge.py::_run_workflow_runtime` 必须边跑边推 `workflow_progress`（`_watch_workflow_progress()` 轮询 durable 的 `workflow-progress.json`）。只在 runtime 返回后推一次，UI 会全程停在 `0/0 agents done`。
+1. **实时进度**：`frontends/ink/bridge.py::_run_workflow_runtime` 必须边跑边推 `workflow_progress`（`_watch_workflow_progress()` 轮询 durable 的 `workflow-progress.json`）。只在 runtime 返回后推一次，UI 会全程停在 `0/0 agents done`。
 2. **产物引用**：计划里的 `artifacts`/`deliverables` 是语义标签，不是路径。真实路径来自子代理自己的 `file_write`/`file_patch` 调用（`workflow_scheduler._record_observed_artifacts()` → `job.metadata["observedArtifacts"]` → `workflow-progress.json` → handoff `intermediateResults[].artifactRefs`）。handoff 里必须说明这些是 **workspace 相对路径**，基准是 GA workspace 根（默认 `temp/`），而不是 run 的内部 artifact 目录。不要把"计划标签"当路径交给 LLM 去猜。
 
 证据见 `docs/20261009-ga-workflow-stability-stepcode-borrow.md` §12。
@@ -384,7 +384,7 @@ Ownership travels with the handoff, never as a tool-name inference. `workspace_w
 
 Every planned/draft/resumed run owns an isolated output workspace at `<base>/workflow-runs/<runId>/`. Two roots must not be confused: `workspacePath` (run-local, where `artifactRefs` resolve) and `workspaceBasePath` (the shared base, where run-internal `resultRef`/`transcriptRef` under `temp/sessions/...` resolve). The Ink bridge resolves artifacts via `_run_workspace_root()` and run-internal refs via `_run_artifact_base_root()`; mixing them makes a correct artifact look missing. `_cache_key()["workspacePathHash"]` hashes the base root so resume still hits cached prefixes.
 
-Every ref published to a reader must open under a root that reader is told about. `resultRef`/`transcriptRef` are relative to the run's internal artifact directory, so the host materialises each job's durable result into the run workspace at `workflow-handoffs/result-<jobId>.json` (`workflow_scheduler._materialize_result_copy`) and every reader-facing surface publishes that workspace-relative copy as `resultRef`, with `resultPath` absolute and `runInternalResultRef` kept for audit: `workflow-progress.json`, the workspace handoff file `workflow-handoffs/<job>.json`, and the post-run handoff in `frontends/ink_bridge.py`. `workflow-handoffs/` is in `HOST_OWNED_WORKSPACE_DIRS`, so writing it while other children run cannot be misattributed to a child diff. A reader that joins the bare internal ref onto `workspacePath` builds a real path that does not exist; that is not a Windows path-separator problem, and it is what made a correct run report its durable result as missing (run `wf_92ad839265dc48f3ac56e5cb86f6e780`). This is not a Windows path-separator issue: a bare `resultRef: agents/agent_1/result.json` joined onto `workspacePath` yields a real, well-formed path that simply does not exist, which is how a correct run reported its durable result as missing.
+Every ref published to a reader must open under a root that reader is told about. `resultRef`/`transcriptRef` are relative to the run's internal artifact directory, so the host materialises each job's durable result into the run workspace at `workflow-handoffs/result-<jobId>.json` (`workflow_scheduler._materialize_result_copy`) and every reader-facing surface publishes that workspace-relative copy as `resultRef`, with `resultPath` absolute and `runInternalResultRef` kept for audit: `workflow-progress.json`, the workspace handoff file `workflow-handoffs/<job>.json`, and the post-run handoff in `frontends/ink/bridge.py`. `workflow-handoffs/` is in `HOST_OWNED_WORKSPACE_DIRS`, so writing it while other children run cannot be misattributed to a child diff. A reader that joins the bare internal ref onto `workspacePath` builds a real path that does not exist; that is not a Windows path-separator problem, and it is what made a correct run report its durable result as missing (run `wf_92ad839265dc48f3ac56e5cb86f6e780`). This is not a Windows path-separator issue: a bare `resultRef: agents/agent_1/result.json` joined onto `workspacePath` yields a real, well-formed path that simply does not exist, which is how a correct run reported its durable result as missing.
 
 Path policy is host-side and deterministic. `workflow_path_acl.check_tool_call(workspace_root, tool_name, args)` is the single source of truth for "may this path be read/written/executed"; `GenericAgentHandler.dispatch` calls it before any workflow child tool executes and returns a `path_acl` error on violation. Capability (permission profile) decides *whether* a tool may be used; the ACL decides *which paths* it may touch. Declared artifacts are additionally integrity-checked at run close: a non-optional artifact that is empty (`empty_artifact`) or shrank below the largest size the host observed a child write (`artifact_altered_after_write`) fails the run, which is what the 2026-10-09 cleanup-probe failure required. Keep `expand_file_refs(..., workspace_root=...)` containment when touching `file_write`/`file_patch`.
 
@@ -396,7 +396,7 @@ A dependent child cannot read `resultRef`/`transcriptRef`: those are run-interna
 
 ## MCP startup resilience: slow is not failed
 
-MCP connection is governed by a per-server budget that must not be tight enough to read a slow handshake as a failure. `_MCP_DISCOVERY_TIMEOUT_DEFAULT` is 30s (mirroring Codex `DEFAULT_STARTUP_TIMEOUT` in `codex-mcp/src/rmcp_client.rs`), overridable per server via `startup_timeout_sec` or globally via `GA_MCP_DISCOVERY_TIMEOUT`. Remote (HTTP/SSE) transports get bounded initialize retries inside that same budget (`_MCP_REMOTE_CONNECT_ATTEMPTS = 3`, backoff `_MCP_REMOTE_CONNECT_RETRY_DELAYS = (0.25, 1.0)`), retrying only retryable errors per `_is_retryable_connect_error`; stdio is never retried (a dead local process will die again). The connect path is three-valued: `pending` = never attempted, `connecting` = attempt/retry in flight, `failed` = retries exhausted. Only `failed` renders as `✕`; `connecting` renders as `◌` (`frontends/ink-ui/src/mcpPanel.ts`).
+MCP connection is governed by a per-server budget that must not be tight enough to read a slow handshake as a failure. `_MCP_DISCOVERY_TIMEOUT_DEFAULT` is 30s (mirroring Codex `DEFAULT_STARTUP_TIMEOUT` in `codex-mcp/src/rmcp_client.rs`), overridable per server via `startup_timeout_sec` or globally via `GA_MCP_DISCOVERY_TIMEOUT`. Remote (HTTP/SSE) transports get bounded initialize retries inside that same budget (`_MCP_REMOTE_CONNECT_ATTEMPTS = 3`, backoff `_MCP_REMOTE_CONNECT_RETRY_DELAYS = (0.25, 1.0)`), retrying only retryable errors per `_is_retryable_connect_error`; stdio is never retried (a dead local process will die again). The connect path is three-valued: `pending` = never attempted, `connecting` = attempt/retry in flight, `failed` = retries exhausted. Only `failed` renders as `✕`; `connecting` renders as `◌` (`frontends/ink/ui/src/mcpPanel.ts`).
 
 Invariants: the background discovery pass (`start_background_discovery`, `retry_failed=True` by default) is the self-heal channel and must retry previously failed servers, while the synchronous `discover_mcp_tools`/`discover_mcp_tools_cached` keep `retry_failed=False` so they never hammer a server known to be down. Local stdio servers connect through a bounded pool (`GA_MCP_LOCAL_CONNECT_CONCURRENCY`, default 4), not a `Semaphore(1)`. stdio stderr logs are size-capped (`GA_MCP_STDERR_LOG_MAX_BYTES`, default 256 KiB) so they cannot grow unbounded. Root cause, Codex comparison, and measurements: `docs/20261010-ga-mcp-startup-connect-failures.md`. Regression tests: `tests/test_mcp_runtime.py::McpStartupResilienceTest`.
 
@@ -408,17 +408,17 @@ Invariants:
 
 1. Never add a startup-time inline MCP warmup. Both a synchronous prewarm in `main()` and a background-thread prewarm pushed `ready` from 1.9s to ~3.7s (import cost + GIL contention) and were reverted. `ready` must stay ~2s.
 2. `npx` stdio servers get `--prefer-offline` injected by `mcp_runtime._prefer_offline_args()` (host-side, because `mcp.json` is gitignored user config). The registry round-trip costs 4-8s per spawn even when the package is cached. The flag still installs a genuinely missing package.
-3. The bridge's failed-server self-heal (`frontends/ink_bridge.py::_watch_mcp_status`) reconnects **only the servers in the `failed` list** via `reconnect_mcp_server`. Do not switch it back to a full `start_background_discovery(retry_failed=True)` pass: one flaky server used to double the `initializing` window for every server.
-4. Startup rows say the truth: `MCP connecting in the background · N/M connected · X tools · you can type now` (`frontends/ink-ui/src/mcpPanel.ts`). Input is never disabled by MCP state, so the copy must not imply otherwise.
+3. The bridge's failed-server self-heal (`frontends/ink/bridge.py::_watch_mcp_status`) reconnects **only the servers in the `failed` list** via `reconnect_mcp_server`. Do not switch it back to a full `start_background_discovery(retry_failed=True)` pass: one flaky server used to double the `initializing` window for every server.
+4. Startup rows say the truth: `MCP connecting in the background · N/M connected · X tools · you can type now` (`frontends/ink/ui/src/mcpPanel.ts`). Input is never disabled by MCP state, so the copy must not imply otherwise.
 
-Codex does the same thing (waits only for `required = true` servers, skips the wait when `allows_cached_startup()` has a cached catalog, 30s `DEFAULT_STARTUP_TIMEOUT`, per-server TUI status) — see `codex-rs/codex-mcp/src/connection_manager/required.rs` and `codex-rs/tui/src/chatwidget/mcp_startup.rs`. Measurements, per-server timings and probes: `docs/20261010-ga-ink-mcp-cold-start-latency.md`; probes live in `frontends/ink-ui/scripts/_probe_mcp_startup.ts` and `_probe_mcp_firstturn.ts`.
+Codex does the same thing (waits only for `required = true` servers, skips the wait when `allows_cached_startup()` has a cached catalog, 30s `DEFAULT_STARTUP_TIMEOUT`, per-server TUI status) — see `codex-rs/codex-mcp/src/connection_manager/required.rs` and `codex-rs/tui/src/chatwidget/mcp_startup.rs`. Measurements, per-server timings and probes: `docs/20261010-ga-ink-mcp-cold-start-latency.md`; probes live in `frontends/ink/ui/scripts/_probe_mcp_startup.ts` and `_probe_mcp_firstturn.ts`.
 
 ## Workflow activation: an explicit /workflow request must execute
 
 `/workflow <task>` is an explicit user opt-in, but the ink UI strips the prefix before planning
-(`frontends/ink-ui/src/inputController.ts`), so the planner cannot see it in the task text. The bridge
+(`frontends/ink/ui/src/inputController.ts`), so the planner cannot see it in the task text. The bridge
 carries it as `context["activation"] = {action: "requested", mode: "explicit"}`
-(`frontends/ink_bridge.py::workflow_plan`, `setdefault` so the auto-recommended path keeps its own
+(`frontends/ink/bridge.py::workflow_plan`, `setdefault` so the auto-recommended path keeps its own
 activation), and `WorkflowPlanner.classify()` must treat that as an execution request: an unrecognised
 task shape resolves to `taskType: "general"` and the `general` template (execute-task -> verify-result),
 never to the planner-only template. The planner-only shape is reserved for genuine plan-only requests
@@ -456,7 +456,7 @@ can stop an `execute` tool from writing.
 "verify"`, or `role` in `{verification, review}`). More than one producer is still `artifactCollisions` +
 an `artifact_path_collision` issue (a real overwrite: reported, never fatal). One producer plus a verifier
 — or two verifiers — becomes `verificationSideEffects` + a `verification_side_effect` event and **must not
-enter `workflowIssues` or degrade the run**. `frontends/ink_bridge.py` publishes it in the handoff so a
+enter `workflowIssues` or degrade the run**. `frontends/ink/bridge.py` publishes it in the handoff so a
 downstream reader does not mistake the re-generated deliverable for a second output. Real case:
 `wf_9d097fb199824a1eb4bb37776ef8a2f1`, where a correct run was reported `degraded`. Regression tests:
 `tests/test_workflow_scheduler.py::test_a_verifier_running_the_artifact_is_a_side_effect_not_a_collision`
@@ -484,7 +484,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - 含转义字形（`⎿ ⎿` / `⏺ ⏺` / `✻ ✻`）的模块：`m0709`、`m1277`、`m1437`、`m1442`、`m1444`、`m1448`、`m1478`、`m1919`、`m0326`、`m0052`。
   - ⚠️ CC 的渲染组件多在打包 chunk（`B:/~BUN/root/chunk-*.js`，bytecode），明文模块里只是**引用**；细节可能要在
     `claude.exe` 上 `grep -a` 搜 chunk 名/字符串（同 agent-team 调研做法）。
-- **GA 落点**：`frontends/ink-ui/src/`（`App.tsx` 的 `computeLayoutMetrics`/面板、转录区渲染、工具调用块）。
+- **GA 落点**：`frontends/ink/ui/src/`（`App.tsx` 的 `computeLayoutMetrics`/面板、转录区渲染、工具调用块）。
 - **交付物**：① 调研+设计文档；② GA ink 改动（折叠/展开 + 图标/排版对齐 CC）；③ 无截图式渲染断言测试（见本文件「Ink UI 测试」）。
 - **约束**：CC 仓库只读；GA 改动走「先落盘调研 → 再实施」强制流程。
 - **exe 到货后（用户 2026-10-15 说次日把 v2.1.283 exe 拷回）**：落位 `claudecode283_hack/claudecode283/claude.exe`
@@ -510,7 +510,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   ② 工具结果行统一 `  ⎿  ` + **dim** + 缩进；③ 折叠 = 渲染后测高锁 `minHeight`，提示走键位表。
 - **对 GA 的影响（差距）**：GA 工具行是 `> name(args)`（与 user 的 `>` 撞车）；无 `⎿` 结果前缀；用 emoji（`🛠️ 🔨 📥 ✅`）当图标；
   workflow 详情用 `│`/`|` 两列表 + 固定 `padEnd(18)`（长标题错位）。折叠只有全局 `expandedTools`（ctrl+o）开关，无 per-block。
-- **待办 → 本轮实施**：① 新增 `frontends/ink-ui/src/glyphs.ts`（CC 字形子集，语义名）；② 工具调用改 `⏺ name(args)`、结果加 `  ⎿  ` + dim；
+- **待办 → 本轮实施**：① 新增 `frontends/ink/ui/src/glyphs.ts`（CC 字形子集，语义名）；② 工具调用改 `⏺ name(args)`、结果加 `  ⎿  ` + dim；
   ③ emoji 换字形；④ 工具输出超长折叠 + `(ctrl+o to expand)`；⑤ workflow 详情改树/盒字形 + `string-width` 列宽（去掉固定 pad）。
 - **不做**：云端会话 UI（【复刻时暂时不需要参考 claudecode 云端会话的实现】）、完整帧动画 spinner。
 - **详细方案**：`docs/20261016-CC-UI-对标调研.md`（本仓库）。
@@ -626,7 +626,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - P1：新增 `tool_result_budget.py` 并接入 `agent_loop.py`；默认 50K 字符阈值、2K preview、500K persist limit；超限先落盘，JSON 用 `bounded_structured_summary()`，落盘失败才 `<truncated-output>`；`file_read`/`code_run` 等自管理工具豁免。
   - P2：`skills_runtime.py` 支持 `on`/`name-only`/`user-invocable-only`/`off`、`disable-model-invocation`、目录作用域命名（`apps/web:deploy`）、`alwaysOnChars`/`onInvokeChars`；Ink 增加 `/skills` 成本视图。
   - compact：`compact_context.py` 回注 `<invoked_skills>`，只带 name/description/base_dir/state/字符数，不重注全文。
-  - focused 验证：Python 相关测试通过；`frontends/ink-ui` 的 `tsc --noEmit` 通过；Ink UI 测试通过。
+  - focused 验证：Python 相关测试通过；`frontends/ink/ui` 的 `tsc --noEmit` 通过；Ink UI 测试通过。
   - MCP per-tool 结果上限：已接入 `_meta.maxResultSizeChars`（GA 规范 key，不使用 Anthropic 私有命名空间），
     经 `McpToolRef` / MCP tools cache 投影到通用 `tool_result_limits` registry；
     `tool_result_budget.budget_tool_result()` 自动查询 registry，值 clamp 到 `1..500000`，旧 cache / 非法值回退默认。
@@ -766,7 +766,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   `workflow_plan` 命令 / `workflow_planned`+`workflow_plan_rejected` 事件全部删除；
   `/workflow on|off` 作为 session opt-in 保留，`/workflows` 列表/详情/控制保留。
   验证：`python -m unittest discover -s tests` **1324 OK (skipped=3)**；
-  `npm --prefix frontends/ink-ui run typecheck` OK；`npm test` **405 pass / 0 fail**。
+  `npm --prefix frontends/ink/ui run typecheck` OK；`npm test` **405 pass / 0 fail**。
 - 实施记录：`docs/20261012-ga-dynamic-workflow-实施记录-直写JS入口.md`。
 ### 中途调研 2026-10-12：GA Ink workflow 内联 fence 关闭导致 Turn 3/4 字面星号
 
@@ -780,10 +780,10 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 修复：
   - `agent_loop.py` 在关闭工具输出 fence 前保证最后一个 chunk 以换行结尾（顺序工具和并行工具路径都覆盖）。
   - `ga.py::do_workflow()` 的 `[Workflow]` / `[Warn]` 输出显式补 `\n`。
-  - `frontends/ink-ui/src/messageFormat.ts` 兼容历史 transcript 中已经存在的 `[Workflow] ...````` ` / `[Warn] ...````` ` 内联关闭形式。
-  - `frontends/ink-ui/src/streamCommit.ts` 的 fence 状态机改为按 Markdown 语义匹配 opener/closer 长度，并把 legacy 内联关闭视为 closer；否则它会把嵌套的 ````text` 误判为关闭 5 反引号块，从而在 `[Info]` 的真正 closer 前切段，让下一段以 closer 开头并吞掉 Turn 4。
+  - `frontends/ink/ui/src/messageFormat.ts` 兼容历史 transcript 中已经存在的 `[Workflow] ...````` ` / `[Warn] ...````` ` 内联关闭形式。
+  - `frontends/ink/ui/src/streamCommit.ts` 的 fence 状态机改为按 Markdown 语义匹配 opener/closer 长度，并把 legacy 内联关闭视为 closer；否则它会把嵌套的 ````text` 误判为关闭 5 反引号块，从而在 `[Info]` 的真正 closer 前切段，让下一段以 closer 开头并吞掉 Turn 4。
 - 详细文档：`docs/20261012-ga-ink-workflow-fence-inline-close-fix.md`。
-- 状态（2026-10-12）：已实施；回归覆盖 Python 工具输出 fence、Ink transcript 渲染与 stream-commit fence 状态机。验证：`python -m unittest discover -s tests` 1325 OK（skipped=3），`npm --prefix frontends/ink-ui test` 407 pass，typecheck OK。
+- 状态（2026-10-12）：已实施；回归覆盖 Python 工具输出 fence、Ink transcript 渲染与 stream-commit fence 状态机。验证：`python -m unittest discover -s tests` 1325 OK（skipped=3），`npm --prefix frontends/ink/ui test` 407 pass，typecheck OK。
 
 ### 中途调研 2026-10-12：GA Ink workflow 实测缺陷清点（wait_agent / workspace guard / 并行隔离 / 假成功）
 
@@ -991,7 +991,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - 现象坐标：`temp/sessions/session_263293057ec6440999915216adcabd15.jsonl`（2026-10-13 19:14，workflow 未启动）；
   同一进程里更早还有 `session_84c43011de614948af2be86ead5ca0e9.jsonl`（19:13:32，仅 `session_start`）——
   即 19:14:16 又新建了一个 agent（`new_session` 路径）。
-- 根因（已最小复现）：`frontends/ink_bridge.py` 里 `workflow_tool_launcher` 只在 `__init__` 绑定到 `self.agent`；
+- 根因（已最小复现）：`frontends/ink/bridge.py` 里 `workflow_tool_launcher` 只在 `__init__` 绑定到 `self.agent`；
   `new_session()` 用 `self.agent = self.agent_factory()` **换掉了 agent，却没有重新绑定 launcher**。
   而模型可见的 `workflow` 工具由 handler 从 `parent.workflow_tool_launcher` 取（`ga.py:750`），
   于是新 agent 上取不到 → `do_workflow` 返回 `workflow tool launcher unavailable`。
@@ -1007,7 +1007,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 
 - 触发：用户实测「workflow 一直卡住，`verify:html_time` 前有 `!`」。
 - run：`wf_a56df8bc24af434090851d96d31745d1`（`session_419bf66b10924881a5223e66c4bc71e8`）。
-- `!` 语义：`frontends/ink-ui/src/workflowPanel.ts:226` —— `degraded|partial → '!'`（该 job 降级）。
+- `!` 语义：`frontends/ink/ui/src/workflowPanel.ts:226` —— `degraded|partial → '!'`（该 job 降级）。
 - 根因：`workflow_tool_profiles.declares_writes` 的写者集合含 `execute`（`WRITE_CAPABILITIES={"file_write","execute"}`），
   于是 5 个 verify job（`capabilities:["file_read","execute"]`、无 writeScope）也被判为写者 → 隐式隔离 →
   cwd 落到**私有空目录**（`temp/workflow_child_agents/<runId>/<jobId>/`），看不到 author 在共享 workspace 的产物 →
@@ -1040,7 +1040,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
     `probe_agent`/`read_agent` 前置解析 runId（命中即返回，**不落盘**，不再造孤儿 state）；默认解析器读
     `temp/sessions/*/workflows/<runId>/state.json`。
   - `ga.py`：`do_wait_agent`/`do_read_agent_result` 注入 `agent.workflow_run_resolver`，未知 runId **立即报错**（带 hint，禁止重试同一 id）。
-  - `frontends/ink_bridge.py`：`_bind_agent` 绑 `agent.workflow_run_resolver = self._resolve_workflow_run_info`
+  - `frontends/ink/bridge.py`：`_bind_agent` 绑 `agent.workflow_run_resolver = self._resolve_workflow_run_info`
     （store 权威；**launcher 线程已死且非终态 → 报 `stale`** 兜底，避免僵尸 run 永久阻塞）；
     handoff 补 `failedJobs`（= CC `<failures>`）+ `journalRef` + 「先读 journal 再诊断」提示。
   - `assets/tools_schema*.json`：`workflow_terminal` 语义 + `workflow` 工具描述补「后台任务/完成唤醒/终态集合」。
@@ -1119,7 +1119,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   - `m2000_0xe395211.js` 状态行「Running in background · /workflows to monitor and save」是**旁路提示**，
     composer 不锁；`/workflows`（`m1075`）是独立对话框。
 - GA 现状：
-  - **异步已对齐**：`workflow_launch_from_tool`（`frontends/ink_bridge.py:861`）起后台线程、立即返回
+  - **异步已对齐**：`workflow_launch_from_tool`（`frontends/ink/bridge.py:861`）起后台线程、立即返回
     `{"status":"async_launched", ...}`（`:982`）。
   - **差异 A（现象 1 根因）**：`_run_workflow_runtime`（`:1164`）emit 全局
     `{"type":"status","status":"running"}`（`:1169`）→ Ink 隐藏光标（`App.tsx:1661`）、
@@ -1144,11 +1144,11 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 `m1569 @65948 call()` 返回 `async_launched`；`m2000` 渲染「Running in background · /workflows to monitor and save」（旁路提示，不锁 composer）。
 
 1. **workflow 不再占用会话 running 状态**（方案 1）
-   - `frontends/ink_bridge.py::_run_workflow_runtime`：删除开头的全局 `status:running` + `activity` emit；删除 `finally` 里的 `activity:None` + `status:idle`（只留 `watch_stop.set()`）；删除 `handoff_queued` 变量。
+   - `frontends/ink/bridge.py::_run_workflow_runtime`：删除开头的全局 `status:running` + `activity` emit；删除 `finally` 里的 `activity:None` + `status:idle`（只留 `watch_stop.set()`）；删除 `handoff_queued` 变量。
    - `_queue_workflow_handoff`：在 `put_task` 之后、`thread.start()` 之前新增 `status:running`（handoff 是真实 agent turn，此时才锁 composer；`_consume_display_queue` 末尾会 emit idle）。
    - 效果：workflow 运行期 Ink composer 不再锁死，输入框可正常输入/提交。
 2. **Enter 永远能打开 workflow 面板**（方案 2）
-   - `frontends/ink-ui/src/App.tsx`（~1416）状态条按键块：空输入 → Enter 开面板；有草稿且 turn running/stopping → Enter 也开面板；有草稿且 idle → Enter 提交草稿（单字母不抢）。
+   - `frontends/ink/ui/src/App.tsx`（~1416）状态条按键块：空输入 → Enter 开面板；有草稿且 turn running/stopping → Enter 也开面板；有草稿且 idle → Enter 提交草稿（单字母不抢）。
 3. **查看路径移出重活**（方案 3，本会话最大发现）
    - 实测根因：`workflow_detail` 原要 7.5–16.8s、emit 2.3 MB（`agent_snapshot` 1.63 MB 来自扫全仓 629 条记录 + 108 run；`workflow_detail` 687 KB）。
    - `workflow_store.list_runs(*, session_id=None)` 新增按 session 作用域 glob（`f"{scope}/workflows/*/state.json"`）。
@@ -1205,7 +1205,7 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
     icon: Bt[t.status], meta: [时间, t.agentCount + "agent", totalTokens + "tok"]}`。
 - GA 现状（改前）：`workflow_list` 对每个 run 发**完整** `_workflow_run_payload`（含 script 之外的全部
   字段：jobs 全量 metadata、artifactDir、resultRef、error 等）。全仓 108 run 的 list payload ≈ **4.5 MB**。
-- 对齐动作：`frontends/ink_bridge.py` 新增 `_workflow_run_summary(run)`，`workflow_list` 改用它。摘要只保留
+- 对齐动作：`frontends/ink/bridge.py` 新增 `_workflow_run_summary(run)`，`workflow_list` 改用它。摘要只保留
   列表行 + 状态条真正读取的字段：
   - `runId` / `sessionId` / `status`；
   - `metadata` 子集：`workflowName` / `workflowTaskType` / `integrationStatus` /
@@ -1226,7 +1226,7 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
 ### 测量 2026-10-14：事件→帧节流（Codex schedule_frame()）收益验证 —— 结论：暂不实施
 
 - 触发：遗留项「事件 → 帧节流」，用户要求先量一版验证收益。
-- 探针：`frontends/ink-ui/scripts/_probe_workflow_frame_cost.ts`
+- 探针：`frontends/ink/ui/scripts/_probe_workflow_frame_cost.ts`
   （真实 `<App>` + 假 bridge，计时 `emit()`，统计 stdout 写次数=帧数）。
 - 关键实测：
   - Ink **每个 `dispatch` 同步写一帧**：同步 burst 20 事件 → 20 次 write（N 事件 = N 帧，未自动合并）。
@@ -1384,5 +1384,10 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   - 新增 `scripts/check_project_structure.py`，当前通过：`project structure ok (73 allowed root Python shims/entrypoints)`。
   - 验证：`compileall`、`agentmain.py --help`、`python -m ga_cli list`、关键 Python focused tests 308 OK、p8 provider anomaly + ink bridge 139 OK、Ink UI `npm test` 431 pass、`tsc --noEmit` 通过。
   - 契约修正：p8 旧测试曾要求 workflow 尾部发 `idle`，与 CC 对齐后的后台任务契约冲突；现统一断言**后台 workflow 不得翻转全局 session status**，避免锁住 Ink composer。
-  - P6 前端目录整理（`frontends/ink_bridge.py`、`frontends/ink-ui/` → `frontends/ink/`）与 P7 根 shim 清理仍待继续。
+  - P6 前端目录整理（`frontends/ink/bridge.py`、`frontends/ink/ui/` → `frontends/ink/`）与 P7 根 shim 清理仍待继续。
+  - P6 Ink 前端迁移已完成：`frontends/ink_bridge.py` → `frontends/ink/bridge.py`，`frontends/ink-ui/` → `frontends/ink/ui/`；旧 `frontends/ink_bridge.py` 保留为 module alias shim，旧 import/patch target 仍指向同一模块对象。
+  - Ink UI 测试命令改为 `cd frontends/ink/ui && npm test`；`ga_cli/cli.py`、`install_ink_ui.cmd`、scripts/probes、测试与 README 路径已同步。验证：相关 Python 165 tests OK，Ink UI 431 pass，`tsc --noEmit` 通过。
+  - 结构门禁新增 Ink 路径检查：canonical `frontends/ink/bridge.py` + `frontends/ink/ui/package.json` 必须存在，旧 `frontends/ink-ui/` 必须不存在，旧 bridge shim 必须是 thin alias。
+  - P7 打包验证：`python -m pip wheel . -w temp/wheels --no-deps` 成功；`genericagent-0.1.0-py3-none-any.whl` 含 89 个 Python 模块及 `workflow/js/worker.js`、`script_contract.js`、`resources/code_run_header.py`，required 资源 0 missing。根 shim 删除仍暂缓，避免破坏外部旧导入。
+  - 真实 LLM E2E（2026-10-16，目录重构后）：默认 `default/deepseek-flash`，显式 `/workflow` 完成 4/4 job（2 路并行版本探测 + 串行写表 + 独立 verify），runId `wf_18a215a93a2942dcad977d81444c411a`，status `succeeded`，产物 `temp/workflow-runs/wf_18a215a93a2942dcad977d81444c411a/workflow-e2e-version-table.md`。证据见 `docs/20261016-GA-目录重构后真实workflow-e2e.md`。
   - 详细实施记录：`docs/20261016-ga-project-structure-reorg-plan.md` §13。

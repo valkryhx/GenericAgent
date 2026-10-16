@@ -11,7 +11,7 @@ function argValue(name: string, fallback: string): string {
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const defaultBridgeScript = path.resolve(here, '..', '..', 'ink_bridge.py')
+const defaultBridgeScript = path.resolve(here, '..', '..', 'bridge.py')
 const python = argValue('--python', process.platform === 'win32' ? 'python' : 'python3')
 const bridgeScript = argValue('--bridge', defaultBridgeScript)
 

@@ -166,7 +166,7 @@ print('suffix=' + ''.join(p.suffixes))
         """Regression: the inlined code_run header used to resolve the guard via
         ``dirname(__file__)/../memory``, which broke when the temporary script was
         written to a cwd outside the repository (e.g. a workflow child running in
-        ``frontends/ink-ui/``). The guard must load from wherever the header lives.
+        ``frontends/ink/ui/``). The guard must load from wherever the header lives.
         """
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
             code_cwd = Path(tmp) / "code_cwd"

@@ -17,7 +17,7 @@ GenericAgent 是一个面向本地开发与自动化任务的多前端 Agent Run
 ### 2. React + Ink 终端 UI 成为默认入口
 
 - `ga` 默认启动 React/Ink 终端 UI；`ga ink` 显式进入 Ink UI。
-- `frontends/ink_bridge.py` 通过 JSONL stdio 协议连接 Node/Ink 前端与 Python `GenericAgent` 后端。
+- `frontends/ink/bridge.py` 通过 JSONL stdio 协议连接 Node/Ink 前端与 Python `GenericAgent` 后端。
 - bridge 将后端 stdout/stderr 重定向到日志文件，保证 stdout 始终是可解析 JSONL 协议流。
 - 支持会话恢复、转录回放、workflow 详情展示、停止/恢复诊断，以及更稳定的终端渲染路径。
 - Windows Terminal/IME 场景下，Ink UI 对原生光标位置有专门处理，便于中文输入候选窗定位。
@@ -127,10 +127,10 @@ python frontends/tuiapp.py
 streamlit run frontends/stapp2.py
 ```
 
-Ink UI 的 npm 命令需要在 `frontends/ink-ui` 下执行：
+Ink UI 的 npm 命令需要在 `frontends/ink/ui` 下执行：
 
 ```bash
-cd frontends/ink-ui
+cd frontends/ink/ui
 npm install
 npm run start
 ```
@@ -148,7 +148,7 @@ python -m unittest tests.test_workflow_prompt_guided_planner
 ### Ink UI 测试
 
 ```bash
-cd frontends/ink-ui
+cd frontends/ink/ui
 npm run test
 npm run typecheck
 ```
@@ -179,8 +179,8 @@ genericagent/
 agentmain.py                 # 兼容入口 shim → genericagent.core.app
 ga.py                        # 兼容入口 shim → genericagent.core.handler
 ga_cli/                      # 可安装 CLI 门面
-frontends/ink_bridge.py      # Python 后端与 React/Ink UI 的 JSONL bridge
-frontends/ink-ui/            # React 18 + Ink 5 终端 UI
+frontends/ink/bridge.py      # Python 后端与 React/Ink UI 的 JSONL bridge
+frontends/ink/ui/            # React 18 + Ink 5 终端 UI
 tests/                       # Python unittest 与真实 API 诊断入口
 ```
 
