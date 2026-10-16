@@ -87,6 +87,68 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
 > 注意：GA agent 会**劫持 `sys.stdout`**，所以脚本用 `sys.__stdout__` 打印；证据一律落文件，
 > 不要依赖终端回显（否则会出现「命令 exit 0 但什么都没打印」的假象）。
 
+### 3.4 真实 MCP 结果预算自测（MCP metadata / tool_result budget 改动必跑）
+
+适用：修改 MCP `_meta` 读取、`maxResultSizeChars`、MCP cache，或
+`tool_result_budget` / `tool_result_limits` 之后。该测试用**真实 stdio MCP server +
+真实 bridge + 真实默认模型**验证「metadata 注册 -> 工具调用 -> 大结果持久化 -> 模型收到引用」。
+
+1. 在 `temp/` 下创建测试 server。关键点：FastMCP tool 的 `meta` 必须带
+   `{"maxResultSizeChars": 200}`，返回值必须明显超过阈值：
+
+   ```python
+   from fastmcp import FastMCP
+   mcp = FastMCP("limitprobe")
+
+   @mcp.tool(
+       name="big",
+       description="Return a deterministic long payload.",
+       meta={"maxResultSizeChars": 200},
+   )
+   def big() -> str:
+       return "LIMITPROBE_START" + chr(10) + ("x" * 5000) + chr(10) + "LIMITPROBE_END"
+
+   if __name__ == "__main__":
+       mcp.run(transport="stdio", show_banner=False)
+   ```
+
+2. 写临时 `mcp.json`，只配置这一个 server。先做 direct discovery，确认不是模型问题：
+
+   ```bash
+   GA_MCP_CONFIG=temp/mcp-limit-selftest/mcp.json python - <<'PY'
+   import mcp_runtime
+   from tool_result_limits import get_tool_result_max_chars
+   tools = mcp_runtime.discover_mcp_tools(timeout=30)
+   name = "mcp__limitprobe__big"
+   print(name in {tool["function"]["name"] for tool in tools})
+   print(get_tool_result_max_chars(name))
+   PY
+   ```
+
+   期望：工具存在，limit 为 `200`。
+
+3. 跑真实 LLM 回合。**自定义 stdio server 冷启动可能超过默认 discovery budget**，
+   因此必须显式提高首轮等待；这不是 MCP metadata 失败：
+
+   ```bash
+   GA_RUN_REAL_API_E2E=1    GA_MCP_CONFIG=temp/mcp-limit-selftest/mcp.json    GA_MCP_DISCOVERY_BUDGET=30    GA_SELFTEST_TIMEOUT=300    GA_SELFTEST_PROMPT='Call the MCP tool mcp__limitprobe__big exactly once. After it returns, reply with LIMITPROBE_DONE only.'    python tests/real_ink_selftest.py
+   ```
+
+4. 判读四个真实证据，不看固定措辞：
+
+   - `temp/ink-selftest/<ts>/summary.json`：真实回合有 `assistant_done`、token usage、无 `error`；
+   - `temp/mcp_tools_cache.json`：`tool_metadata` 中存在
+     `mcp__limitprobe__big: {"maxResultSizeChars": 200}`；
+   - `temp/model_responses/*.txt`：发给模型的 tool result 是
+     `<persisted-output>`，含 `artifactPath`、`originalChars`、`truncated: false`；
+   - `temp/tool-results/...`：落盘文件包含完整 `LIMITPROBE_START` / `LIMITPROBE_END`，
+     证明是「先持久化完整结果，再给模型有界引用」，不是裸截断。
+
+   2026-10-16 实测：自定义 server 冷启动约 6 秒；首轮若不加 discovery budget，
+   模型会正确报告「工具不在工具列表」。加 `GA_MCP_DISCOVERY_BUDGET=30` 后，
+   模型真实调用成功，tool result 为 `35543 chars`，持久化路径和 preview 均进入下一轮 prompt。
+
+
 ---
 
 ## 4. L2：UI 版面级真实自测（真实 App + 伪 TTY）
@@ -187,6 +249,7 @@ cd /d/git_codes/GenericAgent
 | 面板内容错乱/挤成一行 | `panelRows` 未加新面板分支 | `App.tsx` `computeLayoutMetrics` 调用处 |
 | 面板文本断言失败 | Ink 差分渲染，取错帧 | 取「最后一个 chrome 帧」 |
 | `wait_agent` 一直等 | 子代理终态未写 / 条件不匹配 | `temp/subagents/*/events.jsonl` |
+| 首轮模型看不到自定义 MCP 工具 | stdio server 冷启动超过 `GA_MCP_DISCOVERY_BUDGET`（默认约 2s） | 提高 `GA_MCP_DISCOVERY_BUDGET=30`，或先跑 direct discovery 预热 cache；不要先怀疑 metadata |
 | 重型 UI e2e 报 `subagent … did not reach succeeded` | 脚本为 luna 硬编码，用默认模型跑 | 改用 L1+L2；或显式切 luna |
 | `/team` 跑完后 memberCount=0 但 taskCount>0 | 正常：名册只列活跃成员，teammate 已被 lead close | 看共享任务板，非 bug |
 | 中文乱码 | 没设 `LANG/LC_ALL` 或走了 PowerShell | 重跑，显式 `shell=bash` |

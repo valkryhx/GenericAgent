@@ -48,6 +48,13 @@ Ink UI 测试位于 `frontends/ink-ui/src/*.test.ts`，用 Node test runner + ts
 - **L2 agent team 全链路**：`cd frontends/ink-ui && npx tsx scripts/real_ink_team_swarm_e2e.ts`（真实 App + 伪 TTY，从输入框输入硬任务 + 真实 API + 默认模型；断言 team_mode teammate / 共享任务板 / 产物）。
 - **L3 交互式手动**：`./ga`（人眼 + 会话产物）。
 
+- **2026-10-16 真实自测记录（MCP 结果预算）**：用 FastMCP 真实 stdio server 声明
+  `meta={"maxResultSizeChars": 200}`，返回 35,543 chars；默认 `deepseek-flash` 经真实 bridge 调用后，
+  `temp/model_responses/*.txt` 中模型收到的是 `<persisted-output>` + `artifactPath` + `originalChars`，
+  完整结果落在 `temp/tool-results/`。证据包：`temp/ink-selftest/20261016-152336/`。
+  关键测试坑：自定义 stdio server 冷启动约 6 秒，首轮默认 discovery budget（约 2 秒）下模型看不到工具；
+  真实自测需设 `GA_MCP_DISCOVERY_BUDGET=30`。SOP §3.4 已固化完整步骤。
+
 注意：重型全链路脚本 `real_ink_ui_user_input_e2e.ts` **为 luna profile 硬编码**，用默认 `deepseek-flash` 跑会在子代理环节失败（`subagent child did not reach succeeded`）——默认模型下不要用它判定。
 
 ### Ink 终端 resize（reflow）：禁止依赖 ink 的相对 eraseLines
