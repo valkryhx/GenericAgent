@@ -576,6 +576,21 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
 - **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 
 
+#### 追加风险结论 2026-10-17：大 tool result 截断会不会影响后续 agent？
+
+- **会影响。** 截断会改变后续轮次/下游 agent 能看到的信息；如果裸切 JSON，还可能让下游拿到不可解析的半截对象。
+- **安全方案不是只截断，而是：完整内容持久化 + tool_result 返回有界摘要/preview + 可读引用。**
+- **同一会话**：后续轮次可 `file_read` 持久化文件；tool_result 必须带 `truncated`、`artifactPath`、`originalChars`，并提示需要时读取。
+- **workflow 下游**：不能只放父进程私有 temp；worktree child 看不到。GA 已有正确机制：
+  `workflow_scheduler._build_handoff()` 写 `resultRef`/`readableResultRef`/`resultPath`/`artifactRefs`/`artifactOwners`/`handoffRef`；
+  `_materialize_result_copy()` 复制到 `workflow-handoffs/result-<job>.json`；
+  `_materialize_upstream_result()` 给下游写 `workflow-handoffs/upstream-<job>.json`；
+  child prompt 明确要求下游读 `upstreamResultPath` / `artifactRefs`，不要直接打开内部 `resultRef`。
+- **JSON 结果**：必须使用 `workflow_child_agent.bounded_structured_summary()` 的结构化投影（合法 JSON + `_truncated`/`_note` + 完整值 ref），禁止裸 `[:N]`。
+- **P1 通用预算的硬约束**：先持久化完整内容，再展示有界摘要；路径必须对下游可读；JSON 不能裸切；敏感内容 redact；resume/cache 要稳定（sha256/size）。
+- **详细落盘**：`docs/20261017-Skill渐进式披露对标CC.md` §1.3。
+
+
 #### 追加调研 2026-10-17：CC 的通用 tool_result 预算（JSON 不是问题，大小才是）
 
 - **结论**：CC 允许结构化 tool_result；问题不是 JSON，而是单个 `content` 字符串过大。
