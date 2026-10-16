@@ -131,7 +131,12 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
    因此必须显式提高首轮等待；这不是 MCP metadata 失败：
 
    ```bash
-   GA_RUN_REAL_API_E2E=1    GA_MCP_CONFIG=temp/mcp-limit-selftest/mcp.json    GA_MCP_DISCOVERY_BUDGET=30    GA_SELFTEST_TIMEOUT=300    GA_SELFTEST_PROMPT='Call the MCP tool mcp__limitprobe__big exactly once. After it returns, reply with LIMITPROBE_DONE only.'    python tests/real_ink_selftest.py
+   export GA_RUN_REAL_API_E2E=1
+   export GA_MCP_CONFIG=temp/mcp-limit-selftest/mcp.json
+   export GA_MCP_DISCOVERY_BUDGET=30
+   export GA_SELFTEST_TIMEOUT=300
+   export GA_SELFTEST_PROMPT='Call the MCP tool mcp__limitprobe__big exactly once. After it returns, reply with LIMITPROBE_DONE only.'
+   python tests/real_ink_selftest.py
    ```
 
 4. 判读四个真实证据，不看固定措辞：
@@ -147,6 +152,7 @@ temp/ink-selftest/<YYYYMMDD-HHMMSS>/
    2026-10-16 实测：自定义 server 冷启动约 6 秒；首轮若不加 discovery budget，
    模型会正确报告「工具不在工具列表」。加 `GA_MCP_DISCOVERY_BUDGET=30` 后，
    模型真实调用成功，tool result 为 `35543 chars`，持久化路径和 preview 均进入下一轮 prompt。
+   本次证据包：`temp/ink-selftest/20261016-152336/`；模型侧引用见 `temp/model_responses/model_responses_162902.txt`。
 
 
 ---
