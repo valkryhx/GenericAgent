@@ -39,7 +39,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = []
-packages = ["ga_cli"]
+
+[tool.setuptools.packages.find]
+include = ["ga_cli*", "genericagent*"]
+
+[tool.setuptools.package-data]
+"genericagent.workflow" = ["js/*.js"]
+"genericagent.resources" = ["*.py", "prompts/*", "schemas/*"]
+"genericagent.llm.templates" = ["*.py"]
 
 [project.scripts]
 ga = "ga_cli.cli:main"
