@@ -1,7 +1,7 @@
 # GA workflow 真实 deepseek-flash E2E：17K prompt 改造后的并行 + 串行任务
 
-日期：2026-10-16  
-模型：`default/deepseek-flash`  
+日期：2026-10-16
+模型：`default/deepseek-flash`
 入口：真实 `GenericAgentBridge` + 真实 LLM API + 真实 workflow runtime
 
 ## 1. 测试目标
