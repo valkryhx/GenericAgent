@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import token_meter
@@ -28,6 +28,7 @@ class CompactResult:
     summary: str = ""
     original_messages: int = 0
     compacted_messages: int = 0
+    invoked_skills: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _soft_limit_tokens(backend: Any) -> int:
@@ -74,6 +75,7 @@ def compact_agent_context(
         return CompactResult(False, "No backend history available.")
     old_backend_history = copy.deepcopy(getattr(backend, "history", []) or [])
     old_agent_history = copy.deepcopy(getattr(agent, "history", []) or [])
+    invoked_skills = _collect_invoked_skills(agent)
     client = getattr(agent, "llmclient", None)
     old_last_tools = copy.deepcopy(getattr(client, "last_tools", "")) if client is not None else ""
     if not old_backend_history:
@@ -85,6 +87,7 @@ def compact_agent_context(
         summary = _clean_summary(summarizer(source, instructions))
         if not summary:
             raise RuntimeError("compact summary is empty")
+        summary = _append_invoked_skills(summary, invoked_skills)
         compact_history = _summary_history_pair(summary)
         backend.history = compact_history
         if hasattr(agent, "history"):
@@ -99,6 +102,7 @@ def compact_agent_context(
             summary=summary,
             original_messages=len(old_backend_history),
             compacted_messages=len(compact_history),
+            invoked_skills=invoked_skills,
         )
     except Exception as exc:
         backend.history = old_backend_history
@@ -111,6 +115,64 @@ def compact_agent_context(
 
 def _backend(agent: Any) -> Any:
     return getattr(getattr(agent, "llmclient", None), "backend", None)
+
+
+def _collect_invoked_skills(agent: Any) -> list[dict[str, Any]]:
+    """Collect compact-safe skill records from the active handler.
+
+    CC's compact path re-injects an ``invoked_skills`` reminder so instructions
+    loaded earlier are not silently lost. Keep only names/descriptions and the
+    base directory here -- never the full SKILL.md body.
+    """
+    handler = getattr(agent, "handler", None)
+    working = getattr(handler, "working", None) if handler is not None else None
+    if not isinstance(working, dict):
+        return []
+    records = working.get("_loaded_skill_records")
+    if not isinstance(records, dict):
+        active = str(working.get("active_skill") or "").strip()
+        return [{"name": active, "description": "", "base_dir": ""}] if active else []
+    collected: list[dict[str, Any]] = []
+    for value in records.values():
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip()
+        if not name:
+            continue
+        collected.append(
+            {
+                "name": name,
+                "description": str(value.get("description") or "").strip(),
+                "source": str(value.get("source") or "").strip(),
+                "path": str(value.get("path") or "").strip(),
+                "base_dir": str(value.get("base_dir") or "").strip(),
+                "content_chars": int(value.get("content_chars") or 0),
+                "state": str(value.get("state") or "on").strip(),
+            }
+        )
+    collected.sort(key=lambda item: item["name"].casefold())
+    return collected
+
+
+def _append_invoked_skills(summary: str, invoked_skills: list[dict[str, Any]]) -> str:
+    if not invoked_skills:
+        return summary
+    lines = [
+        "",
+        "<invoked_skills>",
+        "Earlier in this session the following skills were loaded. This is context, not a new request; do not execute them again. Follow their instructions if still relevant.",
+    ]
+    for item in invoked_skills:
+        line = f"- {item.get('name') or ''}"
+        description = str(item.get("description") or "").strip()
+        if description:
+            line += f": {description}"
+        base_dir = str(item.get("base_dir") or "").strip()
+        if base_dir:
+            line += f" (base_dir: {base_dir})"
+        lines.append(line)
+    lines.append("</invoked_skills>")
+    return summary.rstrip() + chr(10) + chr(10).join(lines)
 
 
 def _source_char_budget(backend: Any) -> int:

@@ -606,7 +606,15 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   3. P1：`agent_loop.py` 增加通用 tool_result 预算：小结果保持 JSON/text；超阈值持久化到 `temp/tool-results/` 并返回 preview；无法持久化则截断；对已有自身分页的工具豁免。
   4. 不全局禁用 JSON；只限制大 content。
 - **详细落盘**：CC 侧 `docs/20261017-CC-skill渐进式披露调研.md` §8；GA 侧 `docs/20261017-Skill渐进式披露对标CC.md` §1.2。
-- **实施状态 2026-10-17**：P0 已实施——`ga.py::do_load_skill` 的 tool_result 从 17.7KB 降到约 491 字符，正文改走独立 `next_prompt`；重复加载相同正文去重。focused 测试 `tests/test_load_skill_tool.py tests/test_skills_runtime.py -q` = 10 passed。待做：`workflow-authoring/SKILL.md` 瘦身 + `references/`；`agent_loop.py` 通用 tool_result 预算/持久化。
+- **实施状态 2026-10-17（本轮已完成 P0/P0.5/P1/P2 的主体）**：
+  - P0：`ga.py::do_load_skill` 的 tool_result 只保留短元数据，正文改走独立 `next_prompt`；重复加载相同正文去重。
+  - P0.5：`skills/workflow-authoring/SKILL.md` 从 17,297 B 降到 5,052 B，细节拆到 `references/{api,examples,resume,artifacts,testing}.md`。
+  - P1：新增 `tool_result_budget.py` 并接入 `agent_loop.py`；默认 50K 字符阈值、2K preview、500K persist limit；超限先落盘，JSON 用 `bounded_structured_summary()`，落盘失败才 `<truncated-output>`；`file_read`/`code_run` 等自管理工具豁免。
+  - P2：`skills_runtime.py` 支持 `on`/`name-only`/`user-invocable-only`/`off`、`disable-model-invocation`、目录作用域命名（`apps/web:deploy`）、`alwaysOnChars`/`onInvokeChars`；Ink 增加 `/skills` 成本视图。
+  - compact：`compact_context.py` 回注 `<invoked_skills>`，只带 name/description/base_dir/state/字符数，不重注全文。
+  - focused 验证：Python 相关测试通过；`frontends/ink-ui` 的 `tsc --noEmit` 通过；Ink UI 测试通过。
+  - 后续项：MCP `max_result_size_chars` 注解尚未接入（当前 GA MCP schema 转换未保留该字段）；`budget` token 预算对象按用户决定暂缓。
+  - 详细实施记录：`docs/20261017-Skill渐进式披露对标CC.md` §5。
 - **云端边界**：**【复刻时暂时不需要参考 claudecode 云端会话的实现】**。
 
 

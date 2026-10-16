@@ -114,6 +114,11 @@ export type SkillStatus = {
   description: string
   source: string
   path: string
+  state?: string
+  alwaysOnChars?: number
+  onInvokeChars?: number
+  modelVisible?: boolean
+  userInvocable?: boolean
 }
 
 export type TokenUsage = {

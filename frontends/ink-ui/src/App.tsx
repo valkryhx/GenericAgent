@@ -107,7 +107,7 @@ import {
 } from './promptChrome.js'
 import { formatCompletedStatus, formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { footerPanelRows, modelSwitchPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
+import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
   commandTextForLocalDecision,
@@ -541,6 +541,7 @@ export function helpText(): string {
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
     '/workflows - list workflow runs',
+    '/skills - show skills and context cost',
     '/team, /agents - show team roster and shared task board',
     '/workflow on|off - opt this session into dynamic workflow orchestration (the agent then authors a JS workflow script)',
     '/workflow detail|resume|stop RUN_ID - inspect or control workflows',
@@ -793,6 +794,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setFooterPanel({ type: 'help', text: helpText() })
     } else if (decision.action?.type === 'status') {
       setFooterPanel({ type: 'status', text: statusPanelText(state.status, state.messages.length) })
+    } else if (decision.action?.type === 'skills') {
+      setFooterPanel({ type: 'help', text: skillsPanelText(skills) })
     }
     if (decision.exit) {
       exitCleanly()

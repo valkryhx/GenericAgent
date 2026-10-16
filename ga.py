@@ -769,6 +769,16 @@ class GenericAgentHandler(BaseHandler):
         loaded_hashes[result["name"]] = content_hash
         result["content_chars"] = len(content)
         result["loaded"] = not already_loaded
+        loaded_records = self.working.setdefault("_loaded_skill_records", {})
+        loaded_records[result["name"]] = {
+            "name": result["name"],
+            "description": result.get("description", ""),
+            "source": result.get("source", ""),
+            "path": result.get("path", ""),
+            "base_dir": result.get("base_dir", ""),
+            "content_chars": len(content),
+            "state": result.get("state", "on"),
+        }
 
         self.working['active_skill'] = result['name']
         if result.get('allowed_tools'):

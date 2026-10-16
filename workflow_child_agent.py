@@ -965,6 +965,8 @@ class NativeGPTChildAgentRunner:
             _turn_end_hooks={},
         )
         handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+        run_id = str(job.metadata.get("runId") or "run")
+        handler.tool_result_namespace = f"{run_id}/{job.job_id}"
         handler.workflow_permission_policy = ToolPermissionPolicy(profile=profile, options=copy.deepcopy(job.metadata.get("options") or {}))
         # The child must be able to call ``structured_output`` for a schema job.
         handler.workflow_output_schema = _declared_schema(job.metadata.get("options") or {})

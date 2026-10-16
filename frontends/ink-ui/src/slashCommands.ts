@@ -22,6 +22,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/reset', description: 'Alias for /new' },
   { name: '/stop', description: 'Stop the current backend task' },
   { name: '/workflows', description: 'Show workflow runs' },
+  { name: '/skills', description: 'Show skills and context cost' },
   { name: '/team', description: 'Show team roster and shared task board' },
   { name: '/agents', description: 'Alias for /team' },
   { name: '/workflow', description: 'Plan and run a dynamic workflow from task text', requiresArgs: true },
@@ -34,12 +35,19 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 ]
 
 function skillSlashCommands(skills: readonly SkillStatus[]): SlashCommand[] {
-  return skills.map(skill => ({
-    name: `/${skill.name}`,
-    description: skill.description || 'Skill',
-    kind: 'skill',
-    source: skill.source,
-  }))
+  return skills
+    .filter(skill => skill.userInvocable !== false)
+    .map(skill => {
+      const cost = typeof skill.onInvokeChars === 'number' && skill.onInvokeChars > 0
+        ? ` (${skill.onInvokeChars} chars on invoke)`
+        : ''
+      return {
+        name: `/${skill.name}`,
+        description: `${skill.description || 'Skill'}${cost}`,
+        kind: 'skill',
+        source: skill.source,
+      }
+    })
 }
 
 export function slashSuggestions(input: string, skills: readonly SkillStatus[] = []): SlashCommand[] {

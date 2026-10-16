@@ -39,7 +39,7 @@ export type InputDecision = {
   value: string
   cursorOffset?: number
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills' }
   /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
   pendingImagePaste?: boolean
   exit?: boolean
@@ -117,6 +117,7 @@ function parseSlashSubmit(
     return { command: { type: 'permission_status' } }
   }
   if (trimmed === '/theme') return { action: { type: 'open_theme' } }
+  if (trimmed === '/skills') return { action: { type: 'skills' } }
   const modelSwitch = /^\/(?:model|llm)\s+(.+)$/.exec(trimmed)
   if (modelSwitch) {
     const selector = modelSwitch[1].trim()
@@ -184,7 +185,7 @@ function parseSlashSubmit(
   if (trimmed === '/help') return { action: { type: 'help' } }
   if (trimmed === '/status') return { action: { type: 'status' } }
   if (trimmed === '/quit' || trimmed === '/exit') return { command: { type: 'shutdown' }, exit: true }
-  const skillMatch = /^\/([^\s/]+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  const skillMatch = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmed)
   if (skillMatch) {
     const skill = skillMatch[1]
     if (skillNames.has(skill)) return { command: { type: 'skill_invoke', skill, args: skillMatch[2] ?? '' } }

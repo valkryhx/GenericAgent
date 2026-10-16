@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,8 @@ from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 class SkillsRuntimeTest(unittest.TestCase):
@@ -74,6 +77,28 @@ class SkillsRuntimeTest(unittest.TestCase):
             skills = discover_skills([root])
 
         self.assertEqual([s.name for s in skills], ["openai-docs"])
+
+    def test_directory_scoped_skill_names_nested_claude_project(self):
+        from skills_runtime import clear_skill_cache, discover_skills, load_skill_content
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            root = project / "apps" / "web" / ".claude" / "skills"
+            skill_dir = root / "deploy"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: deploy\ndescription: Deploy the web app\n---\n# Deploy\n",
+                encoding="utf-8",
+            )
+
+            clear_skill_cache()
+            skills = discover_skills([root], cwd=project)
+            self.assertEqual(["apps/web:deploy"], [skill.qualified_name for skill in skills])
+            loaded = load_skill_content("apps/web:deploy", search_roots=[root], cwd=project)
+            self.assertEqual("apps/web:deploy", loaded["name"])
+
+            unscoped = discover_skills([root], cwd=project / "apps" / "web")
+            self.assertEqual(["deploy"], [skill.qualified_name for skill in unscoped])
 
     def test_deduplicates_skills_by_name_using_root_order(self):
         from skills_runtime import discover_skills
@@ -160,6 +185,71 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertIn("- xlsx: Work with spreadsheet files - Use whenever", listing)
         self.assertLessEqual(len(listing), 220)
         self.assertIn("long", listing)
+
+    def test_skill_overrides_and_frontmatter_control_visibility(self):
+        import os
+        from unittest.mock import patch
+        from skills_runtime import clear_skill_cache, discover_skills, format_skill_listing
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "skills"
+            for name, extra in (
+                ("hidden", "disable-model-invocation: true\n"),
+                ("user-hidden", "user-invocable: false\n"),
+                ("name-only", ""),
+                ("off-skill", ""),
+            ):
+                skill_dir = root / name
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: {name} description\n{extra}---\n# {name}\n",
+                    encoding="utf-8",
+                )
+            clear_skill_cache()
+            with patch.dict(os.environ, {"GA_SKILL_OVERRIDES": '{"name-only":"name-only","off-skill":"off"}'}, clear=False):
+                skills = discover_skills([root])
+                listing = format_skill_listing(skills, for_model=True)
+
+        self.assertNotIn("- hidden:", listing)
+        self.assertNotIn("off-skill", listing)
+        self.assertIn("- name-only", listing)
+        self.assertNotIn("- name-only [", listing)
+        self.assertIn("user-hidden", listing)
+
+    def test_load_skill_content_enforces_invocation_state(self):
+        from skills_runtime import clear_skill_cache, load_skill_content
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "skills"
+            skill_dir = root / "hidden"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: hidden\ndescription: Hidden\ndisable-model-invocation: true\n---\n# Hidden\n",
+                encoding="utf-8",
+            )
+            clear_skill_cache()
+            with self.assertRaises(PermissionError):
+                load_skill_content("hidden", search_roots=[root], invocation="model")
+            loaded = load_skill_content("hidden", search_roots=[root], invocation="user")
+        self.assertEqual("user-invocable-only", loaded["state"])
+
+    def test_skill_status_rows_report_context_cost(self):
+        from skills_runtime import clear_skill_cache, skill_status_rows
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "skills"
+            skill_dir = root / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: demo\ndescription: Demo skill\n---\n# Demo\n",
+                encoding="utf-8",
+            )
+            clear_skill_cache()
+            row = skill_status_rows([root])[0]
+        self.assertEqual("demo", row["name"])
+        self.assertGreater(row["always_on_chars"], 0)
+        self.assertGreater(row["on_invoke_chars"], 0)
+        self.assertTrue(row["model_visible"])
 
     def test_load_skill_content_adds_base_directory_and_args(self):
         from skills_runtime import load_skill_content

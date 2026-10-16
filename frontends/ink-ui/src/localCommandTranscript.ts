@@ -3,6 +3,7 @@ import type { InputDecision } from './inputController.js'
 export function commandTextForLocalDecision(decision: Pick<InputDecision, 'action' | 'command'>): string | null {
   const action = decision.action?.type
   if (action === 'help') return '/help'
+  if (action === 'skills') return '/skills'
   if (action === 'clear') return '/clear'
   if (action === 'open_mcp') return '/mcp'
   if (action === 'open_model') return '/model'

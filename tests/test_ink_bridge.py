@@ -1530,6 +1530,11 @@ class InkBridgeTest(unittest.TestCase):
                     "description": "Demo skill",
                     "source": "local",
                     "path": str((skill_dir / "SKILL.md").resolve(strict=False)),
+                    "state": "on",
+                    "alwaysOnChars": 15,
+                    "onInvokeChars": 6,
+                    "modelVisible": True,
+                    "userInvocable": True,
                 }
             ],
             events[-1]["skills"],

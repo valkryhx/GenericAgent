@@ -1,4 +1,6 @@
 import json, re, os, queue, threading
+
+from tool_result_budget import budget_tool_result
 from dataclasses import dataclass
 from typing import Any, Optional
 @dataclass
@@ -243,7 +245,20 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     exit_reason = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break
                 if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''
                 if outcome.data is not None and tool_name != 'no_tool':
-                    datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if type(outcome.data) in [dict, list] else str(outcome.data)
+                    structured = type(outcome.data) in [dict, list]
+                    datastr = json.dumps(outcome.data, ensure_ascii=False, default=json_default) if structured else str(outcome.data)
+                    persist_key = str(tid or f"{tool_name}_{turn}_{ii}")
+                    try:
+                        datastr = budget_tool_result(
+                            handler,
+                            tool_name,
+                            persist_key,
+                            datastr,
+                            structured=structured,
+                        )
+                    except Exception:
+                        # Budgeting is an optimization, never a reason to abort a turn.
+                        pass
                     tool_results.append({'tool_use_id': tid, 'content': datastr})
                 next_prompts.add(outcome.next_prompt)
             if exit_reason:

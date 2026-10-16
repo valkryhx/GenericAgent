@@ -239,6 +239,15 @@ test('handleInput parses permission slash commands', () => {
   })
 })
 
+test('handleInput opens the skills cost panel for slash skills', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/skills', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'skills' },
+  })
+})
+
 test('handleInput opens the local theme picker for slash theme', () => {
   const store = createPasteStore()
 
@@ -257,6 +266,15 @@ test('handleInput parses compact slash commands', () => {
   assert.deepEqual(handleInput('/compact keep decisions', '', { return: true }, 'idle', store), {
     value: '',
     command: { type: 'compact', instructions: 'keep decisions' },
+  })
+})
+
+test('handleInput parses directory-scoped skill slash commands', () => {
+  const store = createPasteStore()
+
+  assert.deepEqual(handleInput('/apps/web:deploy --env prod', '', { return: true }, 'idle', store, new Set(['apps/web:deploy'])), {
+    value: '',
+    command: { type: 'skill_invoke', skill: 'apps/web:deploy', args: '--env prod' },
   })
 })
 

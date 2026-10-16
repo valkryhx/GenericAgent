@@ -689,18 +689,23 @@ class GenericAgentBridge:
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
             with backend_output_redirect():
-                from skills_runtime import discover_skills
+                from skills_runtime import skill_status_rows
 
-                skills = discover_skills(search_roots=search_roots)
+                skills = skill_status_rows(search_roots=search_roots)
             self.emit(
                 {
                     "type": "skill_status",
                     "skills": [
                         {
-                            "name": str(skill.name),
-                            "description": str(skill.description or ""),
-                            "source": str(skill.source or ""),
-                            "path": str(skill.path),
+                            "name": str(skill.get("name") or ""),
+                            "description": str(skill.get("description") or ""),
+                            "source": str(skill.get("source") or ""),
+                            "path": str(skill.get("path") or ""),
+                            "state": str(skill.get("state") or "on"),
+                            "alwaysOnChars": int(skill.get("always_on_chars") or 0),
+                            "onInvokeChars": int(skill.get("on_invoke_chars") or 0),
+                            "modelVisible": bool(skill.get("model_visible")),
+                            "userInvocable": bool(skill.get("user_invocable")),
                         }
                         for skill in skills
                     ],
@@ -717,7 +722,12 @@ class GenericAgentBridge:
             with backend_output_redirect():
                 from skills_runtime import load_skill_content
 
-                loaded = load_skill_content(str(skill_name or ""), search_roots=search_roots, args=str(args or ""))
+                loaded = load_skill_content(
+                    str(skill_name or ""),
+                    search_roots=search_roots,
+                    args=str(args or ""),
+                    invocation="user",
+                )
         except KeyError as exc:
             self.emit({"type": "error", "code": "skill_not_found", "message": str(exc)})
             return -1
