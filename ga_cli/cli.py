@@ -42,8 +42,9 @@ def launch_frontend(cmd_parts, args=None):
     if args:
         full_cmd.extend(args)
 
-    print(f"Launching {' '.join(full_cmd)}")
-    sys.stdout.flush()
+    # Keep the launcher quiet by default.  The Ink UI clears the terminal and
+    # owns the first visible frame; a Python banner here flashes in PowerShell
+    # before that frame and looks like a second startup line.
     os.chdir(PROJECT_DIR)
     proc = subprocess.Popen(full_cmd)
     try:

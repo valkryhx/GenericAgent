@@ -1510,19 +1510,11 @@ def _teammate_idle_hook(task_dir, task_name):
         root_dir = os.path.dirname(os.path.dirname(task_dir))
         store = SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
         events_path = os.path.join(task_dir, 'events.jsonl')
-        # Host reconciliation: a teammate whose turn completed owns finished work, so close
-        # out its own in_progress tasks on the shared board even if the model forgot to call
-        # task_update (CC relies on the teammate; GA adds this deterministic fallback).
-        completed = []
-        if str(state.get('turn_status') or '') == 'completed':
-            completed = store.complete_owned_in_progress('/root/' + task_name)
-            for item in completed:
-                append_jsonl_event(events_path, {
-                    'type': 'task_completed',
-                    'task_name': task_name,
-                    'task_id': item.get('id'),
-                    'subject': item.get('subject'),
-                })
+        # A completed turn is only a process fact, not proof that the assigned
+        # task succeeded.  The teammate must call task_update(status="completed")
+        # explicitly; close_agent reclaims unfinished work to pending.  Auto-
+        # completing here made a BLOCKED teammate leave a false "completed" task
+        # on the board and caused the lead to start a duplicate wave.
         task = store.find_claimable()
         if task:
             _claim_result = store.claim_task(task['id'], '/root/' + task_name, start=True)
@@ -1543,8 +1535,6 @@ def _teammate_idle_hook(task_dir, task_name):
                 from_name=task_name,
                 idle_reason='available',
                 summary='idle',
-                completed_task_id=(completed[-1].get('id') if completed else None),
-                completed_status=('completed' if completed else None),
             )
             append_parent_inbox_event(task_dir, frame)
             append_jsonl_event(events_path, frame)

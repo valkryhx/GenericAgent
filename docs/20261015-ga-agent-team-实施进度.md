@@ -627,10 +627,15 @@ cd frontends/ink-ui && npm test && npx tsc --noEmit
 但共享任务板 3 条仍 `pending` / `owner=None`。根因：teammate 没自己 `task_update`，而 lead 读完结果
 `close_agent` → `reclaim_owner`（CC `N4e`）把「未完成」任务回收为 `pending`，抹掉了 spawn 时的绑定。
 
-**修复（GA 稳定性增强，非 CC 原生）**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
+**当时的修复（历史，非 CC 原生）**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
 `SubagentTaskStore.complete_owned_in_progress('/root/<name>')`（只收自己的 `in_progress`），
 并在 CC `mat` idle 帧里带上 `completedTaskId`/`completedStatus`。CC 靠 teammate 自己 `TaskUpdate`；
 GA 加宿主兜底，避免弱模型漏调导致任务板失真。
+
+> **2026-10-19 后续修订（重要）**：该宿主自动完成已移除。真实失败链证明 BLOCKED teammate 的
+> `turn_status=completed` 会把任务误标 completed，导致 lead 无法安全重派并产生重复 spawn。现行规则是：
+> teammate 必须显式 `task_update(status=completed)`；未完成 child 关闭时 reclaim 为 `pending`。
+> 详见 `docs/20261019-GA-workflow-contract与agent-team防重复spawn实施方案.md`。
 
 ### 验收（已达成）
 
@@ -652,7 +657,7 @@ GA 加宿主兜底，避免弱模型漏调导致任务板失真。
 给每个 agent（含 teammate 子进程）**新建 session_id**，而 `GenericAgentHandler._team_name()` 用
 `self.parent.session_id` 解析 team 名 → teammate 用的是**自己的** session，与 lead 不同，于是它模型可见的
 `task_list/task_update/task_create` 全打到自己的板（并触发「板上没有就 task_create」fallback 产出碎板），
-**读不到 lead 的板**；主板的 completed 完全靠宿主兜底，不是模型行为。
+**读不到 lead 的板**；当时主板的 completed 有一部分依赖宿主兜底，不是模型行为（该自动完成兜底已于 2026-10-19 移除）。
 
 **修复**：`SubagentManager._child_popen_kwargs` 向子进程 env 注入 `GA_TEAM_NAME=<manager.team_name>`（= lead 的 team 名），
 `team_name_for` 优先读 `GA_TEAM_NAME` → 全队共用一块板。对齐 CC `m1578` 的 swarm env 传播。

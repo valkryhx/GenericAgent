@@ -66,7 +66,7 @@ class TeammateIdleHookTest(unittest.TestCase):
                 rows = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
                 self.assertFalse(any(row.get("type") == "idle_notification" for row in rows))
 
-    def test_completes_its_own_in_progress_task_when_the_turn_completed(self):
+    def test_turn_completed_does_not_complete_the_owned_task(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "agent_4"
             task_dir.mkdir(parents=True)
@@ -81,12 +81,13 @@ class TeammateIdleHookTest(unittest.TestCase):
             claimed = _teammate_idle_hook(str(task_dir), "agent_4")
 
             self.assertFalse(claimed)
-            self.assertEqual(store.get_task(task["id"])["status"], "completed")
+            self.assertEqual(store.get_task(task["id"])["status"], "in_progress")
+            self.assertEqual(store.get_task(task["id"])["owner"], "/root/agent_4")
             inbox = Path(td) / "temp" / "subagents" / "inbox.jsonl"
             rows = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
             idle = next(row for row in rows if row.get("type") == "idle_notification")
-            self.assertEqual(idle.get("completedTaskId"), task["id"])
-            self.assertEqual(idle.get("completedStatus"), "completed")
+            self.assertNotIn("completedTaskId", idle)
+            self.assertNotIn("completedStatus", idle)
 
     def test_does_not_complete_an_owned_task_when_the_turn_did_not_complete(self):
         with tempfile.TemporaryDirectory() as td:

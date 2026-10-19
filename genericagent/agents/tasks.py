@@ -33,6 +33,16 @@ _SAFE = re.compile(r"[^a-zA-Z0-9_-]")
 _UNSET = object()
 
 
+def _normalize_subject(value) -> str:
+    """Normalize a task subject for duplicate detection.
+
+    CC's board treats the subject as the human-facing task identity. GA uses a
+    whitespace/case-insensitive key so a model retrying a spawn cannot create
+    ``T1 统计`` and ``t1   统计`` as two competing tasks.
+    """
+    return " ".join(str(value or "").split()).casefold()
+
+
 def sanitize_list_id(value) -> str:
     """Map an arbitrary team/list name to a filesystem-safe segment (CC ``BT``)."""
     text = _SAFE.sub("-", str(value or "").strip())
@@ -102,8 +112,20 @@ class SubagentTaskStore:
         subject = str(subject or "").strip()
         if not subject:
             raise ValueError("subject is required")
+        normalized = _normalize_subject(subject)
         with cross_process_lock(self.lock_path):
             data = self._load_unlocked()
+            # Idempotent board writes: a retrying model or a second lead wave
+            # must reuse an active task instead of allocating #4/#5/#6.
+            # Completed tasks are intentionally excluded: the same subject may
+            # legitimately be a new round of work after the prior task closed.
+            for existing in data["tasks"]:
+                if existing.get("status") == "completed":
+                    continue
+                if _normalize_subject(existing.get("subject")) == normalized:
+                    duplicate = dict(existing)
+                    duplicate["duplicate"] = True
+                    return duplicate
             task_id = self._new_id_unlocked(data)
             stamp = now_iso()
             task = {
@@ -143,24 +165,88 @@ class SubagentTaskStore:
         add_blocks=None,
         add_blocked_by=None,
         metadata=None,
+        actor=None,
+        allow_reassign=False,
     ) -> dict:
+        """Update a task with CC-style owner and completion checks.
+
+        ``actor`` is the caller's agent path. The lead (``/root``) may assign
+        or finish any task; a teammate may only mutate its own task. An empty
+        or null ``owner`` releases the soft lock and returns an in-progress task
+        to ``pending`` so another agent can claim it.
+        """
         task_id = str(task_id)
+        actor_text = str(actor or "").strip()
+        is_lead = not actor_text or actor_text == "/root"
         with cross_process_lock(self.lock_path):
             data = self._load_unlocked()
             task = self._find_unlocked(data, task_id)
             if task is None:
                 return {"success": False, "taskId": task_id, "error": "task_not_found"}
+
             if status == DELETED:
+                if not is_lead and str(task.get("owner") or "") != actor_text:
+                    return {"success": False, "taskId": task_id, "error": "not_task_owner", "task": dict(task)}
                 data["tasks"].remove(task)
                 self._detach_edges_unlocked(data, task_id)
                 self._save_unlocked(data)
                 return {"success": True, "taskId": task_id, "updatedFields": ["status"], "statusChange": "deleted"}
+
+            if status is not None and status not in STATUSES:
+                return {"success": False, "taskId": task_id, "error": f"invalid_status:{status}"}
+
+            owner_supplied = owner is not _UNSET
+            release_owner = owner_supplied and (owner is None or str(owner).strip() == "")
+            new_owner = None if release_owner else (str(owner).strip() if owner_supplied else None)
+            current_owner = str(task.get("owner") or "")
+
+            # Reject a teammate mutating another agent's task before any field
+            # changes are applied. The lead is the explicit escape hatch.
+            if not is_lead:
+                if current_owner and current_owner != actor_text:
+                    return {"success": False, "taskId": task_id, "error": "not_task_owner", "task": dict(task)}
+                if owner_supplied and not release_owner and new_owner != actor_text:
+                    return {"success": False, "taskId": task_id, "error": "not_task_owner", "task": dict(task)}
+                if status == "completed" and current_owner != actor_text:
+                    return {"success": False, "taskId": task_id, "error": "not_task_owner", "task": dict(task)}
+
+            if release_owner and status == "in_progress":
+                return {"success": False, "taskId": task_id, "error": "release_conflicts_with_in_progress", "task": dict(task)}
+
             updated_fields = []
+            if owner_supplied:
+                if release_owner:
+                    task["owner"] = None
+                    updated_fields.append("owner")
+                    if task.get("status") == "in_progress" and status is None:
+                        task["status"] = "pending"
+                        updated_fields.append("status")
+                elif new_owner != current_owner:
+                    if allow_reassign:
+                        if task.get("status") == "completed":
+                            return {"success": False, "taskId": task_id, "error": "already_resolved", "task": dict(task)}
+                        open_ids = {str(t.get("id")) for t in data["tasks"] if t.get("status") != "completed"}
+                        blockers = [str(b) for b in (task.get("blockedBy") or []) if str(b) in open_ids]
+                        if blockers:
+                            return {"success": False, "taskId": task_id, "error": "blocked", "task": dict(task), "blockedByTasks": blockers}
+                        task["owner"] = new_owner
+                    else:
+                        claim = self._claim_unlocked(data, task, new_owner, check_busy=False)
+                        if not claim["success"]:
+                            return claim
+                    updated_fields.append("owner")
+                else:
+                    task["owner"] = new_owner
+                    updated_fields.append("owner")
+
+            if status == "in_progress" and not task.get("owner") and actor_text:
+                task["owner"] = actor_text
+                updated_fields.append("owner")
+
             if status is not None:
-                if status not in STATUSES:
-                    return {"success": False, "taskId": task_id, "error": f"invalid_status:{status}"}
                 task["status"] = status
                 updated_fields.append("status")
+
             if subject is not None:
                 task["subject"] = str(subject)
                 updated_fields.append("subject")
@@ -170,14 +256,6 @@ class SubagentTaskStore:
             if active_form is not None:
                 task["activeForm"] = active_form
                 updated_fields.append("activeForm")
-            if owner is not _UNSET:
-                if owner is None:
-                    task["owner"] = None
-                else:
-                    claim = self._claim_unlocked(data, task, owner, check_busy=False)
-                    if not claim["success"]:
-                        return claim
-                updated_fields.append("owner")
             if add_blocks:
                 for other in add_blocks:
                     other = str(other)
@@ -197,7 +275,12 @@ class SubagentTaskStore:
                 updated_fields.append("metadata")
             task["updatedAt"] = now_iso()
             self._save_unlocked(data)
-            return {"success": True, "taskId": task_id, "updatedFields": updated_fields, "task": dict(task)}
+            return {
+                "success": True,
+                "taskId": task_id,
+                "updatedFields": list(dict.fromkeys(updated_fields)),
+                "task": dict(task),
+            }
 
     def claim_task(self, task_id, owner, *, check_busy=False, start=False) -> dict:
         """CAS claim (CC ``claimTask``); ``start`` also flips status to in_progress."""
@@ -270,11 +353,13 @@ class SubagentTaskStore:
             return reclaimed
 
     def complete_owned_in_progress(self, owner) -> list[dict]:
-        """Mark every in_progress task owned by ``owner`` as completed (host reconciliation).
+        """Explicit host reconciliation helper for an operator or a future policy.
 
-        CC relies on the teammate calling TaskUpdate itself; GA adds this deterministic
-        fallback so a weaker model that finishes its turn without TaskUpdate still leaves
-        the shared board (the source of truth) accurate. Returns [{id, subject}, ...].
+        CC relies on the teammate calling TaskUpdate itself. The GA idle hook must
+        **not** call this merely because ``turn_status`` is ``completed``: a
+        blocked teammate can finish a turn without producing a valid artifact.
+        Returns ``[{id, subject}, ...]`` and is intentionally not wired to the
+        automatic idle path.
         """
         owner = str(owner)
         with cross_process_lock(self.lock_path):

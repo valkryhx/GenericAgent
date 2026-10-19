@@ -86,7 +86,8 @@
       "ipc_mode": {"type": "string", "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why", "default": "file"},
       "llm_no": {"type": "integer", "description": "Optional model index; defaults to current model"},
       "submission_id": {"type": "string", "description": "Idempotency key for this control-plane call. Set this whenever you retry a spawn or are not sure whether the previous call took effect: retrying with the same submission_id returns the first result instead of starting a second process, a second active-agent slot and a second round of LLM spend. Omit it only for a genuinely new spawn"},
-            "team_mode": {"type": "boolean", "description": "Opt-in team collaboration mode for the child. When true the child becomes a teammate: it keeps peer messaging (send_message) and the shared task board (task_create/task_get/task_update/task_list/team_status) but still cannot spawn or await agents. Use it when several subagents must coordinate on one goal; leave it off for one-shot isolated workers.", "default": false},
+            "team_task_id": {"type": "string", "description": "Exact shared-task id this teammate must own. Required for a new team_mode spawn unless the host can deterministically match one claimable task; never use a v2 task_name to reopen the same task."},
+            "team_mode": {"type": "boolean", "description": "Opt-in team collaboration mode for the child. When true the child becomes a teammate: it keeps peer messaging (send_message) and the shared task board (task_create/task_get/task_update/task_list/team_status) but still cannot spawn or await agents. Use it when several subagents must coordinate on one goal; a new team_mode spawn must bind a claimable shared task (pass team_task_id or let the host match one); leave it off for one-shot isolated workers.", "default": false},
       "verbose": {"type": "boolean", "description": "Optional verbose child output flag"}}}
   }},
   {"type": "function", "function": {
@@ -257,7 +258,7 @@
   },
   {"type": "function", "function": {
     "name": "task_create",
-    "description": "Create a task on the shared team task board. The task starts as pending with no owner; teammates claim it with task_update(owner=<name>). Use the board as the collaboration contract so parallel agents do not duplicate work. Only mark a task completed when it is fully done and verified.",
+    "description": "Create a task on the shared team task board. The task starts as pending with no owner; teammates claim it with task_update(owner=<name>). The board is the collaboration contract: call task_list first, and a repeated normalized subject reuses the existing task instead of creating a duplicate. Only mark a task completed when it is fully done and verified.",
     "parameters": {"type": "object", "properties": {
       "subject": {"type": "string", "description": "Short imperative title"},
       "description": {"type": "string", "description": "Full detail: what to do, where, and the expected output contract"},
@@ -272,14 +273,14 @@
   }},
   {"type": "function", "function": {
     "name": "task_update",
-    "description": "Update, claim, or delete a task. Setting owner claims the task; owner is a soft lock, so a task already owned by another agent is rejected with already_claimed. status is pending|in_progress|completed|deleted. addBlocks/addBlockedBy wire dependencies.",
+    "description": "Update, claim, or delete a task. Setting owner claims the task; owner is a soft lock, so a task already owned by another agent is rejected with already_claimed. Setting status=in_progress without owner auto-claims it for the caller. Pass owner as null/empty to release it back to pending. status is pending|in_progress|completed|deleted. A teammate may not complete another owner's task. addBlocks/addBlockedBy wire dependencies.",
     "parameters": {"type": "object", "properties": {
       "taskId": {"type": "string", "description": "Task id to update"},
       "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"], "description": "New status; 'deleted' removes the task"},
       "subject": {"type": "string", "description": "New subject"},
       "description": {"type": "string", "description": "New description"},
       "activeForm": {"type": "string", "description": "New present-continuous label"},
-      "owner": {"type": "string", "description": "Claim/assign owner (your agent name); omit to leave unchanged, pass empty to release"},
+      "owner": {"type": "string", "description": "Claim/assign owner (your agent path); omit to leave unchanged, pass null/empty to release the soft lock"},
       "addBlocks": {"type": "array", "items": {"type": "string"}, "description": "Task ids this task blocks"},
       "addBlockedBy": {"type": "array", "items": {"type": "string"}, "description": "Task ids that must complete before this one can be claimed"},
       "metadata": {"type": "object", "description": "Metadata keys to merge"}}}

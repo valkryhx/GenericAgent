@@ -64,6 +64,12 @@ export const meta = {
   returns final text; with `options.schema` it returns a validated object. Do
   not ask a schema child to "return JSON" in prose; the host supplies the
   `structured_output` tool and validates it at the tool-call layer.
+- `schema` is CC's primary structured-output path. GA's
+  `executionContract` / `requiredToolEvidence` is an optional host acceptance
+  extension, not a requirement for every workflow. Without an explicit
+  contract, acceptance must come from actual child tool evidence
+  (`toolSummary` / transcript) and real artifacts, never from prose claiming
+  success.
 - `parallel(items)` takes an array of functions and returns results in input
   order. A failing branch becomes `null`; other branches continue.
 - `pipeline(items, ...stages)` runs each item through all stages independently,

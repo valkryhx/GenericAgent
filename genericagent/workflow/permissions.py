@@ -24,7 +24,21 @@ EVIDENCE_ROLES = frozenset({"verification", "review"})
 MUTATING_TOOL_NAMES = frozenset({"file_write", "file_patch"})
 EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
 DENIED_READ_ONLY_STATIC_TOOLS = MUTATING_TOOL_NAMES | EXECUTE_TOOL_NAMES
-ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({"file_read", "web_scan", "no_tool", "ask_user", "load_skill", "structured_output"})
+# Team control-plane tools change task-board metadata and deliver messages; they
+# do not mutate the workspace.  CC keeps this surface available to read-only
+# teammates so a task can be claimed, blocked, completed, or reported without
+# granting file-write/execute capability.
+TEAM_CONTROL_PLANE_TOOLS = frozenset({
+    "send_message",
+    "task_create",
+    "task_get",
+    "task_update",
+    "task_list",
+    "team_status",
+})
+ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({
+    "file_read", "web_scan", "no_tool", "ask_user", "load_skill", "structured_output",
+}) | TEAM_CONTROL_PLANE_TOOLS
 READ_ONLY_NAME_PREFIXES = ("read", "list", "get", "scan", "search", "show", "status", "inspect", "query", "fetch")
 READ_ONLY_NAME_PARTS = ("_read", "_list", "_get", "_scan", "_search", "_show", "_status", "_query", "_fetch")
 

@@ -29,6 +29,47 @@ class SubagentTaskStoreTest(unittest.TestCase):
         self.assertEqual(task["blockedBy"], [])
         self.assertEqual(self.store.get_task(task["id"])["subject"], "write the parser")
 
+    def test_create_reuses_normalized_duplicate_subject(self):
+        first = self.store.create_task("  Write   Parser ")
+        second = self.store.create_task("write parser")
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual([first["id"]], [task["id"] for task in self.store.list_tasks()])
+
+    def test_completed_subject_can_start_a_new_round(self):
+        first = self.store.create_task("repeatable audit")
+        self.store.update_task(first["id"], status="completed")
+
+        second = self.store.create_task("repeatable audit")
+
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertFalse(second.get("duplicate", False))
+        self.assertEqual(second["status"], "pending")
+
+    def test_update_auto_claims_and_release_returns_to_pending(self):
+        task = self.store.create_task("claim me")
+
+        claimed = self.store.update_task(task["id"], status="in_progress", actor="/root/worker")
+        self.assertTrue(claimed["success"])
+        self.assertEqual(claimed["task"]["owner"], "/root/worker")
+        self.assertEqual(claimed["task"]["status"], "in_progress")
+
+        released = self.store.update_task(task["id"], owner="", actor="/root/worker")
+        self.assertTrue(released["success"])
+        self.assertIsNone(released["task"]["owner"])
+        self.assertEqual(released["task"]["status"], "pending")
+
+    def test_teammate_cannot_mutate_another_owners_task(self):
+        task = self.store.create_task("owned")
+        self.store.claim_task(task["id"], "/root/alice", start=True)
+
+        result = self.store.update_task(task["id"], status="completed", actor="/root/bob")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "not_task_owner")
+        self.assertEqual(self.store.get_task(task["id"])["status"], "in_progress")
+
     def test_ids_are_monotonic_and_not_reused_after_delete(self):
         a = self.store.create_task("a")
         b = self.store.create_task("b")

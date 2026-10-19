@@ -78,6 +78,11 @@ GA-supported options:
   call it once; the call is validated at the tool-call layer (the model retries
   on mismatch) and `agent()` returns that object. It is NOT a request to emit
   JSON as free text, so do not write prompts that ask the child to "return JSON".
+  This is the primary Claude Code path for structured results. GA's
+  `executionContract` / `requiredToolEvidence` remains an optional host
+  extension; do not require it unless the task explicitly asks for that gate.
+  Evidence for an ordinary workflow is the child's actual `toolSummary` or
+  transcript plus the observed artifact, not a prose self-report.
 - `fallback` — `"text"` to degrade to text when schema validation fails.
 - `role` — one of `understanding`, `research`, `contract`, `tests`,
   `implementation`, `verification`, `review`, `repair`, `summary`, `synthesis`.

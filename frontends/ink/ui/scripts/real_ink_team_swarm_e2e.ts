@@ -107,6 +107,7 @@ async function typeUserInput(stdin: FakeReadStream, text: string): Promise<void>
 
 interface ChildEvidence {
   taskName: string
+  taskId: string | null
   teamMode: boolean
   turnStatus: string | null
   processStatus: string | null
@@ -148,8 +149,16 @@ function childrenSince(runStartMs: number): ChildEvidence[] {
     const taskDir = entry.task_dir ? String(entry.task_dir) : path.join(REPO, 'temp', String(entry.task_name))
     const state = readJson(path.join(taskDir, 'state.json'))
     const capOptions = state?.capability_options || {}
+    let taskId: string | null = null
+    try {
+      const input = fs.readFileSync(path.join(taskDir, 'input.txt'), 'utf8')
+      taskId = input.match(/\[TEAM TASK PROTOCOL\][\s\S]*?#(\d+)/)?.[1] ?? null
+    } catch {
+      taskId = null
+    }
     out.push({
       taskName: String(entry.task_name),
+      taskId,
       teamMode: Boolean(capOptions.team_mode),
       turnStatus: state?.turn_status ?? null,
       processStatus: state?.process_status ?? null,
@@ -168,7 +177,7 @@ function buildTeamPrompt(): string {
     '   T1 = 统计仓库根目录下 *.py 文件的总数；',
     '   T2 = 统计 tests/ 目录下 test_*.py 文件的数量；',
     '   T3 = 读取 AGENTS.md，统计以 "## " 开头的二级标题行数。',
-    `2) 用 spawn_agent 起 3 个 teammate（每个都必须传 team_mode=true），message 里写清对应任务，并要求：从共享任务板认领自己的任务、完成后用 task_update 置 completed、用 send_message 把结果发给 team-lead、并把结果写入 ${ART_DIR}/<你的task_name>.txt。`,
+    `2) 记录 task_create 返回的精确 task id，建立 T1/T2/T3 到 id 的映射；每个 spawn_agent 必须传 team_mode=true 和对应的 team_task_id=<该 id>，不要依赖 host 的名称猜测，也不要用新的 task_name 重开已有任务。message 里写清对应任务，并要求：从共享任务板认领自己的任务、完成后用 task_update 置 completed、用 send_message 把结果发给 team-lead、并把结果写入 ${ART_DIR}/<你的task_name>.txt。`,
     '3) 用 wait_agent 等待它们完成，再用 read_agent_result 读取它们的权威结果。',
     `4) 你自己把这三个数字汇总写入文件 ${ART_DIR}/report.md，并在最终回答里列出这三个数字。`,
     '这三个数字必须来自 teammate 的真实结果，不要自己另算。',
@@ -289,7 +298,8 @@ async function main(): Promise<number> {
 
     summary.evidence = {
       childrenSinceRun: children.map(child => child.taskName),
-      teamModeChildren: teamChildren.map(child => ({ taskName: child.taskName, turnStatus: child.turnStatus, profile: child.capabilityProfile })),
+      teamModeChildren: teamChildren.map(child => ({ taskName: child.taskName, taskId: child.taskId, turnStatus: child.turnStatus, profile: child.capabilityProfile })),
+      taskIds: teamChildren.map(child => child.taskId),
       taskBoard: board ? { listId: board.listId, count: boardTasks.length, completed: completedBoardTasks.length, subjects: boardTasks.map(task => task.subject) } : null,
       report: { exists: reportExists, size: reportSize },
       artifacts: artifactFiles,
@@ -303,10 +313,16 @@ async function main(): Promise<number> {
       // 观测模式：只记录证据，不强制团队成立（用于验证自然输入是否自触发 team）
       summary.softMode = true
     } else {
-      assert.ok(teamChildren.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} team_mode teammates, saw ${teamChildren.length} (of ${children.length} children)`)
-      assert.ok(completedTeammates.length >= MIN_MEMBERS, `expected >=${MIN_MEMBERS} teammates with turn_status=completed, saw ${completedTeammates.length}`)
-      assert.ok(board && boardTasks.length >= MIN_MEMBERS, `expected a shared task board with >=${MIN_MEMBERS} tasks, saw ${boardTasks.length}`)
-      assert.ok(completedBoardTasks.length >= 1, 'expected at least one task marked completed on the shared board')
+      assert.ok(board, 'shared task board was not found')
+      assert.ok(boardTasks.length >= MIN_MEMBERS, `expected a shared task board with >=${MIN_MEMBERS} tasks, saw ${boardTasks.length}`)
+      assert.equal(teamChildren.length, boardTasks.length, `expected one team_mode child per board task, saw ${teamChildren.length} children and ${boardTasks.length} tasks`)
+      assert.equal(completedTeammates.length, boardTasks.length, `expected every teammate turn to complete, saw ${completedTeammates.length}/${boardTasks.length}`)
+      assert.equal(completedBoardTasks.length, boardTasks.length, `expected every board task completed, saw ${completedBoardTasks.length}/${boardTasks.length}`)
+      const taskIds = teamChildren.map(child => child.taskId)
+      assert.ok(taskIds.every(Boolean), `every team_mode child must carry its bound task id: ${JSON.stringify(taskIds)}`)
+      assert.equal(new Set(taskIds).size, taskIds.length, `team_mode children reused a task id: ${JSON.stringify(taskIds)}`)
+      const subjects = boardTasks.map(task => String(task.subject || '').trim().toLowerCase())
+      assert.equal(new Set(subjects).size, subjects.length, `task board contains duplicate subjects: ${JSON.stringify(subjects)}`)
       assert.ok((roster?.tasks?.length ?? 0) >= MIN_MEMBERS, `/team payload did not surface the shared task board (saw ${roster?.tasks?.length} tasks)`)
       assert.ok(teamFrame.includes('Task board'), `/team panel frame missing "Task board": ${JSON.stringify(teamFrame.slice(0, 200))}`)
       assert.ok(reportExists && reportSize > 0, `expected lead to write report.md in ${ART_DIR}`)

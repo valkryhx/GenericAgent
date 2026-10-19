@@ -98,6 +98,102 @@ function selectTerminalArtifact(draft, researchLabels) {
   return pool[0]?.artifact
 }
 
+type PersistedWorkflowJob = {
+  jobId?: string
+  status?: string
+  metadata?: {
+    transcriptRef?: string
+    toolSummary?: { allowedTools?: string[]; writtenPaths?: string[] }
+    observedArtifacts?: Array<string | { path?: string }>
+  }
+}
+
+async function loadPersistedJobs(artifactDir?: string): Promise<PersistedWorkflowJob[]> {
+  if (!artifactDir) return []
+  try {
+    const run = JSON.parse(await readFile(path.join(artifactDir, 'run.json'), 'utf8'))
+    return Array.isArray(run.jobs) ? run.jobs : []
+  } catch {
+    return []
+  }
+}
+
+function collectAllowedTools(jobs: PersistedWorkflowJob[]): string[] {
+  const tools = new Set<string>()
+  for (const job of jobs) {
+    for (const tool of job.metadata?.toolSummary?.allowedTools || []) tools.add(String(tool))
+  }
+  return [...tools]
+}
+
+async function collectTranscriptTools(
+  jobs: PersistedWorkflowJob[],
+  artifactDir?: string,
+): Promise<{ tools: string[]; transcriptJobs: number }> {
+  const tools = new Set<string>()
+  let transcriptJobs = 0
+  if (!artifactDir) return { tools: [], transcriptJobs }
+  for (const job of jobs) {
+    const ref = job.metadata?.transcriptRef
+    if (!ref) continue
+    const transcriptPath = path.isAbsolute(ref) ? ref : path.join(artifactDir, ref)
+    try {
+      const text = await readFile(transcriptPath, 'utf8')
+      transcriptJobs += 1
+      for (const line of text.split(String.fromCharCode(10))) {
+        if (!line.trim()) continue
+        try {
+          const event = JSON.parse(line)
+          if (event?.type === 'tool_call' && event?.toolName) tools.add(String(event.toolName))
+        } catch {
+          // A malformed transcript line is not evidence; keep scanning.
+        }
+      }
+    } catch {
+      // Fall back to toolSummary for this job if its transcript is unavailable.
+    }
+  }
+  return { tools: [...tools], transcriptJobs }
+}
+
+function observedPaths(job: PersistedWorkflowJob): string[] {
+  return (job.metadata?.observedArtifacts || [])
+    .map(item => typeof item === 'string' ? item : item?.path)
+    .filter((item): item is string => Boolean(item))
+}
+
+function selectContractArtifact(contract: { artifacts?: Array<{ path?: string }> } | undefined) {
+  const paths = (contract?.artifacts || []).map(item => String(item.path || '')).filter(Boolean)
+  const outputLike = paths.filter(item => /\.(html|docx|md|pdf)$/i.test(item))
+  const selected = (outputLike.length > 0 ? outputLike.at(-1) : paths.at(-1))
+  return selected ? { path: selected, source: 'executionContract' } : null
+}
+
+function selectActualArtifact(
+  jobs: PersistedWorkflowJob[],
+  contract: { artifacts?: Array<{ path?: string }> } | undefined,
+) {
+  const sources = [
+    { source: 'writtenPaths', paths: jobs.flatMap(job => job.metadata?.toolSummary?.writtenPaths || []) },
+    { source: 'observedArtifacts', paths: jobs.flatMap(observedPaths) },
+    { source: 'executionContract', paths: (contract?.artifacts || []).map(item => String(item.path || '')) },
+  ]
+  for (const source of sources) {
+    const paths = source.paths.map(String).filter(Boolean)
+    const outputLike = paths.filter(item => /\.(html|docx|md|pdf)$/i.test(item))
+    const selected = outputLike.length > 0 ? outputLike.at(-1) : paths.at(-1)
+    if (selected) return { path: selected, source: source.source }
+  }
+  return null
+}
+
+function resolveArtifact(workspace: string, artifact: string) {
+  const portable = artifact.split(String.fromCharCode(92)).join('/')
+  const resolved = path.isAbsolute(artifact) ? path.resolve(artifact) : path.resolve(workspace, artifact)
+  const relative = path.relative(workspace, resolved).split(String.fromCharCode(92)).join('/')
+  return { portable, resolved, relative }
+}
+
 async function main(): Promise<number> {
   process.env.GA_WORKFLOW_PLANNER_MODE = 'real'
   process.env.GA_WORKFLOW_LLM_PROFILE = PROFILE
@@ -269,19 +365,47 @@ async function main(): Promise<number> {
     // same instant. Wait for it instead of asserting on the exact frame.
     await waitFor('ink idle after terminal workflow event', () => state.status === 'idle', 180_000)
     assert.equal(state.status, 'idle', 'Ink UI did not return to idle after terminal workflow event')
-    const contract = run?.metadata?.executionContract as { requiredToolEvidence?: Array<{ tool?: string }> ; artifacts?: Array<{ path?: string }> } | undefined
-    assert.ok(contract?.requiredToolEvidence?.some(item => item.tool === EXPECTED_MCP_TOOL), `run has no ${EXPECTED_MCP_TOOL} evidence contract`)
-    const runArtifacts = (contract?.artifacts || []) as Array<{ path?: string }>
-    const outputLike = runArtifacts.filter(item => /\.(html|docx|md|pdf)$/i.test(String(item.path || '')))
-    const artifact = (outputLike.length > 0 ? outputLike[outputLike.length - 1] : runArtifacts[runArtifacts.length - 1])?.path
-    assert.ok(artifact, 'run has no declared artifact path')
+    const taskRequiresExplicitContract = /executionContract|requiredToolEvidence/i.test(TASK)
+    const contract = run?.metadata?.executionContract as {
+      requiredToolEvidence?: Array<{ tool?: string }>
+      artifacts?: Array<{ path?: string }>
+    } | undefined
+    const persistedJobs = await loadPersistedJobs(run?.artifactDir)
+    assert.ok(persistedJobs.length > 0, 'run.json has no persisted jobs')
+    assert.ok(
+      persistedJobs.every(job => job.status === 'succeeded'),
+      `not every persisted job succeeded: ${persistedJobs.map(job => `${job.jobId}:${job.status}`).join(', ')}`,
+    )
+    const transcriptEvidence = await collectTranscriptTools(persistedJobs, run?.artifactDir)
+    const evidenceTools = transcriptEvidence.transcriptJobs > 0
+      ? transcriptEvidence.tools
+      : collectAllowedTools(persistedJobs)
+    const evidenceSource = transcriptEvidence.transcriptJobs > 0 ? 'transcript' : 'toolSummary'
+    assert.ok(evidenceTools.includes(EXPECTED_MCP_TOOL), `actual child tool evidence is missing ${EXPECTED_MCP_TOOL} (${evidenceSource})`)
+
     const workspace = String(run?.metadata?.workspacePath || '')
     assert.ok(workspace, 'run workspacePath missing')
     const resolvedWorkspace = path.resolve(workspace)
-    const artifactPortable = artifact.replaceAll('\\', '/')
-    assert.equal(path.posix.isAbsolute(artifactPortable), false, 'artifact contract must use a workspace-relative POSIX path')
-    assert.equal(path.win32.isAbsolute(artifact), false, 'artifact contract must not use a Windows absolute path')
-    const resolvedArtifact = path.resolve(resolvedWorkspace, artifact)
+    let artifactInfo: { path: string; source: string } | null
+    if (taskRequiresExplicitContract) {
+      assert.ok(contract, 'task explicitly requested executionContract but run metadata has none')
+      assert.ok(
+        contract?.requiredToolEvidence?.some(item => item.tool === EXPECTED_MCP_TOOL),
+        `run has no ${EXPECTED_MCP_TOOL} evidence contract`,
+      )
+      artifactInfo = selectContractArtifact(contract)
+      assert.ok(artifactInfo, 'explicit executionContract has no artifact path')
+      const contractPortable = artifactInfo.path.split(String.fromCharCode(92)).join('/')
+      assert.equal(path.posix.isAbsolute(contractPortable), false, 'artifact contract must use a workspace-relative POSIX path')
+      assert.equal(path.win32.isAbsolute(artifactInfo.path), false, 'artifact contract must not use a Windows absolute path')
+    } else {
+      artifactInfo = selectActualArtifact(persistedJobs, contract)
+      assert.ok(artifactInfo, 'run has neither writtenPaths/observedArtifacts nor a contract artifact')
+    }
+    assert.ok(artifactInfo, 'run has no actual artifact path')
+    const artifact = artifactInfo.path
+    const resolvedInfo = resolveArtifact(resolvedWorkspace, artifact)
+    const resolvedArtifact = resolvedInfo.resolved
     assert.ok(resolvedArtifact.startsWith(`${resolvedWorkspace}${path.sep}`), 'artifact path escaped workspace')
     assert.equal(String(run?.metadata?.workspacePolicy || ''), 'project-temp-workspace-write-v1', 'workspace policy metadata missing')
     let artifactBytes: number
@@ -307,12 +431,17 @@ async function main(): Promise<number> {
     summary.status = run?.status
     summary.eventTypes = [...new Set(eventRows.map(event => event.type))]
     summary.workspacePath = resolvedWorkspace
-    summary.artifactRelativePath = artifactPortable
+    summary.artifactRelativePath = resolvedInfo.relative
+    summary.artifactPath = artifactInfo.path
     summary.resolvedArtifact = resolvedArtifact
     summary.artifact = path.relative(REPO, resolvedArtifact)
     summary.artifactBytes = artifactBytes
     summary.uiReturnedToIdle = state.status === 'idle'
-    summary.realTavilyEvidenceContract = true
+    summary.contractMode = taskRequiresExplicitContract ? 'explicit' : 'actual-evidence'
+    summary.evidenceTools = evidenceTools
+    summary.evidenceSource = evidenceSource
+    summary.transcriptJobs = transcriptEvidence.transcriptJobs
+    summary.artifactSource = artifactInfo.source
     summary.researchAgentsWithTavily = expectedResearchCount
   } catch (error) {
     summary.error = String(error).replaceAll(REPO, '<repo>').slice(0, 1200)

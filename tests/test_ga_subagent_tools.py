@@ -204,12 +204,14 @@ class GaSubagentToolsTest(unittest.TestCase):
                 python_executable="python-test",
             )
 
+            task = handler._get_task_store().create_task("teammate_worker coordination", "coordinate with peers")
             outcome = exhaust(
                 handler.do_spawn_agent(
                     {
                         "task_name": "teammate_worker",
                         "message": "coordinate with peers",
                         "team_mode": True,
+                        "team_task_id": task["id"],
                     },
                     response=None,
                 )
@@ -246,6 +248,212 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(bound["owner"], "/root/teammate_worker")
             self.assertEqual(bound["status"], "in_progress")
             self.assertEqual(outcome.data["team_task"]["id"], task["id"])
+
+    def test_team_mode_spawn_binds_the_resolved_name_after_a_stale_task_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 233})(),
+                python_executable="python-test",
+            )
+            stale_dir = Path(td) / "temp" / "worker"
+            stale_dir.mkdir(parents=True)
+            (stale_dir / "state.json").write_text("{}", encoding="utf-8")
+            store = handler._get_task_store()
+            task = store.create_task("worker task", "do the work")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "worker",
+                        "message": "do the work",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(outcome.data["task_name"], "worker_1")
+            self.assertEqual(store.get_task(task["id"])["owner"], "/root/worker_1")
+            input_text = (Path(td) / "temp" / "worker_1" / "input.txt").read_text(encoding="utf-8")
+            self.assertIn('owner 一律用你的 agent 路径 "/root/worker_1"', input_text)
+
+    def test_team_mode_spawn_requires_a_claimable_task(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 226})(),
+                python_executable="python-test",
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"task_name": "unbound_worker", "message": "coordinate", "team_mode": True},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "team_task_required")
+            self.assertFalse((Path(td) / "temp" / "unbound_worker" / "state.json").exists())
+
+    def test_team_mode_spawn_rejects_an_owned_task_without_starting_a_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 227})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("owned coordination", "coordinate")
+            store.claim_task(task["id"], "/root/existing_worker", start=True)
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "duplicate_worker",
+                        "message": "coordinate",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "already_claimed")
+            self.assertFalse((Path(td) / "temp" / "duplicate_worker" / "state.json").exists())
+
+    def test_team_mode_spawn_rejects_read_only_role_with_write_intent(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 228})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("write the report", "write report.md")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "explore_writer",
+                        "message": "write report.md with findings",
+                        "agent_type": "explore",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "team_role_capability_mismatch")
+            self.assertEqual(store.get_task(task["id"])["status"], "pending")
+            self.assertIsNone(store.get_task(task["id"])["owner"])
+            self.assertFalse((Path(td) / "temp" / "explore_writer" / "state.json").exists())
+
+    def test_team_mode_spawn_rejects_an_unmatched_implicit_task(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 230})(),
+                python_executable="python-test",
+            )
+            handler._get_task_store().create_task("unrelated audit", "inspect a different area")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"task_name": "coordinator", "message": "coordinate the work", "team_mode": True},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "team_task_required")
+            self.assertFalse((Path(td) / "temp" / "coordinator" / "state.json").exists())
+
+    def test_team_mode_spawn_allows_read_only_python_api_research(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 231})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("research Python API behavior", "inspect documented behavior and report findings")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "explore_python_api",
+                        "message": "research the Python API and report findings",
+                        "agent_type": "explore",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(store.get_task(task["id"])["owner"], "/root/explore_python_api")
+
+    def test_team_mode_spawn_rejects_read_only_python_script_execution(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 232})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("run Python script for parser audit", "execute the script and report")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "explore_runner",
+                        "message": "run the Python script and report results",
+                        "agent_type": "explore",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "team_role_capability_mismatch")
+            self.assertFalse((Path(td) / "temp" / "explore_runner" / "state.json").exists())
+
+    def test_team_mode_spawn_allows_read_only_role_for_pure_research(self):
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 229})(),
+                python_executable="python-test",
+            )
+            store = handler._get_task_store()
+            task = store.create_task("inspect the parser", "read code and report findings")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {
+                        "task_name": "explore_reader",
+                        "message": "read the parser and report findings",
+                        "agent_type": "explore",
+                        "team_mode": True,
+                        "team_task_id": task["id"],
+                    },
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertEqual(store.get_task(task["id"])["owner"], "/root/explore_reader")
+            self.assertEqual(store.get_task(task["id"])["status"], "in_progress")
 
     def test_spawn_agent_without_team_mode_has_no_task_protocol(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1305,7 +1513,7 @@ class GaSubagentToolsTest(unittest.TestCase):
                 self.assertIn("cascade", close_schema["parameters"]["properties"])
                 spawn_schema = next(item["function"] for item in raw if item["function"]["name"] == "spawn_agent")
                 properties = spawn_schema["parameters"]["properties"]
-                for prop in ["background", "isolation", "ipc_mode"]:
+                for prop in ["background", "isolation", "ipc_mode", "team_task_id"]:
                     self.assertIn(prop, properties)
                 self.assertNotIn("agent_type", properties)
                 isolation_description = properties["isolation"]["description"]

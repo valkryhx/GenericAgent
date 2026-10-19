@@ -248,6 +248,22 @@ Workflow terminal states are three-valued, not "failed vs succeeded": `completed
 
 `workflowIssues` is a gate of *unresolved* problems, not a history log: `workflow_scheduler._apply_schema_contract()` must call `_clear_schema_issue(job)` when the schema finally validates, otherwise a retry that recovered leaves a stale `schema_validation_failed` and `workflow_runtime` degrades a run whose every job ended `succeeded` (real case: `wf_6e481417f6e344cc80249b7f50fd3418`). Only that job's schema issue is cleared — a `fallback: text` degradation and a job that failed every attempt keep theirs. See §16 of `docs/20261009-ga-workflow-stability-stepcode-borrow.md`. Real E2E: `GA_RUN_REAL_WORKFLOW_DEGRADED_E2E=1 python tests/real_workflow_degraded_semantics_e2e.py` (uses `profiles.default`, currently cc-deepseek-v4.1-flash-chat).
 
+## Workflow contract / Agent Team duplicate-spawn research (2026-10-19)
+
+Before changing workflow acceptance contracts or Agent Team spawn/task-board behavior, read:
+
+- `docs/20261019-CC-workflow-contract与agent-team防重复spawn调研.md` — CC 2.1.283 source evidence and the exact GA failure chain.
+- `docs/20261019-GA-workflow-contract与agent-team防重复spawn实施方案.md` — implementation order, file scope, tests and acceptance criteria.
+- 实施状态（2026-10-19）：P0/P1 代码、111 个聚焦 Python 测试、真实 `deepseek-flash` Workflow + Agent Team E2E 均已通过；证据与运行号见实施方案 §11。
+
+Load-bearing conclusions:
+
+1. CC does **not** define GA's `executionContract.requiredToolEvidence`. CC's primary quality path is `agent(..., {schema})` → `StructuredOutput` tool-call validation → adversarial/perspective-diverse verification. GA's `executionContract` remains an optional host extension; E2E must assert actual child tool evidence when the prompt did not explicitly request that extension.
+2. Agent Team stability must not rely on prompt text alone. CC uses unique teammate identity reservation, a shared task board, automatic owner assignment on `in_progress`, `task_assignment` notifications, and team-context injection. GA additionally fail-closes unbound `team_mode` spawns against a claimable board task, because GA's weaker models were observed creating a second wave after a read-only role failure.
+3. `turn_status=completed` is not proof that the assigned task succeeded. Do not auto-complete a teammate-owned task from that signal; require `task_update(status=completed)` and let `close_agent` reclaim unfinished work as `pending`.
+4. Team coordination tools (`task_*`, `send_message`, `team_status`) are control-plane tools, not workspace mutations; they must remain available to read-only teammates. Write/execute intent must be checked against the role's permission profile before spawn.
+5. Never reintroduce a JSON planner for this path. Workflow entry stays direct JavaScript; task-board/spawn arguments are ordinary tool-call fields, not a second planning DSL.
+
 ## Runtime prompt layers: base prompt vs GA_AGENTS.md
 
 GA splits its runtime prompt the way Codex splits `gpt-5.2-codex_prompt.md` from `AGENTS.md`:
@@ -672,9 +688,9 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   `SubagentTaskStore.reclaim_owner`（对齐 CC `N4e`）会把「未完成」的 owned 任务回收为 `pending`；
   teammate 既没自己 `task_update`，回收就把 spawn 时的绑定抹掉了。
 - **结论 / 对 GA 的影响**：CC 靠 teammate 自己 `TaskUpdate`；弱模型不照做 → 任务板不是事实来源。
-  GA 加**宿主兜底**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
+  当时 GA 曾加**宿主兜底**：`agentmain._teammate_idle_hook` 在 `turn_status=completed` 时
   `store.complete_owned_in_progress('/root/<name>')`（只收自己的 `in_progress`），并在 CC `mat` idle 帧里
-  带上 `completedTaskId`/`completedStatus`。→ **GA 相对 CC 的稳定性增强**（CC 无此分支），已标注。
+  带上 `completedTaskId`/`completedStatus`。这是历史实现，**已于 2026-10-19 移除**：turn completed 不是任务成功证据，会掩盖 BLOCKED teammate。
 - **复验**：真实 e2e 复跑 `natural_p11b` → 任务板 **3/3 completed**，owner 各自 `/root/<name>`，报告 8014 B。
 - **待办**：无（P11 验收达成）。
 - **文档**：`docs/20261015-ga-agent-team-实施进度.md` P11。
@@ -689,7 +705,7 @@ and `::test_a_verification_only_path_is_never_reported_as_a_collision`.
   `GenericAgentHandler._team_name()` = `team_name_for(self.parent.session_id)` → teammate 用**自己的** session 解析 team 名，
   与 lead 不同。结果：teammate 模型可见的 `task_list/task_update/task_create` 全打到自己的板（还会触发
   「板上没有就 task_create」的 fallback 产出碎板），**根本读不到 lead 的板**；主板 3/3 completed 完全靠宿主兜底
-  （`_bind_team_task` + `complete_owned_in_progress`），不是模型行为。
+  （历史 `_bind_team_task` 预绑定；当时的 `complete_owned_in_progress` 自动收口已移除）。
 - **修复**：`SubagentManager._child_popen_kwargs` 在子进程 env 注入 `GA_TEAM_NAME=<manager.team_name>`（= lead 的 team 名）；
   `team_name_for` 优先读 `GA_TEAM_NAME` → 全队共用一块板。对齐 CC `m1578` 的 swarm env 传播。
 - **复验**：真实 e2e `boardfix_p11c` → 本次 run **只产生 1 张板**（`session-83b71255`，3 条全 completed），

@@ -30,7 +30,7 @@ class GaCliLauncherTest(unittest.TestCase):
 
         self.assertEqual("npm.cmd", popen_calls[0][0])
 
-    def test_launch_frontend_banner_uses_plain_text_without_emoji(self):
+    def test_launch_frontend_is_silent_by_default(self):
         class Proc:
             def wait(self):
                 return 0
@@ -44,9 +44,7 @@ class GaCliLauncherTest(unittest.TestCase):
             with patch("sys.stdout", output):
                 cli.launch_frontend(["python", "--version"])
 
-        banner = output.getvalue()
-        self.assertIn("Launching ", banner)
-        self.assertNotIn("\U0001f680", banner)
+        self.assertEqual("", output.getvalue())
 
     def test_main_without_command_launches_default_ink_frontend(self):
         launched = []

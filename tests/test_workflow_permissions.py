@@ -27,7 +27,7 @@ class ToolPermissionPolicyTest(unittest.TestCase):
     def test_read_only_allows_safe_read_discovery_tools(self):
         policy = ToolPermissionPolicy(profile="read_only")
 
-        for tool_name in ["file_read", "web_scan", "no_tool", "ask_user", "load_skill", "status_report", "list_files"]:
+        for tool_name in ["file_read", "web_scan", "no_tool", "ask_user", "load_skill", "status_report", "list_files", "send_message", "task_create", "task_get", "task_update", "task_list", "team_status"]:
             with self.subTest(tool_name=tool_name):
                 decision = policy.evaluate(tool_name, {})
                 self.assertEqual("allow", decision.action)

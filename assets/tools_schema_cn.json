@@ -86,6 +86,7 @@
       "ipc_mode": {"type": "string", "description": "IPC 模式。'file' 是 durable 默认值。'socket'/'pipe'/'event_server' 会请求常驻实时通道推送已持久化事件；仅当 GA_SUBAGENT_REALTIME_IPC=1 且通道成功打开时才生效，否则仍以 durable file event bus 为传输，并在 ipc_fallback_reason 说明原因", "default": "file"},
       "llm_no": {"type": "integer", "description": "可选模型编号，默认当前模型"},
       "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试会返回首次结果，不会再启动第二个进程、第二个活跃 agent 名额和第二份真实 LLM 花费。只有确实是一次全新的 spawn 时才可以省略"},
+            "team_task_id": {"type": "string", "description": "Exact shared-task id this teammate must own. Required for a new team_mode spawn unless the host can deterministically match one claimable task; never use a v2 task_name to reopen the same task."},
             "team_mode": {"type": "boolean", "description": "子智能体的团队协作模式（需显式开启）。为 true 时子智能体成为 teammate：保留同级消息（send_message）与共享任务板（task_create/task_get/task_update/task_list/team_status），但仍不能 spawn 或 wait 其他 agent。当多个子智能体需围绕同一目标协作时使用；一次性隔离 worker 不需要开启。", "default": false},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
   }},
@@ -257,7 +258,7 @@
   },
   {"type": "function", "function": {
     "name": "task_create",
-    "description": "Create a task on the shared team task board. The task starts as pending with no owner; teammates claim it with task_update(owner=<name>). Use the board as the collaboration contract so parallel agents do not duplicate work. Only mark a task completed when it is fully done and verified.",
+    "description": "Create a task on the shared team task board. The task starts as pending with no owner; teammates claim it with task_update(owner=<name>). The board is the collaboration contract: call task_list first, and a repeated normalized subject reuses the existing task instead of creating a duplicate. Only mark a task completed when it is fully done and verified.",
     "parameters": {"type": "object", "properties": {
       "subject": {"type": "string", "description": "Short imperative title"},
       "description": {"type": "string", "description": "Full detail: what to do, where, and the expected output contract"},
@@ -272,14 +273,14 @@
   }},
   {"type": "function", "function": {
     "name": "task_update",
-    "description": "Update, claim, or delete a task. Setting owner claims the task; owner is a soft lock, so a task already owned by another agent is rejected with already_claimed. status is pending|in_progress|completed|deleted. addBlocks/addBlockedBy wire dependencies.",
+    "description": "Update, claim, or delete a task. Setting owner claims the task; owner is a soft lock, so a task already owned by another agent is rejected with already_claimed. Setting status=in_progress without owner auto-claims it for the caller. Pass owner as null/empty to release it back to pending. status is pending|in_progress|completed|deleted. A teammate may not complete another owner's task. addBlocks/addBlockedBy wire dependencies.",
     "parameters": {"type": "object", "properties": {
       "taskId": {"type": "string", "description": "Task id to update"},
       "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "deleted"], "description": "New status; 'deleted' removes the task"},
       "subject": {"type": "string", "description": "New subject"},
       "description": {"type": "string", "description": "New description"},
       "activeForm": {"type": "string", "description": "New present-continuous label"},
-      "owner": {"type": "string", "description": "Claim/assign owner (your agent name); omit to leave unchanged, pass empty to release"},
+      "owner": {"type": "string", "description": "Claim/assign owner (your agent path); omit to leave unchanged, pass null/empty to release the soft lock"},
       "addBlocks": {"type": "array", "items": {"type": "string"}, "description": "Task ids this task blocks"},
       "addBlockedBy": {"type": "array", "items": {"type": "string"}, "description": "Task ids that must complete before this one can be claimed"},
       "metadata": {"type": "object", "description": "Metadata keys to merge"}}}

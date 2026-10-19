@@ -1086,13 +1086,84 @@ class GenericAgentHandler(BaseHandler):
         if team_mode:
             from genericagent.agents.tasks import team_task_protocol
 
+            # Resolve the concrete spawn name before claiming the task.  GA keeps
+            # historical task directories, so manager.spawn_agent may legitimately
+            # choose ``name_1`` after a prior child closed.  If we claimed under
+            # ``name`` but the child runs as ``name_1``, its task_update calls are
+            # rejected as not_task_owner and the lead starts a duplicate wave.
+            resolver = getattr(manager, "_next_available_task_name", None)
+            if resolver is not None:
+                try:
+                    task_name = resolver(task_name)
+                except Exception as exc:
+                    result = self._subagent_error_result(exc)
+                    yield f"[Status] Failed to reserve teammate name: {result['msg']}\n"
+                    return StepOutcome(
+                        result,
+                        next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                    )
             owner_path = "/root/" + str(task_name)
-            bound_task = self._bind_team_task(manager, task_name, owner_path)
+            team_task_id = args.get("team_task_id") or args.get("teamTaskId")
+            resolution = self._resolve_team_task(
+                manager,
+                task_name,
+                message,
+                owner_path=owner_path,
+                team_task_id=team_task_id,
+            )
+            if not resolution.get("success"):
+                reason = resolution.get("reason") or "team_task_unavailable"
+                msg = resolution.get("msg") or "A team_mode spawn must bind a claimable task."
+                yield f"[Status] Team spawn rejected ({reason}): {msg}\n"
+                return StepOutcome(
+                    {
+                        "status": "error",
+                        "success": False,
+                        "reason": reason,
+                        "msg": msg,
+                        "team_task_id": resolution.get("team_task_id"),
+                    },
+                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                )
+
+            candidate = resolution["task"]
+            mismatch = self._team_role_capability_mismatch(
+                role,
+                permission_profile,
+                message,
+                candidate,
+            )
+            if mismatch is not None:
+                yield f"[Status] Team spawn rejected: {mismatch['msg']}\n"
+                return StepOutcome(
+                    {"status": "error", "success": False, **mismatch},
+                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                )
+
+            claim = resolution["store"].claim_task(candidate["id"], owner_path, start=True)
+            if not isinstance(claim, dict) or not claim.get("success"):
+                reason = (claim or {}).get("reason") or "team_task_claim_failed"
+                msg = (
+                    "The selected task could not be claimed. Re-read task_list and use its current owner/status; "
+                    "do not start a second teammate with a v2 task_name."
+                )
+                yield f"[Status] Team spawn rejected ({reason}): {msg}\n"
+                return StepOutcome(
+                    {
+                        "status": "error",
+                        "success": False,
+                        "reason": reason,
+                        "msg": msg,
+                        "team_task_id": candidate.get("id"),
+                    },
+                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                )
+            bound_task = claim.get("task") or candidate
             message = team_task_protocol(
                 task_name,
                 owner_path=owner_path,
-                task_id=(bound_task or {}).get("id"),
-                subject=(bound_task or {}).get("subject"),
+                task_id=bound_task.get("id"),
+                subject=bound_task.get("subject"),
             ) + chr(10) + chr(10) + message
         yield f"[Action] Spawning subagent: {task_name}\n"
         try:
@@ -1162,41 +1233,170 @@ class GenericAgentHandler(BaseHandler):
             yield f"[Status] Failed to spawn subagent: {result['msg']}\n"
         return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
-    def _bind_team_task(self, manager, task_name, owner_path):
-        """Pre-assign a claimable board task to a team_mode teammate (CC: teammates claim from the board).
+    def _resolve_team_task(self, manager, task_name, message, *, owner_path, team_task_id=None):
+        """Resolve the exact board task a new team_mode spawn will own.
 
-        Prefers a task whose subject/description mentions the teammate name, else the first
-        claimable task (CC ``qe`` FIFO). Returns the claimed task dict, or None when the board
-        has nothing claimable (the teammate then claims/creates one via the spawn preamble).
+        The lead may pass ``team_task_id`` explicitly; otherwise GA binds the
+        best deterministic match. A zero-score match is rejected instead of
+        falling back to FIFO, because an unrelated task is worse than a clear
+        retry instruction. Resolution is read-only; the caller claims only after
+        role preflight, so a capability mismatch never leaves a task falsely
+        owned.
         """
         try:
             store = manager.task_store()
-            tasks = store.list_tasks()
-        except Exception:
-            return None
-        claimable = [
-            t for t in tasks
-            if t.get("status") == "pending" and not t.get("owner") and not (t.get("blockedBy") or [])
-        ]
-        if not claimable:
-            return None
-        needle = str(task_name or "").strip().lower()
-        pick = None
-        if needle:
-            for candidate in claimable:
-                hay = (str(candidate.get("subject") or "") + " " + str(candidate.get("description") or "")).lower()
-                if needle in hay:
-                    pick = candidate
-                    break
-        if pick is None:
-            pick = claimable[0]
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": "task_store_unavailable",
+                "msg": f"Shared task board is unavailable: {exc}",
+            }
+
+        if team_task_id is not None and str(team_task_id).strip():
+            requested = str(team_task_id).strip()
+            task = store.get_task(requested)
+            if task is None:
+                return {
+                    "success": False,
+                    "reason": "team_task_not_found",
+                    "team_task_id": requested,
+                    "msg": f"Task #{requested} does not exist. Call task_list and use a real id.",
+                }
+            if task.get("status") == "completed":
+                return {
+                    "success": False,
+                    "reason": "team_task_completed",
+                    "team_task_id": requested,
+                    "msg": f"Task #{requested} is already completed; do not spawn a duplicate teammate.",
+                }
+            owner = str(task.get("owner") or "")
+            if owner and owner != owner_path:
+                return {
+                    "success": False,
+                    "reason": "already_claimed",
+                    "team_task_id": requested,
+                    "msg": f"Task #{requested} is owned by {owner}; inspect that teammate before retrying.",
+                }
+            if owner == owner_path:
+                return {
+                    "success": False,
+                    "reason": "team_task_already_bound",
+                    "team_task_id": requested,
+                    "msg": f"Task #{requested} is already bound to {owner_path}; use list_agents/read_agent_result instead of spawning again.",
+                }
+            return {"success": True, "task": task, "store": store}
+
+        candidates = []
         try:
-            result = store.claim_task(pick["id"], str(owner_path), start=True)
-        except Exception:
+            summaries = store.list_tasks()
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": "task_store_unavailable",
+                "msg": f"Could not read the shared task board: {exc}",
+            }
+        for summary in summaries:
+            if summary.get("status") != "pending" or summary.get("owner") or summary.get("blockedBy"):
+                continue
+            full = store.get_task(summary.get("id"))
+            if full is not None:
+                candidates.append(full)
+        if not candidates:
+            return {
+                "success": False,
+                "reason": "team_task_required",
+                "msg": (
+                    "No claimable task exists. Create one with task_create first, then retry "
+                    "spawn_agent(team_mode=true, team_task_id=<id>). Do not start an unbound teammate."
+                ),
+            }
+        scored = [
+            (self._team_task_match_score(task, task_name, message), task)
+            for task in candidates
+        ]
+        best_score = max(score for score, _task in scored)
+        if best_score <= 0:
+            return {
+                "success": False,
+                "reason": "team_task_required",
+                "msg": (
+                    "No claimable task matches this teammate. Pass the exact task_create id as "
+                    "team_task_id instead of relying on a name guess."
+                ),
+            }
+        pick = max(scored, key=lambda item: item[0])[1]
+        return {"success": True, "task": pick, "store": store}
+
+    @staticmethod
+    def _team_task_match_score(task, task_name, message):
+        hay = (
+            str(task.get("subject") or "") + " " + str(task.get("description") or "")
+        ).casefold()
+        needle = str(task_name or "").strip().casefold().replace("_", " ")
+        score = 0
+        if needle and needle in hay:
+            score += 8
+        tokens = set(re.findall(
+            r"[a-z0-9_]{2,}",
+            (str(task_name or "") + " " + str(message or "")).casefold(),
+        ))
+        # Short task prefixes such as T1 are meaningful, but common English
+        # stopwords are not; keep the fallback deterministic without turning
+        # every message into a false match.
+        tokens.difference_update({"a", "an", "and", "as", "at", "be", "by", "do", "for", "in", "is", "it", "of", "on", "or", "the", "to"})
+        for token in tokens:
+            if token in hay:
+                score += 1
+        return score
+
+    @staticmethod
+    def _team_role_capability_mismatch(role, permission_profile, message, task):
+        profile = str(permission_profile or "").strip().lower()
+        if profile not in {"read_only", "verify"}:
             return None
-        if isinstance(result, dict) and result.get("success"):
-            return result.get("task") or pick
-        return None
+        text = " ".join([
+            str(task.get("subject") or ""),
+            str(task.get("description") or ""),
+            str(message or ""),
+        ])
+
+        def positive_intent(pattern):
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                prefix = text[max(0, match.start() - 16):match.start()].casefold()
+                if any(neg in prefix for neg in ("不要", "禁止", "不得", "勿", "无需", "not ", "without ")):
+                    continue
+                return True
+            return False
+
+        # Avoid treating the noun "Python" (for example, "research the Python
+        # API") as an execution request. Only match verbs that actually ask a
+        # worker to run a command/script/test.
+        write_intent = positive_intent(
+            r"file_write|file_patch|\b(?:write|create|save|output)\b"
+            r"(?:\s+(?:a|an|the|this|that))?\s+"
+            r"(?:file|report|artifact|document|markdown|html|docx|pdf|output)\b|"
+            r"写入|写文件|落盘|保存|输出到|创建文件"
+        )
+        execute_intent = positive_intent(
+            r"code_run|\bsubprocess\b|"
+            r"\b(?:run|execute)\b(?:\s+(?:a|an|the))?\s+"
+            r"(?:command|script|program|python|tests?|pytest|node)\b|"
+            r"\b(?:run|execute)\b[^\n]{0,24}\b(?:command|script|program|python|tests?)\b|"
+            r"(?:运行|执行|跑)\s*(?:python|脚本|命令|代码|测试)"
+        )
+        if not write_intent and not (profile == "read_only" and execute_intent):
+            return None
+        role_name = str(getattr(role, "name", "") or "generic")
+        capability = "write files" if write_intent else "execute commands"
+        return {
+            "reason": "team_role_capability_mismatch",
+            "role": role_name,
+            "permission_profile": profile,
+            "msg": (
+                f"{role_name} is {profile} and cannot {capability}. "
+                "Omit agent_type or choose a write/execute-capable role for this task."
+            ),
+        }
 
     @staticmethod
     def _subagent_error_result(exc):
@@ -1273,7 +1473,7 @@ class GenericAgentHandler(BaseHandler):
         return None
 
     def do_task_create(self, args, response):
-        '''在团队共享任务板上新建一个任务（status 恒为 pending，owner 为空）。'''
+        """在团队共享任务板上新建一个任务（status 恒为 pending，owner 为空）。"""
         subject = args.get("subject") or args.get("title")
         if not subject:
             return StepOutcome({"status": "error", "msg": "subject is required"}, next_prompt="\n")
@@ -1285,8 +1485,13 @@ class GenericAgentHandler(BaseHandler):
             active_form=args.get("activeForm") or args.get("active_form"),
             metadata=metadata,
         )
-        yield f"[Status] Task #{task['id']} created: {task['subject']}\n"
-        return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+        duplicate = bool(task.get("duplicate"))
+        verb = "reused" if duplicate else "created"
+        yield f"[Status] Task #{task['id']} {verb}: {task['subject']}\n"
+        return StepOutcome(
+            {"status": "existing" if duplicate else "success", "task": task, "duplicate": duplicate},
+            next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+        )
 
     def do_task_get(self, args, response):
         '''按 id 读取任务全量字段。'''
@@ -1301,24 +1506,53 @@ class GenericAgentHandler(BaseHandler):
         return StepOutcome({"status": "success", "task": task}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
 
     def do_task_update(self, args, response):
-        '''更新/认领/删除任务。owner 为软锁：任务已被他人认领则拒绝（already_claimed）。'''
+        """更新/认领/删除任务。owner 为软锁：任务已被他人认领则拒绝（already_claimed）。"""
         task_id = args.get("taskId") or args.get("task_id") or args.get("id")
         if task_id is None:
             return StepOutcome({"status": "error", "msg": "taskId is required"}, next_prompt="\n")
         store = self._get_task_store(args.get("list_id") or args.get("listId"))
+        actor = self._self_author()
+        raw_status = args.get("status")
+        status = str(raw_status).strip().lower() if raw_status is not None else None
         kwargs = {
-            "status": args.get("status"),
+            "status": status,
             "subject": args.get("subject"),
             "description": args.get("description"),
             "active_form": args.get("activeForm") or args.get("active_form"),
             "add_blocks": self._as_list_arg(args, "addBlocks", "add_blocks"),
             "add_blocked_by": self._as_list_arg(args, "addBlockedBy", "add_blocked_by"),
             "metadata": args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+            "actor": actor,
+            "allow_reassign": actor == "/root",
         }
         if "owner" in args:
-            kwargs["owner"] = args.get("owner")
+            raw_owner = args.get("owner")
+            kwargs["owner"] = None if raw_owner is None or str(raw_owner).strip() == "" else str(raw_owner).strip()
+        elif status == "in_progress":
+            current = store.get_task(task_id)
+            if current is None:
+                return StepOutcome(
+                    {"success": False, "status": "error", "reason": "task_not_found", "taskId": str(task_id)},
+                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                )
+            current_owner = str(current.get("owner") or "").strip()
+            if current_owner and current_owner != actor:
+                return StepOutcome(
+                    {
+                        "success": False,
+                        "status": "error",
+                        "reason": "already_claimed",
+                        "taskId": str(task_id),
+                        "owner": current_owner,
+                        "msg": "Task is already owned. Use list_agents/read_agent_result instead of spawning a duplicate.",
+                    },
+                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
+                )
+            if not current_owner:
+                kwargs["owner"] = actor
         result = store.update_task(task_id, **kwargs)
         if not result.get("success"):
+            result.setdefault("reason", result.get("error"))
             yield f"[Status] Task update rejected: {result.get('error') or result.get('reason')}\n"
         else:
             yield f"[Status] Task #{task_id} updated: {', '.join(result.get('updatedFields') or [])}\n"
