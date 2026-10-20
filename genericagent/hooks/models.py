@@ -63,6 +63,10 @@ class HookHandler:
 
     @property
     def timeout(self) -> float:
+        # CC's config-based async command fallback is 600s (m0459:157745),
+        # not the 10s default used by ordinary notification hooks.
+        if self.kind == "command" and self.async_requested:
+            return float(self.options.get("timeout") or 600.0)
         return float(self.options.get("timeout") or 10.0)
 
     @property
@@ -80,7 +84,21 @@ class HookHandler:
 
     @property
     def async_requested(self) -> bool:
-        return bool(self.options.get("async", False) or self.options.get("asyncRewake", False))
+        return self.kind == "command" and bool(
+            self.options.get("async", False) or self.options.get("asyncRewake", False)
+        )
+
+    @property
+    def async_rewake(self) -> bool:
+        return self.kind == "command" and bool(self.options.get("asyncRewake", False))
+
+    @property
+    def rewake_message(self) -> str:
+        return str(self.options.get("rewakeMessage") or "").strip()
+
+    @property
+    def rewake_summary(self) -> str:
+        return str(self.options.get("rewakeSummary") or "Stop hook feedback").strip()
 
 
 @dataclass(frozen=True)
@@ -120,6 +138,7 @@ class HookResult:
     output: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     blocking: bool = False
+    backgrounded: bool = False
 
     @property
     def output_dict(self) -> dict[str, Any]:
@@ -162,11 +181,28 @@ class HookResult:
             "duration_ms": self.duration_ms,
             "exit_code": self.exit_code,
             "blocking": self.blocking,
+            "backgrounded": self.backgrounded,
             "stdout": self.stdout,
             "stderr": self.stderr,
             "error": self.error,
             "output": self.output,
         }
+
+
+@dataclass(frozen=True)
+class HookWakeRequest:
+    """A local asyncRewake request ready to be injected into the next turn."""
+
+    event: str
+    hook_run_id: str
+    hook_name: str
+    message: str
+    summary: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int | None = None
+    session_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass

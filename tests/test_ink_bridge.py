@@ -751,6 +751,55 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual("clear", calls[0][2]["reason"])
         self.assertIsNot(old_agent, bridge.agent)
 
+    def test_hook_wake_is_submitted_with_anti_spoof_and_consumed(self):
+        from genericagent.hooks.models import HookWakeRequest
+
+        agent = FakeAgent()
+        agent.session_id = "session_current"
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        request = HookWakeRequest(
+            event="Stop",
+            hook_run_id="hook_test",
+            hook_name="command",
+            message="Retry verification.",
+            summary="verification failed",
+            session_id="session_current",
+        )
+
+        self.assertTrue(bridge._handle_hook_wake(request))
+        self.assertEqual(1, len(agent.prompts))
+        prompt, source, images = agent.prompts[0]
+        self.assertEqual("hook_wake", source)
+        self.assertEqual([], images)
+        self.assertIn("[SYSTEM NOTIFICATION - NOT USER INPUT]", prompt)
+        self.assertIn("automated async hook event", prompt)
+        self.assertIn("Retry verification.", prompt)
+        self.assertEqual("Hook feedback: verification failed", [
+            event.get("text") for event in events if event.get("type") == "system"
+        ][0])
+        bridge.wait_for_idle(timeout=1)
+
+    def test_hook_wake_from_old_session_is_dropped(self):
+        from genericagent.hooks.models import HookWakeRequest
+
+        agent = FakeAgent()
+        agent.session_id = "session_new"
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        request = HookWakeRequest(
+            event="Stop",
+            hook_run_id="hook_old",
+            hook_name="command",
+            message="old wake",
+            summary="old",
+            session_id="session_old",
+        )
+
+        self.assertFalse(bridge._handle_hook_wake(request))
+        self.assertEqual([], agent.prompts)
+        self.assertTrue(any(event.get("type") == "hook_wake_dropped" for event in events))
+
     def test_hooks_status_emits_lightweight_inventory(self):
         agent = FakeAgent()
         events = []

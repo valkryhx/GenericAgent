@@ -12,6 +12,15 @@ export type HookConfiguredEntry = {
   path: string
   statusMessage?: string
   timeout?: number
+  async?: boolean
+  asyncRewake?: boolean
+}
+
+export type HookHttpPolicy = {
+  allowedUrlsConfigured: boolean
+  allowedUrlCount: number
+  allowedEnvVarsConfigured: boolean
+  allowedEnvVarCount: number
 }
 
 export type HookAuditEntry = {
@@ -29,6 +38,7 @@ export type HooksStatusPayload = {
   entries: number
   handlers: number
   handlerTypes: string[]
+  httpPolicy?: HookHttpPolicy
   configured: HookConfiguredEntry[]
   events: Record<string, string>
   issues: Array<{ source: string; path: string; message: string }>
@@ -47,6 +57,7 @@ export function hooksPanelFromStatus(event: HooksStatusPayload): HooksPanelState
       entries: Number(event.entries || 0),
       handlers: Number(event.handlers || 0),
       handlerTypes: Array.isArray(event.handlerTypes) ? event.handlerTypes : [],
+      httpPolicy: event.httpPolicy,
       configured: Array.isArray(event.configured) ? event.configured : [],
       events: event.events && typeof event.events === 'object' ? event.events : {},
       issues: Array.isArray(event.issues) ? event.issues : [],
@@ -84,7 +95,8 @@ export function hooksPanelLines(state: HooksPanelState): string[] {
   p.configured.forEach((item, index) => {
     const marker = index === state.selected ? '\u25b8' : ' '
     const matcher = item.matcher ? ` matcher=${item.matcher}` : ''
-    lines.push(`${marker} ${padEnd(item.event, eventWidth)}  ${padEnd(item.type, typeWidth)}  ${item.source}${matcher}`)
+    const async = item.asyncRewake ? ' async-rewake' : item.async ? ' async' : ''
+    lines.push(`${marker} ${padEnd(item.event, eventWidth)}  ${padEnd(item.type, typeWidth)}  ${item.source}${async}${matcher}`)
   })
   lines.push('')
   lines.push('Event integration')
@@ -92,6 +104,15 @@ export function hooksPanelLines(state: HooksPanelState): string[] {
   const contractOnly = Object.entries(p.events).filter(([, status]) => status !== 'integrated')
   lines.push(`  integrated (${integrated.length}): ${integrated.map(([name]) => name).join(', ') || '-'}`)
   lines.push(`  contract-only (${contractOnly.length}): ${contractOnly.map(([name]) => name).join(', ') || '-'}`)
+  if (p.httpPolicy) {
+    const urlPolicy = p.httpPolicy.allowedUrlsConfigured
+      ? `${p.httpPolicy.allowedUrlCount} URL pattern(s)`
+      : 'unrestricted'
+    const envPolicy = p.httpPolicy.allowedEnvVarsConfigured
+      ? `${p.httpPolicy.allowedEnvVarCount} env var(s)`
+      : 'handler list'
+    lines.push(`  HTTP policy: ${urlPolicy}; header env: ${envPolicy}; redirects: forbidden`)
+  }
   if (p.issues.length > 0) {
     lines.push('')
     lines.push('Configuration issues')

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import subprocess
 import time
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Callable
 
@@ -66,6 +68,26 @@ def _expand_path_templates(value: Any, payload: dict[str, Any]) -> Any:
         return str(current)
     import re
     return re.sub(r"\$\{([^{}]+)\}", replace, value)
+
+
+def _http_url_allowed(url: str, patterns: list[str] | None) -> bool:
+    """Apply CC's HTTP target policy before any network I/O.
+
+    ``None`` means the setting is absent (allow all), while ``[]`` is an
+    explicit deny-all policy. Patterns use shell-style ``*`` wildcards.
+    """
+    try:
+        parsed = urlparse(str(url))
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if patterns is None:
+        return True
+    if not patterns:
+        return False
+    value = str(url)
+    return any(fnmatch.fnmatchcase(value, str(pattern)) for pattern in patterns)
 
 
 def _parse_stdout(result: HookResult, text: str, *, allow_text: bool = False) -> None:
@@ -209,10 +231,28 @@ def _prompt_execute(handler: HookHandler, payload: dict[str, Any], result: HookR
         _parse_stdout(result, text, allow_text=True)
 
 
-def _http_execute(handler: HookHandler, payload: dict[str, Any], result: HookResult) -> None:
+def _http_execute(
+    handler: HookHandler,
+    payload: dict[str, Any],
+    result: HookResult,
+    *,
+    allowed_urls: list[str] | None = None,
+    global_allowed_env_vars: list[str] | None = None,
+) -> None:
+    url = str(handler.options.get("url") or "")
+    if not _http_url_allowed(url, allowed_urls):
+        result.status = "error"
+        result.error = "http hook URL is blocked by allowedHttpHookUrls policy"
+        return
     headers = handler.options.get("headers") if isinstance(handler.options.get("headers"), dict) else {}
     allowed = handler.options.get("allowedEnvVars")
-    allowed_names = {str(item) for item in allowed} if isinstance(allowed, list) else set()
+    handler_names = {str(item) for item in allowed} if isinstance(allowed, list) else set()
+    # CC intersects the handler list with the global allowlist. With no handler
+    # list there is nothing to interpolate. With no global list, the handler
+    # list is authoritative.
+    allowed_names = handler_names
+    if global_allowed_env_vars is not None:
+        allowed_names = handler_names & {str(item) for item in global_allowed_env_vars}
     resolved_headers: dict[str, str] = {}
     for key, value in headers.items():
         text = str(value)
@@ -221,11 +261,14 @@ def _http_execute(handler: HookHandler, payload: dict[str, Any], result: HookRes
             text = text.replace(f"${{{name}}}", str(os.environ.get(name, "")))
         resolved_headers[str(key)] = text
     try:
+        # CC requires HTTP hooks not to follow redirects. A redirect could turn
+        # an allowlisted endpoint into an arbitrary outbound request.
         response = requests.post(
-            str(handler.options.get("url") or ""),
+            url,
             headers=resolved_headers,
             json=payload,
             timeout=handler.timeout,
+            allow_redirects=False,
         )
     except Exception as exc:
         result.status = "error"
@@ -316,6 +359,8 @@ def execute_handler(
     *,
     prompt_runner=None,
     mcp_call=None,
+    allowed_http_urls: list[str] | None = None,
+    global_allowed_env_vars: list[str] | None = None,
 ) -> HookResult:
     started = time.perf_counter()
     try:
@@ -324,7 +369,13 @@ def execute_handler(
         elif handler.kind in ("prompt", "agent"):
             _prompt_execute(handler, payload, result, prompt_runner)
         elif handler.kind == "http":
-            _http_execute(handler, payload, result)
+            _http_execute(
+                handler,
+                payload,
+                result,
+                allowed_urls=allowed_http_urls,
+                global_allowed_env_vars=global_allowed_env_vars,
+            )
         elif handler.kind == "mcp_tool":
             _mcp_execute(handler, payload, result, mcp_call)
         else:

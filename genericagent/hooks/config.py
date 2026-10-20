@@ -24,6 +24,11 @@ class HookRegistry:
     entries: list[HookEntry] = field(default_factory=list)
     issues: list[HookConfigIssue] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    # CC m0062:8024-8025. ``None`` means the key was not configured:
+    # all HTTP URLs / handler-declared env vars are allowed. An empty list is
+    # an explicit deny-all policy and must remain distinguishable from absent.
+    allowed_http_hook_urls: list[str] | None = None
+    http_hook_allowed_env_vars: list[str] | None = None
 
     def for_event(self, event: str) -> list[HookEntry]:
         return [entry for entry in self.entries if entry.event == event]
@@ -55,6 +60,13 @@ def _parse_handler(raw: Any, registry: HookRegistry, source: str, path: str) -> 
     options = dict(raw)
     options["type"] = kind
     options["timeout"] = _timeout(raw.get("timeout"), kind)
+    if kind == "command":
+        if (raw.get("async") is True or raw.get("asyncRewake") is True) and raw.get("timeout") is None:
+            # CC config-based command async falls back to 600s.
+            options["timeout"] = 600
+    if kind != "command" and (raw.get("async") is True or raw.get("asyncRewake") is True):
+        registry.add_issue(source, path, f"{kind} handler does not support async/asyncRewake")
+        return None
     if kind == "command":
         command = raw.get("command")
         args = raw.get("args")
@@ -92,9 +104,27 @@ def _parse_file(path: Path, source: str, source_rank: int, registry: HookRegistr
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         registry.add_issue(source, str(path), f"cannot read hook configuration: {exc}")
         return
+    if isinstance(data, dict):
+        for key, target in (
+            ("allowedHttpHookUrls", "allowed_http_hook_urls"),
+            ("httpHookAllowedEnvVars", "http_hook_allowed_env_vars"),
+        ):
+            if key not in data:
+                continue
+            value = data.get(key)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                registry.add_issue(source, str(path), f"{key} must be an array of strings")
+                continue
+            current = getattr(registry, target)
+            # Settings sources union these restriction lists (CC m0062:7730).
+            merged = list(dict.fromkeys((current or []) + value)) if current is not None else list(dict.fromkeys(value))
+            setattr(registry, target, merged)
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if hooks is None and isinstance(data, dict):
-        hooks = data
+        # A bare event map is accepted only when it doesn't look like a full
+        # settings object. This keeps hook files concise without treating
+        # policy keys as event names.
+        hooks = {k: v for k, v in data.items() if k in EVENT_NAMES}
     if not isinstance(hooks, dict):
         registry.add_issue(source, str(path), "hook configuration must contain an object field: hooks")
         return

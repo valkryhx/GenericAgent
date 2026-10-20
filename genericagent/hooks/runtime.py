@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import queue
+import re
 import threading
 import uuid
 from datetime import datetime
@@ -20,6 +22,7 @@ from genericagent.hooks.models import (
     HookAggregate,
     HookPayload,
     HookResult,
+    HookWakeRequest,
 )
 from genericagent.hooks.runner import execute_handler
 
@@ -84,6 +87,11 @@ class HookRuntime:
         self._lock = threading.Lock()
         self.session_started = False
         self.last_errors: list[dict[str, Any]] = []
+        self._async_threads: set[threading.Thread] = set()
+        self._async_requests: queue.Queue[HookWakeRequest] = queue.Queue()
+        self._wake_handler: Callable[[HookWakeRequest], bool] | None = None
+        self._wake_thread: threading.Thread | None = None
+        self._wake_stop = threading.Event()
 
     @classmethod
     def from_agent(cls, agent) -> "HookRuntime":
@@ -91,6 +99,125 @@ class HookRuntime:
             load_hook_registry(project_root=paths.PROJECT_ROOT),
             prompt_runner=_default_prompt_runner(agent),
         )
+
+    def set_wake_handler(self, handler: Callable[[HookWakeRequest], bool] | None) -> None:
+        """Install the host callback that turns asyncRewake into a new turn."""
+        self._wake_handler = handler
+        if handler is not None and (self._wake_thread is None or not self._wake_thread.is_alive()):
+            self._wake_stop.clear()
+            self._wake_thread = threading.Thread(
+                target=self._wake_loop,
+                daemon=True,
+                name="ga-hook-wake",
+            )
+            self._wake_thread.start()
+
+    def _wake_loop(self) -> None:
+        while not self._wake_stop.is_set():
+            try:
+                request = self._async_requests.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                handler = self._wake_handler
+                if handler is not None:
+                    handler(request)
+            except Exception:
+                pass
+            finally:
+                self._async_requests.task_done()
+
+    def _queue_wake(self, request: HookWakeRequest) -> None:
+        self._async_requests.put(request)
+
+    def close(self) -> None:
+        self._wake_stop.set()
+        thread = self._wake_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._wake_thread = None
+
+    def _complete_async(
+        self,
+        result: HookResult,
+        payload: dict[str, Any],
+        emit,
+    ) -> None:
+        """Persist and announce one background handler completion."""
+        try:
+            self.audit.record(result, payload=payload)
+        except Exception:
+            pass
+        self._emit(
+            emit,
+            "async_hook_response" if result.status in {"success", "blocking"} else "hook_error",
+            hookRunId=result.hook_run_id,
+            event=result.event,
+            source=result.source,
+            handlerType=result.handler.kind,
+            status=result.status,
+            durationMs=result.duration_ms,
+            message=result.error,
+            backgrounded=True,
+        )
+        if result.status not in {"success", "blocking"}:
+            with self._lock:
+                self.last_errors.append({
+                    "hookRunId": result.hook_run_id,
+                    "event": result.event,
+                    "source": result.source,
+                    "handlerType": result.handler.kind,
+                    "status": result.status,
+                    "message": result.error,
+                    "durationMs": result.duration_ms,
+                })
+                self.last_errors = self.last_errors[-50:]
+        if result.handler.async_rewake and result.exit_code == 2:
+            body = (result.stderr or result.stdout or "").strip()
+            prefix = result.handler.rewake_message or (
+                f'{result.event} hook blocking error from command "{result.handler.kind}":'
+            )
+            summary = re.sub(r"\s+", " ", result.handler.rewake_summary).strip()[:300] or "Stop hook feedback"
+            self._queue_wake(HookWakeRequest(
+                event=result.event,
+                hook_run_id=result.hook_run_id,
+                hook_name=result.handler.kind,
+                message=(prefix + " " + body).strip(),
+                summary=summary,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                session_id=str(payload.get("session_id") or ""),
+                agent_id=str(payload.get("agent_id") or ""),
+            ))
+
+    def _run_async(
+        self,
+        handler,
+        payload: dict[str, Any],
+        result: HookResult,
+        emit,
+    ) -> None:
+        def worker() -> None:
+            try:
+                execute_handler(
+                    handler,
+                    payload,
+                    result,
+                    prompt_runner=self.prompt_runner,
+                    mcp_call=self.mcp_call,
+                    allowed_http_urls=self.registry.allowed_http_hook_urls,
+                    global_allowed_env_vars=self.registry.http_hook_allowed_env_vars,
+                )
+                result.backgrounded = True
+                self._complete_async(result, payload, emit)
+            finally:
+                with self._lock:
+                    self._async_threads.discard(threading.current_thread())
+        thread = threading.Thread(target=worker, daemon=True, name=f"ga-hook-async-{result.hook_run_id}")
+        with self._lock:
+            self._async_threads.add(thread)
+        thread.start()
 
     def _payload(self, agent, event: str, data: dict[str, Any] | None) -> HookPayload:
         payload = {
@@ -129,12 +256,20 @@ class HookRuntime:
                     "path": entry.source_path,
                     "statusMessage": handler.status_message,
                     "timeout": handler.timeout,
+                    "async": handler.async_requested,
+                    "asyncRewake": handler.async_rewake,
                 })
         return {
             "files": list(self.registry.files),
             "entries": len(self.registry.entries),
             "handlers": len(configured),
             "handlerTypes": sorted({item["type"] for item in configured}),
+            "httpPolicy": {
+                "allowedUrlsConfigured": self.registry.allowed_http_hook_urls is not None,
+                "allowedUrlCount": len(self.registry.allowed_http_hook_urls or []),
+                "allowedEnvVarsConfigured": self.registry.http_hook_allowed_env_vars is not None,
+                "allowedEnvVarCount": len(self.registry.http_hook_allowed_env_vars or []),
+            },
             "configured": configured,
             "events": events,
             "issues": [
@@ -216,12 +351,24 @@ class HookRuntime:
                     handlerType=handler.kind,
                     statusMessage=handler.status_message,
                 )
+                if handler.async_requested:
+                    # CC config-based async returns a backgrounded response
+                    # immediately; completion arrives on a separate channel.
+                    result.backgrounded = True
+                    if handler.once:
+                        with self._lock:
+                            self._once_seen.add(once_key)
+                    self._run_async(handler, payload_dict, result, emit)
+                    aggregate.add(result)
+                    continue
                 execute_handler(
                     handler,
                     payload_dict,
                     result,
                     prompt_runner=self.prompt_runner,
                     mcp_call=self.mcp_call,
+                    allowed_http_urls=self.registry.allowed_http_hook_urls,
+                    global_allowed_env_vars=self.registry.http_hook_allowed_env_vars,
                 )
                 # A failed command/HTTP/prompt guard can fail closed when the
                 # config explicitly says onFailure=block. Stop-like events are

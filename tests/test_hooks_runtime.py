@@ -1,13 +1,15 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
+from genericagent.hooks.audit import HookAudit
 from genericagent.hooks.config import load_hook_registry
-from genericagent.hooks.models import EVENT_NAMES, HookAggregate, HookHandler, HookResult
+from genericagent.hooks.models import EVENT_NAMES, HookAggregate, HookHandler, HookResult, HookWakeRequest
 from genericagent.hooks.runner import execute_handler
 from genericagent.hooks.runtime import HookRuntime
 from genericagent.hooks.matcher import entry_matches, handler_matches
@@ -237,6 +239,128 @@ class HookRuntimeTests(unittest.TestCase):
             snapshot = runtime.status_snapshot()
             self.assertEqual(snapshot["handlers"], 1)
             self.assertEqual(snapshot["events"]["Stop"], "integrated")
+
+
+    def test_async_command_is_backgrounded_and_audited(self):
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / "slow_hook.py"
+            marker = Path(td) / "done.txt"
+            nl = chr(10)
+            script.write_text(
+                nl.join([
+                    "import sys,time,pathlib",
+                    "sys.stdin.read()",
+                    "time.sleep(0.15)",
+                    "pathlib.Path(sys.argv[1]).write_text('ok',encoding='utf-8')",
+                    "",
+                ]),
+                encoding="utf-8", newline=nl)
+            cfg = Path(td) / ".genericagent" / "hooks.json"
+            cfg.parent.mkdir()
+            cfg.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [{
+                "type": "command", "command": "python", "args": [str(script), str(marker)],
+                "async": True,
+            }]}]}}), encoding="utf-8")
+            registry = load_hook_registry(config_dir=cfg.parent, home=Path(td) / "home")
+            runtime = HookRuntime(registry, audit=HookAudit(Path(td) / "audit"))
+            agent = SimpleNamespace(session_id="s", session_path=None, cwd=td, permission_mode="full_access", session_turn_id=1, agent_id=None, agent_type=None)
+            started = time.perf_counter()
+            aggregate = runtime.run_event(agent, "SessionEnd", {"reason": "exit"})
+            elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(aggregate.results[0].backgrounded)
+            deadline = time.time() + 2
+            while time.time() < deadline and not marker.exists():
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+            deadline = time.time() + 2
+            while time.time() < deadline and not runtime.recent_events(5):
+                time.sleep(0.02)
+            self.assertTrue(runtime.recent_events(5))
+
+    def test_async_rewake_only_on_exit_two_and_queues_wake(self):
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td) / "rewake_hook.py"
+            nl = chr(10)
+            script.write_text(
+                nl.join([
+                    "import sys",
+                    "sys.stdin.read()",
+                    "sys.stderr.write('needs another check')",
+                    "raise SystemExit(2)",
+                    "",
+                ]),
+                encoding="utf-8", newline=nl)
+            cfg = Path(td) / ".genericagent" / "hooks.json"
+            cfg.parent.mkdir()
+            cfg.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{
+                "type": "command", "command": "python", "args": [str(script)],
+                "asyncRewake": True, "rewakeMessage": "Retry verification.",
+                "rewakeSummary": "verification failed",
+            }]}]}}), encoding="utf-8")
+            registry = load_hook_registry(config_dir=cfg.parent, home=Path(td) / "home")
+            runtime = HookRuntime(registry, audit=HookAudit(Path(td) / "audit"))
+            seen = []
+            runtime.set_wake_handler(lambda request: seen.append(request) or True)
+            agent = SimpleNamespace(session_id="s", session_path=None, cwd=td, permission_mode="full_access", session_turn_id=1, agent_id=None, agent_type=None)
+            runtime.run_event(agent, "Stop", {"exit_reason": "completed"})
+            deadline = time.time() + 2
+            while time.time() < deadline and not seen:
+                time.sleep(0.02)
+            self.assertEqual(len(seen), 1)
+            self.assertIsInstance(seen[0], HookWakeRequest)
+            self.assertIn("Retry verification.", seen[0].message)
+            self.assertIn("needs another check", seen[0].message)
+            self.assertEqual("verification failed", seen[0].summary)
+            runtime.close()
+
+    def test_http_url_policy_deny_all_blocks_before_request(self):
+        handler = HookHandler("http", {"url": "https://hook.invalid/test"})
+        result = HookResult("SessionEnd", handler, "test", "", "h", "running")
+        with mock.patch("requests.post") as post:
+            execute_handler(handler, {"hook_event_name": "SessionEnd"}, result, allowed_http_urls=[])
+        self.assertEqual(result.status, "error")
+        post.assert_not_called()
+
+    def test_http_url_policy_wildcard_and_redirect_disabled(self):
+        handler = HookHandler("http", {"url": "https://hooks.example.com/a"})
+        result = HookResult("SessionEnd", handler, "test", "", "h", "running")
+        response = SimpleNamespace(status_code=200, text="{}")
+        with mock.patch("requests.post", return_value=response) as post:
+            execute_handler(handler, {"hook_event_name": "SessionEnd"}, result, allowed_http_urls=["https://hooks.example.com/*"])
+        self.assertEqual(result.status, "success")
+        self.assertFalse(post.call_args.kwargs["allow_redirects"])
+
+    def test_http_env_allowlist_intersects_global_policy(self):
+        handler = HookHandler("http", {
+            "url": "https://hook.invalid/test",
+            "headers": {"Authorization": "Bearer $TOKEN", "X-Other": "$OTHER"},
+            "allowedEnvVars": ["TOKEN", "OTHER"],
+        })
+        result = HookResult("SessionEnd", handler, "test", "", "h", "running")
+        response = SimpleNamespace(status_code=200, text="{}")
+        with mock.patch.dict(os.environ, {"TOKEN": "yes", "OTHER": "no"}, clear=False), mock.patch(
+            "requests.post", return_value=response
+        ) as post:
+            execute_handler(
+                handler,
+                {"hook_event_name": "SessionEnd"},
+                result,
+                global_allowed_env_vars=["TOKEN"],
+            )
+        self.assertEqual("Bearer yes", post.call_args.kwargs["headers"]["Authorization"])
+        self.assertEqual("$OTHER", post.call_args.kwargs["headers"]["X-Other"])
+
+    def test_async_fields_are_rejected_on_non_command_handlers(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / ".genericagent" / "hooks.json"
+            cfg.parent.mkdir()
+            cfg.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{
+                "type": "prompt", "prompt": "x", "async": True,
+            }]}]}}), encoding="utf-8")
+            registry = load_hook_registry(config_dir=cfg.parent, home=Path(td) / "home")
+            self.assertEqual(len(registry.entries), 0)
+            self.assertTrue(registry.issues)
 
 
 if __name__ == "__main__":

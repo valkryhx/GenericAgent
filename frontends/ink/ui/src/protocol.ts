@@ -88,6 +88,15 @@ export type HookConfiguredEntry = {
   path: string
   statusMessage?: string
   timeout?: number
+  async?: boolean
+  asyncRewake?: boolean
+}
+
+export type HookHttpPolicy = {
+  allowedUrlsConfigured: boolean
+  allowedUrlCount: number
+  allowedEnvVarsConfigured: boolean
+  allowedEnvVarCount: number
 }
 
 export type HookAuditEntry = {
@@ -105,6 +114,7 @@ export type HooksStatusPayload = {
   entries: number
   handlers: number
   handlerTypes: string[]
+  httpPolicy?: HookHttpPolicy
   configured: HookConfiguredEntry[]
   events: Record<string, string>
   issues: Array<{ source: string; path: string; message: string }>

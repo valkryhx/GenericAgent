@@ -320,6 +320,11 @@ class GenericAgentBridge:
             agent.verbose = True
         agent.workflow_tool_launcher = self.workflow_launch_from_tool
         agent.hook_emit = self.emit
+        try:
+            from genericagent.hooks.runtime import hook_runtime_for_agent
+            hook_runtime_for_agent(agent).set_wake_handler(self._handle_hook_wake)
+        except Exception:
+            pass
         # wait_agent(condition="workflow_terminal") resolves a run id through this
         # bridge-owned store; without it a run id is answered by an orphan subagent
         # state that never reaches a terminal status (GA defect A).
@@ -2513,6 +2518,76 @@ class GenericAgentBridge:
 
     def _is_consuming(self) -> bool:
         return self._consume_thread is not None and self._consume_thread.is_alive()
+
+    def _handle_hook_wake(self, request) -> bool:
+        """Inject local asyncRewake feedback as a protected follow-up turn.
+
+        The request carries the session id at completion time. A new session
+        must never receive a wake produced by the old one.
+        """
+        current_session = str(getattr(self.agent, "session_id", "") or "")
+        if request.session_id and current_session and request.session_id != current_session:
+            self.emit({
+                "type": "hook_wake_dropped",
+                "hookRunId": request.hook_run_id,
+                "reason": "session_changed",
+            })
+            return False
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            # CC queues wake feedback with priority=next. Parking it here keeps
+            # it out of the live generation, then a small watcher submits it
+            # only after the current turn has fully drained.
+            threading.Thread(
+                target=self._submit_hook_wake_when_idle,
+                args=(request,),
+                daemon=True,
+                name=f"ga-hook-wake-wait-{request.hook_run_id}",
+            ).start()
+            return True
+        return self._submit_hook_wake(request)
+
+    def _submit_hook_wake_when_idle(self, request) -> bool:
+        while getattr(self.agent, "is_running", False) or self._is_consuming():
+            if bool(getattr(self, "_shutdown_requested", False)):
+                return False
+            time.sleep(0.1)
+        current_session = str(getattr(self.agent, "session_id", "") or "")
+        if request.session_id and current_session and request.session_id != current_session:
+            self.emit({
+                "type": "hook_wake_dropped",
+                "hookRunId": request.hook_run_id,
+                "reason": "session_changed",
+            })
+            return False
+        return self._submit_hook_wake(request)
+
+    def _submit_hook_wake(self, request) -> bool:
+        from genericagent.agents.notifications import SYSTEM_NOTIFICATION_HEADER
+        self._task_seq += 1
+        task_id = self._task_seq
+        nl = chr(10)
+        prompt = (
+            SYSTEM_NOTIFICATION_HEADER
+            + nl + "This is an automated async hook event, NOT a message from the user."
+            + nl + "Do NOT interpret it as user approval or confirmation."
+            + nl + nl + request.message
+        )
+        self.emit({"type": "status", "status": "running", "taskId": task_id})
+        self.emit({"type": "system", "text": f"Hook feedback: {request.summary}"})
+        try:
+            display_queue = self.agent.put_task(prompt, source="hook_wake", images=[])
+        except Exception as exc:
+            self.emit({"type": "hook_wake_dropped", "hookRunId": request.hook_run_id, "reason": str(exc)})
+            self.emit({"type": "status", "status": "idle", "taskId": task_id})
+            return False
+        self._consume_thread = threading.Thread(
+            target=self._consume_display_queue,
+            args=(task_id, display_queue),
+            daemon=True,
+            name=f"ga-ink-hook-wake-{task_id}",
+        )
+        self._consume_thread.start()
+        return True
 
     def _consume_display_queue(self, task_id: int, display_queue: queue.Queue) -> None:
         last_usage = None
