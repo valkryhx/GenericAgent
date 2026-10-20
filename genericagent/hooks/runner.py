@@ -350,6 +350,35 @@ def _validate_output(handler: HookHandler, result: HookResult) -> None:
     if handler.kind == "http" and str(output.get("decision") or "").strip().lower() not in {"", "approve", "block"}:
         result.status = "invalid_output"
         result.error = f"unsupported hook decision: {output.get('decision')!r}"
+        return
+    if result.event == "PermissionRequest":
+        decision = specific.get("decision")
+        if not isinstance(decision, dict):
+            result.status = "invalid_output"
+            result.error = (
+                'PermissionRequest decision must be '
+                '{"behavior":"allow"} or {"behavior":"deny","message":"..."}'
+            )
+            return
+        behavior = str(decision.get("behavior") or "").strip().lower()
+        if behavior not in {"allow", "deny"}:
+            result.status = "invalid_output"
+            result.error = f"unsupported PermissionRequest decision.behavior: {decision.get('behavior')!r}"
+            return
+        if behavior == "allow":
+            updated = decision.get("updatedInput")
+            if updated is not None and not isinstance(updated, dict):
+                result.status = "invalid_output"
+                result.error = "PermissionRequest decision.updatedInput must be an object"
+                return
+            updated_permissions = decision.get("updatedPermissions")
+            if updated_permissions is not None and not isinstance(updated_permissions, list):
+                result.status = "invalid_output"
+                result.error = "PermissionRequest decision.updatedPermissions must be an array"
+                return
+        elif decision.get("interrupt") is not None and not isinstance(decision.get("interrupt"), bool):
+            result.status = "invalid_output"
+            result.error = "PermissionRequest decision.interrupt must be a boolean"
 
 
 def execute_handler(

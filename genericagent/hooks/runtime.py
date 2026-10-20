@@ -299,7 +299,7 @@ class HookRuntime:
             "PostCompact": "integrated",
             "PreModelSwitch": "integrated",
             "PostModelSwitch": "integrated",
-            "PermissionRequest": "contract-only",
+            "PermissionRequest": "integrated",
             "PermissionDenied": "integrated",
             "Setup": "contract-only",
             "TeammateIdle": "integrated",

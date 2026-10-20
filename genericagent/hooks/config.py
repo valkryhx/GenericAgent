@@ -146,6 +146,16 @@ def _parse_file(path: Path, source: str, source_rank: int, registry: HookRegistr
                 continue
             handlers = []
             for raw_handler in raw_handlers:
+                if (
+                    event_name == "PermissionRequest"
+                    and isinstance(raw_handler, dict)
+                    and str(raw_handler.get("type") or "").strip() == "agent"
+                ):
+                    registry.add_issue(
+                        source, str(path),
+                        "agent handler is not supported for PermissionRequest; use command/http/mcp_tool",
+                    )
+                    continue
                 parsed = _parse_handler(raw_handler, registry, source, str(path))
                 if parsed is not None:
                     handlers.append(parsed)

@@ -95,6 +95,45 @@ class HookRuntimeTests(unittest.TestCase):
         _validate_output(handler, result)
         self.assertEqual(result.status, "invalid_output")
 
+    def test_permission_request_nested_decision_is_aggregated(self):
+        aggregate = HookAggregate("PermissionRequest")
+        aggregate.add(HookResult("PermissionRequest", HookHandler("command", {"command": "x"}), "test", "", "h", "success", output={
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedInput": {"path": "inside.txt"},
+                },
+            }
+        }))
+        self.assertEqual(aggregate.permission_behavior, "allow")
+        self.assertEqual(aggregate.updated_input, {"path": "inside.txt"})
+        self.assertEqual(aggregate.permission_decision, "allow")
+
+    def test_permission_request_invalid_behavior_is_rejected(self):
+        from genericagent.hooks.runner import _validate_output
+        handler = HookHandler("command", {"command": "x"})
+        result = HookResult("PermissionRequest", handler, "test", "", "h", "success", output={
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "ask"},
+            }
+        })
+        _validate_output(handler, result)
+        self.assertEqual(result.status, "invalid_output")
+        self.assertIn("decision.behavior", result.error)
+
+    def test_permission_request_agent_handler_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / ".genericagent" / "hooks.json"
+            cfg.parent.mkdir()
+            cfg.write_text(json.dumps({"hooks": {"PermissionRequest": [{"hooks": [{
+                "type": "agent", "prompt": "approve?",
+            }]}]}}), encoding="utf-8")
+            registry = load_hook_registry(config_dir=cfg.parent, home=Path(td) / "home")
+            self.assertEqual(registry.entries, [])
+            self.assertTrue(any("agent handler is not supported" in issue.message for issue in registry.issues))
+
     def test_updated_tool_output_prefers_cc_field_and_allows_null(self):
         aggregate = HookAggregate("PostToolUse")
         aggregate.add(HookResult("PostToolUse", HookHandler("command", {"command": "x"}), "test", "", "h", "success", output={

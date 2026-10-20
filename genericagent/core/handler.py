@@ -445,42 +445,81 @@ class GenericAgentHandler(BaseHandler):
             )
             _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
             return ret
+        permission_decision = None
         policy = getattr(self, 'workflow_permission_policy', None)
         if policy is not None:
-            decision = self._check_workflow_permission(tool_name, args or {})
-            if decision.action != 'allow':
-                # workflow 内 ask 仍非阻塞（大件 #3）；主会话 ask 见下方 mode_policy 路径。
-                status = 'approval_required' if decision.action == 'ask' else 'error'
-                yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
-                ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
-                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
-                return ret
+            permission_decision = self._check_workflow_permission(tool_name, args or {})
         else:
             subagent_policy = getattr(self, 'subagent_permission_policy', None)
             if subagent_policy is not None:
-                decision = subagent_policy.evaluate(tool_name, args or {})
+                permission_decision = subagent_policy.evaluate(tool_name, args or {})
                 subagent_permission_callback = getattr(self, 'subagent_permission_event_callback', None)
                 if subagent_permission_callback is not None:
-                    subagent_permission_callback(tool_name, args or {}, decision)
-                if decision.action != 'allow':
-                    status = 'approval_required' if decision.action == 'ask' else 'error'
-                    yield f"[Permission] {decision.action}: {tool_name} ({decision.reason})\n"
-                    ret = StepOutcome({"status": status, "permission": decision.to_dict()}, next_prompt="\n")
-                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
-                    return ret
-            mode_policy = getattr(self, 'permission_mode_policy', None)
-            if mode_policy is not None:
-                decision = mode_policy.evaluate(tool_name, args or {})
-                if decision.action == 'deny':
-                    yield f"[Permission] deny: {tool_name} ({decision.reason})\n"
-                    ret = StepOutcome({"status": "error", "permission": decision.to_dict()}, next_prompt="\n")
-                    _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
-                    return ret
+                    subagent_permission_callback(tool_name, args or {}, permission_decision)
+            else:
+                mode_policy = getattr(self, 'permission_mode_policy', None)
+                if mode_policy is not None:
+                    permission_decision = mode_policy.evaluate(tool_name, args or {})
+        if permission_decision is not None:
+            decision = permission_decision
+            if decision.action == 'deny':
+                yield f"[Permission] deny: {tool_name} ({decision.reason})" + chr(10)
+                ret = StepOutcome({'status': 'error', 'permission': decision.to_dict()}, next_prompt=chr(10))
+                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                return ret
+            if decision.action == 'ask':
+                # PermissionRequest runs only after the ordinary policy has
+                # already produced ask. It can answer allow/deny or rewrite
+                # input, but cannot bypass capability, an existing deny rule,
+                # or PathACL. No verdict keeps the host's original behavior.
+                permission_hooks = self._run_tool_hook('PermissionRequest', tool_name, args or {}, response)
+                hook_behavior = ''
+                if permission_hooks is not None:
+                    hook_behavior = permission_hooks.permission_behavior
+                    if hook_behavior == 'allow':
+                        if permission_hooks.updated_input:
+                            args.update(permission_hooks.updated_input)
+                            checked = self._check_workspace_path_access(tool_name, args)
+                            if checked is not None and not checked.allowed:
+                                yield f"[PathACL] deny after PermissionRequest updatedInput: {tool_name} ({checked.reason})" + chr(10)
+                                ret = StepOutcome(
+                                    {'status': 'error', 'path_acl': checked.to_dict()},
+                                    next_prompt='Hook 修改后的路径未通过 PathACL，请使用工作区内路径。',
+                                )
+                                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                                return ret
+                        yield f"[Permission] allow by hook: {tool_name}" + chr(10)
+                        decision = decision.__class__(
+                            action='allow',
+                            reason='permission_request_hook_allow',
+                            profile=getattr(decision, 'profile', ''),
+                            tool_name=tool_name,
+                        )
+                    elif hook_behavior == 'deny':
+                        deny_reason = permission_hooks.permission_message or permission_hooks.reason or f'PermissionRequest hook denied {tool_name}'
+                        yield f"[Permission] deny: {tool_name} ({deny_reason})" + chr(10)
+                        self._run_tool_hook('PermissionDenied', tool_name, args or {}, response, error=deny_reason)
+                        ret = StepOutcome(
+                            {'status': 'error', 'permission': {'action': 'deny', 'reason': deny_reason, 'hook': 'PermissionRequest'}},
+                            next_prompt=(deny_reason + chr(10)),
+                        )
+                        _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                        return ret
                 if decision.action == 'ask':
-                    # 阻塞审批：accept 后继续执行工具；deny / 无 UI / stop → 不执行。
+                    if policy is not None or getattr(self, 'subagent_permission_policy', None) is not None:
+                        # Workflow/subagent asks have no interactive prompt. Preserve
+                        # GA's fail-closed approval_required result when the hook did
+                        # not answer.
+                        status = 'approval_required'
+                        yield f"[Permission] ask: {tool_name} ({decision.reason})" + chr(10)
+                        ret = StepOutcome({'status': status, 'permission': decision.to_dict()}, next_prompt=chr(10))
+                        _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                        return ret
+                    # Main-session ask: preserve the interactive approval path.
+                    # accept continues; deny / no UI / stop does not execute.
                     from genericagent.core.permissions.runtime import ACCEPT, DENY
                     runtime = getattr(self, 'permission_runtime', None)
-                    yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})\n"
+                    yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})" + chr(10)
                     user_decision = DENY
                     if runtime is not None:
                         parent = getattr(self, 'parent', None)
@@ -490,7 +529,7 @@ class GenericAgentHandler(BaseHandler):
                             tool_name, args or {}, decision.reason, stop_check=_stop_check
                         )
                     if user_decision != ACCEPT:
-                        yield f"[Permission] deny: {tool_name} (user_or_headless)\n"
+                        yield f"[Permission] deny: {tool_name} (user_or_headless)" + chr(10)
                         denied = {
                             "status": "error",
                             "permission": {
@@ -503,10 +542,10 @@ class GenericAgentHandler(BaseHandler):
                                 ),
                             },
                         }
-                        ret = StepOutcome(denied, next_prompt="\n")
+                        ret = StepOutcome(denied, next_prompt=chr(10))
                         _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
                         return ret
-                    yield f"[Permission] accept: {tool_name}\n"
+                    yield f"[Permission] accept: {tool_name}" + chr(10)
         # PreToolUse runs after all built-in hard guards, so a hook can
         # tighten policy but can never grant a capability GA already denied.
         pre_hooks = self._run_tool_hook('PreToolUse', tool_name, args or {}, response)

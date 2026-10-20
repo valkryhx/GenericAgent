@@ -166,6 +166,23 @@ class HookResult:
         return str(value or "").strip()
 
     @property
+    def permission_behavior(self) -> str:
+        # PermissionRequest stores its verdict in a nested decision object:
+        # hookSpecificOutput.decision.behavior. PreToolUse keeps using
+        # hookSpecificOutput.permissionDecision.
+        decision = self.hook_specific.get("decision")
+        if isinstance(decision, dict) and decision.get("behavior") in {"allow", "deny"}:
+            return str(decision["behavior"])
+        return ""
+
+    @property
+    def permission_message(self) -> str:
+        decision = self.hook_specific.get("decision")
+        if isinstance(decision, dict):
+            return str(decision.get("message") or "").strip()
+        return ""
+
+    @property
     def system_message(self) -> str:
         return str(self.output_dict.get("systemMessage") or "").strip()
 
@@ -226,7 +243,25 @@ class HookAggregate:
 
     @property
     def system_text(self) -> str:
-        return "\n".join(dict.fromkeys(item for item in self.system_messages if item))
+        return chr(10).join(dict.fromkeys(item for item in self.system_messages if item))
+
+    @property
+    def permission_behavior(self) -> str:
+        # HookAggregate is what the tool dispatcher consumes. Keep this
+        # property aligned with the strongest PermissionRequest verdict.
+        if self.permission_decision in {"allow", "deny"}:
+            return self.permission_decision
+        for result in reversed(self.results):
+            if result.permission_behavior in {"allow", "deny"}:
+                return result.permission_behavior
+        return ""
+
+    @property
+    def permission_message(self) -> str:
+        for result in reversed(self.results):
+            if result.permission_message:
+                return result.permission_message
+        return ""
 
     @property
     def blocked(self) -> bool:
@@ -259,6 +294,13 @@ class HookAggregate:
         updated = specific.get("updatedInput")
         if isinstance(updated, dict):
             self.updated_input = dict(updated)
+        # PermissionRequest nests updatedInput under decision, unlike
+        # PreToolUse. Later hook results win, matching CC's aggregation order.
+        nested_decision = specific.get("decision")
+        if isinstance(nested_decision, dict) and isinstance(nested_decision.get("updatedInput"), dict):
+            self.updated_input = dict(nested_decision["updatedInput"])
+        if isinstance(nested_decision, dict) and nested_decision.get("behavior") in {"allow", "deny"}:
+            self.permission_decision = str(nested_decision["behavior"])
         # CC 303 m0120:7129 uses updatedToolOutput. updatedOutput is retained
         # only as a GA legacy alias; prefer the CC field when both are present.
         if "updatedToolOutput" in specific:

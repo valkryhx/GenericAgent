@@ -132,7 +132,9 @@ CC 2.1.303 的 hooks 全链路调研与 GA 落地设计已经落盘，后续实�
 
 必须区分语义：CC 的 `Stop` 是**一个用户请求最终结束**，不是 GA `agent_runner_loop` 的每个内部 `Turn N`。GA 的 Stop beep 必须挂到 `GenericAgent.run()` 的用户回合终态（成功/失败/abort 各一次），不能挂 `turn_end_callback()`，否则复杂任务会重复响铃。
 
-当前落地状态（2026-10-20）：本地 hooks runtime 已实现 `command`、`prompt`、`agent`、`http`、`mcp_tool` 五类 handler；33 个事件全部进入配置合同，其中 19 个已接线、14 个为 contract-only。`Stop` 绑定用户回合终态，`SubagentStop` 与 workflow job 作用域已分流；Ink 提供 `/hooks` 只读面板。配置使用 `.genericagent/settings*.json`，默认不读取 `.claude/`。exec form 优先（`command` + `args`，不拼 shell）；PreToolUse 修改 `updatedInput` 后必须重新跑 capability / permission / PathACL，hook 不能放宽任何硬安全边界。
+当前落地状态（2026-10-20）：本地 hooks runtime 已实现 `command`、`prompt`、`agent`、`http`、`mcp_tool` 五类 handler；33 个事件全部进入配置合同，其中 20 个已接线、13 个为 contract-only。`Stop` 绑定用户回合终态，`SubagentStop` 与 workflow job 作用域已分流；Ink 提供 `/hooks` 只读面板。配置使用 `.genericagent/settings*.json`，默认不读取 `.claude/`。exec form 优先（`command` + `args`，不拼 shell）；PreToolUse 修改 `updatedInput` 后必须重新跑 capability / permission / PathACL，hook 不能放宽任何硬安全边界。
+
+`PermissionRequest` 已进入 GA 的 ask 阶段接入：先执行 hook，`allow` 可跳过用户审批但必须先应用嵌套 `decision.updatedInput` 并重新跑 PathACL；`deny` 必须发出 `PermissionDenied` 且不执行工具；hook 没有给出 `allow/deny` 时才走原有用户审批。CC 303 的证据与 GA 映射见 `D:/git_codes/claudecode283_hack/claudecode303/extracted/20261020-hooks入口分析.md` §12；实现顺序见 `docs/20261020-GA-hooks设计与实现方案.md`。
 
 实施记录与剩余限制：`docs/20261020-GA-hooks实施记录.md`（本地 async/asyncRewake 与 HTTP URL/env policy 已接入；完整 per-event schema、async 进度批处理、会话退出时主动取消后台 hook、低频事件接线仍待补）。
 

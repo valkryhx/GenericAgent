@@ -72,6 +72,111 @@ class HooksToolRuntimeTests(unittest.TestCase):
             self.assertIn("PreToolUse", events)
             self.assertIn("PermissionDenied", events)
 
+    def test_permission_request_allow_skips_user_approval_and_runs_tool(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime({"PermissionRequest": {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"},
+                }
+            }})
+            handler = self.make_handler(td, runtime)
+            from genericagent.core.permissions.policy import PermissionModePolicy
+            handler.permission_mode_policy = PermissionModePolicy("ask")
+            handler.permission_runtime = SimpleNamespace(
+                wait_for_decision=lambda *a, **k: self.fail("user approval should be skipped")
+            )
+            Path(td, "workspace", "inside.txt").write_text("allowed", encoding="utf-8")
+            outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "ok"}, None))
+            self.assertEqual(outcome.data["status"], "success")
+            self.assertEqual(Path(td, "workspace", "inside.txt").read_text(encoding="utf-8"), "ok")
+            self.assertIn("PermissionRequest", [name for name, _ in runtime.events])
+
+    def test_permission_request_deny_does_not_execute_and_emits_denied(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime({"PermissionRequest": {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "deny", "message": "blocked by hook"},
+                }
+            }})
+            handler = self.make_handler(td, runtime)
+            from genericagent.core.permissions.policy import PermissionModePolicy
+            handler.permission_mode_policy = PermissionModePolicy("ask")
+            handler.permission_runtime = SimpleNamespace(
+                wait_for_decision=lambda *a, **k: self.fail("deny should skip user approval")
+            )
+            outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "no"}, None))
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertIn("blocked by hook", outcome.data["permission"]["reason"])
+            self.assertFalse(Path(td, "workspace", "inside.txt").exists())
+            events = [name for name, _ in runtime.events]
+            self.assertIn("PermissionRequest", events)
+            self.assertIn("PermissionDenied", events)
+
+    def test_permission_request_updated_input_is_rechecked_by_path_acl(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime({"PermissionRequest": {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "allow",
+                        "updatedInput": {"path": "../outside.txt", "content": "escape"},
+                    },
+                }
+            }})
+            handler = self.make_handler(td, runtime)
+            from genericagent.core.permissions.policy import PermissionModePolicy
+            handler.permission_mode_policy = PermissionModePolicy("ask")
+            handler.permission_runtime = SimpleNamespace(
+                wait_for_decision=lambda *a, **k: self.fail("updated input should be rejected before approval")
+            )
+            outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "safe"}, None))
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertIn("path_acl", outcome.data)
+            self.assertFalse(Path(td, "outside.txt").exists())
+
+    def test_permission_request_without_verdict_still_uses_user_approval(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime()
+            handler = self.make_handler(td, runtime)
+            from genericagent.core.permissions.policy import PermissionModePolicy
+            from genericagent.core.permissions.runtime import ACCEPT
+            handler.permission_mode_policy = PermissionModePolicy("ask")
+            seen = {}
+            def wait(tool_name, args, reason, **kwargs):
+                seen.update(tool_name=tool_name, reason=reason)
+                return ACCEPT
+            handler.permission_runtime = SimpleNamespace(wait_for_decision=wait)
+            outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "ok"}, None))
+            self.assertEqual(outcome.data["status"], "success")
+            self.assertEqual(seen["tool_name"], "file_write")
+
+    def test_workflow_permission_request_allow_replaces_blocking_ask(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime({"PermissionRequest": {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"},
+                }
+            }})
+            handler = self.make_handler(td, runtime)
+            from genericagent.workflow.permissions import ToolPermissionPolicy, EXPLICIT_APPROVAL
+            handler.workflow_permission_policy = ToolPermissionPolicy(profile=EXPLICIT_APPROVAL)
+            outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "allowed"}, None))
+            self.assertEqual(outcome.data.get("status"), "success")
+            self.assertEqual(Path(td, "workspace", "inside.txt").read_text(encoding="utf-8"), "allowed")
+
+    def test_workflow_permission_request_without_verdict_keeps_approval_required(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = RecordingHookRuntime()
+            handler = self.make_handler(td, runtime)
+            from genericagent.workflow.permissions import ToolPermissionPolicy, EXPLICIT_APPROVAL
+            handler.workflow_permission_policy = ToolPermissionPolicy(profile=EXPLICIT_APPROVAL)
+            outcome = exhaust(handler.dispatch("file_read", {"path": "inside.txt"}, None))
+            self.assertEqual(outcome.data.get("status"), "approval_required")
+            self.assertIn("PermissionRequest", [name for name, _ in runtime.events])
+
     def test_post_tool_updated_tool_output_replaces_outcome_data(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = RecordingHookRuntime({"PostToolUse": {
