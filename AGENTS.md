@@ -123,6 +123,19 @@ Claude Code 本地源码位于 `D:\git_codes\claude-reviews-claude\claude-code-f
 
 GA Ink UI 的 IME/光标 bug，权威根因文档是 `docs/ga_ui_ime_visible_native_cursor_root_cause_2026-07-16.md`：Windows Terminal 的输入法候选框锚定在**可见**的原生光标上（DECTCEM `\x1b[?25h`），因此 cursor-park 包裹流（`frontends/ink/ui/src/stdoutCursorPark.ts`）必须在光标停到 caret 后 SHOW、在下一帧写入前 HIDE。2026-07-14/07-15 早期诊断得出的「保持原生光标隐藏、只用反显块」结论是错的，已在该文档中修正。
 
+## 参考实现：Claude Code 2.1.303 hooks
+
+CC 2.1.303 的 hooks 全链路调研与 GA 落地设计已经落盘，后续实现 hooks 前先读：
+
+- CC 源码核验与本机真实 Stop beep 证据：`D:/git_codes/claudecode283_hack/claudecode303/extracted/20261020-hooks入口分析.md`（重点 §15）。
+- GA 的配置、协议、接入点、阶段计划和测试矩阵：`docs/20261020-GA-hooks设计与实现方案.md`。
+
+必须区分语义：CC 的 `Stop` 是**一个用户请求最终结束**，不是 GA `agent_runner_loop` 的每个内部 `Turn N`。GA 的 Stop beep 必须挂到 `GenericAgent.run()` 的用户回合终态（成功/失败/abort 各一次），不能挂 `turn_end_callback()`，否则复杂任务会重复响铃。
+
+第一版落地边界：只实现本地 `command` hook，优先 exec form（`command` + `args`，不拼 shell）；配置使用 `.genericagent/settings*.json`，第一版不读取 `.claude/`；先用 `Stop` beep 打通配置、stdin 输入、进程执行、stdout 输出、审计与 UI 展示。PreToolUse 修改 `updatedInput` 后必须重新跑 capability / permission / PathACL，hook 不能放宽任何硬安全边界。
+
+云端边界：**【复刻 hooks 时暂时不需要参考 Claude Code 云端会话的实现】**；不做 cloud hook 策略、device forwarding 或云端会话同步。
+
 ## 参考实现：Pi agent（提速参考）
 
 Pi agent 本地源码位于 `D:\git_codes\pi`。它是 TypeScript monorepo（agent 循环、多 provider LLM、TUI、codemode、MCP 分包），以启动快、首 token 快著称，比 Codex 响应更快。需要优化 GA 的启动延迟或响应速度时，先看它：核心手法是 MCP 连接异步化（首个 prompt 只等 `direct` 工具，其余后台连接、按需等待）、重依赖 lazy load、启动期工作全部推迟到首帧之后、prompt cache 主动预热与 miss 统计、流式 + 默认并行工具执行。
