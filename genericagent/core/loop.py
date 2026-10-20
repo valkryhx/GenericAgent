@@ -216,6 +216,14 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             response = exhaust(response_gen)
             cleaned = _clean_content(response.content)
             if cleaned: yield cleaned + '\n'
+        # Keep the committed model message separate from the display stream.
+        # CC 303's Stop payload uses the last assistant transcript message's
+        # text (m0459 Spe -> g_(messages) -> Io(content).trim()), not rendered
+        # turn banners or tool progress. App consumes this for transcript and
+        # hook payloads while the existing full_resp stream remains unchanged.
+        if response is not None:
+            handler.last_assistant_message = _clean_content(response.content)
+
 
         if not response.tool_calls: tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
         else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}

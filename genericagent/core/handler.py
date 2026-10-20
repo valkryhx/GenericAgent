@@ -350,6 +350,9 @@ class GenericAgentHandler(BaseHandler):
         self.cwd = cwd;  self.current_turn = 0
         self.workspace_root = str(workspace_root) if workspace_root else None
         self.history_info = last_history if last_history else []
+        # Final assistant text block, kept separate from the verbose display
+        # stream. Stop/StopFailure and transcript finalization use this field.
+        self.last_assistant_message = ""
         self.code_stop_signal = threading.Event()
         self._done_hooks = []
         self.workflow_permission_policy = None

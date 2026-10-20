@@ -178,6 +178,29 @@ class ParallelToolExecutionTest(unittest.TestCase):
             _run(client, handler)
 
 
+class LastAssistantMessageTest(unittest.TestCase):
+    def test_records_clean_final_model_text_not_display_protocol(self):
+        handler = _Handler()
+        client = _Client([
+            _Response([_ToolCall("mcp__s__a", call_id="a")], content="<summary>inspect</summary>working"),
+            _Response([], content="<summary>done</summary>final answer"),
+        ])
+
+        chunks = _run(client, handler, verbose=True)
+        joined = "".join(str(chunk) for chunk in chunks)
+
+        self.assertIn("LLM Running (Turn 1)", joined)
+        self.assertEqual(handler.last_assistant_message, "<summary>done</summary>final answer")
+        self.assertNotIn("LLM Running", handler.last_assistant_message)
+        self.assertNotIn("Tool:", handler.last_assistant_message)
+
+    def test_last_assistant_message_is_empty_when_model_returns_no_content(self):
+        handler = _Handler()
+        client = _Client([_Response([], content="")])
+        _run(client, handler, verbose=True)
+        self.assertEqual(handler.last_assistant_message, "")
+
+
 class _NoNewlineHandler:
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
         yield "workflow output"

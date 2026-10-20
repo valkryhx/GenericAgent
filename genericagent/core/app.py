@@ -1174,16 +1174,23 @@ class GenericAgent:
                 # Ink UI re-paints Turn 1 + tools a second time. Display spacing belongs
                 # in the frontend formatter (formatAssistantText).
                 display_queue.put({'done': full_resp, 'source': source})
+                # full_resp is the UI stream (turn banner + tool progress +
+                # final prose). CC's Stop payload is the last assistant message
+                # text, so persist/send the committed model text separately
+                # while leaving Ink's stream behavior untouched.
+                final_assistant_text = (
+                    getattr(handler, 'last_assistant_message', '') or full_resp
+                )
                 subagent_assistant_callback = getattr(self, '_subagent_transcript_assistant', None)
                 if subagent_assistant_callback is not None:
-                    try: subagent_assistant_callback(full_resp)
+                    try: subagent_assistant_callback(final_assistant_text)
                     except Exception: pass
                 self.history = handler.history_info
                 try:
                     session_transcript.record_agent_turn(
                         self,
                         user_text=raw_query,
-                        assistant_text=full_resp,
+                        assistant_text=final_assistant_text,
                         source=source,
                         backend_history_before=transcript_history_before,
                     )
@@ -1195,7 +1202,7 @@ class GenericAgent:
                             self, 'Stop',
                             {
                                 'stop_hook_active': False,
-                                'last_assistant_message': full_resp,
+                                'last_assistant_message': final_assistant_text,
                                 'exit_reason': 'aborted' if self.stop_sig else 'completed',
                                 'source': source,
                             },
@@ -1207,15 +1214,18 @@ class GenericAgent:
                 print(f"Backend Error: {format_error(e)}")
                 failed_resp = full_resp + f'\n```\n{format_error(e)}\n```'
                 display_queue.put({'done': failed_resp, 'source': source})
+                final_assistant_text = (
+                    getattr(handler, 'last_assistant_message', '') or failed_resp
+                )
                 subagent_assistant_callback = getattr(self, '_subagent_transcript_assistant', None)
                 if subagent_assistant_callback is not None:
-                    try: subagent_assistant_callback(failed_resp, error=format_error(e))
+                    try: subagent_assistant_callback(final_assistant_text, error=format_error(e))
                     except Exception: pass
                 try:
                     session_transcript.record_agent_turn(
                         self,
                         user_text=raw_query,
-                        assistant_text=failed_resp,
+                        assistant_text=final_assistant_text,
                         source=source,
                         backend_history_before=transcript_history_before,
                     )
@@ -1226,7 +1236,7 @@ class GenericAgent:
                         run_hook_event(
                             self, 'StopFailure',
                             {
-                                'last_assistant_message': failed_resp,
+                                'last_assistant_message': final_assistant_text,
                                 'exit_reason': 'failed',
                                 'error': format_error(e),
                                 'source': source,

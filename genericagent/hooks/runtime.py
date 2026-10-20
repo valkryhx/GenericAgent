@@ -146,8 +146,17 @@ class HookRuntime:
         """Persist and announce one background handler completion."""
         try:
             self.audit.record(result, payload=payload)
-        except Exception:
-            pass
+        except Exception as audit_error:
+            self._emit(
+                emit,
+                "hook_audit_error",
+                hookRunId=result.hook_run_id,
+                event=result.event,
+                source=result.source,
+                handlerType=result.handler.kind,
+                status=result.status,
+                message=f"audit write failed: {type(audit_error).__name__}: {audit_error}",
+            )
         self._emit(
             emit,
             "async_hook_response" if result.status in {"success", "blocking"} else "hook_error",
@@ -387,8 +396,17 @@ class HookRuntime:
                         self._once_seen.add(once_key)
                 try:
                     self.audit.record(result, payload=payload_dict)
-                except Exception:
-                    pass
+                except Exception as audit_error:
+                    self._emit(
+                        emit,
+                        "hook_audit_error",
+                        hookRunId=result.hook_run_id,
+                        event=event,
+                        source=entry.source,
+                        handlerType=handler.kind,
+                        status=result.status,
+                        message=f"audit write failed: {type(audit_error).__name__}: {audit_error}",
+                    )
                 self._emit(
                     emit,
                     "hook_response" if result.status in {"success", "blocking"} else "hook_error",

@@ -280,6 +280,25 @@ class HookRuntimeTests(unittest.TestCase):
             self.assertEqual(snapshot["events"]["Stop"], "integrated")
 
 
+    def test_audit_write_failure_is_reported_instead_of_swallowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / ".genericagent").mkdir()
+            cfg = Path(td) / ".genericagent" / "hooks.json"
+            script = Path(td) / "hook.py"
+            script.write_text("import sys; sys.stdin.read()", encoding="utf-8", newline=chr(10))
+            cfg.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python", "args": [str(script)]}]}]}}), encoding="utf-8")
+            registry = load_hook_registry(config_dir=Path(td) / ".genericagent", home=Path(td) / "home")
+            audit = mock.Mock()
+            audit.record.side_effect = PermissionError("audit is read-only")
+            events = []
+            runtime = HookRuntime(registry, audit=audit)
+            agent = SimpleNamespace(session_id="s", session_path=None, cwd=td, permission_mode="full_access", session_turn_id=1, agent_id=None, agent_type=None)
+            aggregate = runtime.run_event(agent, "Stop", {"exit_reason": "completed"}, emit=events.append)
+            self.assertEqual(aggregate.results[0].status, "success")
+            error = next(event for event in events if event.get("type") == "hook_audit_error")
+            self.assertIn("audit write failed", error["message"])
+            self.assertIn("PermissionError", error["message"])
+
     def test_async_command_is_backgrounded_and_audited(self):
         with tempfile.TemporaryDirectory() as td:
             script = Path(td) / "slow_hook.py"
