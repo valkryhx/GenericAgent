@@ -130,6 +130,7 @@ function parseSlashSubmit(
   if (trimmed === '/stop') return { command: { type: 'stop' } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
   // CC execution-time team view: roster + shared task board (/agents is the CC alias).
+  if (trimmed === '/hooks') return { command: { type: 'hooks_status' } }
   if (trimmed === '/team' || trimmed === '/team list' || trimmed === '/agents') return { command: { type: 'team_list' } }
   // ``/team on|off`` toggles the agent-team session switch. The bridge resolves the
   // activation and answers locally, so the frontend just forwards the line (mirrors /workflow on|off).

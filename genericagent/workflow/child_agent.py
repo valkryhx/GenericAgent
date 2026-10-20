@@ -965,7 +965,31 @@ class NativeGPTChildAgentRunner:
             llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])),
             _turn_end_hooks={},
         )
-        handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+        leader = getattr(self, 'hook_agent', None)
+        runtime = getattr(leader, 'hook_runtime', None) if leader is not None else None
+        if runtime is None:
+            handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+            handler.hook_runtime = None
+        else:
+            run_id = str(job.metadata.get("runId") or "run")
+            hook_parent = SimpleNamespace(
+                hook_runtime=runtime,
+                hook_emit=getattr(leader, 'hook_emit', None),
+                parent=None,
+                task_dir=parent.task_dir,
+                llmclient=parent.llmclient,
+                session_id=getattr(leader, 'session_id', None),
+                session_path=getattr(leader, 'session_path', None),
+                cwd=parent.task_dir,
+                permission_mode=getattr(leader, 'permission_mode', None),
+                session_turn_id=0,
+                agent_id=f"{run_id}:{job.job_id}",
+                agent_type='workflow_child',
+                is_subagent=True,
+            )
+            handler = GenericAgentHandler(hook_parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+            handler.hook_runtime = runtime
+            handler.hook_parent_agent = hook_parent
         run_id = str(job.metadata.get("runId") or "run")
         handler.tool_result_namespace = f"{run_id}/{job.job_id}"
         handler.workflow_permission_policy = ToolPermissionPolicy(profile=profile, options=copy.deepcopy(job.metadata.get("options") or {}))

@@ -319,6 +319,7 @@ class GenericAgentBridge:
             agent.inc_out = True
             agent.verbose = True
         agent.workflow_tool_launcher = self.workflow_launch_from_tool
+        agent.hook_emit = self.emit
         # wait_agent(condition="workflow_terminal") resolves a run id through this
         # bridge-owned store; without it a run id is answered by an orphan subagent
         # state that never reaches a terminal status (GA defect A).
@@ -423,6 +424,13 @@ class GenericAgentBridge:
         return task_id
 
     def stop(self) -> None:
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            if not getattr(self, "_hook_session_ended", False):
+                run_hook_event(self.agent, 'SessionEnd', {'reason': 'exit'}, emit=self.emit)
+                self._hook_session_ended = True
+        except Exception:
+            pass
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             try:
                 with backend_output_redirect():
@@ -450,6 +458,11 @@ class GenericAgentBridge:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            run_hook_event(self.agent, 'SessionEnd', {'reason': 'clear'}, emit=self.emit)
+        except Exception:
+            pass
         try:
             with backend_output_redirect():
                 self.agent.abort()
@@ -592,6 +605,16 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return
         try:
+            from genericagent.hooks.runtime import run_hook_event
+            target = str(selector or "")
+            pre = run_hook_event(self.agent, 'PreModelSwitch', {
+                'model': target,
+                'reasoning_effort': reasoning_effort,
+            }, emit=self.emit)
+            if pre.blocked or pre.permission_decision == 'deny':
+                self.emit({"type": "model_switch_result", "ok": False,
+                           "message": pre.reason or "model switch blocked by PreModelSwitch hook"})
+                return
             with backend_output_redirect():
                 # Keep the bridge compatible with lightweight/legacy agent
                 # adapters that only implement ``select_llm(selector)``.
@@ -608,7 +631,14 @@ class GenericAgentBridge:
             if result.get("ok"):
                 effort = result.get("reasoning_effort")
                 suffix = f" ({effort})" if effort else ""
-                self.emit({"type": "model_switch_result", "ok": True, "message": f"Set model to {result.get('name')}{suffix}"})
+                post = run_hook_event(self.agent, 'PostModelSwitch', {
+                    'model': result.get('name'),
+                    'reasoning_effort': effort,
+                }, emit=self.emit)
+                message = f"Set model to {result.get('name')}{suffix}"
+                if post.context_text:
+                    message += chr(10) * 2 + post.context_text
+                self.emit({"type": "model_switch_result", "ok": True, "message": message})
             else:
                 self.emit({"type": "model_switch_result", "ok": False, "message": str(result.get("message") or "model switch failed")})
         except Exception as exc:
@@ -762,15 +792,29 @@ class GenericAgentBridge:
         self.emit({"type": "status", "status": "running"})
         self.emit({"type": "activity", "label": "Compacting conversation"})
         try:
+            from genericagent.hooks.runtime import run_hook_event
+            pre = run_hook_event(self.agent, 'PreCompact', {
+                'trigger': 'manual',
+                'custom_instructions': str(instructions or ''),
+            }, emit=self.emit)
+            if pre.blocked:
+                self.emit({"type": "error", "code": "compact_hook_blocked", "message": pre.reason or "PreCompact hook blocked compaction"})
+                return
             with backend_output_redirect():
                 result = compact_agent_context(self.agent, instructions=str(instructions or ""))
             if not result.ok:
                 self.emit({"type": "local_command_output", "text": f"Compact failed: {result.message}"})
                 return
+            post = run_hook_event(self.agent, 'PostCompact', {
+                'trigger': 'manual',
+                'compact_summary': result.message,
+            }, emit=self.emit)
             self._replace_compact_log()
             self._record_compact_transcript(result.message)
             self._rewind_snapshots.clear()
             text = result.message
+            if post.context_text:
+                text += chr(10) * 2 + '[Hook context] ' + post.context_text
             # 成功结果只走 history_replace：同一文案再发 local_command_output 会在
             # Ink Static 滚动区留下一份，history_replace 后再打一份 → 用户看到重复。
             # 失败仍用 local_command_output（无 history_replace）。
@@ -1135,6 +1179,15 @@ class GenericAgentBridge:
             })
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
+
+    def hooks_status(self) -> None:
+        """Emit the CC-style /hooks inventory without leaking huge audit payloads."""
+        try:
+            from genericagent.hooks.runtime import hook_runtime_for_agent
+            runtime = hook_runtime_for_agent(self.agent)
+            self.emit({"type": "hooks_status", **runtime.status_snapshot(recent=30)})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "hooks_status_failed", "message": str(exc)})
 
     def team_list(self) -> None:
         """Emit the CC-style team roster + shared task board (GA ``/team``, ``/agents``).
@@ -1501,6 +1554,9 @@ class GenericAgentBridge:
                 binding_provider=_binding_provider,
                 enable_tools=True,
             )
+            # Workflow children share the leading agent's loaded hook registry
+            # but receive a child-scoped tool context from _build_handler.
+            runner.hook_agent = agent
             kwargs["runner"] = runner
             kwargs["llm_binding_provider"] = _binding_provider
             return WorkflowRuntime(**kwargs)
@@ -2595,6 +2651,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.workflow_named_list()
         elif cmd_type == "team_list":
             bridge.team_list()
+        elif cmd_type == "hooks_status":
+            bridge.hooks_status()
         elif cmd_type == "workflow_list":
             bridge.workflow_list()
         elif cmd_type == "workflow_detail":

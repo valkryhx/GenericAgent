@@ -64,6 +64,7 @@ export type BridgeCommand =
   | { type: 'workflow_run_named'; name: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_named_list' }
   | { type: 'team_list' }
+  | { type: 'hooks_status' }
   | { type: 'shutdown' }
 
 export type ResumeSession = {
@@ -77,6 +78,37 @@ export type HistoryMessage = {
   role: 'user' | 'assistant' | 'system'
   text: string
   taskId?: number
+}
+
+export type HookConfiguredEntry = {
+  event: string
+  matcher: string
+  type: string
+  source: string
+  path: string
+  statusMessage?: string
+  timeout?: number
+}
+
+export type HookAuditEntry = {
+  hook_run_id?: string
+  event?: string
+  source?: string
+  handler_type?: string
+  status?: string
+  duration_ms?: number
+  error?: string
+}
+
+export type HooksStatusPayload = {
+  files: string[]
+  entries: number
+  handlers: number
+  handlerTypes: string[]
+  configured: HookConfiguredEntry[]
+  events: Record<string, string>
+  issues: Array<{ source: string; path: string; message: string }>
+  recent: HookAuditEntry[]
 }
 
 export type McpServerStatus = {
@@ -393,6 +425,7 @@ export type BridgeEvent =
   | { type: 'workflow_saved'; workflow: NamedWorkflow; overwritten: boolean }
   | { type: 'named_workflows'; workflows: NamedWorkflow[] }
   | { type: 'team_roster'; team: TeamRoster; members: TeamMember[]; tasks: TeamTask[] }
+  | ({ type: 'hooks_status' } & HooksStatusPayload)
   | { type: 'agent_snapshot'; snapshot: AgentSnapshot }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'error'; code: string; message: string; taskId?: number }

@@ -615,6 +615,7 @@ class GenericAgent:
         self.session_id = None
         self.session_path = None
         self.session_turn_id = 0
+        self.hook_runtime = None
         _record_startup_phase('agent_session_init_started')
         session_status, session_error = 'ok', None
         try:
@@ -623,6 +624,11 @@ class GenericAgent:
             session_status, session_error = 'error', f'{type(e).__name__}: {e}'
             print(f"[WARN] Failed to initialize session transcript: {e}")
         _record_startup_phase('agent_session_init_complete', status=session_status, error=session_error)
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            run_hook_event(self, 'SessionStart', {"source": "startup"})
+        except Exception as e:
+            print(f"[WARN] SessionStart hooks failed: {e}")
 
     def load_llm_sessions(self):
         """阶段 3：只从 llm.yaml 构造会话列表（profiles + mixin），不再读 mykey.py。
@@ -944,10 +950,30 @@ class GenericAgent:
         if compact_agent_context is None:
             display_queue.put({'done': "/compact 不可用（compact_context 未加载）", 'source': 'system'})
             return
+        from genericagent.hooks.runtime import run_hook_event as _run_compact_hook
+        try:
+            pre = _run_compact_hook(self, 'PreCompact', {
+                'trigger': 'manual',
+                'custom_instructions': str(instructions or ''),
+            }, emit=getattr(self, 'hook_emit', None))
+            if pre.blocked:
+                display_queue.put({'done': pre.reason or 'PreCompact hook blocked compaction', 'source': 'system'})
+                return
+        except Exception as e:
+            print(f"[WARN] PreCompact hooks failed: {e}")
         result = compact_agent_context(self, instructions=str(instructions or ""))
         if not result.ok:
             display_queue.put({'done': f"压缩失败：{result.message}", 'source': 'system'})
             return
+        try:
+            post = _run_compact_hook(self, 'PostCompact', {
+                'trigger': 'manual',
+                'compact_summary': result.message,
+            }, emit=getattr(self, 'hook_emit', None))
+            if post.context_text:
+                self.history.append(f"[HOOK CONTEXT]: {post.context_text}")
+        except Exception as e:
+            print(f"[WARN] PostCompact hooks failed: {e}")
         # 同步刷新日志与会话记录，与 ink_bridge 一致。
         try:
             if replace_log_with_compact_history is not None:
@@ -968,6 +994,33 @@ class GenericAgent:
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
+            # UserPromptSubmit is a user-turn boundary, not an internal LLM turn.
+            # It runs after slash-command handling so commands such as /model do
+            # not masquerade as user prompts.
+            from genericagent.hooks.runtime import hook_runtime_for_agent, run_hook_event
+            self.hook_runtime = hook_runtime_for_agent(self)
+            prompt_hooks = run_hook_event(
+                self,
+                'UserPromptSubmit',
+                {'prompt': raw_query, 'source': source},
+                emit=getattr(self, 'hook_emit', None),
+            )
+            if prompt_hooks.updated_input and isinstance(prompt_hooks.updated_input.get('prompt'), str):
+                raw_query = prompt_hooks.updated_input['prompt']
+            if prompt_hooks.blocked:
+                reason = prompt_hooks.reason or 'request blocked by UserPromptSubmit hook'
+                display_queue.put({'done': f'Hook blocked the request: {reason}', 'source': 'system'})
+                self.task_queue.task_done()
+                continue
+            if prompt_hooks.context_text:
+                raw_query = (
+                    raw_query
+                    + "\n\n<hook_context>\n"
+                    + prompt_hooks.context_text
+                    + "\n</hook_context>"
+                )
+            if prompt_hooks.system_text:
+                print(f"[Hook] {prompt_hooks.system_text}")
             self.is_running = True
             reset_cancel = getattr(self.llmclient, 'reset_cancel', None)
             if reset_cancel:
@@ -983,6 +1036,7 @@ class GenericAgent:
             sys_prompt = render_system_prompt(sections) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
+            handler.hook_runtime = self.hook_runtime
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
                 handler.working['key_info'] = ki
@@ -1135,6 +1189,20 @@ class GenericAgent:
                     )
                 except Exception as e:
                     print(f"[WARN] Failed to record session transcript: {e}")
+                if not getattr(self, 'is_subagent', False):
+                    try:
+                        run_hook_event(
+                            self, 'Stop',
+                            {
+                                'stop_hook_active': False,
+                                'last_assistant_message': full_resp,
+                                'exit_reason': 'aborted' if self.stop_sig else 'completed',
+                                'source': source,
+                            },
+                            emit=getattr(self, 'hook_emit', None),
+                        )
+                    except Exception as hook_err:
+                        print(f"[WARN] Stop hooks failed: {hook_err}")
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
                 failed_resp = full_resp + f'\n```\n{format_error(e)}\n```'
@@ -1153,6 +1221,20 @@ class GenericAgent:
                     )
                 except Exception as rec_e:
                     print(f"[WARN] Failed to record session transcript: {rec_e}")
+                if not getattr(self, 'is_subagent', False):
+                    try:
+                        run_hook_event(
+                            self, 'StopFailure',
+                            {
+                                'last_assistant_message': failed_resp,
+                                'exit_reason': 'failed',
+                                'error': format_error(e),
+                                'source': source,
+                            },
+                            emit=getattr(self, 'hook_emit', None),
+                        )
+                    except Exception as hook_err:
+                        print(f"[WARN] StopFailure hooks failed: {hook_err}")
             finally:
                 if stop_watcher is not None: stop_watcher()
                 if self.stop_sig: print('User aborted the task.')
@@ -1557,6 +1639,17 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     # parent-only orchestration surface.
     agent.is_subagent = True
     agent.capability_profile = None
+    try:
+        from genericagent.hooks.runtime import hook_runtime_for_agent, run_hook_event as _run_subagent_hook
+        hook_runtime_for_agent(agent)
+        _run_subagent_hook(agent, 'SubagentStart', {
+            'task_name': task_name,
+            'agent_type': 'subagent',
+            'task_dir': task_dir,
+            'permission_profile': permission_profile,
+        })
+    except Exception as e:
+        print(f"[WARN] SubagentStart hooks failed: {e}")
     agent.capability_allow_delegation = False
     agent.capability_team_mode = False
     capability_options = capability_options if capability_options is not None else ((read_json_or_none(os.path.join(task_dir, 'state.json')) or {}).get('capability_options') or {})
@@ -1688,6 +1781,12 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
 
             agent._subagent_transcript_tool_before = _transcript_tool_before
             agent._subagent_transcript_tool_after = _transcript_tool_after
+            # Process subagents run GenericAgent.run(), so Stop would otherwise
+            # be indistinguishable from the lead's Stop in a beep config. Mark
+            # the event with the subagent identity; Stop remains emitted once per
+            # process turn, while SubagentStop covers the full worker lifetime.
+            agent.agent_id = task_name
+            agent.agent_type = 'subagent'
             agent._subagent_transcript_permission = _transcript_permission
             agent._subagent_transcript_assistant = _transcript_assistant
             dq = agent.put_task(raw, source='task')
@@ -1732,7 +1831,26 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             stop_requested = False
             if getattr(agent, 'capability_team_mode', False):
                 # A teammate never idles while work is claimable (CC m1575 qe).
-                _teammate_idle_hook(task_dir, task_name)
+                idle_state = {'blocked': False}
+                try:
+                    from genericagent.agents.team import team_name_for as _team_name_for
+                    from genericagent.hooks.runtime import run_hook_event as _run_idle_hook
+                    idle = _run_idle_hook(agent, 'TeammateIdle', {
+                        'teammate_name': task_name,
+                        'team_name': _team_name_for(task_dir),
+                    })
+                    idle_state['blocked'] = idle.blocked
+                    if idle.system_text:
+                        _subagent_event(task_dir, {
+                            'type': 'hook_system_message',
+                            'task_name': task_name,
+                            'round': int(nround) if isinstance(nround, int) else 0,
+                            'message': idle.system_text,
+                        })
+                except Exception as hook_err:
+                    print(f"[WARN] TeammateIdle hooks failed: {hook_err}")
+                if not idle_state['blocked']:
+                    _teammate_idle_hook(task_dir, task_name)
             # Provenance + receipts for the durable file bus (CC m0300 / m0188): a row that
             # was not written through the ledger is not a genuine teammate message.
             try:
@@ -1799,10 +1917,29 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         except Exception as e:
             _subagent_state(task_dir, task_name, nround, 'errored', 'exited', output_path=output_path, last_error=format_error(e), last_error_stage='turn')
             _subagent_event(task_dir, {'type': 'agent_error', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'error': format_error(e)})
+            try:
+                from genericagent.hooks.runtime import run_hook_event as _run_subagent_hook
+                _run_subagent_hook(agent, 'SubagentStop', {
+                    'task_name': task_name,
+                    'task_dir': task_dir,
+                    'exit_reason': 'failed',
+                    'error': format_error(e),
+                })
+            except Exception as hook_err:
+                print(f"[WARN] SubagentStop hooks failed: {hook_err}")
             if realtime_subscriber is not None:
                 realtime_subscriber.close()
             _set_realtime_subscriber(None)
             raise
+    try:
+        from genericagent.hooks.runtime import run_hook_event as _run_subagent_hook
+        _run_subagent_hook(agent, 'SubagentStop', {
+            'task_name': task_name,
+            'task_dir': task_dir,
+            'exit_reason': 'shutdown' if stop_requested else 'exited',
+        })
+    except Exception as hook_err:
+        print(f"[WARN] SubagentStop hooks failed: {hook_err}")
     if realtime_subscriber is not None:
         realtime_subscriber.close()
     _set_realtime_subscriber(None)

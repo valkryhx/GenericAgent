@@ -732,6 +732,85 @@ class InkBridgeTest(unittest.TestCase):
             state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["attach_status"], "detached")
 
+    def test_new_session_emits_session_end_before_replacing_agent(self):
+        agents = [FakeAgent(), FakeAgent()]
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agents.pop(0), emit=events.append)
+        old_agent = bridge.agent
+        calls = []
+
+        def record_hook(agent, event, data=None, *, emit=None):
+            from genericagent.hooks.models import HookAggregate
+            calls.append((agent, event, dict(data or {})))
+            return HookAggregate(event=event)
+
+        with patch("genericagent.hooks.runtime.run_hook_event", side_effect=record_hook):
+            bridge.new_session()
+
+        self.assertEqual([(old_agent, "SessionEnd")], [(agent, event) for agent, event, _ in calls])
+        self.assertEqual("clear", calls[0][2]["reason"])
+        self.assertIsNot(old_agent, bridge.agent)
+
+    def test_hooks_status_emits_lightweight_inventory(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        snapshot = {
+            "files": ["D:/repo/.genericagent/hooks.json"],
+            "entries": 1,
+            "handlers": 1,
+            "handlerTypes": ["command"],
+            "configured": [{"event": "Stop", "matcher": "", "type": "command", "source": "project", "path": "D:/repo/.genericagent/hooks.json"}],
+            "events": {"Stop": "integrated"},
+            "issues": [],
+            "recent": [],
+        }
+
+        class FakeRuntime:
+            def status_snapshot(self, *, recent=30):
+                self.recent = recent
+                return snapshot
+
+        runtime = FakeRuntime()
+        with patch("genericagent.hooks.runtime.hook_runtime_for_agent", return_value=runtime):
+            bridge.hooks_status()
+
+        self.assertEqual({"type": "hooks_status", **snapshot}, events[-1])
+        self.assertEqual(30, runtime.recent)
+
+    def test_model_switch_runs_pre_and_post_hooks(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        calls = []
+
+        def record_hook(agent_arg, event, data=None, *, emit=None):
+            from genericagent.hooks.models import HookAggregate, HookResult, HookHandler
+            calls.append((event, dict(data or {})))
+            aggregate = HookAggregate(event=event)
+            if event == "PostModelSwitch":
+                result = HookResult(
+                    event,
+                    HookHandler("command", {"command": "test"}),
+                    "test",
+                    "test",
+                    "h",
+                    "success",
+                    output={"hookSpecificOutput": {
+                        "hookEventName": "PostModelSwitch",
+                        "additionalContext": "model context",
+                    }},
+                )
+                aggregate.add(result)
+            return aggregate
+
+        with patch("genericagent.hooks.runtime.run_hook_event", side_effect=record_hook):
+            bridge.model_switch("kimi")
+
+        self.assertEqual(["PreModelSwitch", "PostModelSwitch"], [event for event, _ in calls])
+        self.assertEqual("kimi", calls[0][1]["model"])
+        self.assertIn("model context", events[-2]["message"])
+
     def test_new_session_replaces_agent_and_resets_visible_state(self):
         agents = [FakeAgent(), FakeAgent()]
         events = []

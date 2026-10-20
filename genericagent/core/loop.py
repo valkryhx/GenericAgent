@@ -267,6 +267,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             if len(handler._done_hooks) == 0 or exit_reason.get('result', '') == 'EXITED': break
             next_prompts.add(handler._done_hooks.pop(0))
         next_prompt = handler.turn_end_callback(response, tool_calls, tool_results, turn, '\n'.join(next_prompts), exit_reason)
+        post_batch = _run_post_tool_batch_hook(handler, tool_calls, tool_results, turn, exit_reason)
+        if post_batch.context_text:
+            next_prompt += (chr(10) * 2 + '<hook_context>' + chr(10)
+                            + post_batch.context_text + chr(10) + '</hook_context>')
         messages = [{"role": "user", "content": next_prompt, "tool_results": tool_results}]   # just new message, history is kept in *Session
     if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}
@@ -308,3 +312,25 @@ def _compact_tool_args(name, args):
         if cs: q += '\ncandidates:\n' + '\n'.join(f'- {c}' for c in cs)
         return q
     s = json.dumps(a, ensure_ascii=False); return (s[:120]+'...') if len(s)>120 else s
+
+
+def _run_post_tool_batch_hook(handler, tool_calls, tool_results, turn, exit_reason):
+    """Emit one PostToolBatch after a complete tool batch, never per call."""
+    runtime = getattr(handler, 'hook_runtime', None)
+    agent = getattr(handler, 'hook_parent_agent', None) or getattr(handler, 'parent', None)
+    if runtime is None and agent is not None:
+        runtime = getattr(agent, 'hook_runtime', None)
+    if runtime is None or agent is None:
+        from genericagent.hooks.models import HookAggregate
+        return HookAggregate(event='PostToolBatch')
+    tools = [str(tc.get('tool_name') or '') for tc in (tool_calls or []) if tc.get('tool_name') != 'no_tool']
+    if not tools:
+        from genericagent.hooks.models import HookAggregate
+        return HookAggregate(event='PostToolBatch')
+    return runtime.run_event(agent, 'PostToolBatch', {
+        'turn': int(turn or 0),
+        'tool_names': tools,
+        'tool_call_count': len(tools),
+        'tool_results': list(tool_results or []),
+        'exit_reason': dict(exit_reason or {}),
+    })

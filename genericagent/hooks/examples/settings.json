@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["genericagent/hooks/examples/beep_on_stop.py"],
+            "timeout": 10,
+            "statusMessage": "Beep"
+          }
+        ]
+      }
+    ]
+  }
+}

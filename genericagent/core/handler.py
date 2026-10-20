@@ -62,7 +62,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
     优先使用python，仅在必要系统操作时使用powershell"""
-    preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
+    preview = (code[:60].replace(chr(10), ' ') + '...') if len(code) > 60 else code.strip()
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
     if workspace_root and code_type not in {"python", "py"}:
         return {"status": "error", "msg": "workflow code_run only permits Python under the workspace guard"}
@@ -363,8 +363,68 @@ class GenericAgentHandler(BaseHandler):
         self.subagent_permission_event_callback = None
         # ask 档阻塞审批 runtime（permission_request/response）；None = 无 UI 时 ask→deny。
         self.permission_runtime = None
+        self.hook_runtime = None
+        self.last_hook_aggregate = None
+
+    def _hook_agent(self):
+        return getattr(self, 'hook_parent_agent', None) or self.parent
+
+    def _run_tool_hook(self, event, tool_name, args, response, ret=None, error=None):
+        runtime = getattr(self, 'hook_runtime', None)
+        if runtime is None:
+            runtime = getattr(self._hook_agent(), 'hook_runtime', None)
+        if runtime is None:
+            return None
+        data = {
+            'tool_name': tool_name,
+            'tool_input': {k: v for k, v in (args or {}).items() if not str(k).startswith('_')},
+        }
+        if ret is not None:
+            data['tool_response'] = getattr(ret, 'data', ret)
+        if error:
+            data['error'] = str(error)
+        aggregate = runtime.run_event(self._hook_agent(), event, data)
+        self.last_hook_aggregate = aggregate
+        return aggregate
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
+        """Execute one tool and its post-hook life cycle.
+
+        PreToolUse lives inside ``_dispatch_impl`` after the hard capability /
+        permission / PathACL checks. PostToolUse and PostToolUseFailure wrap the
+        returned outcome so a hook observation can never replace the tool's
+        authoritative result unless it explicitly supplies ``updatedOutput``.
+        """
+        outcome = None
+        try:
+            outcome = yield from self._dispatch_impl(tool_name, args, response, index=index, tool_num=tool_num)
+        except Exception as exc:
+            self._run_tool_hook('PostToolUseFailure', tool_name, args or {}, response, error=exc)
+            raise
+        data = getattr(outcome, 'data', outcome)
+        failed = isinstance(data, dict) and str(data.get('status') or '').lower() in {
+            'error', 'failed', 'failure', 'approval_required', 'timeout', 'cancelled',
+        }
+        post = self._run_tool_hook(
+            'PostToolUseFailure' if failed else 'PostToolUse',
+            tool_name,
+            args or {},
+            response,
+            ret=outcome,
+            error=(data.get('msg') or data.get('error')) if failed and isinstance(data, dict) else None,
+        )
+        if post is not None and outcome is not None:
+            if post.updated_output_set:
+                outcome.data = post.updated_output
+            context = post.context_text or getattr(self, '_hook_pre_context', '')
+            if context:
+                extra = (chr(10) * 2 + '<hook_context>' + chr(10)
+                         + context + chr(10) + '</hook_context>')
+                outcome.next_prompt = (outcome.next_prompt or '') + extra
+            self._hook_pre_context = None
+        return outcome
+
+    def _dispatch_impl(self, tool_name, args, response, index=0, tool_num=1):
         capability_profile = getattr(self, "capability_profile", None)
         if capability_profile is not None and not capability_profile.allows(tool_name):
             reason = "tool_not_granted"
@@ -447,6 +507,36 @@ class GenericAgentHandler(BaseHandler):
                         _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
                         return ret
                     yield f"[Permission] accept: {tool_name}\n"
+        # PreToolUse runs after all built-in hard guards, so a hook can
+        # tighten policy but can never grant a capability GA already denied.
+        pre_hooks = self._run_tool_hook('PreToolUse', tool_name, args or {}, response)
+        if pre_hooks is not None:
+            if pre_hooks.permission_decision in {'deny', 'ask'} or pre_hooks.blocked:
+                action = pre_hooks.permission_decision or 'deny'
+                reason = pre_hooks.reason or f'PreToolUse hook returned {action}'
+                yield f"[Hook] {action}: {tool_name} ({reason})" + chr(10)
+                if action == 'deny':
+                    self._run_tool_hook('PermissionDenied', tool_name, args or {}, response, error=reason)
+                ret = StepOutcome(
+                    {'status': 'error', 'hook': {'action': action, 'reason': reason}},
+                    next_prompt=(reason + (chr(10) + pre_hooks.context_text if pre_hooks.context_text else '')),
+                )
+                _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                return ret
+            if pre_hooks.updated_input:
+                args.update(pre_hooks.updated_input)
+                if not str(tool_name).startswith('mcp__'):
+                    checked = self._check_workspace_path_access(tool_name, args)
+                    if checked is not None and not checked.allowed:
+                        yield f"[PathACL] deny after hook updatedInput: {tool_name} ({checked.reason})" + chr(10)
+                        ret = StepOutcome(
+                            {'status': 'error', 'path_acl': checked.to_dict()},
+                            next_prompt='Hook 修改后的路径未通过 PathACL，请使用工作区内路径。',
+                        )
+                        _ = yield from try_call_generator(self.tool_after_callback, tool_name, args or {}, response, ret)
+                        return ret
+            if pre_hooks.context_text:
+                self._hook_pre_context = pre_hooks.context_text
         if str(tool_name).startswith('mcp__'):
             args = args or {}
             args['_index'] = index; args['_tool_num'] = tool_num
@@ -1486,6 +1576,20 @@ class GenericAgentHandler(BaseHandler):
             metadata=metadata,
         )
         duplicate = bool(task.get("duplicate"))
+        if not duplicate:
+            created_hook = self._run_tool_hook(
+                'TaskCreated', 'task_create', args or {}, response,
+                ret={'task': task},
+            )
+            if created_hook is not None and created_hook.blocked:
+                try:
+                    store.update_task(task.get('id'), status='deleted', actor='/root')
+                except Exception:
+                    pass
+                return StepOutcome(
+                    {'status': 'error', 'hook': {'action': 'block', 'reason': created_hook.reason}},
+                    next_prompt=created_hook.reason or 'TaskCreated hook blocked task creation',
+                )
         verb = "reused" if duplicate else "created"
         yield f"[Status] Task #{task['id']} {verb}: {task['subject']}\n"
         return StepOutcome(
@@ -1555,8 +1659,20 @@ class GenericAgentHandler(BaseHandler):
             result.setdefault("reason", result.get("error"))
             yield f"[Status] Task update rejected: {result.get('error') or result.get('reason')}\n"
         else:
-            yield f"[Status] Task #{task_id} updated: {', '.join(result.get('updatedFields') or [])}\n"
-        return StepOutcome(result, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+            if status == 'completed':
+                completed_hook = self._run_tool_hook(
+                    'TaskCompleted', 'task_update', args or {}, response,
+                    ret={'task': result.get('task'), 'result': result},
+                )
+                if completed_hook is not None and completed_hook.context_text:
+                    result['hookContext'] = completed_hook.context_text
+            yield f"[Status] Task #{task_id} updated: {', '.join(result.get('updatedFields') or [])}" + chr(10)
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        completed_context = result.get('hookContext') if isinstance(result, dict) else None
+        if completed_context:
+            next_prompt += (chr(10) * 2 + '<hook_context>' + chr(10)
+                            + str(completed_context) + chr(10) + '</hook_context>')
+        return StepOutcome(result, next_prompt=next_prompt)
 
     def do_task_list(self, args, response):
         '''列出任务板摘要（只显示未完成的 blockedBy；隐藏内部任务）。'''
@@ -2127,7 +2243,7 @@ class GenericAgentHandler(BaseHandler):
             summary = f"调用工具{tool_name}, args: {clean_args}"
             if tool_name == 'no_tool': summary = "直接回答了用户问题"
             next_prompt += "\n\n\n[SYSTEM] 必须在回复文本中包含<summary>！\n\n"
-        summary = smart_format(summary.replace('\n', ''), max_str_len=80)
+        summary = smart_format(summary.replace(chr(10), ''), max_str_len=80)
         self.history_info.append(f'[Agent] {summary}')
         _plan = self._in_plan_mode()
 

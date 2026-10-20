@@ -20,6 +20,14 @@ import {
   type WorkflowPanelState,
 } from './workflowPanel.js'
 import {
+  HOOKS_PANEL_MAX_ROWS,
+  hooksPanelCapturesKey,
+  hooksPanelCommandForKey,
+  hooksPanelFromStatus,
+  hooksPanelLines,
+  type HooksPanelState,
+} from './hooksPanel.js'
+import {
   TEAM_PANEL_MAX_ROWS,
   teamPanelCapturesKey,
   teamPanelCommandForKey,
@@ -543,6 +551,7 @@ export function helpText(): string {
     '/workflows - list workflow runs',
     '/skills - show skills and context cost',
     '/team, /agents - show team roster and shared task board',
+    '/hooks - show hook configuration, coverage and recent executions',
     '/workflow on|off - opt this session into dynamic workflow orchestration (the agent then authors a JS workflow script)',
     '/workflow detail|resume|stop RUN_ID - inspect or control workflows',
     '/clear - clear display only',
@@ -588,6 +597,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [workflowPanel, setWorkflowPanel] = useState<WorkflowPanelState | null>(null)
   const [teamPanel, setTeamPanel] = useState<TeamPanelState | null>(null)
+  const [hooksPanel, setHooksPanel] = useState<HooksPanelState | null>(null)
   const [slashSelected, setSlashSelected] = useState(0)
   const [expandedTools, setExpandedTools] = useState(false)
   const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0)
@@ -621,7 +631,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const imagePasteInFlightRef = useRef(false)
   const imagePasteSeqRef = useRef(0)
   const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || footerPanel || workflowPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || footerPanel || workflowPanel || teamPanel || hooksPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, teamPanel, hooksPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   useEffect(() => {
@@ -750,6 +760,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       if (decision.command.type !== 'team_list') {
         setTeamPanel(null)
+      }
+      if (decision.command.type !== 'hooks_status') {
+        setHooksPanel(null)
       }
       const command = decision.command
       if (command.type === 'submit') {
@@ -1033,6 +1046,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
         return
       }
+      if (event.type === 'hooks_status') {
+        setHooksPanel(hooksPanelFromStatus(event))
+        if (pendingLocalCommandRef.current) pendingLocalCommandRef.current = null
+        return
+      }
       if (event.type === 'workflow_detail') {
         dispatch(event)
         setWorkflowPanel(workflowPanelFromDetail(event))
@@ -1214,6 +1232,22 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // into the composer, which would then disable the status-bar shortcut
       // (it only runs while the composer is empty).
       if (workflowPanelCapturesKey(workflowPanel, key, rawInput)) return
+    }
+    if (hooksPanel) {
+      if (key.escape) {
+        setHooksPanel(null)
+        return
+      }
+      const decision = hooksPanelCommandForKey(hooksPanel, key, rawInput)
+      if (decision?.panel) {
+        setHooksPanel(decision.panel)
+        return
+      }
+      if (decision?.command) {
+        bridgeRef.current?.send(decision.command)
+        return
+      }
+      if (hooksPanelCapturesKey(hooksPanel, key, rawInput)) return
     }
     if (teamPanel) {
       const decision = teamPanelCommandForKey(teamPanel, key, rawInput)
@@ -1521,7 +1555,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
   const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
   const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
@@ -1543,6 +1577,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     () => (teamPanel ? teamPanelLines(teamPanel).slice(0, TEAM_PANEL_MAX_ROWS) : []),
     [teamPanel],
   )
+  const hooksPanelRows = useMemo(
+    () => (hooksPanel ? hooksPanelLines(hooksPanel).slice(0, HOOKS_PANEL_MAX_ROWS) : []),
+    [hooksPanel],
+  )
   const panelRows = approvalPanel
     ? approvalPanelRows(approvalPanel)
     : modelPanel
@@ -1559,6 +1597,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       ? workflowPanelLines.length
     : teamPanel
       ? teamPanelRows.length
+    : hooksPanel
+      ? hooksPanelRows.length
     : footerPanel
       ? footerPanelRows(footerPanel)
     : showMcpStartupStatus
@@ -1725,6 +1765,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (selector) return <SelectorView key={section} selector={selector} theme={theme} />
       if (workflowPanel) return <WorkflowPanelView key={section} lines={workflowPanelLines} theme={theme} />
       if (teamPanel) return <WorkflowPanelView key={section} lines={teamPanelRows} theme={theme} />
+      if (hooksPanel) return <WorkflowPanelView key={section} lines={hooksPanelRows} theme={theme} />
       if (footerPanel && footerPanel.type !== 'status') return <FooterPanelView key={section} panel={footerPanel} theme={theme} />
       return null
     }

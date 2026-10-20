@@ -25,6 +25,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/skills', description: 'Show skills and context cost' },
   { name: '/team', description: 'Show team roster and shared task board' },
   { name: '/agents', description: 'Alias for /team' },
+  { name: '/hooks', description: 'Show hook configuration, coverage and recent executions' },
   { name: '/workflow', description: 'Plan and run a dynamic workflow from task text', requiresArgs: true },
   { name: '/resume', description: 'Pick a previous conversation' },
   { name: '/rewind', description: 'Rewind to a previous user message' },
