@@ -751,6 +751,24 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual("clear", calls[0][2]["reason"])
         self.assertIsNot(old_agent, bridge.agent)
 
+    def test_session_end_is_emitted_once_even_if_stop_is_repeated(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        calls = []
+
+        def record_hook(agent, event, data=None, *, emit=None):
+            from genericagent.hooks.models import HookAggregate
+            calls.append((agent, event, dict(data or {})))
+            return HookAggregate(event=event)
+
+        with patch("genericagent.hooks.runtime.run_hook_event", side_effect=record_hook):
+            bridge.stop()
+            bridge.stop()
+
+        self.assertEqual([(agent, "SessionEnd")], [(a, event) for a, event, _ in calls])
+        self.assertEqual("exit", calls[0][2]["reason"])
+
     def test_hook_wake_is_submitted_with_anti_spoof_and_consumed(self):
         from genericagent.hooks.models import HookWakeRequest
 
@@ -917,12 +935,43 @@ class InkBridgeTest(unittest.TestCase):
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        calls = []
+
+        def record_hook(agent, event, data=None, *, emit=None):
+            from genericagent.hooks.models import HookAggregate
+            calls.append((agent, event, dict(data or {})))
+            return HookAggregate(event=event)
 
         bridge.submit("first")
-        bridge.stop()
+        with patch("genericagent.hooks.runtime.run_hook_event", side_effect=record_hook):
+            bridge.abort_current_turn()
 
         self.assertTrue(agent.aborted)
         self.assertEqual({"type": "status", "status": "stopping"}, events[-1])
+        self.assertEqual([], calls)
+
+    def test_jsonl_stop_command_aborts_turn_without_session_end(self):
+        agent = FakeAgent()
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda _event: None)
+        bridge.submit("first")
+        calls = []
+
+        def record_hook(agent, event, data=None, *, emit=None):
+            from genericagent.hooks.models import HookAggregate
+            calls.append((agent, event, dict(data or {})))
+            return HookAggregate(event=event)
+
+        with patch("frontends.ink.bridge.GenericAgentBridge", return_value=bridge), patch(
+            "genericagent.hooks.runtime.run_hook_event", side_effect=record_hook
+        ):
+            run_jsonl_loop(
+                io.StringIO(json.dumps({"type": "stop"}) + chr(10) + json.dumps({"type": "shutdown"}) + chr(10)),
+                io.StringIO(),
+            )
+
+        self.assertTrue(agent.aborted)
+        self.assertEqual([(agent, "SessionEnd")], [(a, event) for a, event, _ in calls])
+        self.assertEqual("exit", calls[0][2]["reason"])
 
     def test_list_resume_sessions_emits_picker_options(self):
         agent = FakeAgent()

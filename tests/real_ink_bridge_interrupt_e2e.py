@@ -3,7 +3,7 @@
 Why this exists: S12 added `GenericAgent._start_stop_file_watcher()` around the turn in
 `agentmain.py`. That watcher is for the *subagent* path (`_stop` file, `verbose=False`), but the
 code it wraps is the same `agent_runner_loop` block every frontend runs. The UI interrupts a
-different way — Ink ESC → `{"type":"stop"}` → `ink_bridge.stop()` → `agent.abort()`, in-memory,
+different way — Ink ESC → `{"type":"stop"}` → `ink_bridge.abort_current_turn()` → `agent.abort()`, in-memory,
 no `_stop` file — and `task_dir` is None there, so the watcher must return None and change
 nothing. "Must" is a claim about running code, so it is measured here rather than reasoned about.
 
@@ -208,7 +208,7 @@ def check_ui_interrupt(bridge, agent, events: list[dict], summary: dict) -> None
         summary["issues"].append("stop_file_watcher_started_on_the_ui_path")
 
     sent_at = time.monotonic()
-    bridge.stop()
+    bridge.abort_current_turn()
     row["statusRightAfterStop"] = statuses(events)[-1] if statuses(events) else None
     if row["statusRightAfterStop"] != "stopping":
         summary["issues"].append("stop_did_not_emit_the_stopping_status_the_ui_renders")

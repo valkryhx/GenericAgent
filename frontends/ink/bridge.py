@@ -239,6 +239,7 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent = self.agent_factory()
         self._bind_agent(self.agent)
+        self._hook_session_ended = False
         self._task_seq = 0
         # 自动压缩熔断器：连续失败 N 次后本 session 停用自动压缩，避免摘要模型宕机
         # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
@@ -428,14 +429,31 @@ class GenericAgentBridge:
         self._consume_thread.start()
         return task_id
 
-    def stop(self) -> None:
+    def _end_hook_session_once(self, reason: str) -> None:
+        """Emit SessionEnd at the real session boundary, never on /stop."""
+        if getattr(self, "_hook_session_ended", False):
+            return
         try:
             from genericagent.hooks.runtime import run_hook_event
-            if not getattr(self, "_hook_session_ended", False):
-                run_hook_event(self.agent, 'SessionEnd', {'reason': 'exit'}, emit=self.emit)
-                self._hook_session_ended = True
+            run_hook_event(self.agent, 'SessionEnd', {'reason': reason}, emit=self.emit)
         except Exception:
             pass
+        self._hook_session_ended = True
+
+    def abort_current_turn(self) -> None:
+        """Ink Esc or /stop: end the current user turn, not the session."""
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            try:
+                with backend_output_redirect():
+                    self.agent.abort()
+            finally:
+                self.emit({"type": "status", "status": "stopping"})
+            return
+        self.stop()
+
+    def stop(self) -> None:
+        """Close the Ink session. The caller normally exits after this."""
+        self._end_hook_session_once("exit")
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             try:
                 with backend_output_redirect():
@@ -463,11 +481,7 @@ class GenericAgentBridge:
         if getattr(self.agent, "is_running", False) or self._is_consuming():
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return
-        try:
-            from genericagent.hooks.runtime import run_hook_event
-            run_hook_event(self.agent, 'SessionEnd', {'reason': 'clear'}, emit=self.emit)
-        except Exception:
-            pass
+        self._end_hook_session_once("clear")
         try:
             with backend_output_redirect():
                 self.agent.abort()
@@ -2633,7 +2647,7 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
                 images = []
             bridge.submit(str(command.get("text") or ""), images=images)
         elif cmd_type == "stop":
-            bridge.stop()
+            bridge.abort_current_turn()
         elif cmd_type == "new_session":
             bridge.new_session()
         elif cmd_type == "list_resume_sessions":
