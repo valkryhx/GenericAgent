@@ -128,6 +128,7 @@ GA Ink UI 的 IME/光标 bug，权威根因文档是 `docs/ga_ui_ime_visible_nat
 CC 2.1.303 的 hooks 全链路调研与 GA 落地设计已经落盘，后续实现 hooks 前先读：
 
 - CC 源码核验与本机真实 Stop beep 证据：`D:/git_codes/claudecode283_hack/claudecode303/extracted/20261020-hooks入口分析.md`（重点 §15）。
+- GA 的配置教程（逐层路径、优先级、验证与排障）：`docs/20261021-GA-hooks配置指南.md`。
 - GA 的配置、协议、接入点、阶段计划和测试矩阵：`docs/20261020-GA-hooks设计与实现方案.md`。
 
 必须区分语义：CC 的 `Stop` 是**一个用户请求最终结束**，不是 GA `agent_runner_loop` 的每个内部 `Turn N`。GA 的 Stop beep 必须挂到 `GenericAgent.run()` 的用户回合终态（成功/失败/abort 各一次），不能挂 `turn_end_callback()`，否则复杂任务会重复响铃。
