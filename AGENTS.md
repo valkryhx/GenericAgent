@@ -233,6 +233,17 @@ Codex comparison and real-run measurements are in `docs/20261010-ga-ink-workflow
    `workflow_final`. Real Ink E2E harnesses must `waitFor` idle (see
    `real_ink_ui_workflow_autonomous_e2e.ts`) instead of asserting on the `workflow_final` frame.
 
+
+## 长文本写入边界（Windows / Codex 实测）
+
+- Windows `CreateProcessW` 命令行硬上限为 **32767 UTF-16 code units**；本机 Git Bash `bash -c` 脚本体实测 32735 OK、32736 报 `WinError 206`。
+- 但 Codex tool-call 参数可能远早于 OS 上限被截断；实际曾出现约 3.1 万字符 / 4 万 UTF-8 字节的 heredoc 只写入前半段，末尾 `EOF` 未到达。
+- **禁止把整篇长文塞进一次 `exec_command`。** 中文正文每段约 2K-4K 字符；ASCII/代码每段不超过 8KB；单条命令目标总长 ≤ 8KB，绝不超过 12KB。
+- 第一段用 `cat > file <<'EOF'`，后续段用 `cat >> file <<'EOF'`。按 Markdown 章节边界拆分，不拆 code fence、JSON object、表格行或源码片段的中间；每段独立闭合 heredoc。
+- 看到 `here-document ... delimited by end-of-file (wanted EOF)` 时，立即判定命令未完整到达：检查文件尾部，从最后完整章节继续，并缩小下一段；不得原样重试同一大命令。
+- 完成后验证 UTF-8 可解码、无 BOM、无 CRLF，并确认最后一段的尾部标记/章节确实落盘。
+- 机制与证据见 `D:/git_codes/claudecode283_hack/docs/20261021-Codex长文本写入边界与AGENTS约束.md`；探针见 `D:/git_codes/claudecode283_hack/docs/probes/20261021-codex-command-length-probe.py`。
+
 ## 文档命名约定
 
 新增测试记录、故障复盘、验收报告和技术调研文档时，文件名统一使用 `YYYYMMDD-xxxx.md` 格式，例如 `20260930-gpt6-luna-generic-agent-capability-evaluation.md`。日期使用 Asia/Shanghai 当前日期，`xxxx` 使用简洁、可检索的英文小写短语。
