@@ -742,6 +742,18 @@ class GenericAgentHandler(BaseHandler):
         yield f"Waiting for your answer ...\n"
         return StepOutcome(result, next_prompt="", should_exit=True)
     
+    def do_web_fetch(self, args, response):
+        from genericagent.tools.web_fetch.tool import run_web_fetch
+
+        yield "[Action] Fetching URL...\n"
+        result = run_web_fetch(
+            url=args.get("url", ""),
+            prompt=args.get("prompt", ""),
+            offset=args.get("offset", 0),
+            stop_signal=self.code_stop_signal,
+        )
+        return StepOutcome(result, next_prompt="\n")
+
     def do_web_scan(self, args, response):
         '''获取当前页面内容和标签页列表。也可用于切换标签页。
         注意：HTML经过简化，边栏/浮动元素等可能被过滤。如需查看被过滤的内容请用execute_js。
