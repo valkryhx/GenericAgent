@@ -27,7 +27,7 @@ EXECUTE = "execute"
 READ_TOOL_NAMES = frozenset({"file_read"})
 WRITE_TOOL_NAMES = frozenset({"file_write", "file_patch"})
 EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
-NON_FILESYSTEM_TOOL_NAMES = frozenset({"no_tool", "ask_user", "load_skill", "web_scan"})
+NON_FILESYSTEM_TOOL_NAMES = frozenset({"no_tool", "ask_user", "load_skill", "web_scan", "web_fetch"})
 
 FILE_REF_PATTERN = re.compile(r"\{\{file:(.+?):(\d+):(\d+)\}\}")
 

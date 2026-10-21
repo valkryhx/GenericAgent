@@ -92,7 +92,7 @@ class WorkflowPathAclTest(unittest.TestCase):
         self.assertFalse(denied.allowed)
 
     def test_non_filesystem_and_mcp_tools_are_not_path_restricted(self):
-        for tool_name in ("load_skill", "web_scan", "no_tool", "mcp__tavily__tavily_search"):
+        for tool_name in ("load_skill", "web_scan", "web_fetch", "no_tool", "mcp__tavily__tavily_search"):
             self.assertTrue(check_tool_call(self.workspace, tool_name, {"query": "x"}).allowed)
 
     def test_no_workspace_root_allows_everything(self):
