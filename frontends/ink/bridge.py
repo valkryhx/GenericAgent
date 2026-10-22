@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
+_PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PACKAGE_PARENT not in sys.path:
+    sys.path.insert(0, _PACKAGE_PARENT)
 
+from genericagent import paths as ga_paths
 from genericagent.core.redaction import sanitize, redact_sensitive_text
 from genericagent.workflow.store import build_artifact_ownership_index, preview_text
 from genericagent.agents.wait import workflow_run_is_terminal
@@ -68,10 +69,13 @@ _LIVE_TELEMETRY_RELATIVE = os.path.join("agents", "*", "live.json")
 _WORKFLOW_DETAIL_EVENT_TAIL = 50
 
 
+PROJECT_DIR = str(Path(os.environ.get("GA_PROJECT_ROOT") or os.getcwd()).expanduser().resolve())
+
+
 def _backend_log_path() -> str:
-    path = os.path.join(PROJECT_DIR, "temp", "ink_bridge_backend.log")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    return path
+    path = ga_paths.TEMP_DIR / "ink_bridge_backend.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 # Thread-safe backend log redirect.
@@ -211,7 +215,6 @@ except Exception:  # pragma: no cover - exercised only when optional frontend he
     continue_reset = None
     continue_restore = None
 
-
 try:
     from genericagent.core import transcripts as session_transcript
 except Exception:  # pragma: no cover - transcript resume falls back to legacy replay
@@ -274,7 +277,8 @@ class GenericAgentBridge:
         # Project root the bridge reads shared state from (subagents/teams).
         # Overridable so tests can point the team view at a temp tree.
         self.project_dir = PROJECT_DIR
-        self.workflow_store = WorkflowStore(root=workflow_root)
+        self.state_root = ga_paths.RUNTIME_ROOT
+        self.workflow_store = WorkflowStore(root=workflow_root or ga_paths.SESSIONS_DIR)
         self.workflow_controller = WorkflowController(store=self.workflow_store)
         if agent_control is None:
             with backend_output_redirect():
@@ -283,7 +287,11 @@ class GenericAgentBridge:
                 from genericagent.core.control.workflow import WorkflowChildAdapter
                 from genericagent.agents.manager import SubagentManager
 
-            process_manager = SubagentManager(root_dir=PROJECT_DIR, python_executable=sys.executable)
+            process_manager = SubagentManager(
+                root_dir=PROJECT_DIR,
+                python_executable=sys.executable,
+                state_root=ga_paths.RUNTIME_ROOT,
+            )
             agent_control = UnifiedAgentControl(
                 [
                     ProcessSubagentAdapter(process_manager),
@@ -1226,11 +1234,12 @@ class GenericAgentBridge:
             from genericagent.agents.team import SubagentTeam, team_name_for
 
         project_dir = getattr(self, "project_dir", PROJECT_DIR)
-        registry = SubagentRegistry(Path(project_dir) / "temp" / "subagents")
+        state_root = getattr(self, "state_root", ga_paths.RUNTIME_ROOT)
+        registry = SubagentRegistry(Path(state_root) / "temp" / "subagents")
         team_name = team_name_for(self._current_session_id())
         team = SubagentTeam(registry, "/root", team_name=team_name)
         view = team.view()
-        store = SubagentTaskStore(project_dir, list_id=team_name)
+        store = SubagentTaskStore(project_dir, list_id=team_name, state_root=state_root)
         try:
             tasks = store.list_tasks()
         except Exception:
@@ -2629,6 +2638,10 @@ class GenericAgentBridge:
 
 
 def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
+    # A fresh wheel install has no per-user runtime directory yet.  The bridge
+    # resolves its default workspace with strict=True, so create the runtime
+    # dirs before construction instead of requiring a prior Python command.
+    ga_paths.ensure_runtime_dirs()
     bridge = GenericAgentBridge(emit=make_stdout_emitter(stdout))
     bridge.emit({"type": "ready", "version": 1})
     for line in stdin:

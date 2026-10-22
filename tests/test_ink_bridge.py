@@ -4113,6 +4113,21 @@ return { marker: child.summary }
         except Exception as exc:  # pragma: no cover
             self.fail(f"sys.stdout unusable after concurrent redirects: {type(exc).__name__}: {exc}")
 
+    def test_jsonl_loop_initializes_runtime_dirs_before_bridge_construction(self):
+        calls = []
+        stdin = io.StringIO(json.dumps({"type": "shutdown"}) + chr(10))
+        stdout = io.StringIO()
+
+        with patch("frontends.ink.bridge.ga_paths.ensure_runtime_dirs", side_effect=lambda: calls.append("ensure_runtime_dirs")), patch(
+            "frontends.ink.bridge.GenericAgentBridge"
+        ) as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.emit.side_effect = make_stdout_emitter(stdout)
+            bridge_cls.side_effect = lambda *args, **kwargs: calls.append("construct_bridge") or bridge
+            run_jsonl_loop(stdin, stdout)
+
+        self.assertEqual(["ensure_runtime_dirs", "construct_bridge"], calls)
+
     def test_jsonl_loop_routes_mcp_commands(self):
         stdin = io.StringIO(
             json.dumps({"type": "mcp_status"}) + "\n"
@@ -4529,6 +4544,7 @@ class InkBridgeTeamListTest(unittest.TestCase):
                 agent_control=control,
             )
             bridge.project_dir = tmp
+            bridge.state_root = tmp
             bridge.team_list()
 
         roster = [event for event in events if event.get("type") == "team_roster"]

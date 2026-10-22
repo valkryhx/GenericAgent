@@ -66,7 +66,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
     if workspace_root and code_type not in {"python", "py"}:
         return {"status": "error", "msg": "workflow code_run only permits Python under the workspace guard"}
-    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
+    cwd = cwd or str(paths.TEMP_DIR); tmp_path = None
     if code_type in ["python", "py"]:
         if code_cwd is not None and not os.path.isdir(code_cwd):
             return {"status": "error", "msg": f"code_cwd does not exist: {code_cwd}"}
@@ -110,6 +110,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         if workspace_root or code_type in ["python", "py"]:
             child_env = os.environ.copy()
             child_env["GA_CODE_RUN_ROOT"] = str(paths.PROJECT_ROOT)
+            child_env["GA_MEMORY_DIR"] = str(paths.MEMORY_DIR)
         if workspace_root:
             child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
             if bash_clamp:
@@ -219,7 +220,7 @@ def format_error(e):
 
 def log_memory_access(path):
     if 'memory' not in path: return
-    stats_file = os.path.join(script_dir, 'memory/file_access_stats.json')
+    stats_file = str(paths.MEMORY_DIR / 'file_access_stats.json')
     try:
         with open(stats_file, 'r', encoding='utf-8') as f: stats = json.load(f)
     except: stats = {}
@@ -1051,7 +1052,7 @@ class GenericAgentHandler(BaseHandler):
             return manager
         from genericagent.agents.manager import SubagentManager
 
-        created = SubagentManager(root_dir=script_dir, python_executable=sys.executable)
+        created = SubagentManager(root_dir=script_dir, python_executable=sys.executable, state_root=paths.RUNTIME_ROOT)
         created.team_name = self._team_name()
         return created
 
@@ -1604,7 +1605,7 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         from genericagent.agents.tasks import SubagentTaskStore
 
-        return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name())
+        return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name(), state_root=manager.state_root)
 
     @staticmethod
     def _as_list_arg(args, *names):
@@ -2237,7 +2238,7 @@ class GenericAgentHandler(BaseHandler):
             import codex_session_distill
             DistillState = codex_session_distill.DistillState
             codex_lesson_update = codex_session_distill.codex_lesson_update
-        state_dir = args.get("state_dir") or os.path.join(script_dir, "memory", "codex_distill")
+        state_dir = args.get("state_dir") or str(paths.MEMORY_DIR / "codex_distill")
         evidence = args.get("evidence") or args.get("evidence_signals") or []
         if isinstance(evidence, str): evidence = [evidence]
         result = codex_lesson_update(
@@ -2322,12 +2323,16 @@ def get_global_memory():
     prompt = "\n"
     try:
         suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
-        with open(os.path.join(script_dir, 'memory/global_mem_insight.txt'), 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
-        with open(os.path.join(script_dir, f'assets/insight_fixed_structure{suffix}.txt'), 'r', encoding='utf-8') as f: structure = f.read()
-        prompt += f'cwd = {os.path.join(script_dir, "temp")} (./; tool scratch/output dir)\n'
-        prompt += f'workspace root = {script_dir} (..; project files such as README.md usually live here)\n'
-        prompt += f"\n[Memory] (../memory)\n"
-        prompt += structure + '\n../memory/global_mem_insight.txt:\n'
+        insight_path = str(paths.MEMORY_DIR / 'global_mem_insight.txt')
+        structure_path = str(paths.ASSETS_DIR / f'insight_fixed_structure{suffix}.txt')
+        if not os.path.isfile(structure_path):
+            structure_path = str(paths.BUNDLED_ASSETS_DIR / f'insight_fixed_structure{suffix}.txt')
+        with open(insight_path, 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
+        with open(structure_path, 'r', encoding='utf-8') as f: structure = f.read()
+        prompt += f'cwd = {paths.TEMP_DIR} (./; tool scratch/output dir)' + chr(10)
+        prompt += f'workspace root = {script_dir} (project files such as README.md usually live here)' + chr(10)
+        prompt += chr(10) + f"[Memory] ({paths.MEMORY_DIR})" + chr(10)
+        prompt += structure + chr(10) + str(paths.MEMORY_DIR / 'global_mem_insight.txt') + ':' + chr(10)
         prompt += insight + "\n"
     except FileNotFoundError: pass
     return prompt

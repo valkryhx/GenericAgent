@@ -1087,7 +1087,10 @@ class NativeGPTChildAgentRunner:
         return copy.deepcopy(snapshot)
 
     def _discover_tools_schema(self) -> list[dict]:
-        with open(paths.ASSETS_DIR / "tools_schema.json", "r", encoding="utf-8") as f:
+        schema_path = paths.ASSETS_DIR / "tools_schema.json"
+        if not schema_path.is_file():
+            schema_path = paths.BUNDLED_ASSETS_DIR / "tools_schema.json"
+        with open(schema_path, "r", encoding="utf-8") as f:
             tools = json.load(f)
         if os.name != "nt":
             tools = json.loads(json.dumps(tools, ensure_ascii=False).replace("powershell", "bash"))

@@ -8,7 +8,7 @@
 
 根目录解析与 frontends/ink/ui/src/clipboardImage.ts 的 resolveGaImageRoot 一致：
 1. env GA_IMAGE_TEMP
-2. {repo}/temp/ga-images
+2. {GA_DATA_DIR}/temp/ga-images
 3. fallback {tmpdir}/ga-images
 """
 
@@ -42,7 +42,7 @@ class GcResult:
 
 
 def repo_root() -> Path:
-    return paths.PROJECT_ROOT
+    return paths.RUNTIME_ROOT
 
 
 def resolve_ga_image_root(*, prefer_repo: bool = True) -> Path:

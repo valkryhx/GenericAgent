@@ -1194,3 +1194,29 @@ test("App shows a Codex-style completion summary only after each turn ends", asy
     instance.unmount()
   }
 })
+
+test('App skips raw-mode setup when stdin is not an interactive TTY', async () => {
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  stdin.isTTY = false
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    const frame = await waitForFrame(stdout, frame => frame.includes('>'))
+    assert.match(frame, />/)
+    assert.equal(stderr.chunks.join(''), '')
+  } finally {
+    instance.unmount()
+  }
+})

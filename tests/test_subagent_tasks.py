@@ -21,6 +21,18 @@ class SubagentTaskStoreTest(unittest.TestCase):
     def tearDown(self):
         self._td.cleanup()
 
+    def test_explicit_state_root_keeps_board_out_of_project(self):
+        with tempfile.TemporaryDirectory() as project_td, tempfile.TemporaryDirectory() as state_td:
+            store = SubagentTaskStore(project_td, list_id="team-demo", state_root=state_td)
+            task = store.create_task("keep runtime state separate")
+
+            self.assertEqual(
+                Path(state_td) / "temp" / "teams" / "team-demo" / "tasks.json",
+                store.tasks_path,
+            )
+            self.assertEqual(task["subject"], "keep runtime state separate")
+            self.assertFalse((Path(project_td) / "temp").exists())
+
     def test_create_is_pending_unowned(self):
         task = self.store.create_task("write the parser", "see spec.md")
         self.assertEqual(task["status"], "pending")

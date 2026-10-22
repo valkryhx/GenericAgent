@@ -1,12 +1,42 @@
-# GenericAgent dependency reference generated from the local environment.
-# Local Python version: 3.12.4
-# This file pins the README-mentioned packages for comparison/installation.
-
+# GenericAgent Python dependency reference.
+# Environment baseline: Python 3.12.x, Node.js 22.x LTS.
+#
+# Supported surface: `ga` (default Ink UI) and `ga ink`.
+# Legacy Textual / Qt / Streamlit / pywebview / bot adapters are deprecated and
+# intentionally omitted from this default snapshot.
+#
+# pyproject.toml is the installable source of truth.  Prefer:
+#   python -m pip install -e .
+#   python -m pip install -e ".[mcp]"       # optional MCP support
+#
+# Core runtime
 requests==2.31.0
+beautifulsoup4==4.12.3
+bottle==0.13.4
+simple-websocket-server==0.4.4
+PyYAML==6.0.3
+pydantic==2.12.5
+psutil==5.9.0
+urllib3==2.6.3
 
-# Desktop GUI (launch.pyw)
-streamlit==1.48.0
-pywebview==6.2.1
+# Optional MCP
+mcp==1.26.0
+fastmcp==2.14.4
 
-# Terminal UI (frontends/terminal/tuiapp.py)
-textual==7.5.0
+# Deprecated compatibility extras (do not install for normal GA deployments)
+# streamlit==1.48.0
+# pywebview==6.2.1
+# textual==7.5.0
+# rich==14.3.2
+# pillow==10.3.0
+# PySide6==6.9.1
+# markdown==3.5.1
+# discord.py==2.7.0
+# python-telegram-bot>=20.0
+# qq-botpy>=1.0
+# lark-oapi==1.5.3
+# dingtalk-stream==0.24.3
+# pycryptodome==3.23.0
+# qrcode>=7.4
+# wecom-aibot-sdk>=1.0
+# langfuse

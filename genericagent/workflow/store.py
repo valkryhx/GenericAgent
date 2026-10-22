@@ -38,7 +38,7 @@ def copy_token_usage(value) -> dict:
 from genericagent.workflow.workspace import artifact_ownership_index, workspace_writes_with_writer
 
 PROJECT_ROOT = paths.PROJECT_ROOT
-DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
+DEFAULT_ROOT = paths.SESSIONS_DIR
 
 
 def build_artifact_ownership_index(run: WorkflowRun) -> dict[str, list[str]]:
@@ -96,7 +96,7 @@ def normalize_named_workflow_name(name: str) -> str:
 
 class WorkflowStore:
     def __init__(self, root: str | Path | None = None):
-        self.root = Path(root) if root is not None else DEFAULT_ROOT
+        self.root = Path(root) if root is not None else paths.SESSIONS_DIR
 
     def create_run(self, run: WorkflowRun) -> WorkflowRun:
         artifact_dir = self._artifact_dir(run.session_id, run.run_id)

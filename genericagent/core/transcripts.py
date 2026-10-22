@@ -14,7 +14,7 @@ from genericagent import paths
 
 
 PROJECT_ROOT = paths.PROJECT_ROOT
-DEFAULT_ROOT = PROJECT_ROOT / "temp" / "sessions"
+DEFAULT_ROOT = paths.SESSIONS_DIR
 
 # Process-monotonic write counter. Persisted per event as ``seq`` so
 # ``list_sessions`` can break filesystem-mtime ties deterministically: on

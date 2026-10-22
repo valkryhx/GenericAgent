@@ -130,8 +130,9 @@ def load_base_system_prompt(script_dir=None, lang_suffix: str = "") -> str:
     through here so the two cannot drift apart.
     """
 
-    root = Path(script_dir) if script_dir else paths.PROJECT_ROOT
-    path = root / "assets" / DEFAULT_BASE_PROMPT_TEMPLATE.format(suffix=lang_suffix or "")
+    path = paths.ASSETS_DIR / DEFAULT_BASE_PROMPT_TEMPLATE.format(suffix=lang_suffix or "")
+    if not path.is_file():
+        path = paths.BUNDLED_ASSETS_DIR / DEFAULT_BASE_PROMPT_TEMPLATE.format(suffix=lang_suffix or "")
     return path.read_text(encoding="utf-8")
 
 

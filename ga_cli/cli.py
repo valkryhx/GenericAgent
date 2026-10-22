@@ -4,17 +4,43 @@ ga_cli/cli.py - GenericAgent 命令行分发系统
 通过 python -m ga_cli <命令> 或 ga <命令> 调用
 """
 import os, sys, subprocess, argparse, textwrap, shutil
+from pathlib import Path
 
 # Windows GBK 终端兼容
 if sys.platform == "win32" and sys.stdout.encoding and sys.stdout.encoding.lower() in ("gbk", "gb2312"):
     sys.stdout.reconfigure(errors="replace") if hasattr(sys.stdout, "reconfigure") else None
 
+PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 
 
-def _frontends():
-    return os.path.join(PROJECT_DIR, "frontends")
+def _source_project_dir() -> str:
+    candidate = PACKAGE_PARENT
+    if (candidate / "pyproject.toml").is_file() or (candidate / "ga").is_file():
+        return str(candidate)
+    return ""
+
+
+def _runtime_project_dir() -> str:
+    override = os.environ.get("GA_PROJECT_ROOT")
+    if override:
+        return str(Path(override).expanduser().resolve())
+    source = _source_project_dir()
+    if source:
+        return source
+    # Installed wheel: the project workspace is the caller's current directory,
+    # not site-packages and not GA's private user-data directory.
+    return str(Path.cwd().resolve())
+
+
+PROJECT_DIR = _runtime_project_dir()
+
+
+def _frontends() -> str:
+    source = _source_project_dir()
+    if source:
+        return os.path.join(source, "frontends")
+    return str(PACKAGE_PARENT / "frontends")
 
 def _reflect():
     return os.path.join(PROJECT_DIR, "reflect")
@@ -28,7 +54,7 @@ def resolve_executable(command: str) -> str:
 
 
 def launch_frontend(cmd_parts, args=None):
-    """启动前端/工具进程"""
+    """启动前端/工具进程，并保留用户当前工作区作为 Agent workspace。"""
     full_cmd = []
     for i, part in enumerate(cmd_parts):
         part = part.replace("{PROJECT_DIR}", PROJECT_DIR)
@@ -45,51 +71,42 @@ def launch_frontend(cmd_parts, args=None):
     # Keep the launcher quiet by default.  The Ink UI clears the terminal and
     # owns the first visible frame; a Python banner here flashes in PowerShell
     # before that frame and looks like a second startup line.
-    os.chdir(PROJECT_DIR)
-    proc = subprocess.Popen(full_cmd)
+    # The Ink UI itself must start from the installed UI directory so Node can
+    # resolve tsx/node_modules, while the Python bridge still receives the
+    # user's original workspace through GA_PROJECT_ROOT.
+    original_cwd = os.getcwd()
+    env = os.environ.copy()
+    env["GA_PROJECT_ROOT"] = PROJECT_DIR
+    try:
+        from genericagent import paths as ga_paths
+        env.setdefault("GA_CONFIG_DIR", str(ga_paths.user_config_dir()))
+        env.setdefault("GA_DATA_DIR", str(ga_paths.user_data_dir()))
+    except Exception:
+        pass
+    ui_cwd = os.path.dirname(os.path.dirname(_frontends()))
+    try:
+        ui_dir = os.path.join(_frontends(), "ink", "ui")
+        os.chdir(ui_dir if os.path.isdir(ui_dir) else PROJECT_DIR)
+    except OSError:
+        pass
+    proc = subprocess.Popen(full_cmd, env=env)
     try:
         proc.wait()
     except KeyboardInterrupt:
         proc.terminate()
         sys.exit(0)
+    finally:
+        try:
+            os.chdir(original_cwd)
+        except OSError:
+            pass
 
 
 COMMANDS = {
-    "gui": {
-        "help": "启动桌面GUI (qtapp)",
-        "desc": "启动基于 PyQt5 的完整桌面聊天界面（气泡代码高亮、文件拖拽、历史搜索）",
-        "cmd": ["python", "{FRONTENDS}/desktop/qtapp.py"],
-    },
-    "web": {
-        "help": "启动Web增强版 (stapp2)  加 --native 使用 webview 桌面壳",
-        "desc": "启动 Streamlit Web 界面，浏览器访问，适合远程/跨设备",
-        "cmd": ["python", "-m", "streamlit", "run", "{FRONTENDS}/web/stapp2.py",
-                "--server.headless", "true"],
-        "flags": {"--native": {"help": "用 webview 原生窗口启动(stapp基础版)", "cmd": ["python", "{PROJECT_DIR}/launch.pyw"]}},
-    },
-    "configure": {
-        "help": "运行初始配置向导 (configure_mykey.py)",
-        "desc": "首次安装后配置 API Key、模型参数等基础设置",
-        "cmd": ["python", "{PROJECT_DIR}/assets/configure_mykey.py"],
-    },
-    "hub": {
-        "help": "启动 Hub 管理器 (launcher)",
-        "desc": "启动 hub 前端管理面板（系统托盘 + 浏览器界面）",
-        "cmd": ["python", "{PROJECT_DIR}/hub.pyw"],
-    },
-    "pet": {
-        "help": "启动桌面宠物",
-        "desc": "启动桌面宠物皮肤系统，桌面上陪伴你的虚拟宠物",
-        "cmd": ["python", "{FRONTENDS}/desktop/desktop_pet_v2.pyw"],
-    },
-    "tui": {
-        "help": "启动终端 TUI (tuiapp)",
-        "desc": "启动终端图形界面（Textual），适合纯终端环境或 SSH",
-        "cmd": ["python", "{FRONTENDS}/terminal/tuiapp.py"],
-    },
+    # Supported entry points.  `ga` with no subcommand launches `ga ink`.
     "ink": {
-        "help": "启动实验性 React/Ink TUI",
-        "desc": "启动独立 React/Ink 终端前端，通过 JSONL bridge 调用 Python 后端",
+        "help": "启动 React/Ink 终端 UI",
+        "desc": "通过 JSONL bridge 调用 Python 后端；这是默认且受支持的交互入口",
         "cmd": [
             "node",
             "{FRONTENDS}/ink/ui/node_modules/tsx/dist/cli.mjs",
@@ -97,14 +114,15 @@ COMMANDS = {
         ],
     },
     "cli": {
-        "help": "启动 CLI 对话 (genericagent.core.app)",
-        "desc": "启动命令行交互对话模式，最轻量的使用方式",
+        "help": "启动轻量 Python CLI",
+        "desc": "不起 Node UI，直接运行 genericagent.core.app",
         "cmd": ["python", "-m", "genericagent.core.app"],
     },
-    "launch": {
-        "help": "启动 webview 桌面壳 (launch.pyw)",
-        "desc": "以原生窗口形式包装 stapp Web 界面（基于 pywebview）",
-        "cmd": ["python", "{PROJECT_DIR}/launch.pyw"],
+    "list": {
+        "help": "列出支持的命令",
+        "desc": "显示当前支持的 GA 入口",
+        "cmd": None,
+        "internal": True,
     },
     "status": {
         "help": "检查运行状态",
@@ -114,16 +132,23 @@ COMMANDS = {
     },
     "update": {
         "help": "更新项目 (git pull + pip install)",
-        "desc": "从 Git 拉取最新代码并更新依赖",
+        "desc": "从 Git 拉取最新代码并更新核心依赖",
         "cmd": None,
         "internal": True,
     },
-    "list": {
-        "help": "列出所有可用前端/服务",
-        "desc": "显示所有注册的命令",
-        "cmd": None,
-        "internal": True,
-    },
+}
+
+# Kept as compatibility shims only.  They are not advertised by `ga list` and
+# their dependencies live in opt-in `legacy-*` extras.  The supported product
+# surface is `ga` / `ga ink`.
+DEPRECATED_COMMANDS = {
+    "gui": "PySide6 桌面入口已过时，请使用 `ga` 或 `ga ink`；仅需兼容时安装 `.[legacy-qt]`",
+    "web": "Streamlit Web 入口已过时，请使用 `ga ink`；仅需兼容时安装 `.[legacy-ui]`",
+    "launch": "pywebview 桌面壳已过时，请使用 `ga ink`；仅需兼容时安装 `.[legacy-ui]`",
+    "tui": "Textual TUI 已过时，请使用 `ga ink`；仅需兼容时安装 `.[legacy-ui]`",
+    "pet": "桌面宠物入口已过时，不属于 GA 发布面；仅需兼容时安装 `.[legacy-ui]`",
+    "hub": "Hub 启动器已过时，不属于 GA 发布面",
+    "configure": "配置向导尚未纳入当前两个入口的发布面；请直接编辑 `llm.yaml` / `mykey.py`",
 }
 
 
@@ -157,8 +182,12 @@ def cmd_status():
 
 
 def cmd_update():
-    """git pull + pip install"""
-    os.chdir(PROJECT_DIR)
+    """Update a source checkout; installed wheel users upgrade with pip."""
+    source = _source_project_dir()
+    if not source:
+        print("[UPDATE] Installed wheel mode: use `python -m pip install --upgrade genericagent`.")
+        return
+    os.chdir(source)
     print("[UPDATE] git pull...")
     r = subprocess.run(["git", "pull"], capture_output=True, text=True)
     print(r.stdout)
@@ -177,16 +206,13 @@ def main():
         prog="ga",
         description="GenericAgent 全局命令入口",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
-            示例:
-              ga                   启动实验性 React/Ink TUI
-              ga help              显示帮助
-              ga gui               启动桌面 GUI
-              ga web               启动 Web 增强版
-              ga web --native      启动 Web 基础版(桌面壳)
-              ga pet               启动桌面宠物 v2
-              ga launch            启动 webview 桌面壳
-              ga list              列出所有命令
+        epilog=textwrap.dedent("""\n            示例:
+              ga                   启动 React/Ink TUI（默认）
+              ga ink               显式启动 React/Ink TUI
+              ga cli               启动轻量 Python CLI
+              ga list              列出支持的命令
+              ga status            检查运行状态
+              ga update            更新项目
         """),
     )
     parser.add_argument("command", nargs="?", help="命令名")
@@ -222,9 +248,13 @@ def main():
         cmd_update()
         return
 
+    if cmd in DEPRECATED_COMMANDS:
+        print(f"[DEPRECATED] {cmd}: {DEPRECATED_COMMANDS[cmd]}")
+        sys.exit(2)
+
     if cmd not in COMMANDS:
         print(f"[ERROR] 未知命令: {cmd}")
-        print(f"   使用 'ga list' 查看可用命令")
+        print("   支持的命令: ga / ga ink / ga cli / ga list / ga status / ga update")
         sys.exit(1)
 
     info = COMMANDS[cmd]

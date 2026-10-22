@@ -182,7 +182,13 @@ def mcp_discovery_state() -> dict[str, Any]:
 
 
 def default_mcp_config_path() -> Path:
-    return Path(os.environ.get("GA_MCP_CONFIG") or Path(script_dir) / "mcp.json")
+    override = os.environ.get("GA_MCP_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    project_config = Path(script_dir) / "mcp.json"
+    if project_config.is_file():
+        return project_config
+    return paths.user_config_dir() / "mcp.json"
 
 
 def load_mcp_config(config_path: Optional[os.PathLike | str] = None) -> McpConfig:

@@ -8,7 +8,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[ui]"
 python -m unittest discover -s tests
 python -m unittest tests.test_ink_bridge
 python -m unittest tests.test_ink_bridge.InkBridgeTest.test_resume_transcript_uses_exact_backend_history_before_each_turn_for_rewind
@@ -21,12 +20,11 @@ ga
 ga ink
 ga cli
 ga list
-python launch.pyw
-python frontends/terminal/tuiapp.py
-streamlit run frontends/web/stapp2.py
 ```
 
 `ga` with no subcommand starts the React/Ink terminal UI by default. `ga ink` uses `frontends/ink/ui` through the Python JSONL bridge. `ga cli` runs the plain Python CLI.
+
+Textual, Qt, Streamlit, pywebview, desktop-pet, Hub, and bot adapters are deprecated legacy surfaces. Do not add them back to the default dependency set; see `docs/20261022-GA入口收敛与旧前端退役说明.md`.
 
 ### Ink UI setup and checks
 

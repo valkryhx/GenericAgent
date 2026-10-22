@@ -247,9 +247,20 @@ class SubagentManager:
     STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
     STARTUP_HANDSHAKE_POLL_S = 0.05
 
-    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None):
+    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None, state_root=None):
         self.root_dir = Path(root_dir or paths.PROJECT_ROOT)
-        self.temp_dir = self.root_dir / "temp"
+        # ``root_dir`` is the project workspace (cwd/repository for worktrees).
+        # ``state_root`` is where GA-owned subagent state is persisted. Keep the
+        # historical root_dir/temp layout for tests and source checkout, while a
+        # production wheel passes GA_DATA_DIR explicitly so a user project never
+        # receives GA runtime files.
+        if state_root is not None:
+            self.state_root = Path(state_root)
+        elif root_dir is not None:
+            self.state_root = self.root_dir
+        else:
+            self.state_root = paths.RUNTIME_ROOT
+        self.temp_dir = self.state_root / "temp"
         from genericagent.agents.registry import resolve_tree_limits_from_env
 
         self.registry = SubagentRegistry(
@@ -281,7 +292,7 @@ class SubagentManager:
         self.python_executable = python_executable or os.environ.get("PYTHON", "python")
         self.worktree_creator = worktree_creator
         self.worktree_runner = worktree_runner
-        self.repo_dir = paths.PROJECT_ROOT
+        self.repo_dir = self.root_dir
         # Optional ``run_id -> info dict | None`` resolver so a dynamic-workflow run id can
         # be waited on like a subagent (GA defect A). The Ink bridge injects the
         # workflow-store-backed resolver; the default reads the durable run state.json.
@@ -366,6 +377,10 @@ class SubagentManager:
         from genericagent.agents.team import TEAM_NAME_ENV
 
         env = {**os.environ, self.AGENT_PATH_ENV: str(agent_path)}
+        # Child runtime state must follow the parent's writable data root even
+        # when the child's cwd is a project worktree.
+        env["GA_DATA_DIR"] = str(self.state_root)
+        env["GA_PROJECT_ROOT"] = str(self.root_dir)
         # A child gets its OWN session id (session_transcript.ensure_agent_session), so it
         # cannot derive the lead's team name from its own session: without this the teammate
         # would resolve a different team and its task-board calls would hit a DIFFERENT board
@@ -2064,7 +2079,7 @@ class SubagentManager:
     def task_store(self, list_id=None):
         from genericagent.agents.tasks import SubagentTaskStore
 
-        return SubagentTaskStore(self.root_dir, list_id=list_id or self.team_name)
+        return SubagentTaskStore(self.root_dir, list_id=list_id or self.team_name, state_root=self.state_root)
 
     def reclaim_tasks_for(self, agent_path, list_id=None):
         """Unassign every unfinished task owned by a terminated agent (CC m0300 N4e)."""

@@ -143,6 +143,18 @@ def try_build_default_client(start_dir: Optional[str] = None):
     return build_client(config)
 
 
+def _write_llm_config_hint(expected):
+    """Best-effort first-run convenience: seed a user config from the template."""
+    try:
+        from genericagent import paths as _paths
+        created = _paths.seed_llm_config()
+        if created:
+            print(f"[Info] Created initial LLM config: {created}")
+        return created
+    except Exception:
+        return None
+
+
 def load_clients_from_yaml(path: Optional[str] = None, start_dir: Optional[str] = None):
     """读 llm.yaml，按 profiles（+ mixin）构造全部 NativeToolClient。
 
@@ -158,9 +170,17 @@ def load_clients_from_yaml(path: Optional[str] = None, start_dir: Optional[str] 
 
     cfg_path = path or find_llm_config(start_dir)
     if not cfg_path or not os.path.exists(cfg_path):
+        from genericagent import paths as _paths
+        expected = _paths.user_config_dir() / "llm.yaml"
+        created = _write_llm_config_hint(expected)
+        if created is not None:
+            expected = created
         raise FileNotFoundError(
-            "未找到 llm.yaml / llm.yml。阶段 3 起 GA 只读 YAML 配置，"
-            "请在仓库根目录放置 llm.yaml（参见 llm.yaml.example）。"
+            "未找到 llm.yaml / llm.yml。"
+            + chr(10)
+            + f"请把 llm.yaml.example 复制为：{expected}"
+            + chr(10)
+            + "或设置 GA_LLM_CONFIG 指向你的配置文件。"
         )
     config = load_llm_config(cfg_path)
     if not config.profiles and not config.mixin:

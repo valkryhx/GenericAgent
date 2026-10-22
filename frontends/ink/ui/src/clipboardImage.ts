@@ -26,11 +26,16 @@ export type ClipboardImageResult =
 
 export function resolveGaImageRoot(): string {
   if (process.env.GA_IMAGE_TEMP) return process.env.GA_IMAGE_TEMP
-  // 优先仓库 temp（与 GA 其它运行时产物一致）；不可写时再 fallback
-  const repoTemp = join(process.cwd(), 'temp', 'ga-images')
+  // The launcher passes GA_DATA_DIR and starts Node inside the installed UI
+  // directory. Prefer that GA-owned runtime root; cwd is only a source-checkout
+  // compatibility fallback and must not leak state into an installed user's
+  // project.
+  const runtimeTemp = process.env.GA_DATA_DIR
+    ? join(process.env.GA_DATA_DIR, 'temp', 'ga-images')
+    : join(process.cwd(), 'temp', 'ga-images')
   try {
-    mkdirSync(repoTemp, { recursive: true })
-    return repoTemp
+    mkdirSync(runtimeTemp, { recursive: true })
+    return runtimeTemp
   } catch {
     return join(tmpdir(), 'ga-images')
   }

@@ -17,7 +17,7 @@ def _startup_task_dir_from_argv(argv=None):
     task_name = value_for('--task')
     if not task_name:
         return None
-    root_dir = value_for('--task_root') or str(paths.PROJECT_ROOT)
+    root_dir = value_for('--task_root') or str(paths.RUNTIME_ROOT)
     return os.path.join(os.path.abspath(root_dir), 'temp', task_name)
 
 
@@ -47,6 +47,7 @@ def _record_startup_phase(phase, task_dir=None, **details):
 
 
 _record_startup_phase('process_entry')
+paths.ensure_runtime_dirs()
 os.environ.setdefault('GA_LANG', 'zh' if any(k in (locale.getlocale()[0] or '').lower() for k in ('zh', 'chinese')) else 'en')
 def _configure_stdio_utf8():
     for name in ('stdout', 'stderr'):
@@ -379,7 +380,10 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
 
 def load_tool_schema(suffix='', include_mcp_tools=True):
     global TOOLS_SCHEMA
-    with open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8') as f:
+    schema_path = os.path.join(script_dir, f'assets/tools_schema{suffix}.json')
+    if not os.path.isfile(schema_path):
+        schema_path = str(paths.BUNDLED_ASSETS_DIR / f'tools_schema{suffix}.json')
+    with open(schema_path, 'r', encoding='utf-8') as f:
         TS = f.read()
     TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
     _apply_subagent_role_schema(
@@ -446,15 +450,19 @@ def start_mcp_schema_warmup():
 load_tool_schema(include_mcp_tools=False)
 
 lang_suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
-mem_dir = os.path.join(script_dir, 'memory')
+# Runtime state belongs to USER_DATA_DIR, not the user's project checkout.
+# `script_dir` remains the workspace root used for tools and project docs.
+mem_dir = str(paths.MEMORY_DIR)
 if not os.path.exists(mem_dir): os.makedirs(mem_dir)
 mem_txt = os.path.join(mem_dir, 'global_mem.txt')
-if not os.path.exists(mem_txt): open(mem_txt, 'w', encoding='utf-8').write('# [Global Memory - L2]\n')
+if not os.path.exists(mem_txt): open(mem_txt, 'w', encoding='utf-8').write('# [Global Memory - L2]' + chr(10))
 mem_insight = os.path.join(mem_dir, 'global_mem_insight.txt')
 if not os.path.exists(mem_insight):
-    t = os.path.join(script_dir, f'assets/global_mem_insight_template{lang_suffix}.txt')
+    t = os.path.join(str(paths.ASSETS_DIR), f'global_mem_insight_template{lang_suffix}.txt')
+    if not os.path.exists(t):
+        t = os.path.join(str(paths.BUNDLED_ASSETS_DIR), f'global_mem_insight_template{lang_suffix}.txt')
     open(mem_insight, 'w', encoding='utf-8').write(open(t, encoding='utf-8').read() if os.path.exists(t) else '')
-cdp_cfg = os.path.join(script_dir, 'assets/tmwd_cdp_bridge/config.js')
+cdp_cfg = os.path.join(str(paths.ASSETS_DIR), 'tmwd_cdp_bridge/config.js')
 if not os.path.exists(cdp_cfg):
     try:
         os.makedirs(os.path.dirname(cdp_cfg), exist_ok=True)
@@ -573,7 +581,7 @@ def build_permission_mode_hint(mode):
 
 class GenericAgent:
     def __init__(self):
-        os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
+        os.makedirs(str(paths.TEMP_DIR), exist_ok=True)
         # Slice D3：进程内首次构造 agent 时 GC 自产图片缓存（best-effort）
         _record_startup_phase('agent_image_gc_started')
         image_gc_status, image_gc_error = 'ok', None
@@ -608,7 +616,7 @@ class GenericAgent:
             self.permission_runtime = None
             permission_status, permission_error = 'error', f'{type(e).__name__}: {e}'
         _record_startup_phase('agent_permission_init_complete', status=permission_status, error=permission_error)
-        self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
+        self.log_path = str(paths.TEMP_DIR / f'model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
         _record_startup_phase('agent_model_config_started')
         self.load_llm_sessions()
         _record_startup_phase('agent_model_config_complete', llm_count=len(self.llmclients), active_llm_no=self.llm_no)
@@ -653,7 +661,7 @@ class GenericAgent:
         except Exception:
             old_name = None
 
-        clients, active_index, cfg_path, mtime_ns = load_clients_from_yaml(start_dir=script_dir)
+        clients, active_index, cfg_path, mtime_ns = load_clients_from_yaml()
         _llm_yaml_path, _llm_yaml_mtime_ns = cfg_path, mtime_ns
         # Rebuilding the clients orphans the previous pooled HTTP sessions.
         for old_client in (getattr(self, "llmclients", None) or []):
@@ -931,7 +939,7 @@ class GenericAgent:
         if not raw_query.startswith('/'): return raw_query
         if _sm := re.match(r'/session\.(\w+)=(.*)', raw_query.strip()):
             k, v = _sm.group(1), _sm.group(2)
-            vfile = os.path.join(script_dir, 'temp', v)
+            vfile = os.path.join(str(paths.TEMP_DIR), v)
             if os.path.isfile(vfile): v = open(vfile, encoding='utf-8').read().strip()
             try: v = json.loads(v)  # cover number parsing
             except (json.JSONDecodeError, ValueError): pass
@@ -1035,7 +1043,7 @@ class GenericAgent:
                 print(f"[Prompt] system prompt sections changed: {', '.join(changed_sections)}")
             sys_prompt = render_system_prompt(sections) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
-            handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
+            handler = GenericAgentHandler(self, self.history, str(paths.TEMP_DIR), workspace_root=str(paths.PROJECT_ROOT))
             handler.hook_runtime = self.hook_runtime
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
@@ -1973,7 +1981,7 @@ def start_task_background(
 ):
     from genericagent.agents.manager import SubagentManager
 
-    root_dir = os.path.abspath(root_dir or script_dir)
+    root_dir = os.path.abspath(root_dir or str(paths.RUNTIME_ROOT))
     manager = SubagentManager(root_dir=root_dir, popen=popen, python_executable=python_executable or sys.executable)
     task_name = manager._task_name_from_target(task_name)
     if fork_turns is None:
@@ -2108,7 +2116,7 @@ if __name__ == '__main__':
     parser.add_argument('--task', metavar='IODIR', help='一次性任务模式(文件IO)')
     parser.add_argument('--reflect', metavar='SCRIPT', help='反射模式：加载监控脚本，check()触发时发任务')
     parser.add_argument('--input', help='prompt')
-    parser.add_argument('--task_root', default=script_dir, help='子智能体任务根目录')
+    parser.add_argument('--task_root', default=str(paths.RUNTIME_ROOT), help='子智能体任务根目录')
     parser.add_argument('--llm_no', type=int, default=0)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--nobg', action='store_true')
@@ -2155,7 +2163,7 @@ if __name__ == '__main__':
     _record_startup_phase('agent_thread_started')
 
     if args.task:
-        task_root = os.path.abspath(args.task_root or script_dir)
+        task_root = os.path.abspath(args.task_root or str(paths.RUNTIME_ROOT))
         run_task_worker_loop(
             agent,
             os.path.join(task_root, f'temp/{args.task}'),
@@ -2196,7 +2204,7 @@ if __name__ == '__main__':
             except Exception as e:
                 if getattr(mod, 'ONCE', False): raise
                 print(f'[Reflect] drain error: {e}'); result = f'[ERROR] {e}'
-            log_dir = os.path.join(script_dir, 'temp/reflect_logs'); os.makedirs(log_dir, exist_ok=True)
+            log_dir = os.path.join(str(paths.TEMP_DIR), 'reflect_logs'); os.makedirs(log_dir, exist_ok=True)
             script_name = os.path.splitext(os.path.basename(args.reflect))[0]
             open(os.path.join(log_dir, f'{script_name}_{datetime.now():%Y-%m-%d}.log'), 'a', encoding='utf-8').write(f'[{datetime.now():%m-%d %H:%M}]\n{result}\n\n')
             if (on_done := getattr(mod, 'on_done', None)):

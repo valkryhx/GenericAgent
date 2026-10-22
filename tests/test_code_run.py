@@ -162,6 +162,42 @@ print('suffix=' + ''.join(p.suffixes))
             self.assertIn("alias", result["stdout"])
             self.assertEqual([], list(code_cwd.glob("*.ai.py")))
 
+    def test_python_child_env_uses_runtime_memory_dir(self):
+        popen_kwargs = {}
+
+        class EmptyStdout:
+            def readline(self):
+                return b""
+
+            def close(self):
+                pass
+
+        class Proc:
+            stdout = EmptyStdout()
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        def fake_popen(_cmd, **kwargs):
+            popen_kwargs.update(kwargs)
+            return Proc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            memory_dir = Path(tmp) / "runtime-memory"
+            with patch.object(ga.paths, "MEMORY_DIR", memory_dir):
+                with patch.object(ga.subprocess, "Popen", side_effect=fake_popen):
+                    result = exhaust_generator(
+                        code_run('print("test")', "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd))
+                    )
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(str(memory_dir), popen_kwargs["env"]["GA_MEMORY_DIR"])
+
     def test_workspace_guard_imports_when_code_cwd_is_outside_the_repo(self):
         """Regression: the inlined code_run header used to resolve the guard via
         ``dirname(__file__)/../memory``, which broke when the temporary script was

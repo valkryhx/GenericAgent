@@ -1,6 +1,6 @@
 import ast, asyncio, glob, json, os, queue as Q, re, socket, sys, time
 
-from genericagent.paths import PROJECT_ROOT as _PROJECT_ROOT, TEMP_DIR as _TEMP_DIR_PATH
+from genericagent.paths import RUNTIME_ROOT as _PROJECT_ROOT, TEMP_DIR as _TEMP_DIR_PATH
 
 HELP_COMMANDS = (
     ("/help", "显示帮助"),

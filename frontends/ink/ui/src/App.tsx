@@ -572,7 +572,7 @@ export function helpText(): string {
 export function App({ python, bridgeScript, startBridgeClient = startBridge, cursorPark }: Props) {
   const { exit } = useApp()
   const { stdout } = useStdout()
-  const { setRawMode, internal_eventEmitter } = useStdin()
+  const { setRawMode, isRawModeSupported, internal_eventEmitter } = useStdin()
   const [terminalSize, setTerminalSize] = useState(() => ({
     columns: Math.max(1, stdout.columns || 80),
     rows: Math.max(1, stdout.rows || 24),
@@ -1535,6 +1535,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   terminalInputHandlerRef.current = handleTerminalInput
 
   useEffect(() => {
+    // Ink can render a final diagnostic frame in a non-interactive process
+    // (pipes, CI, `timeout < ga`); only a real TTY may enter raw mode.
+    if (!isRawModeSupported) return
     setRawMode(true)
     const handleData = (data: Buffer | string) => {
       const currentStdinAt = Date.now()
@@ -1550,7 +1553,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       internal_eventEmitter.removeListener('input', handleData)
       setRawMode(false)
     }
-  }, [internal_eventEmitter, mouseMode, setRawMode, stdout])
+  }, [internal_eventEmitter, isRawModeSupported, mouseMode, setRawMode, stdout])
 
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns

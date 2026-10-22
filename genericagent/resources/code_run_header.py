@@ -5,8 +5,9 @@ import sys, os, json, re, time, subprocess
 _code_run_root = os.environ.get('GA_CODE_RUN_ROOT')
 if _code_run_root and os.path.isdir(_code_run_root) and _code_run_root not in sys.path:
     sys.path.insert(0, _code_run_root)
-if _code_run_root:
-    sys.path.append(os.path.join(_code_run_root, 'memory'))
+_memory_root = os.environ.get('GA_MEMORY_DIR') or (_code_run_root and os.path.join(_code_run_root, 'memory'))
+if _memory_root and os.path.isdir(_memory_root) and _memory_root not in sys.path:
+    sys.path.append(_memory_root)
 _r = subprocess.run
 def _d(b):
     if not b: return ''

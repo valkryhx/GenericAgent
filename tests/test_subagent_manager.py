@@ -19,6 +19,26 @@ from genericagent.agents.state import append_jsonl_event, atomic_write_json, rea
 from genericagent.agents.manager import SubagentManager  # noqa: E402
 
 
+class SubagentManagerStateRootTest(unittest.TestCase):
+    def test_explicit_state_root_keeps_runtime_out_of_project(self):
+        class Proc:
+            pid = 4242
+
+        with tempfile.TemporaryDirectory() as project_td, tempfile.TemporaryDirectory() as state_td:
+            manager = SubagentManager(
+                root_dir=project_td,
+                state_root=state_td,
+                process_exists=lambda _pid: False,
+                popen=lambda *args, **kwargs: Proc(),
+            )
+            handle = manager.spawn_agent("state_root_worker", "do the work")
+
+            self.assertEqual(Path(state_td) / "temp", manager.temp_dir)
+            self.assertEqual(Path(state_td) / "temp" / "subagents", manager.registry.registry_dir)
+            self.assertTrue((Path(state_td) / "temp" / handle.task_name / "state.json").is_file())
+            self.assertFalse((Path(project_td) / "temp").exists())
+
+
 class SubagentManagerReadTest(unittest.TestCase):
     def _write_running_state(self, root, task_name="wc_france_history", pid=1234):
         task_dir = Path(root) / "temp" / task_name

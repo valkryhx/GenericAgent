@@ -13,19 +13,40 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "bottle>=0.12",
     "simple-websocket-server>=0.4",
+    "PyYAML>=6",
+    "pydantic>=2",
+    "psutil>=5.9",
+    "urllib3>=1.26",
 ]
 
 [project.optional-dependencies]
-# select extras, not all. match current task/env.
-# examples: .[ui] for GUI, bot deps only if bot needed.
-ui = [
+# The supported product surface is `ga` / `ga ink`.  Legacy UI adapters are
+# kept in-tree for reference only and are NOT part of the default package
+# contract or release dependency set.
+mcp = [
+    "mcp>=1.0",
+    "fastmcp>=2.0",
+]
+langfuse = [
+    "langfuse",
+]
+# Explicit opt-in only.  These extras are deprecated and are not installed by
+# any of the supported GA entry points.
+legacy-ui = [
     "streamlit>=1.28",
     "pywebview>=4.0",
     "textual>=0.70",
+    "rich>=13",
+    "pillow>=10",
 ]
-all-frontends = [
+legacy-qt = [
+    "PySide6>=6",
+    "markdown>=3.5",
+]
+legacy-bots = [
     "python-telegram-bot>=20.0",
     "qq-botpy>=1.0",
+    "discord.py>=2.0",
     "pycryptodome>=3.19",
     "qrcode>=7.4",
     "lark-oapi>=1.0",
@@ -39,14 +60,67 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = []
-
-[tool.setuptools.packages.find]
-include = ["ga_cli*", "genericagent*"]
+packages = [
+    "ga_cli",
+    "genericagent",
+    "genericagent.agents",
+    "genericagent.core",
+    "genericagent.core.control",
+    "genericagent.core.permissions",
+    "genericagent.core.tool_results",
+    "genericagent.hooks",
+    "genericagent.hooks.examples",
+    "genericagent.llm",
+    "genericagent.llm.templates",
+    "genericagent.mcp",
+    "genericagent.media",
+    "genericagent.resources",
+    "genericagent.resources.assets",
+    "genericagent.resources.assets.tmwd_cdp_bridge",
+    "genericagent.resources.skills",
+    "genericagent.resources.skills.workflow-authoring",
+    "genericagent.services",
+    "genericagent.tools",
+    "genericagent.tools.web_fetch",
+    "genericagent.web",
+    "genericagent.workflow",
+    "genericagent.workflow.js",
+    "frontends",
+    "frontends.acp",
+    "frontends.common",
+    "frontends.ink",
+    "frontends.ink.ui",
+    "frontends.ink.ui.src",
+    "frontends.terminal",
+]
 
 [tool.setuptools.package-data]
 "genericagent.workflow" = ["js/*.js"]
-"genericagent.resources" = ["*.py", "prompts/*", "schemas/*"]
+"genericagent.resources" = [
+    "*.py",
+    "llm.yaml.example",
+    "assets/*.json",
+    "assets/*.txt",
+    "assets/tmwd_cdp_bridge/*",
+    "skills/workflow-authoring/SKILL.md",
+    "skills/workflow-authoring/references/api.md",
+    "skills/workflow-authoring/references/artifacts.md",
+    "skills/workflow-authoring/references/examples.md",
+    "skills/workflow-authoring/references/resume.md",
+    "skills/workflow-authoring/references/testing.md",
+    "prompts/*",
+    "schemas/*",
+]
 "genericagent.llm.templates" = ["*.py"]
+"frontends.ink" = [
+    "bridge.py",
+    "ui/package.json",
+    "ui/package-lock.json",
+    "ui/tsconfig.json",
+    "ui/src/*.ts",
+    "ui/src/*.tsx",
+]
+"frontends.terminal" = ["continue_cmd.py"]
 
 [project.scripts]
 ga = "ga_cli.cli:main"

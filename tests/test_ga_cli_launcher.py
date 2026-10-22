@@ -1,3 +1,4 @@
+import os
 import unittest
 from io import StringIO
 from unittest.mock import patch
@@ -25,7 +26,7 @@ class GaCliLauncherTest(unittest.TestCase):
                 pass
 
         with patch("ga_cli.cli.resolve_executable", side_effect=lambda part: "npm.cmd" if part == "npm" else part):
-            with patch("ga_cli.cli.subprocess.Popen", side_effect=lambda cmd: popen_calls.append(cmd) or Proc()):
+            with patch("ga_cli.cli.subprocess.Popen", side_effect=lambda cmd, **kwargs: popen_calls.append(cmd) or Proc()):
                 cli.launch_frontend(["npm", "--version"])
 
         self.assertEqual("npm.cmd", popen_calls[0][0])
@@ -62,6 +63,57 @@ class GaCliLauncherTest(unittest.TestCase):
         self.assertEqual("node", cmd[0])
         self.assertIn("node_modules/tsx/dist/cli.mjs", cmd[1].replace("\\", "/"))
         self.assertIn("ink/ui/src/main.tsx", cmd[2].replace("\\", "/"))
+
+    def test_supported_entry_points_are_ga_and_ink(self):
+        self.assertEqual({"ink", "cli", "list", "status", "update"}, set(cli.COMMANDS))
+
+    def test_legacy_ui_commands_are_not_advertised(self):
+        for name in ("gui", "web", "launch", "tui", "pet", "hub", "configure"):
+            self.assertIn(name, cli.DEPRECATED_COMMANDS)
+            self.assertNotIn(name, cli.COMMANDS)
+
+    def test_deprecated_command_exits_with_actionable_message(self):
+        output = StringIO()
+
+        with patch("sys.argv", ["ga", "tui"]):
+            with patch("sys.stdout", output):
+                with self.assertRaises(SystemExit) as raised:
+                    cli.main()
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("[DEPRECATED] tui:", output.getvalue())
+        self.assertIn("ga ink", output.getvalue())
+
+    def test_launch_frontend_preserves_workspace_for_bridge(self):
+        seen = {}
+
+        class Proc:
+            def wait(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+        def fake_popen(cmd, **kwargs):
+            seen.update(kwargs)
+            seen["cwd_during_launch"] = os.getcwd()
+            return Proc()
+
+        original = os.getcwd()
+        fake_frontends = os.path.join(original, "frontends")
+        with patch("ga_cli.cli.subprocess.Popen", side_effect=fake_popen):
+            with patch("ga_cli.cli._frontends", return_value=fake_frontends):
+                cli.launch_frontend(["python", "--version"])
+
+        self.assertEqual(original, os.getcwd())
+        self.assertEqual(cli.PROJECT_DIR, seen["env"]["GA_PROJECT_ROOT"])
+        self.assertEqual(os.path.join(fake_frontends, "ink", "ui"), seen["cwd_during_launch"])
+
+    def test_installed_launcher_uses_caller_cwd(self):
+        caller = os.getcwd()
+        with patch("ga_cli.cli._source_project_dir", return_value=""):
+            with patch.dict(os.environ, {"GA_PROJECT_ROOT": ""}, clear=False):
+                self.assertEqual(caller, cli._runtime_project_dir())
 
 
 if __name__ == "__main__":

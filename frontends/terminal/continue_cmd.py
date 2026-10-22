@@ -3,7 +3,7 @@ Pure functions + one `install(cls)` monkey-patch entry. No side effects at impor
 """
 import ast, glob, json, os, re, time
 
-from genericagent.paths import PROJECT_ROOT as _PROJECT_ROOT
+from genericagent.paths import RUNTIME_ROOT as _PROJECT_ROOT
 try:
     from genericagent.core import transcripts as session_transcript
 except Exception:

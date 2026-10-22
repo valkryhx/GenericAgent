@@ -2,18 +2,16 @@
 
 ## 项目结构与模块组织
 
-GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent/`，按 `core/`、`llm/`、`mcp/`、`agents/`、`workflow/`、`web/`、`media/`、`resources/` 分域。仓库根目录只保留本地配置 `mykey.py`，以及 `ga`、`ga.cmd`、`launch.pyw`、`hub.pyw` 等薄入口；旧根级/前端 shim 已删除。可安装的 CLI 门面仍在 `ga_cli/`，`ga` 命令入口映射到 `ga_cli.cli:main`。各类界面和聊天/机器人适配器位于 `frontends/`；图片、皮肤和静态资源位于 `frontends/skins/` 与 `assets/`。长期记忆、SOP 和辅助工具位于 `memory/`，反射与自主运行辅助逻辑位于 `reflect/`，可选集成放在 `plugins/`。测试统一放在 `tests/`。
+GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent/`，按 `core/`、`llm/`、`mcp/`、`agents/`、`workflow/`、`web/`、`media/`、`resources/` 分域。仓库根目录只保留本地配置 `mykey.py`，以及 `ga`、`ga.cmd` 等薄入口；`launch.pyw`、`hub.pyw` 仅作为 deprecated 兼容文件保留，不属于发布面。可安装的 CLI 门面仍在 `ga_cli/`，`ga` 命令入口映射到 `ga_cli.cli:main`。受支持的 Ink 前端位于 `frontends/ink/`；Textual、Qt、Web、桌面宠物和聊天/机器人适配器仍在 `frontends/` 中保留，但均已 deprecated。图片、皮肤和静态资源位于 `frontends/skins/` 与 `assets/`。长期记忆、SOP 和辅助工具位于 `memory/`，反射与自主运行辅助逻辑位于 `reflect/`，可选集成放在 `plugins/`。测试统一放在 `tests/`。
 
 ## 构建、测试与本地运行
 
-- `python -m pip install -e .`：以 editable 模式安装核心包和 `ga` 命令。
-- `python -m pip install -e ".[ui]"`：安装核心依赖和桌面/TUI UI 依赖。
-- `python launch.pyw`：启动默认桌面界面。
-- `python frontends/terminal/tuiapp.py`：启动终端 UI。
-- `streamlit run frontends/web/stapp2.py`：启动 Streamlit 前端。
+- `python -m pip install -e .`：安装核心包、`ga` 命令以及 `ga` / `ga ink` 所需依赖。
+- `ga` / `ga ink`：受支持的 React/Ink 终端入口；`ga cli` 为轻量排障入口。
+- `npm install --prefix frontends/ink/ui`：安装 Ink UI 的 npm 依赖。
 - `python -m unittest discover -s tests`：运行当前测试套件。
 
-只安装正在修改的前端或机器人适配器所需的可选依赖。
+Textual、Qt、Streamlit、pywebview、桌面宠物、Hub、聊天机器人等旧入口已 deprecated：源码保留但不维护，也不再进入默认依赖。详见 `docs/20261022-GA入口收敛与旧前端退役说明.md`。
 
 ## 编码风格与命名规范
 

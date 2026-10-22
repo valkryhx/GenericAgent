@@ -45,46 +45,38 @@ GenericAgent 是一个面向本地开发与自动化任务的多前端 Agent Run
 - `/compact` 手动压缩和自动压缩共用 `genericagent/core/context.py` 核心逻辑。
 - 压缩会把长历史替换为摘要 pair，并可更新 legacy log，便于长任务继续运行。
 
-### 6. 多前端与集成入口
+### 6. 支持入口
 
-- `ga`：默认 Ink UI。
-- `ga ink`：React/Ink 终端 UI。
-- `ga cli`：纯 Python CLI。
-- `ga list`：查看/选择已有会话。
-- `python launch.pyw`：桌面启动入口。
-- `python frontends/terminal/tuiapp.py`：Textual TUI。
-- `streamlit run frontends/web/stapp2.py`：Streamlit Web UI。
-- `frontends/acp/genericagent_acp_bridge.py`：供 Codeg 等外部桌面/Web UI 作为本地 ACP Agent 调用。
+当前发布面只支持以下入口：
+
+- `ga`：默认启动 React/Ink 终端 UI。
+- `ga ink`：显式启动 React/Ink 终端 UI。
+- `ga cli`：轻量纯 Python CLI，便于排障与脚本化调用。
+- `ga list` / `ga status` / `ga update`：管理命令。
+
+Textual、Qt、Streamlit、pywebview、桌面宠物、Hub、聊天机器人等旧入口**已标记为 deprecated**：源码暂时保留，但不进入默认安装、不对外宣传，也不再维护。退役边界与后续删除清单见 `docs/20261022-GA入口收敛与旧前端退役说明.md`。
 
 ## 快速开始
 
 ### 1. 安装 Python 包
 
+默认安装已覆盖 `ga` / `ga ink` 所需的核心 Python 依赖：
+
 ```bash
 python -m pip install -e .
 ```
 
-如果要使用 Ink UI：
-
-```bash
-python -m pip install -e ".[ui]"
-```
-
-Windows 下也可以在仓库根目录运行：
-
-```bash
-install_ink_ui.cmd
-```
+安装发行 wheel 时，使用 `dist/install_release.ps1`；它会同时安装 site-packages 内的 Ink npm 依赖。源码开发环境在仓库根目录运行 `install_ink_ui.cmd` 安装 `frontends/ink/ui` 依赖。
 
 ### 2. 配置 LLM
 
-复制模板并填写本地密钥：
+当前运行路径使用 `llm.yaml` 管理 provider / model / profile / key。源码仓库可复制根目录模板；安装 wheel 时首次启动会在用户配置目录自动生成 `llm.yaml`，已有文件不会被覆盖：
 
 ```bash
-cp genericagent/llm/templates/mykey_template.py mykey.py
+cp llm.yaml.example llm.yaml
 ```
 
-当前推荐优先使用 `llm.yaml` 管理真实 provider/profile。`mykey.py` / `mykey.json` 仍可作为兼容配置来源，但新的 workflow 与 model/session 选择路径正在向 `llm.yaml` 收敛。
+安装版的默认位置是 `%APPDATA%/GenericAgent/llm.yaml`。`mykey.py` / `mykey.json` 仅保留为旧兼容路径，不作为当前主配置。
 
 最小概念结构：
 
@@ -122,9 +114,6 @@ ga
 ga ink
 ga cli
 ga list
-python launch.pyw
-python frontends/terminal/tuiapp.py
-streamlit run frontends/web/stapp2.py
 ```
 
 Ink UI 的 npm 命令需要在 `frontends/ink/ui` 下执行：

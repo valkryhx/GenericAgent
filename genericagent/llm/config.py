@@ -540,10 +540,24 @@ def load_llm_config(path: str) -> LLMConfig:
 
 
 def find_llm_config(start_dir: Optional[str] = None) -> Optional[str]:
-    """在 start_dir（默认本模块目录）找 llm.yaml / llm.yml，找到返回路径，否则 None。"""
-    base = start_dir or str(paths.PROJECT_ROOT)
-    for name in ("llm.yaml", "llm.yml"):
-        p = os.path.join(base, name)
-        if os.path.exists(p):
-            return p
-    return None
+    """Find llm.yaml/llm.yml.
+
+    Search order when ``start_dir`` is not supplied:
+      1. GA_LLM_CONFIG (explicit file path)
+      2. project root (portable / development layout)
+      3. per-user config dir (%APPDATA%/GenericAgent on Windows)
+      4. package parent fallback
+
+    Explicit ``start_dir`` retains the historical behavior and only scans that
+    directory; this keeps tests and callers that isolate a config directory
+    deterministic.
+    """
+    if start_dir is not None:
+        for name in ("llm.yaml", "llm.yml"):
+            p = os.path.join(start_dir, name)
+            if os.path.exists(p):
+                return p
+        return None
+
+    resolved = paths.resolve_llm_config_path()
+    return str(resolved) if resolved is not None else None
