@@ -14,7 +14,7 @@ import {
 } from './messageWindow.js'
 import type { ChatMessage } from './protocol.js'
 import { getInkTheme } from './theme.js'
-import { RESULT_PREFIX } from './glyphs.js'
+import { GLYPHS, RESULT_PREFIX } from './glyphs.js'
 
 test('visibleMessages keeps only the latest messages', () => {
   const messages: ChatMessage[] = Array.from({ length: 5 }, (_, i) => ({
@@ -373,4 +373,22 @@ test('wrapTranscriptLines never exceeds the requested display width', () => {
   const wrapped = wrapTranscriptLines([{ id: 'wide', text: '中文👨‍💻abcdef' }], 4)
 
   assert.equal(wrapped.every(line => stringWidth(line.text) <= 4), true)
+})
+
+test('transcriptLines folds an open streaming tool args fence to one row', () => {
+  const partial = [
+    '先跑一下。',
+    '⏺ Tool: `code_run` args:',
+    '````text',
+    '{',
+    ...Array.from({ length: 50 }, (_, index) => `  "line_${index}": ${index},`),
+  ].join('\n')
+  const rows = transcriptLines([
+    { id: 'a-stream', role: 'assistant', text: partial, done: false, taskId: 1 },
+  ], { expandedTools: false })
+
+  assert.deepEqual(rows.map(row => row.text).filter(text => text.trim()), [
+    '先跑一下。',
+    `${GLYPHS.bullet} code_run`,
+  ])
 })

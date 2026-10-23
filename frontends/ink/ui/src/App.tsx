@@ -1649,6 +1649,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       hasStaticMessages: staticTranscriptRows.length > 0,
       liveLineCount: activeTranscriptRows.length,
       messageRows: metrics.messageRows,
+      // In the real UI the live band should use the terminal's available message
+      // area. The 12-row default is only a headless/legacy fallback now; keeping
+      // it here caused long tool args to be tail-clipped during the first turn.
+      maxLiveRows: metrics.messageRows,
       keepLivePlaceholder: keepLatestTaskActive && activeTranscriptRows.length === 0,
     })
   ), [activeTranscriptRows.length, keepLatestTaskActive, metrics.messageRows, staticTranscriptRows.length])

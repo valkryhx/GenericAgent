@@ -2,6 +2,8 @@ import { GLYPHS, EXPAND_HINT } from './glyphs.js'
 
 type FormatOptions = {
   expanded?: boolean
+  /** Mid-stream render: fold an args fence that has not closed yet to a tool chip. */
+  streaming?: boolean
 }
 
 const TOOL_SUMMARY_LIMIT = 110
@@ -69,6 +71,33 @@ function formatToolBlock(name: string, argsText: string, options: FormatOptions)
   return options.expanded ? formatExpandedTool(name, argsText) : formatCollapsedTool(name, argsText)
 }
 
+/**
+ * Mid-stream safety net: if a tool header is followed by an args fence that has
+ * not closed yet, keep only the tool chip and drop the in-flight JSON body.
+ * Once the closing fence arrives, the complete-tool regex above handles it.
+ */
+function foldOpenStreamingToolBlock(text: string): string {
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(/Tool:\s*`([^`]+)`.*args:\s*$/)
+    if (!header) continue
+    const opener = (lines[i + 1] ?? '').trim().match(/^(`{3,})([^`]*)$/)
+    if (!opener) continue
+    const openLength = opener[1]!.length
+    let closed = false
+    for (let j = i + 2; j < lines.length; j++) {
+      const closer = lines[j]!.trim().match(/^(`{3,})\s*$/)
+      if (closer && closer[1]!.length >= openLength) {
+        closed = true
+        break
+      }
+    }
+    if (closed) continue
+    return [...lines.slice(0, i), `${GLYPHS.bullet} ${header[1]}`].join('\n')
+  }
+  return text
+}
+
 const TOOL_OUTPUT_HEAD_LINES = 8
 const RESULT_MARKER_LINE_RE = /^[^\S\r\n]*(?:\|[^\S\r\n]*)?\[(?:Action|Status|Stdout)\][^\S\r\n]*$/
 const STDOUT_MARKER_LINE_RE = /^[^\S\r\n]*(?:\|[^\S\r\n]*)?\[Stdout\][^\S\r\n]*$/
@@ -111,6 +140,13 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     /^[^\S\r\n]*[^\w\s]*[^\S\r\n]*Tool:[^\S\r\n]*`([^`]+)`[^\S\r\n]*[^\w\s]*[^\S\r\n]*args:[^\S\r\n]*\n````text\n([\s\S]*?)\n````/gm,
     (_match, name, argsText) => formatToolBlock(String(name), String(argsText), options),
   )
+  // Streaming fallback: an args fence that is still open must not paint its raw
+  // JSON into the live transcript. This is the first-turn code_run regression:
+  // the tool header had already been committed to Static, so the orphan
+  // ```text block could no longer match the complete-tool regex above.
+  if (options.streaming) {
+    text = foldOpenStreamingToolBlock(text)
+  }
   // Streaming fallback: a tool header whose args fence has not arrived yet still
   // collapses to the bullet form instead of showing the raw emoji header.
   text = text.replace(

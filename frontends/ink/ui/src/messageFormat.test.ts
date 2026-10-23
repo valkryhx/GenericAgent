@@ -137,3 +137,36 @@ test('formatAssistantText collapses a tool header before its args fence arrives'
   const raw = '🔨 Tool: `load_skill`  📥 args:'
   assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill`)
 })
+
+test('formatAssistantText streaming folds an open tool args fence to a chip', () => {
+  // First-turn code_run regression: the tool header was committed to Static and
+  // only the open ```text JSON remained in the live segment. It must never be
+  // painted line-by-line into the 12-row viewport.
+  const partial = [
+    '我先执行一个脚本。',
+    '⏺ Tool: `code_run` args:',
+    '````text',
+    '{',
+    '  "script": "import os',
+    ...Array.from({ length: 60 }, (_, index) => `  line_${index} = ${index}`),
+  ].join('\n')
+
+  assert.equal(formatAssistantText(partial, { streaming: true }), [
+    '我先执行一个脚本。',
+    `${GLYPHS.bullet} code_run`,
+  ].join('\n'))
+})
+
+test('formatAssistantText streaming keeps complete tool blocks collapsed', () => {
+  const complete = [
+    '⏺ Tool: `code_run` args:',
+    '````text',
+    '{"script":"print(1)","timeout":60}',
+    '````',
+  ].join('\n')
+
+  assert.equal(
+    formatAssistantText(complete, { streaming: true }),
+    `${GLYPHS.bullet} code_run(script: print(1), timeout: 60)`,
+  )
+})

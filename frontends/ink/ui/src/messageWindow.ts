@@ -189,7 +189,7 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
     return
   }
 
-  const body = formatAssistantText(message.text, { expanded: expandedTools }) || ' '
+  const body = formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
   const markdownLines = renderMarkdownLines(body, theme)
   markdownLines.forEach((line, index) => {
     // No per-line "continuation indent". Stream-commit splits one logical turn into

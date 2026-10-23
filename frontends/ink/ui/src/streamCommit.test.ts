@@ -335,3 +335,38 @@ test('end-to-end applyBridgeEvent long stream: single-channel + no duplicate lin
     )
   }
 })
+
+test('findFenceSafeOverflowCount never cuts immediately after a tool header', () => {
+  const lines = [
+    'before',
+    '⏺ Tool: `code_run` args:',
+    '````text',
+    '{',
+    ...Array.from({ length: 40 }, (_, index) => `  "line_${index}": ${index},`),
+  ]
+  const headerIndex = lines.indexOf('⏺ Tool: `code_run` args:')
+  const overflow = findFenceSafeOverflowCount(lines, 8)
+  assert.ok(overflow > 0)
+  assert.ok(overflow <= headerIndex, `cut ${overflow} must not include the tool header at ${headerIndex}`)
+  assert.equal(lines.slice(0, overflow).at(-1), 'before')
+})
+
+test('commitStreamingAssistantMessages keeps a tool header and args fence in the same segment', () => {
+  const lines = [
+    'intro',
+    '⏺ Tool: `code_run` args:',
+    '````text',
+    '{',
+    ...Array.from({ length: 30 }, (_, index) => `  "line_${index}": ${index},`),
+  ]
+  const messages: ChatMessage[] = [liveAssistant(21, lines.join('\n'))]
+  const next = commitStreamingAssistantMessages(messages, 21, 8)
+  const commits = next.filter(message => message.id.startsWith('a-21-c'))
+  assert.ok(commits.length >= 1)
+  for (const commit of commits) {
+    assert.doesNotMatch(commit.text, /Tool:\s*`[^`]+`.*args:\s*$/m)
+  }
+  const live = next.find(message => message.id === 'a-21')
+  assert.match(live?.text ?? '', /Tool:\s*`code_run` args:/)
+  assert.match(live?.text ?? '', /^````text/m)
+})

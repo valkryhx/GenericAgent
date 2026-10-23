@@ -79,10 +79,27 @@ export function findFenceSafeOverflowCount(lines: string[], maxTail: number): nu
   // walk overflow downward (commit less / keep more live) until the head is balanced.
   let overflow = total - maxTailSafe
   while (overflow > 0) {
-    if (overflow < lines.length && fenceOpenState(lines.slice(0, overflow)) === 0) return overflow
+    if (overflow < lines.length) {
+      const head = lines.slice(0, overflow)
+      // Never commit a tool header without its args fence/body. Doing so leaves
+      // `● code_run` in Static and an orphan ```text JSON block in live, which
+      // the formatter can no longer recognize as a tool call (the first-turn
+      // large-output occlusion regression).
+      if (fenceOpenState(head) === 0 && !endsWithToolHeader(head)) return overflow
+    }
     overflow -= 1
   }
   return 0
+}
+
+/** True when the last non-empty line is a GA tool invocation header. */
+function endsWithToolHeader(lines: string[]): boolean {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    return /Tool:\s*`[^`]+`.*args:\s*$/.test(line)
+  }
+  return false
 }
 
 /**
