@@ -17,7 +17,24 @@ from genericagent.core.loop import (  # noqa: E402
     _run_single_tool,
     _tool_execution_mode,
     agent_runner_loop,
+    get_pretty_json,
 )
+
+
+class PrettyJsonTest(unittest.TestCase):
+    def test_multiline_script_stays_valid_json(self):
+        payload = {"script": "import os" + chr(10) + "print(os.getcwd())", "timeout": 60, "type": "python"}
+        rendered = get_pretty_json(payload)
+
+        self.assertEqual(json.loads(rendered), payload)
+
+    def test_semicolons_inside_script_are_not_rewritten(self):
+        payload = {"script": 'print("a; b")', "timeout": 30}
+        rendered = get_pretty_json(payload)
+
+        self.assertEqual(json.loads(rendered), payload)
+        self.assertIn('a; b', rendered)
+        self.assertNotIn("a;" + chr(10), rendered)
 
 
 class _ToolCall:

@@ -40,6 +40,7 @@ import { createInputHistory, nextInput, previousInput, recordInput } from './inp
 import {
   liveTranscriptViewportLines,
   transcriptLines,
+  transcriptLinesWithChannel,
   type TranscriptLine,
   visibleTranscriptLines,
   wrapTranscriptLines,
@@ -1183,6 +1184,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       return
     }
     if (key.ctrl && (rawInput === 'o' || rawInput === '\u000f')) {
+      // Expanding/collapsing tools changes rows already emitted through
+      // <Static>. Static only appends, so an in-place state flip leaves old
+      // rows in scrollback and skips/duplicates rows. Reset once and remount.
+      resetTranscriptViewport()
+      resetStaticTranscriptOutput()
       setExpandedTools(value => !value)
       return
     }
@@ -1634,16 +1640,27 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     splitStaticAndActiveMessages(state.messages, { keepLatestTaskActive })
   ), [keepLatestTaskActive, state.messages])
 
-  const staticTranscriptRows = useMemo(() => (
+  const staticTranscript = useMemo(() => (
     mouseMode === 'full'
-      ? []
-      : wrapTranscriptLines(transcriptLines(messagePartition.staticMessages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
+      ? { rows: [], channel: null }
+      : (() => {
+          const rendered = transcriptLinesWithChannel(messagePartition.staticMessages, { expandedTools, theme })
+          return {
+            rows: wrapTranscriptLines(rendered.lines, transcriptContentColumns(metrics.canvasColumns)),
+            channel: rendered.channel,
+          }
+        })()
   ), [expandedTools, messagePartition.staticMessages, metrics.canvasColumns, mouseMode, theme])
+  const staticTranscriptRows = staticTranscript.rows
   const activeTranscriptRows = useMemo(() => (
     mouseMode === 'full'
       ? []
-      : wrapTranscriptLines(transcriptLines(messagePartition.activeMessages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
-  ), [expandedTools, messagePartition.activeMessages, metrics.canvasColumns, mouseMode, theme])
+      : wrapTranscriptLines(transcriptLinesWithChannel(messagePartition.activeMessages, {
+          expandedTools,
+          theme,
+          initialChannel: staticTranscript.channel,
+        }).lines, transcriptContentColumns(metrics.canvasColumns))
+  ), [expandedTools, messagePartition.activeMessages, metrics.canvasColumns, mouseMode, staticTranscript.channel, theme])
   const inlineMessageViewportPlan = useMemo(() => (
     planMessageViewport({
       hasStaticMessages: staticTranscriptRows.length > 0,

@@ -157,6 +157,35 @@ test('formatAssistantText streaming folds an open tool args fence to a chip', ()
   ].join('\n'))
 })
 
+test('formatAssistantText summarizes multi-line code_run args instead of dumping raw JSON', () => {
+  // Historical transcripts stored invalid JSON because the old
+  // loop.get_pretty_json() replaced escaped newlines with real ones. It
+  // must still become one chip when an old session is reopened.
+  const args = [
+    '{',
+    '  "script": "import os',
+    'print(os.getcwd())',
+    'print(1)",',
+    '  "timeout": 60,',
+    '  "type": "python"',
+    '}',
+  ].join('\n')
+  const raw = [`⏺ Tool: \`code_run\` args:`, '````text', args, '````'].join('\n')
+  const formatted = formatAssistantText(raw)
+  assert.match(formatted, /^● code_run\(script: import os print\(os\.getcwd\(\)\) print\(1\), timeout: 60, type: python\)/)
+  assert.doesNotMatch(formatted, /^\s*"script"/m)
+})
+
+test('formatAssistantText folds an orphan args fence left by a static/live split', () => {
+  // Historical first-turn bug: the tool chip was in the earlier Static segment
+  // and only this bare ```text args block remained. It must not render as cyan
+  // JSON prose.
+  const raw = ['````text', '{"script":"print(1)","timeout":60}', '````', '[Status] Exit Code: 0'].join('\n')
+  const formatted = formatAssistantText(raw)
+  assert.doesNotMatch(formatted, /"script"/)
+  assert.match(formatted, /\[Status\] Exit Code: 0/)
+})
+
 test('formatAssistantText streaming keeps complete tool blocks collapsed', () => {
   const complete = [
     '⏺ Tool: `code_run` args:',
@@ -169,4 +198,73 @@ test('formatAssistantText streaming keeps complete tool blocks collapsed', () =>
     formatAssistantText(complete, { streaming: true }),
     `${GLYPHS.bullet} code_run(script: print(1), timeout: 60)`,
   )
+})
+
+test('formatAssistantText matches five-backtick tool arg fences', () => {
+  const raw = [
+    '⏺ Tool: `code_run` args:',
+    '`````text',
+    '{"script":"print(1)","timeout":60}',
+    '`````',
+  ].join('\n')
+
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} code_run(script: print(1), timeout: 60)`)
+})
+
+test('formatAssistantText rejoins a tool chip with a later args fence', () => {
+  const raw = [
+    `${GLYPHS.bullet} code_run`,
+    '````text',
+    '{"script":"print(1)","timeout":60}',
+    '````',
+  ].join('\n')
+
+  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} code_run(script: print(1), timeout: 60)`)
+})
+
+test('formatAssistantText repairs a backslash followed by a real newline in legacy args', () => {
+  // Old get_pretty_json() replaced every literal backslash-n with a real
+  // newline, so this historical shape has a backslash immediately before a
+  // physical newline. The chip must not leak that broken pair into the summary.
+  const bs = String.fromCharCode(92)
+  const newline = String.fromCharCode(10)
+  const args = [
+    '{',
+    '  "script": "print(1)' + bs + newline + 'print(2)",',
+    '  "timeout": 60',
+    '}',
+  ].join(newline)
+  const raw = ['⏺ Tool: `code_run` args:', '````text', args, '````'].join(newline)
+  const formatted = formatAssistantText(raw)
+
+  assert.match(formatted, /^● code_run\(script: print\(1\)\\nprint\(2\), timeout: 60\)/)
+  assert.equal(formatted.includes(bs + newline), false)
+})
+
+test('formatAssistantText leaves an ordinary 3-backtick code block with a [Status] line intact', () => {
+  const raw = [
+    'Output example:',
+    '```',
+    '[Status] not a GA tool marker',
+    'print(1)',
+    '```',
+  ].join('\n')
+  const formatted = formatAssistantText(raw)
+
+  assert.match(formatted, /```/)
+  assert.match(formatted, /\[Status\] not a GA tool marker/)
+})
+
+test('formatAssistantText keeps ordinary markdown code fences intact', () => {
+  const raw = [
+    'Here:',
+    '~~~python',
+    'print(1)',
+    '~~~',
+    'Done',
+  ].join('\n')
+
+  const formatted = formatAssistantText(raw)
+  assert.match(formatted, /~~~python/)
+  assert.match(formatted, /print\(1\)/)
 })

@@ -37,9 +37,11 @@ def exhaust(g):
     except StopIteration as e: return e.value
 
 def get_pretty_json(data):
-    if isinstance(data, dict) and "script" in data:
-        data = data.copy(); data["script"] = data["script"].replace("; ", ";\n  ")
-    return json.dumps(data, indent=2, ensure_ascii=False).replace('\\n', '\n')
+    # Keep the args payload valid JSON and semantically identical. The earlier
+    # implementation rewrote string values (`\n` -> real newline and `; ` ->
+    # `;\n  `), which both invalidated multi-line `code_run` JSON and could
+    # change a script's string literals. Formatting belongs to display code.
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 # Tools with no shared handler state and no process-global side effects can
 # overlap. Everything else keeps the original strictly-ordered execution:

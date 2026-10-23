@@ -85,7 +85,7 @@ export function findFenceSafeOverflowCount(lines: string[], maxTail: number): nu
       // `● code_run` in Static and an orphan ```text JSON block in live, which
       // the formatter can no longer recognize as a tool call (the first-turn
       // large-output occlusion regression).
-      if (fenceOpenState(head) === 0 && !endsWithToolHeader(head)) return overflow
+      if (fenceOpenState(head) === 0 && !endsWithToolHeader(head) && !endsWithStdoutMarker(head)) return overflow
     }
     overflow -= 1
   }
@@ -98,6 +98,16 @@ function endsWithToolHeader(lines: string[]): boolean {
     const line = lines[i]!.trim()
     if (!line) continue
     return /Tool:\s*`[^`]+`.*args:\s*$/.test(line)
+  }
+  return false
+}
+
+/** True when the last non-empty line opens a stdout body block. */
+function endsWithStdoutMarker(lines: string[]): boolean {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    return /^\[Stdout\]$/.test(line)
   }
   return false
 }

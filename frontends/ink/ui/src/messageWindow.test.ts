@@ -7,6 +7,7 @@ import {
   liveTranscriptViewportLines,
   tailLines,
   transcriptLines,
+  transcriptLinesWithChannel,
   visibleMessages,
   visibleMessagesForViewport,
   visibleTranscriptLines,
@@ -375,6 +376,36 @@ test('wrapTranscriptLines never exceeds the requested display width', () => {
   assert.equal(wrapped.every(line => stringWidth(line.text) <= 4), true)
 })
 
+test('transcriptLines keeps [Stdout] body dim and does not emit an empty result marker', () => {
+  const messages: ChatMessage[] = [{
+    id: 'a-stdout',
+    role: 'assistant',
+    text: [
+      '```',
+      '[Status] Exit Code: 0',
+      '[Stdout]',
+      '60e4340 feat(packaging): ship installable GA wheel',
+      '[omitted long output]',
+      'dc07912 feat(hooks): implement Claude Code compatible hook runtime',
+      '```',
+    ].join('\n'),
+    done: true,
+    taskId: 1,
+  }]
+  const theme = getInkTheme('default')
+  const rows = transcriptLines(messages, { expandedTools: false, theme })
+  const texts = rows.map(row => row.text)
+  assert.equal(texts.some(text => text.trim() === '⎿'), false, 'empty [Stdout] must not leave an isolated ⎿')
+  const stdout = rows.find(row => row.text.includes('60e4340'))
+  const omitted = rows.find(row => row.text.includes('[omitted long output]'))
+  const later = rows.find(row => row.text.includes('dc07912'))
+  assert.ok(stdout && omitted && later)
+  for (const row of [stdout!, omitted!, later!]) {
+    assert.equal(row.parts?.[0]?.color, 'gray')
+    assert.equal(row.parts?.[0]?.dimColor, true)
+  }
+})
+
 test('transcriptLines folds an open streaming tool args fence to one row', () => {
   const partial = [
     '先跑一下。',
@@ -390,5 +421,194 @@ test('transcriptLines folds an open streaming tool args fence to one row', () =>
   assert.deepEqual(rows.map(row => row.text).filter(text => text.trim()), [
     '先跑一下。',
     `${GLYPHS.bullet} code_run`,
+  ])
+})
+
+test('transcriptLinesWithChannel carries stdout state from Static into live', () => {
+  const staticPart = transcriptLinesWithChannel([
+    { id: 'a-static', role: 'assistant', text: ['[Status] Exit Code: 0', '[Stdout]'].join(String.fromCharCode(10)), done: true, taskId: 3 },
+  ], { expandedTools: false })
+  const livePart = transcriptLinesWithChannel([
+    { id: 'a-live', role: 'assistant', text: 'stdout body in live', done: false, taskId: 4 },
+  ], { expandedTools: false, initialChannel: staticPart.channel })
+  const texts = livePart.lines.map(row => row.text)
+
+  assert.deepEqual(texts.filter(text => text.trim()), [`${RESULT_PREFIX}stdout body in live`])
+  assert.equal(livePart.lines[0]?.parts?.[0]?.dimColor, true)
+})
+
+test('transcriptLines keeps a stdout block real across a stream-commit split', () => {
+  const messages: ChatMessage[] = [
+    {
+      id: 'a-split-c0',
+      role: 'assistant',
+      text: ['[Status] Exit Code: 0', '[Stdout]'].join('\n'),
+      done: true,
+      taskId: 7,
+    },
+    {
+      id: 'a-split-c1',
+      role: 'assistant',
+      text: ['first stdout line', 'second stdout line'].join('\n'),
+      done: true,
+      taskId: 7,
+    },
+  ]
+  const theme = getInkTheme('default')
+  const rows = transcriptLines(messages, { expandedTools: false, theme })
+  const texts = rows.map(row => row.text)
+
+  assert.deepEqual(texts.filter(text => text.trim()), [
+    `${RESULT_PREFIX}Exit Code: 0`,
+    `${RESULT_PREFIX}first stdout line`,
+    `      second stdout line`,
+  ])
+  const body = rows.find(row => row.text.includes('first stdout line'))
+  assert.equal(body?.parts?.[0]?.color, 'gray')
+  assert.equal(body?.parts?.[0]?.dimColor, true)
+})
+
+test('transcriptLines exits stdout mode at an orphan closing fence in a later segment', () => {
+  const messages: ChatMessage[] = [
+    { id: 'a-orphan-c0', role: 'assistant', text: ['[Stdout]', 'command output'].join(String.fromCharCode(10)), done: true, taskId: 11 },
+    { id: 'a-orphan-c1', role: 'assistant', text: ['```', '', 'final answer'].join(String.fromCharCode(10)), done: true, taskId: 11 },
+  ]
+  const rows = transcriptLines(messages, { expandedTools: false })
+  const final = rows.find(row => row.text === 'final answer')
+
+  assert.ok(final)
+  assert.equal(final!.parts?.[0]?.dimColor, undefined)
+  assert.equal(rows.some(row => row.text.trim() === '```'), false)
+})
+
+test('transcriptLines exits stdout mode at the closing fence sentinel', () => {
+  const messages: ChatMessage[] = [{
+    id: 'a-stdout-close',
+    role: 'assistant',
+    text: [
+      '`````',
+      '[Stdout]',
+      'command output',
+      '`````',
+      '',
+      'final answer',
+    ].join('\n'),
+    done: true,
+    taskId: 9,
+  }]
+  const rows = transcriptLines(messages, { expandedTools: false })
+  const final = rows.find(row => row.text === 'final answer')
+
+  assert.ok(final)
+  assert.equal(final!.parts?.[0]?.dimColor, undefined)
+  assert.ok(rows.some(row => row.text === `${RESULT_PREFIX}command output`))
+})
+
+test('transcriptLines exits stdout mode at the next real turn header', () => {
+  const messages: ChatMessage[] = [{
+    id: 'a-stdout-turn2',
+    role: 'assistant',
+    text: [
+      '[Stdout]',
+      'command output',
+      '',
+      '**LLM Running (Turn 2) ...**',
+      '',
+      'second turn answer',
+    ].join('\n'),
+    done: true,
+    taskId: 8,
+  }]
+  const rows = transcriptLines(messages, { expandedTools: false })
+  const turn = rows.find(row => row.text.includes('LLM Running (Turn 2)'))
+
+  assert.ok(turn)
+  assert.equal(turn!.text, 'LLM Running (Turn 2) ...')
+  assert.equal(turn!.parts?.[0]?.color, undefined)
+  assert.ok(rows.some(row => row.text === 'second turn answer'))
+})
+
+test('transcriptLines keeps consecutive status rows contiguous like CC tool results', () => {
+  const messages: ChatMessage[] = [{
+    id: 'a-status-group',
+    role: 'assistant',
+    text: [
+      '● file_read({path: x})',
+      '[Status] Reading file: a',
+      '',
+      '[Status] Reading file: b',
+      '',
+      '[Status] Reading file: c',
+    ].join('\n'),
+    done: true,
+    taskId: 10,
+  }]
+  const rows = transcriptLines(messages, { expandedTools: false })
+  const texts = rows.map(row => row.text).filter(text => text.trim())
+
+  assert.deepEqual(texts, [
+    '● file_read({path: x})',
+    `${RESULT_PREFIX}Reading file: a`,
+    `${RESULT_PREFIX}Reading file: b`,
+    `${RESULT_PREFIX}Reading file: c`,
+  ])
+})
+
+test('transcriptLines keeps the rendered prefix append-only across stream-commit segments', () => {
+  // Ink <Static> appends by item count. Every segment that has already been
+  // committed must remain a byte-for-byte prefix of the next render; otherwise
+  // Static skips the first row of the newly committed segment. This was the
+  // long-stdout "one missing line per commit" bug (L006/L022/L037/...).
+  const messages: ChatMessage[] = [
+    { id: 'u-1', role: 'user', text: '跑大量输出', done: true, taskId: 1 },
+    { id: 'a-1-c0', role: 'assistant', text: '我先执行一个脚本。', done: true, taskId: 1 },
+    { id: 'a-1-c1', role: 'assistant', text: '[Status] Exit Code: 0', done: true, taskId: 1 },
+    { id: 'a-1-c2', role: 'assistant', text: '[Stdout]\n\nL000 stdout payload ........\nL001 stdout payload ........\nL002 stdout payload ........', done: true, taskId: 1 },
+    { id: 'a-1-c3', role: 'assistant', text: 'L003 stdout payload ........\nL004 stdout payload ........\nL005 stdout payload ........', done: true, taskId: 1 },
+    { id: 'a-1-c4', role: 'assistant', text: 'L006 stdout payload ........\nL007 stdout payload ........\nL008 stdout payload ........', done: true, taskId: 1 },
+    { id: 'a-1-c5', role: 'assistant', text: 'L009 stdout payload ........\nL010 stdout payload ........\nL011 stdout payload ........', done: true, taskId: 1 },
+  ]
+
+  let previous: string[] = []
+  for (let count = 1; count <= messages.length; count++) {
+    const current = transcriptLines(messages.slice(0, count), { expandedTools: false }).map(line => line.text)
+    assert.deepEqual(current.slice(0, previous.length), previous,
+      `render of ${count} messages changed an already-committed prefix`)
+    previous = current
+  }
+
+  const all = previous.filter(text => text.trim())
+  for (let index = 0; index < 12; index++) {
+    const tag = `L${String(index).padStart(3, '0')} stdout payload`
+    assert.equal(all.filter(text => text.includes(tag)).length, 1, `${tag} must render exactly once`)
+  }
+})
+
+test('result boundary blank is appended at the next block, not removed from the previous one', () => {
+  const base: ChatMessage[] = [
+    { id: 'a-1-c0', role: 'assistant', text: '[Stdout]\nL001\nL002', done: true, taskId: 1 },
+  ]
+  const before = transcriptLines(base, { expandedTools: false }).map(line => line.text)
+  const after = transcriptLines([
+    ...base,
+    { id: 'u-2', role: 'user', text: 'next question', done: true, taskId: 2 },
+  ], { expandedTools: false }).map(line => line.text)
+
+  assert.deepEqual(after.slice(0, before.length), before)
+  // The boundary blank belongs before the prompt; the prompt itself always
+  // owns a stable trailing blank (it can never be continued by a commit).
+  assert.deepEqual(after.slice(before.length), [' ', '> next question', ' '])
+})
+
+test('consecutive stdout commit segments stay contiguous without phantom blanks', () => {
+  const rows = transcriptLines([
+    { id: 'a-1-c0', role: 'assistant', text: '[Stdout]\nL001', done: true, taskId: 1 },
+    { id: 'a-1-c1', role: 'assistant', text: 'L002\nL003', done: true, taskId: 1 },
+  ], { expandedTools: false }).map(line => line.text)
+
+  assert.deepEqual(rows.filter(text => text.trim()), [
+    `${RESULT_PREFIX}L001`,
+    '      L002',
+    '      L003',
   ])
 })

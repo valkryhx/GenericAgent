@@ -370,3 +370,18 @@ test('commitStreamingAssistantMessages keeps a tool header and args fence in the
   assert.match(live?.text ?? '', /Tool:\s*`code_run` args:/)
   assert.match(live?.text ?? '', /^````text/m)
 })
+
+test('findFenceSafeOverflowCount never cuts immediately after a [Stdout] marker', () => {
+  const lines = [
+    'intro',
+    ...Array.from({ length: 20 }, (_, index) => `prelude ${index}`),
+    '[Stdout]',
+    ...Array.from({ length: 8 }, (_, index) => `stdout line ${index}`),
+  ]
+  const markerIndex = lines.indexOf('[Stdout]')
+  const overflow = findFenceSafeOverflowCount(lines, 8)
+
+  assert.ok(overflow > 0)
+  assert.ok(overflow <= markerIndex, `cut ${overflow} must not separate [Stdout] from its body`)
+  assert.notEqual(lines.slice(0, overflow).at(-1), '[Stdout]')
+})

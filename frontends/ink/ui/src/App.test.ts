@@ -1220,3 +1220,56 @@ test('App skips raw-mode setup when stdin is not an interactive TTY', async () =
     instance.unmount()
   }
 })
+
+test('App resets the viewport and remounts Static when ctrl+o toggles tool expansion', async () => {
+  let emit: ((event: BridgeEvent) => void) | null = null
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    emit = onEvent
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return { send() {}, stop() {} }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const cursorPark = createCursorParkStdout(stdout as unknown as NodeJS.WriteStream)
+  // Headless render has no terminal resize/reset path; drive the toggle through
+  // the same input handler as a real ctrl+o.
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+    cursorPark,
+  }), {
+    stdout: cursorPark.stdout,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    const sink = emit as unknown as (event: BridgeEvent) => void
+    sink({ type: 'user', taskId: 1, text: '跑一下' })
+    sink({
+      type: 'assistant_done',
+      taskId: 1,
+      text: '`````text\n● code_run\n{"script":"print(1)"}\n`````',
+    })
+    sink({ type: 'status', status: 'idle', taskId: 1 })
+    await delay(200)
+
+    const mark = stdout.chunks.length
+    stdin.send('\u000f')
+    await delay(200)
+
+    const after = stdout.chunks.slice(mark).join('')
+    assert.ok(after.includes('\x1b[2J'), 'ctrl+o must clear the screen before re-rendering history')
+    assert.ok(after.includes('\x1b[3J'), 'ctrl+o must clear scrollback before reprinting Static history')
+  } finally {
+    instance.unmount()
+  }
+})

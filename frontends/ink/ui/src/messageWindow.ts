@@ -1,5 +1,5 @@
 import type { ChatMessage } from './protocol.js'
-import { formatAssistantText } from './messageFormat.js'
+import { formatAssistantText, STDOUT_BODY_END, STDOUT_BODY_PREFIX } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
 import { GLYPHS, RESULT_PREFIX, normalizeEmoji } from './glyphs.js'
@@ -89,11 +89,102 @@ export function visibleMessagesForViewport(
 }
 
 export function transcriptLines(messages: ChatMessage[], options: { expandedTools: boolean; theme?: InkTheme }): TranscriptLine[] {
+  return transcriptLinesWithChannel(messages, options).lines
+}
+
+/**
+ * Render a transcript segment and return the result-channel state at its end.
+ * The inline UI renders Static and live messages in separate calls; carrying
+ * this state across the boundary keeps a `[Stdout]` block dim when a stream
+ * commit lands exactly between the marker and its body.
+ */
+export function transcriptLinesWithChannel(
+  messages: ChatMessage[],
+  options: { expandedTools: boolean; theme?: InkTheme; initialChannel?: ResultChannel },
+): { lines: TranscriptLine[]; channel: ResultChannel } {
   const rows: TranscriptLine[] = []
+  let channel: ResultChannel = options.initialChannel ?? null
+
   for (const message of messages) {
-    appendMessageLines(rows, message, options.expandedTools, options.theme)
+    // Render and compact each message independently. <Static> appends by item
+    // count, so an already-emitted row must never be removed or reordered when
+    // the next stream-commit segment arrives. Collapsing across messages used
+    // to delete the previous segment's trailing blank, shrinking the item
+    // prefix by one and making Ink skip the next segment's first row.
+    const messageRows: TranscriptLine[] = []
+    channel = appendMessageLines(messageRows, message, options.expandedTools, options.theme, channel)
+    const compacted = collapseResultSeparators(messageRows)
+    // The separator belongs to the message that follows it. This is what keeps
+    // Static append-only: once a message is emitted we never remove its last
+    // row to make room for the next one. Consecutive tool-result rows stay
+    // contiguous (Status -> Stdout across a stream-commit split).
+    if (
+      rows.length > 0
+      && compacted.length > 0
+      && rows[rows.length - 1]!.text.trim() !== ''
+      && !bothResultBlocks(rows, compacted)
+    ) {
+      rows.push(blankLine(`boundary-${message.id}`))
+    }
+    rows.push(...compacted)
   }
-  return rows
+  // Deliberately no synthetic trailing blank: the next stream-commit segment
+  // may continue a result/stdout block. Separators are emitted at the start of
+  // the *following* block, which keeps every rendered prefix append-only.
+  return { lines: rows, channel }
+}
+
+export type ResultChannel = { kind: 'stdout'; needsMarker: boolean } | null
+
+function isResultRow(row: TranscriptLine): boolean {
+  return row.text.startsWith(RESULT_PREFIX) || row.text.startsWith(TOOL_RESULT_CONTINUATION)
+}
+
+function firstNonBlank(rows: TranscriptLine[]): TranscriptLine | null {
+  return rows.find(row => row.text.trim() !== '') ?? null
+}
+
+function lastNonBlank(rows: TranscriptLine[]): TranscriptLine | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i]!.text.trim() !== '') return rows[i]!
+  }
+  return null
+}
+
+/** True when the previous block and the next block are both result rows. */
+function bothResultBlocks(previous: TranscriptLine[], next: TranscriptLine[]): boolean {
+  const prev = lastNonBlank(previous)
+  const following = firstNonBlank(next)
+  return Boolean(prev && following && isResultRow(prev) && isResultRow(following))
+}
+
+/**
+ * Tool-result rows are one visual block. GA emits a blank line between each
+ * `[Status]` line and stream-commit adds a trailing blank per segment; CC 303
+ * keeps consecutive result rows contiguous. Remove only blank rows whose
+ * nearest non-blank neighbours are both result rows, so prose spacing and
+ * blank lines inside stdout bodies remain intact.
+ */
+function collapseResultSeparators(rows: TranscriptLine[]): TranscriptLine[] {
+  const out: TranscriptLine[] = []
+  let lastContentWasResult = false
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!
+    if (row.text.trim() !== '') {
+      out.push(row)
+      lastContentWasResult = isResultRow(row)
+      continue
+    }
+    let next = i + 1
+    while (next < rows.length && rows[next]!.text.trim() === '') next += 1
+    const nextIsResult = next < rows.length && isResultRow(rows[next]!)
+    if (lastContentWasResult && nextIsResult) {
+      i = next - 1
+      continue
+    }
+    out.push(row)
+  }
+  return out
 }
 
 export function wrapTranscriptLines(lines: TranscriptLine[], columns: number): TranscriptLine[] {
@@ -129,15 +220,15 @@ export function liveTranscriptViewportLines(lines: TranscriptLine[], maxRows: nu
   const max = Math.max(1, Math.floor(maxRows))
   if (lines.length <= max) return lines
 
-  // Pin the *last* user-prompt block (open/current turn question) so a long assistant
-  // tail cannot hide it — without re-pinning older historical user lines.
+  // Pin the *last* user-prompt block (open/current turn question) so a long
+  // assistant tail cannot hide it. The blank after the prompt belongs to that
+  // header, but assistant output must keep at least one row.
   let pinStart = -1
   let pinEnd = -1
   for (let i = 0; i < lines.length; ) {
     if (lines[i]!.id.startsWith('u-')) {
-      const start = i
+      pinStart = i
       while (i < lines.length && lines[i]!.id.startsWith('u-')) i += 1
-      pinStart = start
       pinEnd = i
     } else {
       i += 1
@@ -148,13 +239,20 @@ export function liveTranscriptViewportLines(lines: TranscriptLine[], maxRows: nu
     return visibleTranscriptLines(lines, { maxRows: max, scrollOffset: 0 }).lines
   }
 
-  const pinned = lines.slice(pinStart, pinEnd)
-  const after = lines.slice(pinEnd)
-  const pinnedCount = Math.min(pinned.length, Math.max(0, max - 1))
-  const keptPinned = pinned.slice(0, pinnedCount)
-  const restBudget = Math.max(0, max - keptPinned.length)
-  const restTail = after.length <= restBudget ? after : after.slice(after.length - restBudget)
-  return [...keptPinned, ...restTail]
+  let separatorEnd = pinEnd
+  if (lines[separatorEnd]?.text.trim() === '') separatorEnd += 1
+  const promptHeader = lines.slice(pinStart, separatorEnd)
+  const body = lines.slice(separatorEnd)
+
+  // Never spend the entire viewport on the prompt header; keep one body row.
+  const headerRows = Math.min(promptHeader.length, Math.max(0, max - 1))
+  const keptHeader = promptHeader.slice(0, headerRows)
+  const bodyBudget = Math.max(0, max - keptHeader.length)
+  const visibleBody = body.length <= bodyBudget
+    ? body
+    : body.slice(Math.max(0, body.length - bodyBudget))
+
+  return [...keptHeader, ...visibleBody]
 }
 
 export function clampTranscriptScrollOffset(offset: number, totalRows: number, maxRows: number): number {
@@ -162,14 +260,20 @@ export function clampTranscriptScrollOffset(offset: number, totalRows: number, m
   return Math.min(maxScrollOffset, Math.max(0, Math.floor(offset)))
 }
 
-function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expandedTools: boolean, theme?: InkTheme): void {
+function appendMessageLines(
+  rows: TranscriptLine[],
+  message: ChatMessage,
+  expandedTools: boolean,
+  theme?: InkTheme,
+  channel: ResultChannel = null,
+): ResultChannel {
   if (message.localCommand === 'input') {
     appendPlainLines(rows, message, message.text || ' ')
-    return
+    return null
   }
   if (message.localCommand === 'output') {
     appendPlainLines(rows, message, message.text || ' ', { color: 'gray', prefix: '  ', appendBlank: true })
-    return
+    return null
   }
   if (message.role === 'user') {
     const lines = splitDisplayLines(message.text || ' ')
@@ -181,46 +285,209 @@ function appendMessageLines(rows: TranscriptLine[], message: ChatMessage, expand
         backgroundColor: theme?.userBackground ?? '#d7d7d7',
       })
     })
+    // The prompt is a complete visual block: the blank after it is stable and
+    // can never need removal when an assistant commit arrives later.
     rows.push(blankLine(`${message.id}-blank`))
-    return
+    return null
   }
   if (message.role === 'system') {
     appendPlainLines(rows, message, message.text || ' ', { color: 'gray', appendBlank: true })
-    return
+    return null
   }
 
   const body = formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
-  const markdownLines = renderMarkdownLines(body, theme)
-  markdownLines.forEach((line, index) => {
-    // No per-line "continuation indent". Stream-commit splits one logical turn into
-    // many a-*-c* messages; indenting every non-first line of each segment made
-    // [Action] (segment start) and [Status] (continuation) look misaligned.
-    const styled = styleAssistantTranscriptLine(line.parts ?? [{ text: line.text }], theme)
-    rows.push({
-      id: `${message.id}-${index}`,
-      text: styled.map(part => part.text).join('') || ' ',
-      parts: styled,
-    })
-  })
-  rows.push(blankLine(`${message.id}-blank`))
+  const nextChannel = appendAssistantBodyRows(rows, message.id, body, theme, channel)
+  // A plain prose block gets its trailing blank immediately: it is stable and
+  // gives the composer breathing room at the end of the transcript. A result
+  // block must NOT get one, because the next stream-commit segment can still
+  // continue the same tool result (`[Status]` then `[Stdout]` body). For
+  // result -> prose the separator is added at the start of the next block.
+  const last = lastNonBlank(rows)
+  if (!message.done) {
+    // Live message: reserve one row below the body so the viewport tail does not
+    // sit flush against the composer. This row is not committed to Static.
+    rows.push(blankLine(`${message.id}-streaming-tail`))
+  } else if (!nextChannel && !(last && isResultRow(last))) {
+    rows.push(blankLine(`${message.id}-blank`))
+  }
+  return nextChannel
 }
 
 /**
  * GA tool progress lines ([Action]/[Status]/[Stdout]) become CC-style result
  * lines: `  ⎿  <body>` (dim). Matches even when markdown left a blockquote
  * marker or residual indent: "  [Status] ...", "| [Action] ...".
+ *
+ * `[Stdout]` is a block marker: its body (including `[omitted long output]`)
+ * belongs to the same dim result channel. Previously only the marker line was
+ * styled, so stdout rendered as ordinary black Markdown and left an empty `⎿`.
  */
-const RESULT_MARKER_RE = /^\s*(?:\|\s*)?\[(?:Action|Status|Stdout)\]\s?/
+const RESULT_MARKER_RE = /^\s*(?:\|\s*)?\[(Action|Status|Stdout)\]\s?(.*)$/
+const TOOL_RESULT_CONTINUATION = `      `
+
+function resultMarkerBody(text: string): { kind: string; body: string } | null {
+  const match = RESULT_MARKER_RE.exec(text)
+  if (!match) return null
+  return { kind: match[1]!, body: match[2] ?? '' }
+}
+
+function mutedResultLine(body: string, theme?: InkTheme): TranscriptPart[] {
+  return [{ text: `${RESULT_PREFIX}${body}`, color: theme?.muted ?? 'gray', dimColor: true }]
+}
+
+function appendResultBodyRow(rows: TranscriptLine[], id: string, body: string, theme?: InkTheme): void {
+  // CC 303 renders tool output as a child block under the `⎿` result row
+  // (marginLeft 5, dimColor). Keep blank bodies empty rather than emitting an
+  // isolated, content-free `⎿`.
+  if (!body.trim()) return
+  rows.push({
+    id,
+    text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(body.trimEnd())}`,
+    parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(body.trimEnd())}`, color: theme?.muted ?? 'gray', dimColor: true }],
+  })
+}
+
+/** A bare closing fence whose opener was committed to an earlier Static segment. */
+function isOrphanClosingFence(line: string): boolean {
+  return /^\s*`{3,}\s*$/.test(line)
+}
+
+function isTurnBoundary(line: string): boolean {
+  // Only a real runtime turn header may end a stdout block. Matching generic
+  // "Summary:" or "Turn ..." text would misclassify legitimate command output.
+  const trimmed = line.trim()
+  return /^\*\*LLM Running \(Turn \d+\) \.\.\.\*\*$/.test(trimmed)
+    || /^\*\*Turn \d+ \.\.\.\*\*$/.test(trimmed)
+    || /^LLM Running \(Turn \d+\) \.\.\.$/.test(trimmed)
+    || /^Turn \d+ \.\.\.$/.test(trimmed)
+}
+
+function appendAssistantBodyRows(
+  rows: TranscriptLine[],
+  messageId: string,
+  body: string,
+  theme?: InkTheme,
+  channel: ResultChannel = null,
+): ResultChannel {
+  const lines = body.split('\n')
+  let plain: string[] = []
+  let rowIndex = 0
+
+  const flushPlain = () => {
+    if (plain.length === 0) return
+    const source = plain.join('\n')
+    plain = []
+    renderMarkdownLines(source, theme).forEach(line => {
+      const styled = styleAssistantTranscriptLine(line.parts ?? [{ text: line.text }], theme)
+      rows.push({
+        id: `${messageId}-${rowIndex++}`,
+        text: styled.map(part => part.text).join('') || ' ',
+        parts: styled,
+      })
+    })
+  }
+
+  let inStdout = channel?.kind === 'stdout'
+  let stdoutNeedsMarker = channel?.needsMarker ?? false
+  for (const line of lines) {
+    if (line === STDOUT_BODY_END) {
+      flushPlain()
+      inStdout = false
+      stdoutNeedsMarker = false
+      continue
+    }
+    if (inStdout && isTurnBoundary(line)) {
+      flushPlain()
+      inStdout = false
+      stdoutNeedsMarker = false
+    }
+    if (inStdout && isOrphanClosingFence(line)) {
+      // The opening fence may already be in Static; the remaining closing fence
+      // still means the tool result ended. Drop it and let following prose
+      // return to the normal Markdown channel.
+      flushPlain()
+      inStdout = false
+      stdoutNeedsMarker = false
+      continue
+    }
+    if (line.startsWith(STDOUT_BODY_PREFIX)) {
+      const unprefixed = line.slice(STDOUT_BODY_PREFIX.length)
+      if (inStdout && isTurnBoundary(unprefixed)) {
+        inStdout = false
+        stdoutNeedsMarker = false
+        plain.push(unprefixed)
+        continue
+      }
+      flushPlain()
+      // Prefixed rows are authoritative stdout body rows even when the marker
+      // lived in an earlier stream-commit segment.
+      inStdout = true
+      const stdoutBody = normalizeEmoji(unprefixed.trimEnd())
+      if (!stdoutBody) continue
+      if (stdoutNeedsMarker) {
+        rows.push({
+          id: `${messageId}-${rowIndex++}`,
+          text: `${RESULT_PREFIX}${stdoutBody}`,
+          parts: mutedResultLine(stdoutBody, theme),
+        })
+        stdoutNeedsMarker = false
+      } else {
+        appendResultBodyRow(rows, `${messageId}-${rowIndex++}`, stdoutBody, theme)
+      }
+      continue
+    }
+    const marker = resultMarkerBody(line)
+    if (marker) {
+      flushPlain()
+      inStdout = marker.kind === 'Stdout'
+      stdoutNeedsMarker = inStdout
+      const markerBody = normalizeEmoji(marker.body.trimEnd())
+      if (markerBody) {
+        rows.push({
+          id: `${messageId}-${rowIndex++}`,
+          text: `${RESULT_PREFIX}${markerBody}`,
+          parts: mutedResultLine(markerBody, theme),
+        })
+        stdoutNeedsMarker = false
+      } else if (!inStdout) {
+        rows.push({
+          id: `${messageId}-${rowIndex++}`,
+          text: `  ${GLYPHS.resultPrefix}`,
+          parts: [{ text: `  ${GLYPHS.resultPrefix}`, color: theme?.muted ?? 'gray', dimColor: true }],
+        })
+      }
+      continue
+    }
+    if (inStdout) {
+      const stdoutBody = normalizeEmoji(line.trimEnd())
+      if (!stdoutBody) continue
+      if (stdoutNeedsMarker) {
+        // Bind the first real stdout line to the `⎿` result row, exactly like
+        // CC's tool-result channel. A blank stdout body never yields a bare `⎿`.
+        rows.push({
+          id: `${messageId}-${rowIndex++}`,
+          text: `${RESULT_PREFIX}${stdoutBody}`,
+          parts: mutedResultLine(stdoutBody, theme),
+        })
+        stdoutNeedsMarker = false
+      } else {
+        appendResultBodyRow(rows, `${messageId}-${rowIndex++}`, stdoutBody, theme)
+      }
+      continue
+    }
+    plain.push(line)
+  }
+  flushPlain()
+  return inStdout ? { kind: 'stdout', needsMarker: stdoutNeedsMarker } : null
+}
 
 function styleAssistantTranscriptLine(parts: TranscriptPart[], theme?: InkTheme): TranscriptPart[] {
   const text = parts.map(part => part.text).join('')
-  const match = RESULT_MARKER_RE.exec(text)
-  if (match) {
-    const body = normalizeEmoji(text.slice(match[0].length).trimEnd())
-    const line = body ? `${RESULT_PREFIX}${body}` : `  ${GLYPHS.resultPrefix}`
-    return [{ text: line, color: theme?.muted ?? 'gray', dimColor: true }]
-  }
-  return parts
+  const marker = resultMarkerBody(text)
+  if (!marker) return parts
+  const body = normalizeEmoji(marker.body.trimEnd())
+  if (!body) return [{ text: `  ${GLYPHS.resultPrefix}`, color: theme?.muted ?? 'gray', dimColor: true }]
+  return mutedResultLine(body, theme)
 }
 
 function appendPlainLines(
