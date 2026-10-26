@@ -29,6 +29,7 @@ class CompactResult:
     original_messages: int = 0
     compacted_messages: int = 0
     invoked_skills: list[dict[str, Any]] = field(default_factory=list)
+    working_state: dict[str, Any] = field(default_factory=dict)
 
 
 def _soft_limit_tokens(backend: Any) -> int:
@@ -78,6 +79,16 @@ def compact_agent_context(
     invoked_skills = _collect_invoked_skills(agent)
     client = getattr(agent, "llmclient", None)
     old_last_tools = copy.deepcopy(getattr(client, "last_tools", "")) if client is not None else ""
+    handler = getattr(agent, "handler", None)
+    handler_working = copy.deepcopy(getattr(handler, "working", {}) or {})
+    from genericagent.core.transcripts import _lightweight_handler_working
+    compact_working_state = {
+        "handler_working": _lightweight_handler_working(handler_working),
+        "last_tools": str(old_last_tools or ""),
+        "last_usage_tokens": copy.deepcopy(
+            getattr(getattr(client, "backend", None), "last_usage_tokens", None)
+        ),
+    }
     if not old_backend_history:
         return CompactResult(False, "No conversation history to compact.")
 
@@ -103,6 +114,7 @@ def compact_agent_context(
             original_messages=len(old_backend_history),
             compacted_messages=len(compact_history),
             invoked_skills=invoked_skills,
+            working_state=compact_working_state,
         )
     except Exception as exc:
         backend.history = old_backend_history

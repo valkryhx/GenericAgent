@@ -205,6 +205,19 @@ def history_native_image_count(history, *, max_messages: int = 24) -> int:
     return n
 
 
+def transcript_delta_anchor(agent):
+    """Return the cheapest safe anchor for recording this turn's transcript delta.
+
+    v2 sessions persist only the appended tail, so the pre-turn list length is
+    sufficient.  v1 still needs its legacy full snapshot for compatibility.
+    """
+    history = backend_history(getattr(agent, "llmclient", None))
+    session_path = getattr(agent, "session_path", None)
+    if session_path and session_transcript._detect_session_version(session_path) == 1:
+        return session_transcript.current_backend_history(agent)
+    return len(history)
+
+
 def backend_history(llmclient):
     backend = getattr(llmclient, "backend", None)
     backend = getattr(backend, "primary", backend)
@@ -989,9 +1002,20 @@ class GenericAgent:
         except Exception: pass
         try:
             if session_transcript is not None and getattr(self, "session_path", None):
-                session_transcript.record_compact(
-                    self.session_path, session_id=getattr(self, "session_id", ""),
-                    message=result.message, backend_history_after=copy.deepcopy(self.llmclient.backend.history))
+                if session_transcript._detect_session_version(self.session_path) == 2:
+                    session_transcript.record_compact_v2(
+                        self.session_path,
+                        session_id=getattr(self, "session_id", ""),
+                        summary=result.summary or result.message,
+                        trigger="manual",
+                        messages_summarized=result.original_messages,
+                        turn_id=getattr(self, "session_turn_id", None),
+                        working_state=getattr(result, "working_state", None),
+                    )
+                else:
+                    session_transcript.record_compact(
+                        self.session_path, session_id=getattr(self, "session_id", ""),
+                        message=result.message, backend_history_after=copy.deepcopy(self.llmclient.backend.history))
         except Exception: pass
         display_queue.put({'done': smart_format(result.message, max_str_len=500), 'source': 'system'})
 
@@ -1045,6 +1069,12 @@ class GenericAgent:
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             handler = GenericAgentHandler(self, self.history, str(paths.TEMP_DIR), workspace_root=str(paths.PROJECT_ROOT))
             handler.hook_runtime = self.hook_runtime
+            resumed_state = getattr(self, "_resumed_working_state", None)
+            if isinstance(resumed_state, dict):
+                restored_working = resumed_state.get("handler_working")
+                if isinstance(restored_working, dict):
+                    handler.working.update(copy.deepcopy(restored_working))
+                self._resumed_working_state = None
             if self.handler and 'key_info' in self.handler.working: 
                 ki = re.sub(r'\n\[SYSTEM\] 此为.*?工作记忆[。\n]*', '', self.handler.working['key_info'])  # 去旧
                 handler.working['key_info'] = ki
@@ -1075,7 +1105,7 @@ class GenericAgent:
             handler.permission_runtime = getattr(self, 'permission_runtime', None)
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
-            transcript_history_before = session_transcript.current_backend_history(self)
+            transcript_history_before = transcript_delta_anchor(self)
             can_image = supports_image_input(self.llmclient)
             initial_content = _build_user_content_with_images(raw_query, images) if can_image else None
             if (images or _extract_image_paths(raw_query)) and not can_image:

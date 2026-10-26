@@ -1,4 +1,4 @@
-import os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
+import copy, os, json, re, time, requests, sys, threading, queue, urllib3, base64, importlib, uuid
 from datetime import datetime
 from genericagent import paths
 from genericagent.core import tokens as token_meter
@@ -868,9 +868,10 @@ class BaseSession:
         def _ask_gen():
             with self.lock:
                 self.history.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-                if self.auto_compact_enabled:
-                    trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
-                messages = self.make_messages(self.history)
+                request_history = copy.deepcopy(self.history)
+            if self.auto_compact_enabled:
+                trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens)
+            messages = self.make_messages(request_history)
             content_blocks = None; content = ''
             gen = self.raw_ask(messages)
             try:
@@ -1010,9 +1011,10 @@ class NativeClaudeSession(BaseSession):
         assert type(msg) is dict
         with self.lock:
             self.history.append(msg)
-            if self.auto_compact_enabled:
-                trim_messages_history(self.history, self.hard_limit_tokens, self.last_usage_tokens)
-            messages = [{"role": m["role"], "content": _content_blocks(m["content"])} for m in self.history]
+            request_history = copy.deepcopy(self.history)
+        if self.auto_compact_enabled:
+            trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens)
+        messages = [{"role": m["role"], "content": _content_blocks(m["content"])} for m in request_history]
         content_blocks = None
         gen = self.raw_ask(messages)
         try:

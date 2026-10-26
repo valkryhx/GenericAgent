@@ -32,7 +32,7 @@ class FakeAgent:
 class SessionTranscriptTest(unittest.TestCase):
     def test_create_session_writes_session_start_event(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", schema=1)
 
             lines = Path(path).read_text(encoding="utf-8").splitlines()
             self.assertEqual(1, len(lines))
@@ -44,7 +44,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_record_turn_and_load_session_round_trips_ui_and_backend_state(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             before = []
             after = [
                 {"role": "user", "content": [{"type": "text", "text": "hello"}]},
@@ -78,8 +78,8 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_list_sessions_returns_newest_first_and_skips_malformed_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            first = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_a")
-            second = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_b")
+            first = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_a", schema=1)
+            second = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_b", schema=1)
             Path(tmp, "broken.jsonl").write_text("{not json", encoding="utf-8")
             session_transcript.record_turn(
                 second,
@@ -100,8 +100,8 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_list_sessions_skips_empty_session_start_files_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            empty = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_empty")
-            full = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_full")
+            empty = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_empty", schema=1)
+            full = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_full", schema=1)
             session_transcript.record_turn(
                 full,
                 session_id="session_full",
@@ -121,7 +121,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_restore_session_replaces_backend_history_and_clears_runtime_state(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             history = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
             session_transcript.record_turn(
                 path,
@@ -146,9 +146,9 @@ class SessionTranscriptTest(unittest.TestCase):
             self.assertEqual(str(path), agent.session_path)
             self.assertEqual(1, agent.session_turn_id)
 
-    def test_restored_session_continues_in_same_transcript_with_next_turn_id(self):
+    def test_restored_v1_session_branches_and_keeps_next_turn_id(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             first_after = [{"role": "user", "content": "one"}]
             second_after = first_after + [{"role": "assistant", "content": "two"}]
             session_transcript.record_turn(
@@ -172,6 +172,7 @@ class SessionTranscriptTest(unittest.TestCase):
                 backend_history_after=second_after,
             )
             agent = FakeAgent()
+            legacy_bytes = Path(path).read_bytes()
 
             session_transcript.restore_agent_session(agent, path)
             agent.llmclient.backend.history = second_after + [{"role": "user", "content": "three"}]
@@ -183,16 +184,18 @@ class SessionTranscriptTest(unittest.TestCase):
                 backend_history_before=second_after,
             )
 
-            loaded = session_transcript.load_session(path)
-            self.assertEqual(str(path), agent.session_path)
-            self.assertEqual("session_test", agent.session_id)
-            self.assertEqual(3, agent.session_turn_id)
+            self.assertEqual(legacy_bytes, Path(path).read_bytes())
+            self.assertNotEqual(str(path), agent.session_path)
+            self.assertNotEqual("session_test", agent.session_id)
+            self.assertEqual(1, agent.session_turn_id)
+            loaded = session_transcript.load_session(agent.session_path)
+            self.assertEqual(1, loaded.branch_rounds)
             self.assertEqual([1, 2, 3], [turn.turn_id for turn in loaded.turns])
             self.assertEqual(["one", "two", "three"], [turn.user_text for turn in loaded.turns])
 
     def test_load_session_discards_legacy_dead_branch_when_next_turn_starts_from_earlier_history(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             first_after = [
                 {"role": "user", "content": "1+1= ?"},
                 {"role": "assistant", "content": "2"},
@@ -245,7 +248,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_load_session_does_not_treat_empty_backend_snapshots_as_implicit_rewind(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             session_transcript.record_turn(
                 path,
                 session_id="session_test",
@@ -273,7 +276,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_record_rewind_keeps_raw_turns_but_loads_only_current_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             first_after = [
                 {"role": "user", "content": "1+1= ?"},
                 {"role": "assistant", "content": "2"},
@@ -336,7 +339,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_record_agent_turn_uses_agent_session_and_increments_turn_id(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             agent = FakeAgent()
             agent.session_id = "session_test"
             agent.session_path = str(path)
@@ -362,7 +365,7 @@ class SessionTranscriptTest(unittest.TestCase):
 
     def test_record_workflow_event_appends_reference_without_counting_as_conversation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             history = [{"role": "user", "content": "hello"}]
             session_transcript.record_turn(
                 path,

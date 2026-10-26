@@ -167,6 +167,7 @@ class ContinueCmdResumeTest(unittest.TestCase):
                 root=transcript_root,
                 cwd="C:/repo",
                 session_id="session_test",
+                schema=1,
             )
             session_transcript.record_turn(
                 transcript,
@@ -201,6 +202,7 @@ class ContinueCmdResumeTest(unittest.TestCase):
                 root=transcript_root,
                 cwd="C:/repo",
                 session_id="session_test",
+                schema=1,
             )
             first_after = [{"role": "user", "content": "one"}, {"role": "assistant", "content": "a1"}]
             session_transcript.record_turn(
@@ -244,6 +246,7 @@ class ContinueCmdResumeTest(unittest.TestCase):
                 root=transcript_root,
                 cwd="C:/repo",
                 session_id="session_active",
+                schema=1,
             )
             first_after = [{"role": "user", "content": "one"}]
             second_after = first_after + [{"role": "assistant", "content": "two"}]
@@ -294,7 +297,7 @@ class ContinueCmdResumeTest(unittest.TestCase):
 
     def test_restore_dispatches_transcript_path_to_session_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             history = [{"role": "user", "content": "hello"}]
             session_transcript.record_turn(
                 transcript,

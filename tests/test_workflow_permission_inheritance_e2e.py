@@ -153,7 +153,7 @@ class WorkflowPermissionInheritanceE2ETest(unittest.TestCase):
             workdir = root / "child_workdir"
             workdir.mkdir()
             parent_session_id = "session_parent_permission"
-            parent_path = create_session(root=root / "parent_sessions", cwd=str(root), session_id=parent_session_id, frontend="test")
+            parent_path = create_session(root=root / "parent_sessions", cwd=str(root), session_id=parent_session_id, frontend="test", schema=1)
             record_turn(
                 parent_path,
                 session_id=parent_session_id,

@@ -837,7 +837,7 @@ class GenericAgentBridge:
                 'compact_summary': result.message,
             }, emit=self.emit)
             self._replace_compact_log()
-            self._record_compact_transcript(result.message)
+            self._record_compact_transcript(result, trigger="manual")
             self._rewind_snapshots.clear()
             text = result.message
             if post.context_text:
@@ -2290,7 +2290,7 @@ class GenericAgentBridge:
             if result.ok:
                 self._auto_compact_failures = 0
                 self._replace_compact_log()
-                self._record_compact_transcript(result.message)
+                self._record_compact_transcript(result, trigger="auto")
                 self._rewind_snapshots.clear()
                 text = "Auto " + result.message
                 # 与手动 /compact 相同：成功只 emit history_replace，避免 Static 重复行。
@@ -2322,16 +2322,29 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "compact_log_failed", "message": str(exc)})
 
-    def _record_compact_transcript(self, message: str) -> None:
+    def _record_compact_transcript(self, result: Any, *, trigger: str) -> None:
         if session_transcript is None or not getattr(self.agent, "session_path", None):
             return
+        path = self.agent.session_path
+        message = str(getattr(result, "message", "") or "")
         try:
-            session_transcript.record_compact(
-                self.agent.session_path,
-                session_id=getattr(self.agent, "session_id", ""),
-                message=message,
-                backend_history_after=copy.deepcopy(self._backend_history()),
-            )
+            if session_transcript._detect_session_version(path) == 2:
+                session_transcript.record_compact_v2(
+                    path,
+                    session_id=getattr(self.agent, "session_id", ""),
+                    summary=str(getattr(result, "summary", "") or message),
+                    trigger=trigger,
+                    messages_summarized=int(getattr(result, "original_messages", 0) or 0),
+                    turn_id=getattr(self.agent, "session_turn_id", None),
+                    working_state=getattr(result, "working_state", None),
+                )
+            else:
+                session_transcript.record_compact(
+                    path,
+                    session_id=getattr(self.agent, "session_id", ""),
+                    message=message,
+                    backend_history_after=copy.deepcopy(self._backend_history()),
+                )
         except Exception as exc:
             self.emit({"type": "error", "code": "compact_transcript_failed", "message": str(exc)})
 
@@ -2401,7 +2414,8 @@ class GenericAgentBridge:
         if snapshot is None:
             self.emit({"type": "error", "code": "rewind_missing", "message": f"no checkpoint for task {task_id}"})
             return
-        self._restore_agent_state(snapshot)
+        if not self._restore_agent_state(snapshot):
+            return
         self._record_rewind_transcript(snapshot)
         for stale_id in [key for key in self._rewind_snapshots if key > task_id]:
             del self._rewind_snapshots[stale_id]
@@ -2409,43 +2423,132 @@ class GenericAgentBridge:
         self.emit({"type": "rewind_done", "taskId": task_id, "text": str(snapshot.get("text") or "")})
 
     def _snapshot_agent_state(self) -> dict[str, Any]:
+        keep_turn_id = int(getattr(self.agent, "session_turn_id", 0) or 0)
+        anchor_uuid = None
+        session_path = getattr(self.agent, "session_path", None)
+        if session_transcript is not None and session_path and session_transcript.is_transcript_path(session_path):
+            try:
+                if session_transcript._detect_session_version(session_path) == 2:
+                    anchor_uuid = session_transcript._turn_boundary_uuid(session_path, keep_turn_id)
+            except Exception:
+                anchor_uuid = None
+        history = getattr(self.agent, "history", [])
+        client = getattr(self.agent, "llmclient", None)
+        last_tools = getattr(client, "last_tools", "")
+        last_usage_tokens = copy.deepcopy(
+            getattr(getattr(client, "backend", None), "last_usage_tokens", None)
+        )
+        if anchor_uuid:
+            handler = getattr(self.agent, "handler", None)
+            working = getattr(handler, "working", None) if handler is not None else None
+            state = {}
+            if session_transcript is not None:
+                snapshot_fn = getattr(session_transcript, "_lightweight_handler_working", None)
+                if callable(snapshot_fn):
+                    state = snapshot_fn(working)
+            return {
+                "text": "",
+                "anchor_uuid": anchor_uuid,
+                "keep_turn_id": keep_turn_id,
+                "last_tools": copy.deepcopy(last_tools),
+                "last_usage_tokens": last_usage_tokens,
+                "working": copy.deepcopy(state),
+                "history_tail": [str(item)[-512:] for item in list(history)[-4:]],
+            }
         return {
             "text": "",
-            "history": copy.deepcopy(getattr(self.agent, "history", [])),
+            "history": copy.deepcopy(history),
             "backend_history": copy.deepcopy(self._backend_history()),
-            "last_tools": copy.deepcopy(getattr(getattr(self.agent, "llmclient", None), "last_tools", "")),
-            "session_turn_id": int(getattr(self.agent, "session_turn_id", 0) or 0),
+            "last_tools": copy.deepcopy(last_tools),
+            "last_usage_tokens": last_usage_tokens,
+            "session_turn_id": keep_turn_id,
         }
 
-    def _restore_agent_state(self, snapshot: dict[str, Any]) -> None:
+    def _restore_agent_state(self, snapshot: dict[str, Any]) -> bool:
         try:
             self.agent.abort()
         except Exception:
             pass
-        if hasattr(self.agent, "history"):
-            self.agent.history = copy.deepcopy(snapshot.get("history") or [])
+        anchor_uuid = str(snapshot.get("anchor_uuid") or "")
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
-        if backend is not None and hasattr(backend, "history"):
-            backend.history = copy.deepcopy(snapshot.get("backend_history") or [])
+        if anchor_uuid and session_transcript is not None and getattr(self.agent, "session_path", None):
+            try:
+                projected = session_transcript.load_history_at_anchor(
+                    self.agent.session_path,
+                    anchor_uuid=anchor_uuid,
+                    keep_turn_id=int(snapshot.get("keep_turn_id", 0) or 0),
+                )
+            except Exception as exc:
+                self.emit({"type": "error", "code": "rewind_anchor_failed", "message": str(exc)})
+                return False
+            if projected is None:
+                self.emit({"type": "error", "code": "rewind_anchor_missing", "message": anchor_uuid})
+                return False
+            if backend is not None and hasattr(backend, "history"):
+                backend.history = copy.deepcopy(projected)
+            if hasattr(self.agent, "history"):
+                self.agent.history = list(snapshot.get("history_tail") or [])
+        else:
+            if hasattr(self.agent, "history"):
+                self.agent.history = copy.deepcopy(snapshot.get("history") or [])
+            if backend is not None and hasattr(backend, "history"):
+                backend.history = copy.deepcopy(snapshot.get("backend_history") or [])
         client = getattr(self.agent, "llmclient", None)
         if client is not None and hasattr(client, "last_tools"):
             client.last_tools = copy.deepcopy(snapshot.get("last_tools") or "")
         if hasattr(self.agent, "handler"):
             self.agent.handler = None
+        usage = snapshot.get("last_usage_tokens")
+        if isinstance(usage, dict) and backend is not None:
+            backend.last_usage_tokens = copy.deepcopy(usage)
+        working = snapshot.get("working")
+        if isinstance(working, dict):
+            # The app constructs a fresh handler next turn, so stage the
+            # checkpoint on the agent rather than resurrecting a finished one.
+            self.agent._resumed_working_state = {
+                "handler_working": copy.deepcopy(working),
+                "last_tools": str(snapshot.get("last_tools") or ""),
+                "last_usage_tokens": copy.deepcopy(usage),
+            }
         if hasattr(self.agent, "session_turn_id"):
-            self.agent.session_turn_id = int(snapshot.get("session_turn_id", 0) or 0)
+            self.agent.session_turn_id = int(
+                snapshot.get("keep_turn_id", snapshot.get("session_turn_id", 0)) or 0
+            )
+        return True
 
     def _record_rewind_transcript(self, snapshot: dict[str, Any]) -> None:
         if session_transcript is None or not getattr(self.agent, "session_path", None):
             return
-        keep_turns = int(snapshot.get("session_turn_id", 0) or 0)
+        path = self.agent.session_path
+        keep_turns = int(
+            snapshot.get("keep_turn_id", snapshot.get("session_turn_id", 0)) or 0
+        )
         try:
-            session_transcript.record_rewind(
-                self.agent.session_path,
-                session_id=getattr(self.agent, "session_id", ""),
-                keep_turns=keep_turns,
-                backend_history_after=copy.deepcopy(snapshot.get("backend_history") or []),
-            )
+            if session_transcript._detect_session_version(path) == 2:
+                working = snapshot.get("working")
+                rewind_state = None
+                if isinstance(working, dict):
+                    rewind_state = {
+                        "handler_working": copy.deepcopy(working),
+                        "last_tools": snapshot.get("last_tools") or "",
+                        "last_usage_tokens": copy.deepcopy(
+                            snapshot.get("last_usage_tokens")
+                        ),
+                    }
+                session_transcript.record_rewind_v2(
+                    path,
+                    session_id=getattr(self.agent, "session_id", ""),
+                    keep_turn_id=keep_turns,
+                    anchor_uuid=str(snapshot.get("anchor_uuid") or "") or None,
+                    working_state=rewind_state,
+                )
+            else:
+                session_transcript.record_rewind(
+                    path,
+                    session_id=getattr(self.agent, "session_id", ""),
+                    keep_turns=keep_turns,
+                    backend_history_after=copy.deepcopy(self._backend_history()),
+                )
         except Exception as exc:
             self.emit({"type": "error", "code": "rewind_transcript_failed", "message": str(exc)})
 
@@ -2498,13 +2601,31 @@ class GenericAgentBridge:
                     self._task_seq += 1
                     task_id = self._task_seq
                     messages.append({"role": "user", "text": turn.user_text, "taskId": task_id})
-                    self._rewind_snapshots[task_id] = {
+                    # The local branch turn_id is authoritative. ``task_id`` is
+                    # a UI sequence and diverges after a v1 source is merged.
+                    branch_turn_id = int(getattr(turn, "turn_id", task_id) or 0)
+                    snapshot = {
                         "text": turn.user_text,
-                        "history": [],
-                        "backend_history": copy.deepcopy(turn.backend_history_before),
                         "last_tools": "",
-                        "session_turn_id": task_id - 1,
+                        "last_usage_tokens": None,
+                        "keep_turn_id": max(0, branch_turn_id - 1),
                     }
+                    state = (getattr(loaded, "working_states", {}) or {}).get(branch_turn_id)
+                    if isinstance(state, dict):
+                        snapshot["last_tools"] = str(state.get("last_tools") or "")
+                        usage = state.get("last_usage_tokens")
+                        if isinstance(usage, dict):
+                            snapshot["last_usage_tokens"] = copy.deepcopy(usage)
+                        working = state.get("handler_working")
+                        if isinstance(working, dict):
+                            snapshot["working"] = copy.deepcopy(working)
+                    if getattr(turn, "anchor_uuid", ""):
+                        snapshot["anchor_uuid"] = turn.anchor_uuid
+                    else:
+                        snapshot["history"] = []
+                        snapshot["backend_history"] = copy.deepcopy(turn.backend_history_before)
+                        snapshot["session_turn_id"] = max(0, branch_turn_id - 1)
+                    self._rewind_snapshots[task_id] = snapshot
                     if turn.assistant_text:
                         messages.append({"role": "assistant", "text": turn.assistant_text, "taskId": task_id})
                 return messages

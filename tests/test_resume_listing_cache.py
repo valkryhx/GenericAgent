@@ -38,8 +38,8 @@ def record_turn(path, session_id, turn_id, user_text, assistant_text, before, af
 class TranscriptListingCacheTest(unittest.TestCase):
     def _root_with_two_sessions(self, tmp):
         root = Path(tmp)
-        first = session_transcript.create_session(root=root, cwd="C:/repo", session_id="session_one")
-        second = session_transcript.create_session(root=root, cwd="C:/repo", session_id="session_two")
+        first = session_transcript.create_session(root=root, cwd="C:/repo", session_id="session_one", schema=1)
+        second = session_transcript.create_session(root=root, cwd="C:/repo", session_id="session_two", schema=1)
         record_turn(first, "session_one", 1, "first question", "first answer", [],
                     [{"role": "user", "content": "first question"}])
         record_turn(second, "session_two", 1, "second question", "second answer", [],
@@ -83,7 +83,7 @@ class TranscriptListingCacheTest(unittest.TestCase):
 
     def test_summary_matches_full_load_for_rewind_and_inferred_rewind(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_rw")
+            path = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_rw", schema=1)
             after_one = [{"role": "user", "content": "one"}]
             after_two = after_one + [{"role": "assistant", "content": "a2"}]
             record_turn(path, "session_rw", 1, "one", "a1", [], after_one)

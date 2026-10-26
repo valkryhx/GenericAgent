@@ -14,6 +14,7 @@ class WorkflowIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as transcript_root, tempfile.TemporaryDirectory() as workflow_root:
             session_id = "session_parent"
             transcript_path = session_transcript.create_session(
+                schema=1,
                 root=transcript_root,
                 cwd="D:/git_codes/GenericAgent",
                 session_id=session_id,

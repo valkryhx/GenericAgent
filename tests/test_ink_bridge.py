@@ -1072,7 +1072,7 @@ class InkBridgeTest(unittest.TestCase):
         from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             first_after = [
                 {"role": "system", "content": "seed"},
                 {"role": "user", "content": "one"},
@@ -1117,7 +1117,7 @@ class InkBridgeTest(unittest.TestCase):
         from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             session_transcript.record_turn(
                 transcript,
                 session_id="session_test",
@@ -1156,11 +1156,11 @@ class InkBridgeTest(unittest.TestCase):
                 history_replace["messages"],
             )
 
-    def test_resume_transcript_switches_active_session_and_next_turn_appends_to_same_file(self):
+    def test_resume_v1_transcript_switches_to_a_new_v2_branch_file(self):
         from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_old")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_old", schema=1)
             first_after = [{"role": "user", "content": "old question"}]
             session_transcript.record_turn(
                 transcript,
@@ -1179,6 +1179,7 @@ class InkBridgeTest(unittest.TestCase):
             events = []
             bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
 
+            legacy_bytes = Path(transcript).read_bytes()
             with patch("frontends.ink.bridge.continue_reset", lambda *_args, **_kwargs: None):
                 bridge.resume_session(str(transcript))
             agent.llmclient.backend.history = first_after + [{"role": "user", "content": "follow up"}]
@@ -1190,12 +1191,187 @@ class InkBridgeTest(unittest.TestCase):
                 backend_history_before=first_after,
             )
 
-            loaded = session_transcript.load_session(transcript)
-            self.assertEqual("session_old", agent.session_id)
-            self.assertEqual(str(transcript), agent.session_path)
-            self.assertEqual(2, agent.session_turn_id)
-            self.assertEqual(["old question", "follow up"], [turn.user_text for turn in loaded.turns])
-            self.assertFalse(Path(agent.session_path).with_name("session_new.jsonl").exists())
+            self.assertEqual(legacy_bytes, Path(transcript).read_bytes())
+            self.assertNotEqual(str(transcript), agent.session_path)
+            self.assertNotEqual("session_old", agent.session_id)
+            self.assertTrue(agent.session_path.endswith(".jsonl"))
+            self.assertEqual(1, agent.session_turn_id)
+            loaded = session_transcript.load_session(agent.session_path)
+            self.assertEqual(
+                ["old question", "follow up"],
+                [turn.user_text for turn in loaded.turns],
+            )
+            self.assertEqual(1, loaded.branch_rounds)
+            self.assertEqual(
+                [
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                    {"role": "user", "content": "follow up"},
+                ],
+                loaded.ui_messages,
+            )
+            events = [
+                json.loads(line)
+                for line in Path(agent.session_path).read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual("resumed_from", events[1]["type"])
+            self.assertEqual(str(transcript), events[1]["source_path"])
+
+    def test_v2_rewind_snapshot_is_lightweight_and_records_anchor_event(self):
+        from genericagent.core import transcripts as session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(
+                root=tmp, cwd="C:/repo", session_id="session_rewind_v2"
+            )
+            first = [
+                {"role": "user", "content": [{"type": "text", "text": "first"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "first answer"}]},
+            ]
+            agent = FakeAgent()
+            agent.session_id = "session_rewind_v2"
+            agent.session_path = path
+            agent.session_turn_id = 1
+            agent.llmclient.backend.history = first
+            session_transcript.append_message(
+                path, session_id="session_rewind_v2", role="user",
+                blocks=[{"type": "text", "text": "first"}], origin={"kind": "human"},
+                turn_id=1, text="first", uuid_value="u1",
+            )
+            session_transcript.append_message(
+                path, session_id="session_rewind_v2", role="assistant",
+                blocks=[{"type": "text", "text": "first answer"}], origin={"kind": "assistant"},
+                turn_id=1, text="first answer", uuid_value="a1",
+            )
+            session_transcript.append_turn_end(
+                path, session_id="session_rewind_v2", turn_id=1,
+                first_uuid="u1", last_uuid="a1",
+            )
+            events = []
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            snapshot = bridge._snapshot_agent_state()
+            self.assertEqual("a1", snapshot["anchor_uuid"])
+            self.assertNotIn("backend_history", snapshot)
+            self.assertNotIn("history", snapshot)
+
+            bridge._rewind_snapshots[1] = {**snapshot, "text": "first"}
+            bridge.rewind(1)
+            self.assertEqual(first, agent.llmclient.backend.history)
+            raw = [
+                json.loads(line)
+                for line in Path(path).read_text(encoding="utf-8").splitlines()
+            ]
+            rewind_event = next(event for event in raw if event["type"] == "rewind")
+            self.assertEqual("a1", rewind_event["anchor_uuid"])
+            self.assertNotIn("backend_history_after", rewind_event)
+
+    def test_v2_rewind_snapshot_restores_and_persists_usage(self):
+        from genericagent.core import transcripts as session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(
+                root=tmp, cwd="C:/repo", session_id="session_rewind_usage"
+            )
+            projected = [
+                {"role": "user", "content": [{"type": "text", "text": "first"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "first answer"}]},
+            ]
+            usage = {
+                "input_tokens": 31,
+                "output_tokens": 7,
+                "total_tokens": 38,
+            }
+            agent = FakeAgent()
+            agent.session_id = "session_rewind_usage"
+            agent.session_path = path
+            agent.session_turn_id = 1
+            agent.llmclient.last_tools = "tools-before-rewind"
+            agent.llmclient.backend.history = projected
+            agent.llmclient.backend.last_usage_tokens = copy.deepcopy(usage)
+            session_transcript.append_message(
+                path, session_id="session_rewind_usage", role="user",
+                blocks=[{"type": "text", "text": "first"}], origin={"kind": "human"},
+                turn_id=1, text="first", uuid_value="u1",
+            )
+            session_transcript.append_message(
+                path, session_id="session_rewind_usage", role="assistant",
+                blocks=[{"type": "text", "text": "first answer"}], origin={"kind": "assistant"},
+                turn_id=1, text="first answer", uuid_value="a1",
+            )
+            session_transcript.append_turn_end(
+                path, session_id="session_rewind_usage", turn_id=1,
+                first_uuid="u1", last_uuid="a1",
+            )
+
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda event: None)
+            snapshot = bridge._snapshot_agent_state()
+            self.assertEqual(usage, snapshot["last_usage_tokens"])
+            self.assertEqual("tools-before-rewind", snapshot["last_tools"])
+
+            agent.llmclient.last_tools = "tools-after-rewind"
+            agent.llmclient.backend.last_usage_tokens = {
+                "input_tokens": 999,
+                "output_tokens": 999,
+                "total_tokens": 1998,
+            }
+            bridge._rewind_snapshots[1] = {**snapshot, "text": "first"}
+            bridge.rewind(1)
+
+            self.assertEqual(usage, agent.llmclient.backend.last_usage_tokens)
+            self.assertEqual("tools-before-rewind", agent.llmclient.last_tools)
+            raw = [
+                json.loads(line)
+                for line in Path(path).read_text(encoding="utf-8").splitlines()
+            ]
+            rewind_event = next(event for event in raw if event["type"] == "rewind")
+            self.assertEqual(usage, rewind_event["working_state"]["last_usage_tokens"])
+
+    def test_resume_checkpoints_use_the_working_state_for_each_turn(self):
+        from genericagent.core import transcripts as session_transcript
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = session_transcript.create_session(
+                root=tmp, cwd="C:/repo", session_id="session_resume_states"
+            )
+            for turn_id, marker in ((1, "first-memory"), (2, "second-memory")):
+                session_transcript.append_message(
+                    path, session_id="session_resume_states", role="user",
+                    blocks=[{"type": "text", "text": f"turn {turn_id}"}],
+                    origin={"kind": "human"}, turn_id=turn_id,
+                    text=f"turn {turn_id}", uuid_value=f"u{turn_id}",
+                )
+                session_transcript.append_turn_end(
+                    path, session_id="session_resume_states", turn_id=turn_id,
+                    first_uuid=f"u{turn_id}", last_uuid=f"u{turn_id}",
+                )
+                session_transcript.append_working_state(
+                    path, session_id="session_resume_states",
+                    handler_working={"key_info": marker},
+                    last_tools=f"tools-{turn_id}",
+                    last_usage_tokens={
+                        "input_tokens": turn_id * 10,
+                        "output_tokens": turn_id,
+                        "total_tokens": turn_id * 11,
+                    },
+                    turn_id=turn_id,
+                )
+            agent = FakeAgent()
+            agent.session_id = "session_resume_states"
+            agent.session_path = path
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=lambda event: None)
+            bridge._resume_ui_messages_with_checkpoints(path)
+            self.assertEqual("first-memory", bridge._rewind_snapshots[1]["working"]["key_info"])
+            self.assertEqual("tools-1", bridge._rewind_snapshots[1]["last_tools"])
+            self.assertEqual("second-memory", bridge._rewind_snapshots[2]["working"]["key_info"])
+            self.assertEqual("tools-2", bridge._rewind_snapshots[2]["last_tools"])
+            self.assertEqual(
+                {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+                bridge._rewind_snapshots[1]["last_usage_tokens"],
+            )
+            self.assertEqual(
+                {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
+                bridge._rewind_snapshots[2]["last_usage_tokens"],
+            )
 
     def test_rewind_restores_checkpoint_before_selected_task(self):
         agent = FakeAgent()
@@ -1223,7 +1399,7 @@ class InkBridgeTest(unittest.TestCase):
         from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             first_after = [
                 {"role": "user", "content": "1+1= ?"},
                 {"role": "assistant", "content": "2"},
@@ -1536,7 +1712,7 @@ class InkBridgeTest(unittest.TestCase):
         from genericagent.core import transcripts as session_transcript
 
         with tempfile.TemporaryDirectory() as tmp:
-            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test")
+            transcript = session_transcript.create_session(root=tmp, cwd="C:/repo", session_id="session_test", schema=1)
             agent = FakeAgent()
             agent.session_id = "session_test"
             agent.session_path = str(transcript)
