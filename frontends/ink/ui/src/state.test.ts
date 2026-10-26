@@ -153,8 +153,12 @@ test('applyBridgeEvent keeps completed token usage when idle and clears stale us
   assert.equal(state.tokenUsage, null)
 })
 
-test('applyBridgeEvent replaces history after resume', () => {
+test('applyBridgeEvent replaces history after resume without resetting token usage', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  state = applyBridgeEvent(state, {
+    type: 'token_usage', taskId: 1, inputTokens: 11, outputTokens: 17, totalTokens: 28,
+  })
   state = applyBridgeEvent(state, {
     type: 'history_replace',
     messages: [
@@ -167,6 +171,17 @@ test('applyBridgeEvent replaces history after resume', () => {
     { id: 'h-0', role: 'user', text: 'old question', done: true },
     { id: 'h-1', role: 'assistant', text: 'old answer', done: true },
   ])
+  assert.equal(state.tokenUsage?.totalTokens, 28)
+})
+
+test('applyBridgeEvent clears token usage when history replacement starts a new session', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'token_usage', taskId: 1, inputTokens: 14200, outputTokens: 100, totalTokens: 14300,
+  })
+  state = applyBridgeEvent(state, { type: 'history_replace', messages: [], resetSession: true })
+
+  assert.equal(state.tokenUsage, null)
 })
 
 test('applyBridgeEvent compact replacement keeps only compact result rows', () => {

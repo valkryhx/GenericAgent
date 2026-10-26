@@ -212,6 +212,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   if (event.type === 'history_replace') {
     return {
       ...state,
+      tokenUsage: event.resetSession ? null : state.tokenUsage,
       messages: event.messages.map((message, index) => {
         let id = `h-${index}`
         if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`

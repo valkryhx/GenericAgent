@@ -405,7 +405,7 @@ export type BridgeEvent =
   | { type: 'local_command_output'; text: string }
   | { type: 'clear' }
   | { type: 'resume_sessions'; sessions: ResumeSession[] }
-  | { type: 'history_replace'; messages: HistoryMessage[] }
+  | { type: 'history_replace'; messages: HistoryMessage[]; resetSession?: boolean }
   | { type: 'rewind_done'; taskId: number; text: string }
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading?: boolean; discovery_running?: boolean; discovery_complete?: boolean | null }
   | { type: 'mcp_progress'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading: boolean; discovery_running: boolean; discovery_complete: boolean | null }

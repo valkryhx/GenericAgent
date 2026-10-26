@@ -1013,6 +1013,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       if (event.type === 'history_replace') {
         const commandText = pendingLocalCommandRef.current
+        if (event.resetSession) {
+          setCompletedTurnActivity(null)
+          activeTurnStartedAtRef.current = null
+        }
         setSelector(null)
         setFooterPanel(null)
         resumePendingRef.current = false

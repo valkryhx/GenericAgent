@@ -503,7 +503,7 @@ class GenericAgentBridge:
         self._consume_thread = None
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
-        self.emit({"type": "history_replace", "messages": []})
+        self.emit({"type": "history_replace", "messages": [], "resetSession": True})
         self.emit({"type": "system", "text": "Started a new session."})
         self.emit({"type": "status", "status": "idle"})
 

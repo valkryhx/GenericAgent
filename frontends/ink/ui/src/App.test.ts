@@ -1195,6 +1195,69 @@ test("App shows a Codex-style completion summary only after each turn ends", asy
   }
 })
 
+test('App clears the previous completion summary and token usage after /new', async () => {
+  let emit: ((event: BridgeEvent) => void) | null = null
+  const commands: BridgeCommand[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    emit = onEvent
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        commands.push(command)
+        if (command.type !== 'new_session') return
+        setTimeout(() => {
+          onEvent({ type: 'history_replace', messages: [], resetSession: true })
+          onEvent({ type: 'system', text: 'Started a new session.' })
+          onEvent({ type: 'status', status: 'idle' })
+        }, 0)
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    const eventSink = emit as unknown as (event: BridgeEvent) => void
+    eventSink({ type: 'status', status: 'running', taskId: 1 })
+    eventSink({ type: 'activity', label: 'Calculating' })
+    eventSink({ type: 'token_usage', taskId: 1, inputTokens: 14200, outputTokens: 100, totalTokens: 14300 })
+    eventSink({ type: 'status', status: 'idle', taskId: 1 })
+    const completed = await waitForFrame(stdout, frame => frame.includes('Worked for'))
+    assert.ok(completed.includes('↑14.2k ↓100 Σ14.3k'))
+
+    const outputStart = stdout.chunks.length
+    stdin.send('/new')
+    await delay(20)
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('Started a new session.'))
+    await delay(50)
+
+    assert.ok(commands.some(command => command.type === 'new_session'))
+    const latestFrame = completeFrames(stdout, outputStart).at(-1) ?? ''
+    assert.doesNotMatch(latestFrame, /Worked for/)
+    assert.doesNotMatch(latestFrame, /14\.2k|Σ14\.3k/)
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App skips raw-mode setup when stdin is not an interactive TTY', async () => {
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()

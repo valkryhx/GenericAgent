@@ -901,7 +901,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual([], old_agent.prompts[1:])
         self.assertEqual([("second", "user", [])], bridge.agent.prompts)
         self.assertEqual([
-            {"type": "history_replace", "messages": []},
+            {"type": "history_replace", "messages": [], "resetSession": True},
             {"type": "system", "text": "Started a new session."},
             {"type": "status", "status": "idle"},
         ], new_session_events)
