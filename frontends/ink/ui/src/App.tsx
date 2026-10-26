@@ -1017,6 +1017,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setFooterPanel(null)
         resumePendingRef.current = false
         flushDeltas()
+        // <Static> can only append. A whole-history replacement must clear the
+        // old viewport and scrollback before the reducer remounts <Static>, or
+        // old rows remain underneath the replayed transcript. Inline mode also
+        // drops its old relative scroll offset; full mode keeps its existing
+        // bottom-anchor effect below.
+        resetTranscriptViewport()
+        if (mouseMode !== 'full') setTranscriptScrollOffset(0)
         pendingHistoryReplacementScrollRef.current = true
         // 重挂 <Static> 的代数由 reducer 在同一个 action 里 +1，与 messages 落在同一次
         // commit；这里若再单独 bump，会先按「追加尾部」写一次、再全量重印 → 尾部重复
