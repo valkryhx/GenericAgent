@@ -39,9 +39,9 @@ test('renderMarkdownLines keeps GA tool summaries as plain lines', () => {
 })
 
 test('renderMarkdownLines bolds LLM Running turn markers', () => {
-  const lines = renderMarkdownLines('**LLM Running (Turn 2) ...**\n\nSummary: ok')
-  const turn = lines.find(line => lineText(line).includes('LLM Running (Turn 2)'))
+  const lines = renderMarkdownLines('**LLM Running (Step 2) ...**\n\nSummary: ok')
+  const turn = lines.find(line => lineText(line).includes('LLM Running (Step 2)'))
   assert.ok(turn)
-  assert.equal(lineText(turn!), 'LLM Running (Turn 2) ...')
+  assert.equal(lineText(turn!), 'LLM Running (Step 2) ...')
   assert.equal(turn!.parts?.some(part => part.bold && part.text.includes('LLM Running')), true)
 })

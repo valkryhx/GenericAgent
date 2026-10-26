@@ -16,14 +16,18 @@ class AgentMainStreamingTest(unittest.TestCase):
         self.assertFalse(should_flush_display_delta("x" * 15, 0, "x" * 15))
         self.assertTrue(should_flush_display_delta("x" * 16, 0, "x" * 16))
 
-    def test_flushes_turn_marker_immediately(self):
+    def test_flushes_step_marker_immediately(self):
         self.assertTrue(
             should_flush_display_delta(
-                "\n\n**LLM Running (Turn 1) ...**\n\n",
+                "\n\n**LLM Running (Step 1) ...**\n\n",
                 0,
-                "\n\n**LLM Running (Turn 1) ...**\n\n",
+                "\n\n**LLM Running (Step 1) ...**\n\n",
             )
         )
+
+    def test_does_not_flush_only_the_generic_llm_running_prefix(self):
+        marker = "**Turn 1 ...**"
+        self.assertFalse(should_flush_display_delta(marker, 0, marker))
 
     def test_normalize_display_assistant_text_is_idempotent_for_summary(self):
         raw = "<summary>need clock</summary>\nbody"

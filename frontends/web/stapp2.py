@@ -1015,7 +1015,7 @@ def poll_agent_output(max_items=20):
 
 
 def _get_response_segments(text):
-    return [p for p in re.split(r'(?=\*\*LLM Running \(Turn \d+\) \.\.\.\*\*)', text) if p.strip()] or [text]
+    return [p for p in re.split(r'(?=\*\*LLM Running \(Step \d+\) \.\.\.\*\*)', text) if p.strip()] or [text]
 
 def render_message(role, content, ts='', unsafe_allow_html=True):
     with st.chat_message(role):

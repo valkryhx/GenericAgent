@@ -222,7 +222,7 @@ test('transcriptLines repairs legacy inline workflow fence close', () => {
       '`````',
       '[Workflow] launched model-availability-research (wf_test); use /workflows to monitor.`````',
       '',
-      '**LLM Running (Turn 3) ...**',
+      '**LLM Running (Step 3) ...**',
       '',
       '🔨 Tool: `update_working_checkpoint`  📥 args:',
       '````text',
@@ -232,9 +232,9 @@ test('transcriptLines repairs legacy inline workflow fence close', () => {
   }]
 
   const rows = transcriptLines(messages, { expandedTools: false })
-  const turn = rows.find(row => row.text.includes('LLM Running (Turn 3)'))
+  const turn = rows.find(row => row.text.includes('LLM Running (Step 3)'))
   assert.ok(turn)
-  assert.equal(turn!.text, 'LLM Running (Turn 3) ...')
+  assert.equal(turn!.text, 'LLM Running (Step 3) ...')
   assert.equal(turn!.parts?.some(part => part.bold), true)
 })
 
@@ -504,7 +504,7 @@ test('transcriptLines exits stdout mode at the closing fence sentinel', () => {
   assert.ok(rows.some(row => row.text === `${RESULT_PREFIX}command output`))
 })
 
-test('transcriptLines exits stdout mode at the next real turn header', () => {
+test('transcriptLines exits stdout mode at the next real step header', () => {
   const messages: ChatMessage[] = [{
     id: 'a-stdout-turn2',
     role: 'assistant',
@@ -512,20 +512,20 @@ test('transcriptLines exits stdout mode at the next real turn header', () => {
       '[Stdout]',
       'command output',
       '',
-      '**LLM Running (Turn 2) ...**',
+      '**LLM Running (Step 2) ...**',
       '',
-      'second turn answer',
+      'second step answer',
     ].join('\n'),
     done: true,
     taskId: 8,
   }]
   const rows = transcriptLines(messages, { expandedTools: false })
-  const turn = rows.find(row => row.text.includes('LLM Running (Turn 2)'))
+  const step = rows.find(row => row.text.includes('LLM Running (Step 2)'))
 
-  assert.ok(turn)
-  assert.equal(turn!.text, 'LLM Running (Turn 2) ...')
-  assert.equal(turn!.parts?.[0]?.color, undefined)
-  assert.ok(rows.some(row => row.text === 'second turn answer'))
+  assert.ok(step)
+  assert.equal(step!.text, 'LLM Running (Step 2) ...')
+  assert.equal(step!.parts?.[0]?.color, undefined)
+  assert.ok(rows.some(row => row.text === 'second step answer'))
 })
 
 test('transcriptLines keeps consecutive status rows contiguous like CC tool results', () => {

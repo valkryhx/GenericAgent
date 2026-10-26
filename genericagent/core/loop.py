@@ -205,8 +205,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     ]
     turn = 0;  handler.max_turns = max_turns
     while turn < handler.max_turns:
-        turn += 1; turnstr = f'LLM Running (Turn {turn}) ...'
-        if handler.parent.task_dir: turnstr = f'Turn {turn} ...'
+        turn += 1; turnstr = f'LLM Running (Step {turn}) ...'
+        if handler.parent.task_dir: turnstr = f'Step {turn} ...'
         if verbose: turnstr = f'**{turnstr}**'
         yield f"\n\n{turnstr}\n\n"
         if turn%10 == 0: client.last_tools = ''  # 每10轮重置一次工具描述，避免上下文过大导致的模型性能下降

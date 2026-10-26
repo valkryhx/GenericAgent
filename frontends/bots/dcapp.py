@@ -51,7 +51,7 @@ def _extract_discord_progress(text):
 def _strip_discord_transcript(text):
     """Hide LLM/tool transcript noise while preserving the final natural reply."""
     text = text or ""
-    text = re.sub(r"^\s*\*?\*?LLM Running \(Turn \d+\) \.\.\.\*?\*?\s*$", "", text, flags=re.M)
+    text = re.sub(r"^\s*\*?\*?LLM Running \(Step \d+\) \.\.\.\*?\*?\s*$", "", text, flags=re.M)
     text = re.sub(r"^\s*🛠️\s+.*?(?=^\s*(?:\*?\*?LLM Running|<summary>|$))", "", text, flags=re.M | re.DOTALL)
     text = re.sub(r"^\s*(?:✅|✓|❌|✗|ERR|STDOUT|PAT\b|RC\b).*?$", "", text, flags=re.M)
     text = re.sub(r"<tool_use>.*?</tool_use>", "", text, flags=re.DOTALL)

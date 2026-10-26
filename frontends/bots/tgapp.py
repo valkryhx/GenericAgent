@@ -66,7 +66,7 @@ _MD_TOKEN_RE = re.compile(
     ),
     re.DOTALL,
 )
-_TURN_MARKER_RE = re.compile(r"^\*{0,2}LLM Running \(Turn (\d+)\) \.\.\.\*{0,2}\s*$")
+_TURN_MARKER_RE = re.compile(r"^\*{0,2}LLM Running \(Step (\d+)\) \.\.\.\*{0,2}\s*$")
 _CODE_FENCE_RE = re.compile(r"^\s*(`{3,})(.*)$")
 _TURN_SUMMARY_LIMIT = 160
 _TURN_SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
@@ -124,7 +124,7 @@ def _maybe_partial_turn_marker(line):
     text = (line or "").strip().lstrip("*")
     if not text:
         return False
-    marker_head = "LLM Running (Turn "
+    marker_head = "LLM Running (Step "
     return marker_head.startswith(text) or text.startswith(marker_head)
 
 def _maybe_partial_code_fence(line):

@@ -32,7 +32,7 @@ test('commitStreamingAssistantMessages leaves short streams untouched', () => {
 test('commitStreamingAssistantMessages does not split inside an open backtick fence', () => {
   // Real GA tool traces wrap [Action]/[Status] in ````` fences. A naive
   // "keep last N lines" cut can leave the fence open in the committed segment
-  // and put "**LLM Running (Turn 2)**" into the live tail after an unmatched
+  // and put "**LLM Running (Step 2)**" into the live tail after an unmatched
   // opener — marked then treats Turn 2 as a code block and shows literal **.
   const body = [
     'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7',
@@ -40,7 +40,7 @@ test('commitStreamingAssistantMessages does not split inside an open backtick fe
     '[Action] Calling MCP tool: mcp__tavily__tavily_search',
     '[Status] MCP success',
     '`````',
-    '**LLM Running (Turn 2) ...**',
+    '**LLM Running (Step 2) ...**',
     'tail0',
     'tail1',
     'tail2',
@@ -69,7 +69,7 @@ test('commitStreamingAssistantMessages does not split inside an open backtick fe
   }
   // Turn 2 must still appear exactly once across segments.
   const all = [...commits, live!].map(m => m.text).join('\n')
-  assert.equal(all.split('LLM Running (Turn 2)').length - 1, 1)
+  assert.equal(all.split('LLM Running (Step 2)').length - 1, 1)
 })
 
 function fenceBalance(text: string): number {
@@ -102,7 +102,7 @@ test('commitStreamingAssistantMessages does not split before a closer after an i
     '`````',
     '[Workflow] launched model-availability-research (wf_test); use /workflows to monitor.`````',
     '',
-    '**LLM Running (Turn 3) ...**',
+    '**LLM Running (Step 3) ...**',
     '🔨 Tool: `update_working_checkpoint`  📥 args:',
     '````text',
     '{',
@@ -113,16 +113,16 @@ test('commitStreamingAssistantMessages does not split before a closer after an i
     '[Info] Updated key_info and related_sop.',
     '`````',
     '',
-    '**LLM Running (Turn 4) ...**',
+    '**LLM Running (Step 4) ...**',
   ]
   const messages: ChatMessage[] = [liveAssistant(12, lines.join('\n'))]
   const next = commitStreamingAssistantMessages(messages, 12, 4)
   const live = next.find(m => m.id === 'a-12')
   assert.ok(live)
   const rendered = renderMarkdownLines(formatAssistantText(live!.text, { expanded: true }))
-  const turn4 = rendered.find(line => line.text.includes('LLM Running (Turn 4)'))
+  const turn4 = rendered.find(line => line.text.includes('LLM Running (Step 4)'))
   assert.ok(turn4)
-  assert.equal(turn4!.text, 'LLM Running (Turn 4) ...')
+  assert.equal(turn4!.text, 'LLM Running (Step 4) ...')
   assert.equal(turn4!.parts?.some(part => part.bold), true)
 })
 
@@ -250,21 +250,21 @@ test('remainingAssistantTextAfterCommits handles exact full commit (empty remain
 test('remainingAssistantTextAfterCommits tolerates summary newline injection on done', () => {
   // agentmain rewrites "</summary>" → "</summary>\n\n" only on the done payload.
   // Streamed deltas still have a single newline, so exact-prefix strip used to fail and
-  // the full turn (including LLM Running Turn 1) was appended again on top of commits.
+  // the full turn (including LLM Running Step 1) was appended again on top of commits.
   const streamed = [
-    '**LLM Running (Turn 1) ...**',
+    '**LLM Running (Step 1) ...**',
     '',
     '<summary>需要当前时间，读取系统钟</summary>',
     'tool output',
-    '**LLM Running (Turn 2) ...**',
+    '**LLM Running (Step 2) ...**',
     '',
     '现在是 **2026年7月14日 15:28**。',
   ].join('\n')
   const done = streamed.replace('</summary>', '</summary>\n\n')
   const commits = streamed.split('\n').slice(0, 4).join('\n')
   const remaining = remainingAssistantTextAfterCommits(done, commits)
-  assert.equal(remaining.includes('LLM Running (Turn 1)'), false)
-  assert.match(remaining, /LLM Running \(Turn 2\)/)
+  assert.equal(remaining.includes('LLM Running (Step 1)'), false)
+  assert.match(remaining, /LLM Running \(Step 2\)/)
   assert.match(remaining, /15:28/)
 })
 

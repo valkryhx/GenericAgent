@@ -932,7 +932,7 @@ class _MsgRow(QWidget):
 
         for line in lines:
             # 检查是否是折叠块开始
-            llm_match = re.match(r'^\s*\*\*LLM Running \(Turn \d+\) \.\.\.\*\*\s*$', line)
+            llm_match = re.match(r'^\s*\*\*LLM Running \(Step \d+\) \.\.\.\*\*\s*$', line)
             tool_match = re.match(r'^\s*🛠️\s*Tool:', line)
             tool_compact_match = re.match(r'^\s*🛠️\s+\w+\(', line)
 

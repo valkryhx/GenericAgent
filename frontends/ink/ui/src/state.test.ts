@@ -59,11 +59,11 @@ test('applyBridgeEvent assistant_done with summary newline rewrite does not dupl
   state = applyBridgeEvent(state, { type: 'user', taskId: 11, text: '现在几点' })
   // Simulate long incremental stream (tool + two turns) so stream-commit creates a-11-c* segments.
   const parts = [
-    '**LLM Running (Turn 1) ...**\n\n',
+    '**LLM Running (Step 1) ...**\n\n',
     '<summary>需要当前时间，读取系统钟</summary>\n',
     '🛠️ Tool: `code_run`  📥 args:\n````text\n{"script":"print(1)"}\n````\n',
     '`````\n[Action] Running python\n[Status] Exit Code: 0\n[Stdout]\n2026-07-14 15:28:09 Tuesday\n`````\n\n',
-    '**LLM Running (Turn 2) ...**\n\n',
+    '**LLM Running (Step 2) ...**\n\n',
     '<summary>系统时间为15:28</summary>\n\n',
     '现在是 **2026年7月14日 15:28**。\n',
   ]
@@ -76,8 +76,8 @@ test('applyBridgeEvent assistant_done with summary newline rewrite does not dupl
   const done = streamed.replaceAll('</summary>', '</summary>\n\n')
   state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 11, text: done })
   const all = state.messages.filter(m => m.role === 'assistant').map(m => m.text).join('\n')
-  assert.equal(all.split('LLM Running (Turn 1)').length - 1, 1, `Turn 1 duplicated in:\n${all}`)
-  assert.equal(all.split('LLM Running (Turn 2)').length - 1, 1, `Turn 2 duplicated in:\n${all}`)
+  assert.equal(all.split('LLM Running (Step 1)').length - 1, 1, `Turn 1 duplicated in:\n${all}`)
+  assert.equal(all.split('LLM Running (Step 2)').length - 1, 1, `Turn 2 duplicated in:\n${all}`)
   assert.match(all, /15:28/)
   assert.doesNotMatch(all, /^:28\*\*/m)
 })

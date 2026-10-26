@@ -206,7 +206,7 @@ class LastAssistantMessageTest(unittest.TestCase):
         chunks = _run(client, handler, verbose=True)
         joined = "".join(str(chunk) for chunk in chunks)
 
-        self.assertIn("LLM Running (Turn 1)", joined)
+        self.assertIn("LLM Running (Step 1)", joined)
         self.assertEqual(handler.last_assistant_message, "<summary>done</summary>final answer")
         self.assertNotIn("LLM Running", handler.last_assistant_message)
         self.assertNotIn("Tool:", handler.last_assistant_message)

@@ -92,7 +92,7 @@ def fold_turns(text: str) -> list[dict[str, str]]:
 
     safe = re.sub(r"`{4,}.*?`{4,}", stash, text, flags=re.DOTALL)
     safe = re.sub(r"`{4,}[^`].*$", stash, safe, flags=re.DOTALL)
-    parts = re.split(r"(\**LLM Running \(Turn \d+\) \.\.\.\**)", safe)
+    parts = re.split(r"(\**LLM Running \(Step \d+\) \.\.\.\**)", safe)
 
     def restore(part: str) -> str:
         return re.sub(r"\x00PH(\d+)\x00", lambda m: placeholders[int(m.group(1))], part)

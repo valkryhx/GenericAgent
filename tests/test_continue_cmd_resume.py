@@ -154,7 +154,7 @@ class ContinueCmdResumeTest(unittest.TestCase):
             self.assertEqual("assistant", messages[1]["role"])
             self.assertIn("Tool: `web_search`", messages[1]["content"])
             self.assertIn("result text", messages[1]["content"])
-            self.assertIn("LLM Running (Turn 2)", messages[1]["content"])
+            self.assertIn("LLM Running (Step 2)", messages[1]["content"])
             self.assertEqual(2, len(messages))
 
     def test_list_sessions_includes_transcripts_before_legacy_logs(self):

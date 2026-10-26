@@ -119,7 +119,7 @@ def fold_turns(text):
     safe = re.sub(r'`{4,}.*?`{4,}', lambda m: (_ph.append(m.group(0)), f'\x00PH{len(_ph)-1}\x00')[1], text, flags=re.DOTALL)
     # 流式中间态：末尾可能有未闭合的4+反引号块，也需保护
     safe = re.sub(r'`{4,}[^`].*$', lambda m: (_ph.append(m.group(0)), f'\x00PH{len(_ph)-1}\x00')[1], safe, flags=re.DOTALL)
-    parts = re.split(r'(\**LLM Running \(Turn \d+\) \.\.\.\*\**)', safe)
+    parts = re.split(r'(\**LLM Running \(Step \d+\) \.\.\.\*\**)', safe)
     parts = [re.sub(r'\x00PH(\d+)\x00', lambda m: _ph[int(m.group(1))], p) for p in parts]
     if len(parts) < 4: return [{'type': 'text', 'content': text}]
     segments = []
@@ -170,11 +170,11 @@ def agent_backend_stream(prompt=None):
         st.session_state.partial_response = ''
     dq = st.session_state.get('display_queue')
     if dq is None: return
-    # Drop a dangling 'LLM Running (Turn N) ...' marker if the captured partial
+    # Drop a dangling 'LLM Running (Step N) ...' marker if the captured partial
     # ended right at a turn boundary with no content yet — otherwise the resume
     # bubble flashes as a marker-only gray line. The marker reappears with
     # content on the next chunk (raw_resp is cumulative).
-    response = re.sub(r'\**LLM Running \(Turn \d+\) \.\.\.\**\s*$',
+    response = re.sub(r'\**LLM Running \(Step \d+\) \.\.\.\**\s*$',
                       '', st.session_state.get('partial_response', '')).rstrip()
     try:
         while True:

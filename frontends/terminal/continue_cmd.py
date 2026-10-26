@@ -463,14 +463,14 @@ def extract_ui_messages(path):
             if assistant is not None: out.append(assistant)
             out.append({'role': 'user', 'content': user})
             assistant = {'role': 'assistant',
-                         'content': f"\n\n**LLM Running (Turn 1) ...**\n\n{seg}"}
+                         'content': f"\n\n**LLM Running (Step 1) ...**\n\n{seg}"}
             round_turn = 1
         else:
             if assistant is None:
                 assistant = {'role': 'assistant', 'content': ''}
                 round_turn = 1
             round_turn += 1
-            marker = f"\n\n**LLM Running (Turn {round_turn}) ...**\n\n"
+            marker = f"\n\n**LLM Running (Step {round_turn}) ...**\n\n"
             assistant['content'] = (assistant['content'] or '') + marker + seg
     if assistant is not None: out.append(assistant)
     return [m for m in out if (m.get('content') or '').strip()]

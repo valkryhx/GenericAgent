@@ -409,7 +409,9 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
             self.assertEqual(events[1]["round"], 1)
 
     def test_task_worker_loop_records_sidechain_request_tool_result_permission_and_final_output(self):
-        with tempfile.TemporaryDirectory() as td:
+        temp_root = REPO_ROOT / "temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root, prefix="test-subagent-transcript-") as td:
             task_dir = Path(td) / "temp" / "demo_transcript_full"
             task_dir.mkdir(parents=True)
             (task_dir / "fixture.txt").write_text("fixture body", encoding="utf-8")
@@ -458,12 +460,18 @@ class AgentMainSubagentLifecycleTest(unittest.TestCase):
                 next(row for row in rows if row["type"] == "request")["payload"]["prompt"],
                 "inspect fixture",
             )
-            tool_call = next(row for row in rows if row["type"] == "tool_call")
-            self.assertEqual(tool_call["payload"]["tool_name"], "file_read")
-            self.assertEqual(tool_call["payload"]["args"]["path"], str(task_dir / "fixture.txt"))
-            tool_result = next(row for row in rows if row["type"] == "tool_result")
-            self.assertEqual(tool_result["payload"]["tool_name"], "file_read")
-            self.assertIn("fixture body", tool_result["payload"]["data"])
+            real_tool_calls = [
+                row for row in rows
+                if row["type"] == "tool_call" and row["payload"]["tool_name"] != "no_tool"
+            ]
+            self.assertEqual([row["payload"]["tool_name"] for row in real_tool_calls], ["file_read"])
+            self.assertEqual(real_tool_calls[0]["payload"]["args"]["path"], str(task_dir / "fixture.txt"))
+            real_tool_results = [
+                row for row in rows
+                if row["type"] == "tool_result" and row["payload"]["tool_name"] != "no_tool"
+            ]
+            self.assertEqual([row["payload"]["tool_name"] for row in real_tool_results], ["file_read"])
+            self.assertIn("fixture body", real_tool_results[0]["payload"]["data"])
             assistant = next(row for row in rows if row["type"] == "assistant")
             self.assertIn("final answer from backend", assistant["payload"]["content"])
             final_output = next(row for row in rows if row["type"] == "final_output")

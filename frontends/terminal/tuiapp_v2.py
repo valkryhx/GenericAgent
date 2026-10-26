@@ -50,14 +50,14 @@ _ANSI_CONTROL_RE = re.compile(
 
 
 def fold_turns(text: str) -> list[dict]:
-    """按 `**LLM Running (Turn N) ...**` 标记切分；已完成 turn 标为 fold，末尾未完成 turn 保持原文。"""
+    """按 `**LLM Running (Step N) ...**` 标记切分；已完成 turn 标为 fold，末尾未完成 turn 保持原文。"""
     placeholders: list[str] = []
     def stash(m):
         placeholders.append(m.group(0))
         return f"\x00PH{len(placeholders) - 1}\x00"
     safe = re.sub(r"`{4,}.*?`{4,}", stash, text, flags=re.DOTALL)
     safe = re.sub(r"`{4,}[^`].*$", stash, safe, flags=re.DOTALL)
-    parts = re.split(r"(\**LLM Running \(Turn \d+\) \.\.\.\**)", safe)
+    parts = re.split(r"(\**LLM Running \(Step \d+\) \.\.\.\**)", safe)
     parts = [re.sub(r"\x00PH(\d+)\x00", lambda m: placeholders[int(m.group(1))], p) for p in parts]
     if len(parts) < 4:
         return [{"type": "text", "content": text}]

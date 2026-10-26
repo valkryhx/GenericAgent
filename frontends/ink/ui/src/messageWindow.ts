@@ -352,14 +352,14 @@ function isOrphanClosingFence(line: string): boolean {
   return /^\s*`{3,}\s*$/.test(line)
 }
 
-function isTurnBoundary(line: string): boolean {
-  // Only a real runtime turn header may end a stdout block. Matching generic
-  // "Summary:" or "Turn ..." text would misclassify legitimate command output.
+function isStepBoundary(line: string): boolean {
+  // Only a real runtime step header may end a stdout block. Matching generic
+  // "Summary:" or "Step ..." text would misclassify legitimate command output.
   const trimmed = line.trim()
-  return /^\*\*LLM Running \(Turn \d+\) \.\.\.\*\*$/.test(trimmed)
-    || /^\*\*Turn \d+ \.\.\.\*\*$/.test(trimmed)
-    || /^LLM Running \(Turn \d+\) \.\.\.$/.test(trimmed)
-    || /^Turn \d+ \.\.\.$/.test(trimmed)
+  return /^\*\*LLM Running \(Step \d+\) \.\.\.\*\*$/.test(trimmed)
+    || /^\*\*Step \d+ \.\.\.\*\*$/.test(trimmed)
+    || /^LLM Running \(Step \d+\) \.\.\.$/.test(trimmed)
+    || /^Step \d+ \.\.\.$/.test(trimmed)
 }
 
 function appendAssistantBodyRows(
@@ -396,7 +396,7 @@ function appendAssistantBodyRows(
       stdoutNeedsMarker = false
       continue
     }
-    if (inStdout && isTurnBoundary(line)) {
+    if (inStdout && isStepBoundary(line)) {
       flushPlain()
       inStdout = false
       stdoutNeedsMarker = false
@@ -412,7 +412,7 @@ function appendAssistantBodyRows(
     }
     if (line.startsWith(STDOUT_BODY_PREFIX)) {
       const unprefixed = line.slice(STDOUT_BODY_PREFIX.length)
-      if (inStdout && isTurnBoundary(unprefixed)) {
+      if (inStdout && isStepBoundary(unprefixed)) {
         inStdout = false
         stdoutNeedsMarker = false
         plain.push(unprefixed)

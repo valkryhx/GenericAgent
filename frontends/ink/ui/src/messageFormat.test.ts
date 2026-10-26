@@ -68,7 +68,7 @@ test('formatAssistantText removes final response marker block', () => {
 
 test('formatAssistantText collapses tool fence noise without dropping final bold answer', () => {
   const raw = [
-    '**LLM Running (Turn 1) ...**',
+    '**LLM Running (Step 1) ...**',
     '',
     '<summary>需要当前时间，读取系统钟</summary>',
     '',
@@ -83,7 +83,7 @@ test('formatAssistantText collapses tool fence noise without dropping final bold
     '2026-07-14 15:28:09 Tuesday',
     '`````',
     '',
-    '**LLM Running (Turn 2) ...**',
+    '**LLM Running (Step 2) ...**',
     '',
     '<summary>系统时间为15:28</summary>',
     '',
@@ -93,7 +93,7 @@ test('formatAssistantText collapses tool fence noise without dropping final bold
   const formatted = formatAssistantText(raw)
   assert.match(formatted, /现在是 \*\*2026年7月14日 15:28\*\*。/)
   assert.doesNotMatch(formatted, /^:28\*\*/m)
-  assert.equal(formatted.split('LLM Running (Turn 1)').length - 1, 1)
+  assert.equal(formatted.split('LLM Running (Step 1)').length - 1, 1)
 })
 
 test('formatAssistantText strips GA tool status fences so later turns stay markdown bold', () => {
@@ -103,15 +103,15 @@ test('formatAssistantText strips GA tool status fences so later turns stay markd
     '[Status] MCP success',
     '`````',
     '',
-    '**LLM Running (Turn 2) ...**',
+    '**LLM Running (Step 2) ...**',
     '',
     'Summary: second pass',
   ].join('\n')
   const formatted = formatAssistantText(raw)
   assert.match(formatted, /\[Action\] Calling MCP tool/)
   assert.doesNotMatch(formatted, /```/)
-  // After format, markdown renderer should still bold Turn 2 (no open fence).
-  assert.match(formatted, /\*\*LLM Running \(Turn 2\) \.\.\.\*\*/)
+  // After format, markdown renderer should still bold Step 2 (no open fence).
+  assert.match(formatted, /\*\*LLM Running \(Step 2\) \.\.\.\*\*/)
 })
 
 test('formatAssistantText folds long [Stdout] bodies until transcript mode', () => {

@@ -294,7 +294,7 @@ def _strip_md(t):
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
 def _clean(t):
-    t = re.sub(r'^\s*LLM Running \(Turn \d+\) \.{3}\s*$', '', t, flags=re.M)
+    t = re.sub(r'^\s*LLM Running \(Step \d+\) \.{3}\s*$', '', t, flags=re.M)
     t = re.sub(r'^\s*🛠️\s*[A-Za-z_][A-Za-z0-9_]*\(.*$', '', t, flags=re.M)
     for p in _TAG_PATS:
         t = re.sub(p, '', t, flags=re.DOTALL)
@@ -304,7 +304,7 @@ def _clean(t):
 def _turn_parts(t):
     _ph = []
     safe = re.sub(r'`{4,}.*?`{4,}', lambda m: (_ph.append(m.group(0)), f'\x00PH{len(_ph)-1}\x00')[1], t, flags=re.DOTALL)
-    parts = re.split(r'(\**LLM Running \(Turn \d+\) \.\.\.\**)', safe)
+    parts = re.split(r'(\**LLM Running \(Step \d+\) \.\.\.\**)', safe)
     parts = [re.sub(r'\x00PH(\d+)\x00', lambda m: _ph[int(m.group(1))], p) for p in parts]
     if len(parts) < 4: return [], t
     turns = [parts[i] + (parts[i+1] if i+1 < len(parts) else '') for i in range(1, len(parts), 2)]

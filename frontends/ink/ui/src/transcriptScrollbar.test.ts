@@ -60,7 +60,7 @@ test('subagent MCP transcript keeps a continuous scrollbar cell beside every vis
     role: 'assistant',
     done: false,
     text: [
-      'Turn 1 ...',
+      'Step 1 ...',
       '',
       '<summary>开始权威检索与交叉核验</summary>',
       '',

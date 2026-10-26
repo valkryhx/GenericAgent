@@ -64,7 +64,7 @@ class ChatMessageRenderStateTest(unittest.TestCase):
 
     def test_streaming_body_does_not_run_fold_or_markdown_rendering(self):
         app = self.make_unmounted_app()
-        msg = ChatMessage("assistant", "**LLM Running (Turn 1) ...**\npartial", done=False)
+        msg = ChatMessage("assistant", "**LLM Running (Step 1) ...**\npartial", done=False)
 
         with patch("frontends.terminal.tuiapp_v2.render_folded_text") as folded:
             body = app._build_assistant_body(msg)
@@ -74,7 +74,7 @@ class ChatMessageRenderStateTest(unittest.TestCase):
 
     def test_completed_body_can_run_fold_rendering(self):
         app = self.make_unmounted_app()
-        msg = ChatMessage("assistant", "**LLM Running (Turn 1) ...**\nfinal", done=True)
+        msg = ChatMessage("assistant", "**LLM Running (Step 1) ...**\nfinal", done=True)
 
         with patch("frontends.terminal.tuiapp_v2.render_folded_text", return_value="folded") as folded:
             app._build_assistant_body(msg)

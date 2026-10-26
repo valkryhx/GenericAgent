@@ -290,7 +290,7 @@ def should_inject_vision_direct_answer(
 
 
 def should_flush_display_delta(full_resp, last_pos, chunk):
-    return len(full_resp) - last_pos >= STREAM_FLUSH_CHARS or 'LLM Running' in chunk
+    return len(full_resp) - last_pos >= STREAM_FLUSH_CHARS or re.search(r'LLM Running \(Step \d+\) \.\.\.', chunk) is not None
 
 
 def normalize_display_assistant_text(full_resp: str) -> str:
