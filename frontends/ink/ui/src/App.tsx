@@ -1722,7 +1722,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     activityRows: 1,
     errorRows,
     panelRows: 0,
-    hintRows: 1,
+    hintRows: 0,
     inputBorderTopRows: 1,
     inputPaddingLeftColumns: inputLeftPaddingColumns,
     inputGutterColumns,
@@ -1785,6 +1785,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
     hasMcpStatus: showMcpStartupStatus,
+    hasAboveInputStatus: footerPanel?.type === 'status',
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null

@@ -995,6 +995,62 @@ test('App writes completed transcript to static terminal scrollback instead of t
 })
 
 
+test('App places the keyboard hint directly below the input frame', async () => {
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    const frame = await waitForFrame(stdout, value => value.includes('Enter send') && inputBorderRows(value).length >= 2)
+    const lines = frame.split('\n')
+    const borders = inputBorderRows(frame)
+    const hintRow = lines.findIndex(line => line.includes('Enter send'))
+    assert.ok(hintRow > borders[1]!, `hint should be below input border@${borders[1]}, got hint@${hintRow}; frame=\n${frame}`)
+  } finally {
+    instance.unmount()
+  }
+})
+
+test('App keeps temporary status text above the input frame', async () => {
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient: readyBridge,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    stdin.send('/status')
+    await delay(20)
+    stdin.send('\r')
+    const frame = await waitForFrame(stdout, value => value.includes('status=idle messages=0') && inputBorderRows(value).length >= 2)
+    const lines = frame.split('\n')
+    const borders = inputBorderRows(frame)
+    const statusRow = lines.findIndex(line => line.includes('status=idle messages=0'))
+    assert.ok(statusRow >= 0 && statusRow < borders[0]!, `status should stay above input border@${borders[0]}, got status@${statusRow}; frame=\n${frame}`)
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App places slash suggestions below the input frame', async () => {
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()
