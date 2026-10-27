@@ -1231,7 +1231,6 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         runner = NativeGPTChildAgentRunner(
             client_factory=lambda config_name: client,
             tools_schema_factory=lambda: [],
-            max_turns=40,
         )
 
         def exhausted_loop(*_args, **_kwargs):
@@ -1246,12 +1245,50 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
 
         self.assertEqual("failed", result.status)
         self.assertEqual("max_turns_exceeded", result.payload["code"])
-        self.assertEqual(40, result.payload["maxTurns"])
+        self.assertEqual(80, result.payload["maxTurns"])
         self.assertIn("max_turns_exceeded", result.payload["error"])
         self.assertTrue(any(
             event.get("type") == "error" and event.get("code") == "max_turns_exceeded"
             for event in result.transcript_events
         ))
+
+    def test_job_max_turns_option_reaches_agent_runner_loop(self):
+        seen = {}
+
+        def recording_loop(*_args, **kwargs):
+            seen["max_turns"] = kwargs.get("max_turns")
+            yield "done"
+            return None
+
+        runner = NativeGPTChildAgentRunner(
+            client_factory=lambda config_name: StubToolClient([StubToolResponse("done")]),
+            tools_schema_factory=lambda: [],
+        )
+        job = WorkflowJob(
+            job_id="agent_custom_turns",
+            prompt="finish",
+            metadata={"runId": "wf_custom_turns", "options": {"maxTurns": 23}},
+        )
+
+        with mock.patch("genericagent.core.loop.agent_runner_loop", side_effect=recording_loop), mock.patch(
+            "genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]
+        ):
+            runner.start(job)
+            self.wait_for_result(runner, job)
+
+        self.assertEqual(23, seen["max_turns"])
+
+    def test_job_max_turns_rejects_invalid_values(self):
+        runner = NativeGPTChildAgentRunner()
+        for value in (0, -1, 1.5, "10", True, 81):
+            with self.subTest(value=value):
+                job = WorkflowJob(
+                    job_id="agent_invalid_turns",
+                    prompt="x",
+                    metadata={"options": {"maxTurns": value}},
+                )
+                with self.assertRaisesRegex(ValueError, "maxTurns"):
+                    runner._job_max_turns(job)
 
     def test_role_and_tool_profile_hints_do_not_filter_advertised_tools(self):
         tools = [

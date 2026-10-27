@@ -308,6 +308,42 @@ return {summary: result.summary}
             self.assertEqual("completed agent_1", outcome.result["summary"])
             self.assertEqual("workspace", runner.started_jobs[0].metadata["options"]["pathPolicy"])
 
+    def test_runtime_accepts_and_records_max_turns_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            script = """
+const result = await agent('inspect', {label: 'inspector', maxTurns: 55})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+            runner = WorkspaceRecordingRunner()
+
+            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(
+                run,
+                args={"workspacePath": str(workspace)},
+            )
+
+            self.assertEqual("completed agent_1", outcome.result["summary"])
+            self.assertEqual(55, runner.started_jobs[0].metadata["options"]["maxTurns"])
+
+    def test_runtime_rejects_invalid_max_turns_option(self):
+        for bad in (0, -1, 81, 1.5, "10", True):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                store = WorkflowStore(root=tmp)
+                workspace = Path(tmp) / "workspace"
+                workspace.mkdir()
+                script = (
+                    "const result = await agent('inspect', {maxTurns: __MAX_TURNS__});"
+                    " return {summary: result.summary};"
+                ).replace("__MAX_TURNS__", json.dumps(bad))
+                run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
+                runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+
+                with self.assertRaisesRegex(RuntimeError, "maxTurns"):
+                    runtime.run(run, args={"workspacePath": str(workspace)})
+
     def test_runtime_rejects_unknown_path_policy_option(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)

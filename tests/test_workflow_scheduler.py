@@ -939,6 +939,46 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertIn("missing required field: sources", retry_feedback["issues"])
         self.assertIn("missing required field: claims", retry_feedback["issues"])
 
+    def test_max_turns_retry_raises_budget_and_stops_at_attempt_limit(self):
+        class RecordingRunner:
+            def __init__(self):
+                self.max_turns = []
+
+            def start(self, job):
+                self.max_turns.append(job.metadata.get("options", {}).get("maxTurns"))
+
+            def poll(self, job):
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="failed",
+                    payload={
+                        "error": "max_turns_exceeded: child reached its budget",
+                        "code": "max_turns_exceeded",
+                    },
+                )
+
+            def cancel(self, job):
+                pass
+
+        runner = RecordingRunner()
+        scheduler, _store, _run = self.make_scheduler(runner=runner)
+        scheduler.register_agent(
+            prompt="inspect deeply",
+            label="review",
+            options={
+                "maxTurns": 20,
+                "retryPolicy": {
+                    "maxAttempts": 3,
+                    "retryableErrors": ["max_turns_exceeded"],
+                    "backoffMs": 0,
+                },
+            },
+        )
+
+        scheduler.run_all()
+
+        self.assertEqual([20, 60, 80], runner.max_turns)
+
     def test_max_turns_failure_bypasses_schema_validation(self):
         class MaxTurnsRunner:
             def start(self, job):

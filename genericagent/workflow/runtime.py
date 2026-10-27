@@ -16,7 +16,12 @@ from typing import Any
 
 from genericagent.workflow.determinism import determinism_error
 from genericagent.core.redaction import is_sensitive_key, redact_sensitive_text, sanitize
-from genericagent.workflow.child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
+from genericagent.workflow.child_agent import (
+    AgentResult,
+    FakeChildAgentRunner,
+    MAX_CHILD_MAX_TURNS,
+    NativeGPTChildAgentRunner,
+)
 from genericagent.workflow.models import WorkflowEvent, WorkflowJob, WorkflowRun, refresh_workflow_execution_metadata
 from genericagent.workflow.scheduler import AgentScheduler, SchedulerConfig, normalize_workflow_workspace
 from genericagent.workflow.store import WorkflowStore
@@ -492,6 +497,13 @@ class WorkflowRuntime:
                 raise RuntimeError(
                     "agent({isolation:'" + str(isolation) + "'}) is not available in this build"
                 )
+        max_turns = options.get("maxTurns")
+        if max_turns is not None:
+            if isinstance(max_turns, bool) or not isinstance(max_turns, int):
+                raise RuntimeError(f"agent({{maxTurns:...}}) must be an integer between 1 and {MAX_CHILD_MAX_TURNS}")
+            if max_turns < 1 or max_turns > MAX_CHILD_MAX_TURNS:
+                raise RuntimeError(f"agent({{maxTurns:...}}) must be an integer between 1 and {MAX_CHILD_MAX_TURNS}")
+            options = {**options, "maxTurns": max_turns}
         path_policy = options.get("pathPolicy")
         if path_policy is not None:
             normalized_path_policy = str(path_policy).strip().lower()

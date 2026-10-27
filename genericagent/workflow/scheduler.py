@@ -13,6 +13,7 @@ from genericagent.workflow.child_agent import (
     AgentResult,
     ChildAgentRunner,
     FakeChildAgentRunner,
+    MAX_CHILD_MAX_TURNS,
     bounded_structured_summary,
     loads_json_answer,
 )
@@ -1014,6 +1015,22 @@ class AgentScheduler:
         feedback = self._schema_retry_feedback(job, result)
         policy["lastError"] = redact_sensitive_text(error)
         policy["retryNotBefore"] = time.time() + (policy["backoffMs"] / 1000.0)
+        if "max_turns_exceeded" in text:
+            options = job.metadata.get("options") if isinstance(job.metadata.get("options"), dict) else {}
+            base = job.metadata.get("retryMaxTurnsBase")
+            if base is None:
+                base = options.get("maxTurns")
+                if base is None:
+                    base = MAX_CHILD_MAX_TURNS
+                base = max(1, min(MAX_CHILD_MAX_TURNS, int(base)))
+                job.metadata["retryMaxTurnsBase"] = base
+            # Derive every retry from the original base, never from the
+            # previous mutable value. The fixed +40 increase lets the retry
+            # absorb the long read phase, while the cap and maxAttempts keep
+            # total work bounded.
+            next_turns = min(MAX_CHILD_MAX_TURNS, int(base) + 40 * policy["attempts"])
+            job.metadata["retryMaxTurns"] = next_turns
+            job.metadata["options"] = {**options, "maxTurns": next_turns}
         job.metadata["retryPolicy"] = policy
         if feedback:
             job.metadata["retryFeedback"] = feedback
@@ -1030,6 +1047,7 @@ class AgentScheduler:
                 "maxAttempts": policy["maxAttempts"],
                 "error": policy["lastError"],
                 "backoffMs": policy["backoffMs"],
+                "maxTurns": job.metadata.get("retryMaxTurns", (job.metadata.get("options") or {}).get("maxTurns")),
             },
         )
         return True

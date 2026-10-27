@@ -86,7 +86,7 @@ export const meta = {
 
 Full options: `label`, `phase`, `schema`, `fallback`, `role`, `toolProfile` (planning hint),
 `pathPolicy`, `writeScope`, `deliverables`, `acceptanceChecks`, `capabilities`,
-`requiredTools`, `dependsOn`, `retryPolicy`, `isolation`, and
+`requiredTools`, `dependsOn`, `maxTurns`, `retryPolicy`, `isolation`, and
 `bashCommandClamp`. `pathPolicy` defaults to `"unrestricted"`; set it to
 `"workspace"` only when the job must be hard-confined to `workspacePath`.
 See `references/api.md`.

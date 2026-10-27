@@ -22,6 +22,9 @@ from genericagent.workflow.tool_profiles import (
 _PRUNE_INTERVAL_SECONDS = 600.0
 _last_prune_at = 0.0
 
+DEFAULT_CHILD_MAX_TURNS = 80
+MAX_CHILD_MAX_TURNS = 80
+
 
 def _isolated_workspace_base_root() -> Path:
     """Root directory that holds every private workflow-child workspace.
@@ -695,7 +698,7 @@ class NativeGPTChildAgentRunner:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         enable_tools: bool = True,
-        max_turns: int = 40,
+        max_turns: int = DEFAULT_CHILD_MAX_TURNS,
         telemetry_min_interval: float = 1.0,
     ):
         # config_name kept for factory call signature / legacy tests; not used for mykey resolve by default.
@@ -894,9 +897,20 @@ class NativeGPTChildAgentRunner:
             state["result"] = result
             state["done"] = True
 
+    def _job_max_turns(self, job) -> int:
+        metadata = job.metadata if isinstance(job.metadata, dict) else {}
+        options = metadata.get("options") if isinstance(metadata.get("options"), dict) else {}
+        value = options.get("maxTurns", self.max_turns)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"maxTurns must be an integer between 1 and {MAX_CHILD_MAX_TURNS}")
+        if value < 1 or value > MAX_CHILD_MAX_TURNS:
+            raise ValueError(f"maxTurns must be an integer between 1 and {MAX_CHILD_MAX_TURNS}")
+        return value
+
     def _run_tool_job(self, job, state: dict, client, prompt: str, transcript_events: list[dict], profile: str, version: str):
         from genericagent.core.loop import agent_runner_loop
         from genericagent.mcp.runtime import mcp_cancellation_scope
+        job_max_turns = self._job_max_turns(job)
         handler = self._build_handler(job, transcript_events, profile, version)
         live = LiveJobTelemetry(
             self._telemetry_sink,
@@ -937,7 +951,7 @@ class NativeGPTChildAgentRunner:
                 prompt,
                 handler,
                 tools_schema,
-                max_turns=self.max_turns,
+                max_turns=job_max_turns,
                 verbose=False,
                 initial_user_content=[{"type": "text", "text": prompt}],
             )
@@ -960,10 +974,10 @@ class NativeGPTChildAgentRunner:
                 transcript_events.append({
                     "type": "error",
                     "code": WorkflowChildMaxTurnsExceeded.code,
-                    "maxTurns": self.max_turns,
-                    "error": str(WorkflowChildMaxTurnsExceeded(self.max_turns)),
+                    "maxTurns": job_max_turns,
+                    "error": str(WorkflowChildMaxTurnsExceeded(job_max_turns)),
                 })
-                raise WorkflowChildMaxTurnsExceeded(self.max_turns)
+                raise WorkflowChildMaxTurnsExceeded(job_max_turns)
         finally:
             with self._lock:
                 if state.get("handler") is handler:

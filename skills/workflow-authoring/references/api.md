@@ -95,7 +95,8 @@ GA-supported options:
   `file_write`, `execute`.
 - `requiredTools` — array of concrete GA tool names the agent should use.
 - `dependsOn` — array of upstream labels.
-- `retryPolicy` — `{ maxAttempts: 1..3, backoffMs, retryableErrors }`.
+- `maxTurns` — maximum LLM/tool steps for this one child execution. Integer `1..80`; default `80`. It does not increase `retryPolicy.maxAttempts`.
+- `retryPolicy` — `{ maxAttempts: 1..3, backoffMs, retryableErrors }`. A `max_turns_exceeded` retry raises the single-attempt budget by 40 steps (capped at 80) and still stops at `maxAttempts`.
 - `isolation` — `"worktree"` or `"none"`. `"worktree"` runs the child in its own
   private directory instead of the shared workspace, so parallel writers cannot
   collide. Like CC's git worktree, that directory is a **working copy with the
