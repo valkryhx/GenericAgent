@@ -126,7 +126,26 @@
 - 若计划把某能力声明为 `mode: required` 且该能力在 preflight 时**一个可用工具都没有**，
   运行终态是 `degraded`（`capability_unavailable`），不是 `failed`、也不是静默通过。
 
-## 5. 不变量（写入 AGENTS.md）
+## 5. 2026-10-27 决策更新：工具不再按角色预先收窄
+
+后续真实运行 `wf_1b042df3e71c49a691ac5b5c4133d8c7` 暴露了上述档位方案的稳定性问题：
+`review` job 的 `toolProfile` 是 `planner`，但 scheduler 又把 evidence role 推断成
+`verify`；运行期 `verify` 允许 `code_run`，schema 又仍按另一个档位裁剪，最终
+capability snapshot、prompt 与实际 dispatch 互相矛盾。
+
+用户决定：**不再用不可靠的角色/档位推断事先拦住工具**。workflow child 默认继承
+当前权限并看到全部已连接工具；`role` 和 `toolProfile` 只保留为调度提示和审计元数据，
+不参与 `ToolPermissionPolicy` 的预拒绝，也不裁剪 tools schema。
+
+仍保留的硬边界：
+
+- workspace path ACL 继续限制 `file_read` / `file_write` / `file_patch` / `code_run`
+  的文件路径；
+- schema 继续在输出层校验；
+- `MAX_TURNS_EXCEEDED` 继续是明确失败，且必须原样上报为 `max_turns_exceeded`，
+  不能再被包装成 `schema_validation_failed`。
+
+## 6. 旧版不变量（历史记录，已被上节取代）
 
 1. workflow child 的工具边界由**宿主档位**决定，计划只声明档位名或能力类别，永不声明具体工具名。
 2. 档位是**减法**：只限制"能用哪一类工具"，不要求"必须调用某个工具"。

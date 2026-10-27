@@ -1053,43 +1053,136 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertEqual("success", skill_results[0]["data"]["status"])
             self.assertEqual("sample-skill", skill_results[0]["data"]["name"])
 
-    def test_native_tool_runner_read_only_denies_write_and_non_read_mcp_before_dispatch(self):
-        import os
-        import tempfile
-        from unittest import mock
+    def test_max_turns_result_is_reported_instead_of_becoming_a_schema_failure(self):
+        client = StubToolClient([])
+        job = WorkflowJob(
+            job_id="agent_max_turns",
+            prompt="keep reading",
+            metadata={
+                "runId": "wf_max_turns",
+                "options": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}},
+            },
+        )
+        runner = NativeGPTChildAgentRunner(
+            client_factory=lambda config_name: client,
+            tools_schema_factory=lambda: [],
+            max_turns=40,
+        )
 
+        def exhausted_loop(*_args, **_kwargs):
+            yield "Step 1 ..."
+            return {"result": "MAX_TURNS_EXCEEDED"}
+
+        with mock.patch("genericagent.core.loop.agent_runner_loop", side_effect=exhausted_loop), mock.patch(
+            "genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]
+        ):
+            runner.start(job)
+            result = self.wait_for_result(runner, job)
+
+        self.assertEqual("failed", result.status)
+        self.assertEqual("max_turns_exceeded", result.payload["code"])
+        self.assertEqual(40, result.payload["maxTurns"])
+        self.assertIn("max_turns_exceeded", result.payload["error"])
+        self.assertTrue(any(
+            event.get("type") == "error" and event.get("code") == "max_turns_exceeded"
+            for event in result.transcript_events
+        ))
+
+    def test_role_and_tool_profile_hints_do_not_filter_advertised_tools(self):
+        tools = [
+            {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
+            {"type": "function", "function": {"name": "file_write", "parameters": {"type": "object", "properties": {}}}},
+            {"type": "function", "function": {"name": "code_run", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        runner = NativeGPTChildAgentRunner(
+            enable_tools=True,
+            tools_schema_factory=lambda: tools,
+        )
+        job = WorkflowJob(
+            job_id="agent_review_full_tools",
+            prompt="review with every connected capability",
+            metadata={
+                "runId": "wf_full_tools",
+                "options": {
+                    "role": "review",
+                    "toolProfile": "planner",
+                    "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+                },
+            },
+        )
+
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+            advertised = runner._load_tools_schema(job)
+
+        names = {(tool.get("function") or {}).get("name") for tool in advertised}
+        self.assertIn("file_read", names)
+        self.assertIn("file_write", names)
+        self.assertIn("code_run", names)
+        self.assertIn("structured_output", names)
+        self.assertEqual("unrestricted", runner.last_job_tool_profile)
+        self.assertEqual("planner", runner.last_declared_tool_profile)
+
+    def test_real_default_schema_is_not_filtered_by_role_or_tool_profile(self):
+        runner = NativeGPTChildAgentRunner(enable_tools=True)
+        job = WorkflowJob(
+            job_id="agent_review_real_schema",
+            prompt="review using the real child schema",
+            metadata={
+                "runId": "wf_real_schema",
+                "options": {
+                    "role": "review",
+                    "toolProfile": "planner",
+                    "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+                },
+            },
+        )
+
+        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+            discovered = runner._discover_tools_schema()
+            runner._run_capability_schemas.clear()
+            advertised = runner._load_tools_schema(job)
+
+        discovered_names = {(tool.get("function") or {}).get("name") for tool in discovered}
+        advertised_names = {(tool.get("function") or {}).get("name") for tool in advertised}
+        self.assertTrue(discovered_names.issubset(advertised_names))
+        self.assertIn("file_read", advertised_names)
+        self.assertIn("file_write", advertised_names)
+        self.assertIn("code_run", advertised_names)
+        self.assertIn("spawn_agent", advertised_names)
+        self.assertIn("workflow", advertised_names)
+        self.assertIn("structured_output", advertised_names)
+
+    def test_role_hint_does_not_deny_file_write_before_dispatch(self):
         with tempfile.TemporaryDirectory() as td:
-            marker = os.path.join(td, "blocked.txt")
+            marker = Path(td) / "allowed.txt"
             client = StubToolClient([
-                StubToolResponse("<summary>try writes</summary>", [
-                    StubToolCall("file_write", {"path": marker, "content": "blocked"}, id="tool_write"),
-                    StubToolCall("mcp__deterministic__write_marker", {"marker": "blocked"}, id="tool_mcp_write"),
+                StubToolResponse("<summary>write</summary>", [
+                    StubToolCall("file_write", {"path": str(marker), "content": "allowed"}, id="tool_write"),
                 ]),
-                StubToolResponse("<summary>done</summary>denied safely"),
+                StubToolResponse("<summary>done</summary>write complete"),
             ])
             tools = [
                 {"type": "function", "function": {"name": "file_write", "parameters": {"type": "object", "properties": {}}}},
-                {"type": "function", "function": {"name": "mcp__deterministic__write_marker", "parameters": {"type": "object", "properties": {}}}},
             ]
             job = WorkflowJob(
-                job_id="agent_read_only",
-                prompt="try blocked writes",
-                metadata={"runId": "wf_test", "permissionProfile": "read_only", "permissionPolicyVersion": "read-only-v1"},
+                job_id="agent_review_write",
+                prompt="write evidence",
+                metadata={
+                    "runId": "wf_role_write",
+                    "workspacePath": td,
+                    "permissionProfile": "inherit-current-permissions",
+                    "options": {"role": "review", "toolProfile": "planner"},
+                },
             )
             runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-            with mock.patch("genericagent.mcp.runtime.call_mcp_tool") as call_mcp, mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
                 runner.start(job)
                 result = self.wait_for_result(runner, job)
 
             self.assertEqual("succeeded", result.status)
-            self.assertFalse(os.path.exists(marker))
-            call_mcp.assert_not_called()
-            self.assertIn("file_write", result.tool_summary["deniedTools"])
-            self.assertIn("mcp__deterministic__write_marker", result.tool_summary["deniedTools"])
-            self.assertEqual(2, result.tool_summary["denied"])
-            self.assertTrue(any(event.get("type") == "tool_denied" and event.get("toolName") == "file_write" for event in result.transcript_events))
-            self.assertTrue(any(event.get("type") == "tool_result" and event.get("data", {}).get("permission", {}).get("action") == "deny" for event in result.transcript_events))
+            self.assertEqual("allowed", marker.read_text(encoding="utf-8"))
+            self.assertNotIn("file_write", result.tool_summary.get("deniedTools", []))
 
     def test_child_tool_summary_reports_files_written_by_code_run(self):
         """The runner must report artifacts from the filesystem, not tool names.

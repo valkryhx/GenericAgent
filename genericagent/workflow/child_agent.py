@@ -15,8 +15,6 @@ from genericagent.workflow.models import AgentResult, DEFAULT_PERMISSION_PROFILE
 from genericagent.workflow.tool_profiles import (
     capability_coverage,
     effective_tool_profile,
-    filter_schema_for_denied,
-    filter_schema_for_profile,
     unavailable_capabilities,
 )
 
@@ -136,6 +134,16 @@ def prune_isolated_workspaces(
             if _guarded_remove_tree(Path(entry.path), root):
                 removed += 1
     return removed
+
+
+class WorkflowChildMaxTurnsExceeded(RuntimeError):
+    """The child exhausted its turn budget without producing an answer."""
+
+    code = "max_turns_exceeded"
+
+    def __init__(self, max_turns: int):
+        self.max_turns = int(max_turns)
+        super().__init__(f"max_turns_exceeded: child reached {self.max_turns} steps")
 
 
 class ChildAgentRunner(Protocol):
@@ -705,6 +713,7 @@ class NativeGPTChildAgentRunner:
         self.last_capability_snapshot: dict = {}
         self._run_capability_schemas: dict[str, tuple[list[dict], dict]] = {}
         self.last_job_tool_profile: str = ""
+        self.last_declared_tool_profile: str = ""
         self.last_llm_binding: dict = {}
         self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -853,11 +862,19 @@ class NativeGPTChildAgentRunner:
             )
         except Exception as exc:
             error = redact_sensitive_text(str(exc))
-            transcript_events.append({"type": "error", "error": error})
+            max_turns = isinstance(exc, WorkflowChildMaxTurnsExceeded)
+            if not max_turns:
+                transcript_events.append({"type": "error", "error": error})
+            payload = {"error": error}
+            if max_turns:
+                payload.update({
+                    "code": exc.code,
+                    "maxTurns": exc.max_turns,
+                })
             result = AgentResult(
                 job_id=job.job_id,
                 status="failed",
-                payload={"error": error},
+                payload=payload,
                 transcript_ref=transcript_ref,
                 token_usage=copy.deepcopy(getattr(executable, "last_usage_tokens", None) or getattr(session, "last_usage_tokens", None) or {}),
                 tool_summary=self._build_tool_summary(transcript_events),
@@ -913,7 +930,8 @@ class NativeGPTChildAgentRunner:
         workspace_before = snapshot_workspace(workspace_root)
         try:
             chunks = []
-            for chunk in agent_runner_loop(
+            loop_result = None
+            runner = agent_runner_loop(
                 client,
                 self._build_system_prompt(),
                 prompt,
@@ -922,12 +940,30 @@ class NativeGPTChildAgentRunner:
                 max_turns=self.max_turns,
                 verbose=False,
                 initial_user_content=[{"type": "text", "text": prompt}],
-            ):
+            )
+            while True:
+                try:
+                    chunk = next(runner)
+                except StopIteration as stop:
+                    loop_result = stop.value
+                    break
                 chunks.append(str(chunk))
                 with self._lock:
                     if state.get("cancelled"):
+                        runner.close()
                         break
             output = "".join(chunks)
+            if (
+                isinstance(loop_result, dict)
+                and loop_result.get("result") == "MAX_TURNS_EXCEEDED"
+            ):
+                transcript_events.append({
+                    "type": "error",
+                    "code": WorkflowChildMaxTurnsExceeded.code,
+                    "maxTurns": self.max_turns,
+                    "error": str(WorkflowChildMaxTurnsExceeded(self.max_turns)),
+                })
+                raise WorkflowChildMaxTurnsExceeded(self.max_turns)
         finally:
             with self._lock:
                 if state.get("handler") is handler:
@@ -995,7 +1031,13 @@ class NativeGPTChildAgentRunner:
             handler.hook_parent_agent = hook_parent
         run_id = str(job.metadata.get("runId") or "run")
         handler.tool_result_namespace = f"{run_id}/{job.job_id}"
-        handler.workflow_permission_policy = ToolPermissionPolicy(profile=profile, options=copy.deepcopy(job.metadata.get("options") or {}))
+        # Workflow children inherit full tool access. The policy remains an
+        # audit hook, but a model-declared role is not treated as a hard deny
+        # boundary; the workspace path ACL still constrains every filesystem op.
+        handler.workflow_permission_policy = ToolPermissionPolicy(
+            profile="inherit-current-permissions",
+            options=copy.deepcopy(job.metadata.get("options") or {}),
+        )
         # The child must be able to call ``structured_output`` for a schema job.
         handler.workflow_output_schema = _declared_schema(job.metadata.get("options") or {})
         handler.workflow_permission_context = {
@@ -1158,12 +1200,13 @@ class NativeGPTChildAgentRunner:
         }]
 
     def _load_tools_schema(self, job=None):
-        """Return the tool schema one job may see.
+        """Return the complete tool schema available to one workflow child.
 
-        The run keeps one unfiltered discovery snapshot (so every child in a run
-        sees the same environment); each job then gets the schema narrowed by its
-        host-owned tool profile. With no job this returns the unfiltered set,
-        which is what the capability preflight reports on.
+        The run keeps one unfiltered discovery snapshot so every child sees the
+        same environment. ``role`` / ``toolProfile`` remain visible in the
+        prompt and result metadata as planning hints, but no longer remove tools
+        from the schema: inferred capability rails were less reliable than the
+        agent's own judgment. The workspace path ACL remains the host boundary.
         """
 
         metadata = (getattr(job, "metadata", {}) or {}) if job is not None else {}
@@ -1178,9 +1221,10 @@ class NativeGPTChildAgentRunner:
                 self._run_capability_schemas[run_id] = (copy.deepcopy(tools), copy.deepcopy(self.last_capability_snapshot))
         if job is None:
             return tools
-        profile_name, denied = effective_tool_profile(metadata.get("options") or {})
-        self.last_job_tool_profile = profile_name
-        return self._with_structured_output_tool(filter_schema_for_denied(tools, denied), metadata.get("options") or {})
+        declared_profile, _denied = effective_tool_profile(metadata.get("options") or {})
+        self.last_job_tool_profile = "unrestricted"
+        self.last_declared_tool_profile = declared_profile
+        return self._with_structured_output_tool(tools, metadata.get("options") or {})
 
     def _build_system_prompt(self) -> str:
         """Compose the child prompt the same way the root agent does.
@@ -1498,11 +1542,11 @@ class NativeGPTChildAgentRunner:
             f"options: {options}",
             f"permissionProfile: {permission_profile}",
             f"permissionPolicyVersion: {permission_policy_version}",
-            f"toolProfile: {tool_profile}",
+            f"toolProfileHint: {tool_profile}",
             f"workspacePath: {self._child_cwd(job)}",
             "workspacePolicy: project-temp-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
-            "toolBoundary: the host already removed every tool outside this profile from your tool list; "
-            "work with what you have instead of trying to reconstruct a missing tool by hand.",
+            "toolBoundary: the full connected tool set is available. role/toolProfile are planning hints, not "
+            "hard capability limits; choose the safest effective tool for the assigned work.",
             (
                 "isolatedWorkspace: you are running in an isolated working copy at your workspacePath -- the same "
                 "relative file structure as the shared run workspace, but a separate copy. Files that already existed "

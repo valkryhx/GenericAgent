@@ -384,39 +384,38 @@ happens before the model can see the directory — the same reason Step-Code ren
 "can write" from `permission_profile`, so a role added later is annotated by behaviour rather than by a
 hand-maintained list.
 
-## Workflow tool boundary: host-owned profiles, never model-declared tool names
+## Workflow tool access: full connected surface, role/profile are hints
 
-A workflow child's tool boundary is decided by the **host**, not by the plan. The plan declares a
-named `toolProfile` (a closed set: `planner` = read-only + search, `research` = + write, `authoring` =
-everything, `verify` = read-only + execute, `*` = unrestricted) and/or capability classes
-(`web_search`, `web_fetch`, `file_read`, `file_write`, `execute`). `workflow_tool_profiles.py` resolves
-that to the child's actual tool schema and to a dispatch-time gate. When a plan names no profile, the
-host derives one from the declared role, exactly like `resolve_job_permission_profile` derives the
-`verify` permission profile for evidence roles.
+A workflow child receives the **complete connected tool schema**. `role` and
+`toolProfile` remain useful planning hints and audit metadata, but they do not
+pre-deny tools and do not narrow the schema. Inferring hard capability boundaries
+from model-authored roles produced contradictory runs (a `review` + `planner` job
+was resolved as `verify`, granted `code_run`, while its advertised schema came
+from a different profile), so the unreliable rail was removed.
 
 Rules that must not regress:
 
-1. **Never let the model name a concrete tool.** `requiredTools`/`requiredToolEvidence` are parsed only
-   for backward compatibility with older saved plans; deterministic plans and the planner prompt must
-   use `capabilities` + `requiredCapabilityEvidence`. Guessing `mcp__tavily__tavily_search` from the
-   substring "tavily" in the task text is exactly the bug this replaces.
-2. **Profiles are subtraction only.** They restrict which *classes* of tool a child may use; they never
-   require the model to call a specific tool. This mirrors Step-Code's `WORKFLOW_TOOL_PROFILES` and
-   Codex's `ToolPolicy.allowed_tools` ("a startup ceiling on tool selection ... only restricts tools").
-3. **Orchestration tools are always denied to workflow children** (`spawn_agent`, `wait_agent`, ...).
-   They used to leak in through `assets/tools_schema.json`; the profile filter is now the single gate.
-4. **A missing capability degrades, it never kills the run and never passes silently.** MCP discovery
-   failures are reported in the capability snapshot (`capabilityCoverage` / `unavailableCapabilities`),
-   surfaced to the child prompt, and recorded as a `capability_unavailable` workflow issue so the run
-   terminates `degraded`. Codex emits `McpStartupUpdateEvent` with a reason and keeps the servers that
-   did start; Step-Code simply never constructs the missing tool. GA's old
-   `raise RuntimeError("capability_unavailable: ...")` fail-fast turned one dead search server into a
-   10-minute scraping loop.
-5. **Capability classes are predicates, not name lists.** `tool_capabilities()` classifies by behaviour
-   so a tool added later lands in the right class; the same lesson as the artifact-observation fix.
+1. **Do not derive a restrictive `permissionProfile` from `role`.** The scheduler
+   keeps an explicitly configured run profile; otherwise the child inherits the
+   caller's current permissions. `role` never silently changes `read_only` /
+   `verify`.
+2. **Do not filter workflow-child tools by `toolProfile`.** `_load_tools_schema`
+   returns the discovered schema unchanged (plus `structured_output` for a schema
+   job). Keep the declared profile in audit metadata, not as an enforcement gate.
+3. **Workspace path ACL remains enforced.** Full tool access does not permit
+   arbitrary filesystem targets: `workflow/path_acl.py` still constrains
+   `file_read`, `file_write`, `file_patch`, and `code_run` to `workspacePath`.
+4. **Schema validation and turn-budget failures stay distinct.** If
+   `agent_runner_loop` returns `{"result": "MAX_TURNS_EXCEEDED"}`, the child must
+   fail with `code: max_turns_exceeded`; it must never fall through to
+   `_build_success_payload` and be reported as `schema_validation_failed`.
+5. **Capability discovery is reported, not used to pre-reject.** MCP discovery
+   failures remain visible in `capabilityCoverage` / `unavailableCapabilities`;
+   the agent chooses among the tools that actually connected.
 
-Evidence: `docs/20261009-workflow-tool-profile-capability-boundary.md`. Regression tests:
-`tests/test_workflow_capability_preflight.py`, `tests/test_workflow_planner_execution_intent.py`.
+Evidence: `docs/20261009-workflow-tool-profile-capability-boundary.md` §5.
+Regression tests: `tests/test_workflow_child_agent.py`,
+`tests/test_workflow_scheduler.py`, `tests/test_workflow_permissions.py`.
 
 ## Workflow artifact observation and run workspaces
 

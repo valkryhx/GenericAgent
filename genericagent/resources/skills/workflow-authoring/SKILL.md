@@ -84,7 +84,7 @@ export const meta = {
 - `runPythonUnittest(...)` and `repairAndRetest(...)` are GA-specific host test
   gates. Read `references/testing.md` before using them.
 
-Full options: `label`, `phase`, `schema`, `fallback`, `role`, `toolProfile`,
+Full options: `label`, `phase`, `schema`, `fallback`, `role`, `toolProfile` (planning hint),
 `writeScope`, `deliverables`, `acceptanceChecks`, `capabilities`,
 `requiredTools`, `dependsOn`, `retryPolicy`, `isolation`, and
 `bashCommandClamp`. See `references/api.md`.

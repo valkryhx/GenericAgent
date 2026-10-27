@@ -210,17 +210,16 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual("agent_1", entry["jobId"])
         self.assertIn("inspect repo", entry["promptPreview"])
 
-    def test_evidence_roles_get_host_enforced_non_mutating_profile(self):
+    def test_roles_are_hints_and_do_not_derive_a_restrictive_permission_profile(self):
         scheduler, _store, _run = self.make_scheduler()
 
         reviewer = scheduler.register_agent(prompt="review it", label="Review", options={"role": "review"})
         verifier = scheduler.register_agent(prompt="verify it", label="Verify", options={"role": "verification"})
         implementer = scheduler.register_agent(prompt="build it", label="Build", options={"role": "implementation"})
 
-        self.assertEqual("verify", reviewer.metadata["permissionProfile"])
-        self.assertEqual("verify", verifier.metadata["permissionProfile"])
-        self.assertEqual("inherit-current-permissions", implementer.metadata["permissionProfile"])
-        self.assertEqual("verify", verifier.metadata["cacheKey"]["permissionProfile"])
+        for job in (reviewer, verifier, implementer):
+            self.assertEqual("inherit-current-permissions", job.metadata["permissionProfile"])
+            self.assertEqual("inherit-current-permissions", job.metadata["cacheKey"]["permissionProfile"])
 
     def test_verify_profile_never_loosens_a_read_only_run(self):
         scheduler, _store, _run = self.make_scheduler(
@@ -469,7 +468,7 @@ class WorkflowSchedulerTest(unittest.TestCase):
                 prompt="verify", label="verify-result",
                 options={"role": "verification", "dependsOn": ["execute-task"]},
             )
-            self.assertEqual("verify", verifier.metadata["permissionProfile"])
+            self.assertEqual("inherit-current-permissions", verifier.metadata["permissionProfile"])
 
             scheduler._record_observed_artifacts(producer, AgentResult(
                 job_id=producer.job_id, status="succeeded", payload={},
@@ -939,6 +938,42 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertIsInstance(retry_feedback, dict)
         self.assertIn("missing required field: sources", retry_feedback["issues"])
         self.assertIn("missing required field: claims", retry_feedback["issues"])
+
+    def test_max_turns_failure_bypasses_schema_validation(self):
+        class MaxTurnsRunner:
+            def start(self, job):
+                pass
+
+            def poll(self, job):
+                return AgentResult(
+                    job_id=job.job_id,
+                    status="failed",
+                    payload={
+                        "error": "max_turns_exceeded: child reached 40 steps",
+                        "code": "max_turns_exceeded",
+                        "maxTurns": 40,
+                    },
+                )
+
+            def cancel(self, job):
+                pass
+
+        scheduler, store, run = self.make_scheduler(runner=MaxTurnsRunner())
+        job = scheduler.register_agent(
+            prompt="inspect deeply",
+            label="review",
+            options={"schema": {"type": "object", "required": ["axis"]}},
+        )
+
+        scheduler.run_all()
+
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("failed", loaded.jobs[0].status)
+        self.assertIn("max_turns_exceeded", loaded.jobs[0].error)
+        self.assertEqual("max_turns_exceeded", loaded.jobs[0].metadata["result"]["code"])
+        self.assertNotIn("schemaValidation", loaded.jobs[0].metadata)
+        codes = [issue["code"] for issue in loaded.metadata.get("workflowIssues") or []]
+        self.assertNotIn("schema_validation_failed", codes)
 
     def test_schema_issue_is_cleared_when_a_retry_succeeds(self):
         """A recovered schema miss must not leave the run degraded.

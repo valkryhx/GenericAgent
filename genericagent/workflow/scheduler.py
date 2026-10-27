@@ -151,22 +151,16 @@ def _normalize_parallel_batch(value) -> int | None:
 
 
 def resolve_job_permission_profile(run_profile: str, options: dict | None) -> str:
-    """Pick the effective tool policy for one child agent.
+    """Return the host permission profile for one child agent.
 
-    The plan only *declares* intent; the host still enforces the capability. A
-    packet that only judges another packet's work must not be able to author the
-    artifact it judges, so declared evidence roles get the non-mutating `verify`
-    profile even when the run default is permissive. A run-level read-only
-    profile is already strictly stronger, so it is never loosened.
+    ``role`` and ``toolProfile`` are planning hints and audit metadata, not
+    reliable capability boundaries. Inferring restrictions from a model-authored
+    role made the child's actual tool surface disagree with its schema and
+    caused avoidable `tool_denied` loops. Keep an explicitly configured run
+    profile, otherwise inherit the caller's current permissions unchanged.
     """
 
-    from genericagent.workflow.permissions import EVIDENCE_ROLES, READ_ONLY, VERIFY
-
-    base = str(run_profile or "").strip() or "inherit-current-permissions"
-    role = str((options or {}).get("role") or "").strip().lower()
-    if role in EVIDENCE_ROLES and base not in {READ_ONLY, VERIFY}:
-        return VERIFY
-    return base
+    return str(run_profile or "").strip() or "inherit-current-permissions"
 
 
 def validate_agent_payload_against_schema(payload, schema) -> list[str]:
