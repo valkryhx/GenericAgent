@@ -184,6 +184,66 @@ test('applyBridgeEvent clears token usage when history replacement starts a new 
   assert.equal(state.tokenUsage, null)
 })
 
+test('applyBridgeEvent keeps workflow state for history replacement outside /new', () => {
+  const run = { runId: 'wf_resume_visible', sessionId: 's1', status: 'succeeded' as const }
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'workflow_run', run })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_detail',
+    run,
+    script: 'return 1',
+    events: [],
+    progress: { runId: run.runId, sessionId: run.sessionId, status: run.status, workflowProgress: [] },
+  })
+  state = applyBridgeEvent(state, { type: 'history_replace', messages: [{ role: 'user', text: 'resumed' }] })
+
+  assert.equal(state.workflows[0]?.runId, run.runId)
+  assert.equal(state.workflowDetails[run.runId]?.script, 'return 1')
+})
+
+test('applyBridgeEvent clears workflow UI state when history replacement starts a new session', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_run',
+    run: {
+      runId: 'wf_old_session',
+      sessionId: 'session_old',
+      status: 'succeeded',
+      metadata: { workflowName: 'review-project-path-refactor', integrationStatus: 'degraded', finalAuditStatus: 'degraded' },
+      jobs: [{ jobId: 'agent_1', status: 'succeeded' }],
+    },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_detail',
+    run: { runId: 'wf_old_session', sessionId: 'session_old', status: 'succeeded' },
+    script: 'return 1',
+    events: [],
+    progress: {
+      runId: 'wf_old_session',
+      sessionId: 'session_old',
+      status: 'succeeded',
+      workflowProgress: [{ jobId: 'agent_1', state: 'succeeded' }],
+    },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_final',
+    runId: 'wf_old_session',
+    result: { ok: true },
+  })
+  state = applyBridgeEvent(state, {
+    type: 'workflow_live',
+    runId: 'wf_old_session',
+    jobs: [{ jobId: 'agent_1', turn: 3 }],
+  })
+
+  state = applyBridgeEvent(state, { type: 'history_replace', messages: [], resetSession: true })
+
+  assert.deepEqual(state.workflows, [])
+  assert.deepEqual(state.workflowDetails, {})
+  assert.deepEqual(state.workflowResults, {})
+  assert.deepEqual(state.liveTelemetry, {})
+})
+
 test('applyBridgeEvent compact replacement keeps only compact result rows', () => {
   let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
   // 成功路径只发 history_replace（不再先 local_command_output），避免 Static 重复。

@@ -1314,6 +1314,85 @@ test('App clears the previous completion summary and token usage after /new', as
   }
 })
 
+test('App hides the previous workflow status after /new', async () => {
+  let emit: ((event: BridgeEvent) => void) | null = null
+  const commands: BridgeCommand[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    emit = onEvent
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return {
+      send(command) {
+        commands.push(command)
+        if (command.type !== 'new_session') return
+        setTimeout(() => {
+          onEvent({ type: 'history_replace', messages: [], resetSession: true })
+          onEvent({ type: 'system', text: 'Started a new session.' })
+          onEvent({ type: 'status', status: 'idle' })
+        }, 0)
+      },
+      stop() {},
+    }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    const eventSink = emit as unknown as (event: BridgeEvent) => void
+    const run = {
+      runId: 'wf_old_session',
+      sessionId: 'session_old',
+      status: 'degraded' as const,
+      metadata: {
+        workflowName: 'review-project-path-refactor',
+        integrationStatus: 'degraded',
+        finalAuditStatus: 'degraded',
+      },
+      jobs: [
+        { jobId: 'agent_1', status: 'succeeded' as const, metadata: { label: 'audit' } },
+        { jobId: 'agent_2', status: 'succeeded' as const, metadata: { label: 'integration' } },
+        { jobId: 'agent_3', status: 'succeeded' as const, metadata: { label: 'review' } },
+        { jobId: 'agent_4', status: 'succeeded' as const, metadata: { label: 'test' } },
+        { jobId: 'agent_5', status: 'succeeded' as const, metadata: { label: 'verify' } },
+      ],
+    }
+    eventSink({ type: 'workflow_run', run })
+
+    const before = await waitForFrame(stdout, frame => frame.includes('review-project-path-refactor'))
+    assert.match(before, /5\/5 agents done/)
+    assert.match(before, /! review-project-path-refactor/)
+
+    const outputStart = stdout.chunks.length
+    stdin.send('/new')
+    await delay(20)
+    stdin.send('\r')
+    await waitForOutput(stdout, output => output.includes('Started a new session.'))
+    await delay(50)
+
+    assert.ok(commands.some(command => command.type === 'new_session'))
+    const latestFrame = completeFrames(stdout, outputStart).at(-1) ?? ''
+    assert.doesNotMatch(latestFrame, /review-project-path-refactor/)
+    assert.doesNotMatch(latestFrame, /agents done|integration degraded|audit degraded/)
+  } finally {
+    instance.unmount()
+  }
+})
+
 test('App skips raw-mode setup when stdin is not an interactive TTY', async () => {
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()

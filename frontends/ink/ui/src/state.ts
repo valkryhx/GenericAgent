@@ -210,9 +210,19 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     return { ...state, messages: [], error: null }
   }
   if (event.type === 'history_replace') {
+    // ``/new`` starts a new backend session. Workflow runs are session-scoped UI
+    // state: keeping them would leave the old terminal summary in the status bar
+    // and let Enter open a panel whose owning session no longer exists. Resume
+    // and compact also use history_replace but must retain the current run view.
+    const startsNewSession = Boolean(event.resetSession)
     return {
       ...state,
-      tokenUsage: event.resetSession ? null : state.tokenUsage,
+      tokenUsage: startsNewSession ? null : state.tokenUsage,
+      workflows: startsNewSession ? [] : state.workflows,
+      workflowEvents: startsNewSession ? [] : state.workflowEvents,
+      workflowDetails: startsNewSession ? {} : state.workflowDetails,
+      workflowResults: startsNewSession ? {} : state.workflowResults,
+      liveTelemetry: startsNewSession ? {} : state.liveTelemetry,
       messages: event.messages.map((message, index) => {
         let id = `h-${index}`
         if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`
