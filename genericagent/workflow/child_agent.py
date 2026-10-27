@@ -998,6 +998,8 @@ class NativeGPTChildAgentRunner:
     def _build_handler(self, job, transcript_events: list[dict], profile: str, version: str):
         from genericagent.core.handler import GenericAgentHandler
         from genericagent.workflow.permissions import ToolPermissionPolicy
+        path_policy = self._path_policy(job)
+        workspace_root = self._child_cwd(job) if path_policy == "workspace" else None
         parent = SimpleNamespace(
             task_dir=self._child_cwd(job),
             verbose=False,
@@ -1007,7 +1009,7 @@ class NativeGPTChildAgentRunner:
         leader = getattr(self, 'hook_agent', None)
         runtime = getattr(leader, 'hook_runtime', None) if leader is not None else None
         if runtime is None:
-            handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+            handler = GenericAgentHandler(parent, cwd=parent.task_dir, workspace_root=workspace_root)
             handler.hook_runtime = None
         else:
             run_id = str(job.metadata.get("runId") or "run")
@@ -1026,14 +1028,14 @@ class NativeGPTChildAgentRunner:
                 agent_type='workflow_child',
                 is_subagent=True,
             )
-            handler = GenericAgentHandler(hook_parent, cwd=parent.task_dir, workspace_root=parent.task_dir)
+            handler = GenericAgentHandler(hook_parent, cwd=parent.task_dir, workspace_root=workspace_root)
             handler.hook_runtime = runtime
             handler.hook_parent_agent = hook_parent
         run_id = str(job.metadata.get("runId") or "run")
         handler.tool_result_namespace = f"{run_id}/{job.job_id}"
         # Workflow children inherit full tool access. The policy remains an
         # audit hook, but a model-declared role is not treated as a hard deny
-        # boundary; the workspace path ACL still constrains every filesystem op.
+        # boundary; pathPolicy is the only explicit filesystem confinement.
         handler.workflow_permission_policy = ToolPermissionPolicy(
             profile="inherit-current-permissions",
             options=copy.deepcopy(job.metadata.get("options") or {}),
@@ -1521,6 +1523,22 @@ class NativeGPTChildAgentRunner:
     def _permission_policy_version(self, job) -> str:
         return job.metadata.get("permissionPolicyVersion") or DEFAULT_PERMISSION_POLICY_VERSION
 
+    @staticmethod
+    def _path_policy(job) -> str:
+        """Return whether filesystem tools are workspace-confined.
+
+        ``workspacePath`` remains the child cwd and artifact root. Path access is
+        unrestricted by default; callers that need a hard sandbox must opt in
+        with ``agent(..., {pathPolicy: 'workspace'})``.
+        """
+
+        options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        options = options if isinstance(options, dict) else {}
+        value = str(options.get("pathPolicy") or "unrestricted").strip().lower()
+        if value not in {"unrestricted", "workspace"}:
+            raise ValueError("pathPolicy must be 'unrestricted' or 'workspace'")
+        return value
+
     def _build_prompt(self, job) -> str:
         run_id = job.metadata.get("runId") or job.metadata.get("run_id") or ""
         label = job.metadata.get("label") or ""
@@ -1531,6 +1549,13 @@ class NativeGPTChildAgentRunner:
         role = options.get("role") or ""
         role_instructions = ROLE_INSTRUCTIONS.get(str(role), "")
         dependency_handoff = job.metadata.get("dependencyHandoff") or []
+        path_policy = self._path_policy(job)
+        workspace_policy = (
+            "workspacePolicy: workspace; all file/code paths are hard-limited to workspacePath."
+            if path_policy == "workspace"
+            else "workspacePolicy: unrestricted; workspacePath is the default cwd and artifact root, "
+            "but file/code tools may access other paths."
+        )
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
             f"runId: {run_id}",
@@ -1544,7 +1569,8 @@ class NativeGPTChildAgentRunner:
             f"permissionPolicyVersion: {permission_policy_version}",
             f"toolProfileHint: {tool_profile}",
             f"workspacePath: {self._child_cwd(job)}",
-            "workspacePolicy: project-temp-workspace-write-v1; all file/code paths are hard-limited to workspacePath.",
+            f"pathPolicy: {path_policy}",
+            workspace_policy,
             "toolBoundary: the full connected tool set is available. role/toolProfile are planning hints, not "
             "hard capability limits; choose the safest effective tool for the assigned work.",
             (

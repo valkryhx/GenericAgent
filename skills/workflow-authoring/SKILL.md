@@ -85,9 +85,11 @@ export const meta = {
   gates. Read `references/testing.md` before using them.
 
 Full options: `label`, `phase`, `schema`, `fallback`, `role`, `toolProfile` (planning hint),
-`writeScope`, `deliverables`, `acceptanceChecks`, `capabilities`,
+`pathPolicy`, `writeScope`, `deliverables`, `acceptanceChecks`, `capabilities`,
 `requiredTools`, `dependsOn`, `retryPolicy`, `isolation`, and
-`bashCommandClamp`. See `references/api.md`.
+`bashCommandClamp`. `pathPolicy` defaults to `"unrestricted"`; set it to
+`"workspace"` only when the job must be hard-confined to `workspacePath`.
+See `references/api.md`.
 
 ## Common pitfalls
 

@@ -281,6 +281,23 @@ def resolve_workspace_child(raw: str | os.PathLike[str], root: Path) -> Path:
     return target
 
 
-def workspace_metadata(root: Path) -> dict[str, str]:
+def workspace_metadata(root: Path, path_policy: str = "unrestricted") -> dict[str, str]:
+    """Describe the run workspace without implying an access boundary.
+
+    ``workspacePath`` is always the default cwd and artifact root. Access is
+    unrestricted unless the caller explicitly selects the workspace policy.
+    """
+
     workspace = resolve_workspace_root(root)
-    return {"workspacePath": str(workspace), "workspacePolicy": "project-temp-workspace-write-v1"}
+    normalized = str(path_policy or "unrestricted").strip().lower()
+    if normalized not in {"unrestricted", "workspace"}:
+        raise WorkspacePathError("pathPolicy must be 'unrestricted' or 'workspace'")
+    return {
+        "workspacePath": str(workspace),
+        "pathPolicy": normalized,
+        "workspacePolicy": (
+            "workspace"
+            if normalized == "workspace"
+            else "unrestricted"
+        ),
+    }

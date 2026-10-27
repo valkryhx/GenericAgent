@@ -139,7 +139,7 @@ capability snapshot、prompt 与实际 dispatch 互相矛盾。
 
 仍保留的硬边界：
 
-- workspace path ACL 继续限制 `file_read` / `file_write` / `file_patch` / `code_run`
+- 路径策略默认 `pathPolicy: "unrestricted"`；只有显式 `pathPolicy: "workspace"` 时，workspace path ACL 才限制 `file_read` / `file_write` / `file_patch` / `code_run`
   的文件路径；
 - schema 继续在输出层校验；
 - `MAX_TURNS_EXCEEDED` 继续是明确失败，且必须原样上报为 `max_turns_exceeded`，

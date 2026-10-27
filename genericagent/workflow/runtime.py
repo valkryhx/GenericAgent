@@ -492,6 +492,14 @@ class WorkflowRuntime:
                 raise RuntimeError(
                     "agent({isolation:'" + str(isolation) + "'}) is not available in this build"
                 )
+        path_policy = options.get("pathPolicy")
+        if path_policy is not None:
+            normalized_path_policy = str(path_policy).strip().lower()
+            if normalized_path_policy not in {"unrestricted", "workspace"}:
+                raise RuntimeError(
+                    "agent({pathPolicy:...}) must be 'unrestricted' or 'workspace'"
+                )
+            options = {**options, "pathPolicy": normalized_path_policy}
         # The worker marks agent() calls made inside parallel()/pipeline() with
         # the batch size; the scheduler uses it to implicitly isolate parallel
         # writers (see docs/20261013-ga-workflow-隐式默认隔离方案.md).

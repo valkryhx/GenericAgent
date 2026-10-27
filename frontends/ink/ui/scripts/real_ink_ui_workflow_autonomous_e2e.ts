@@ -407,7 +407,7 @@ async function main(): Promise<number> {
     const resolvedInfo = resolveArtifact(resolvedWorkspace, artifact)
     const resolvedArtifact = resolvedInfo.resolved
     assert.ok(resolvedArtifact.startsWith(`${resolvedWorkspace}${path.sep}`), 'artifact path escaped workspace')
-    assert.equal(String(run?.metadata?.workspacePolicy || ''), 'project-temp-workspace-write-v1', 'workspace policy metadata missing')
+    assert.equal(String(run?.metadata?.pathPolicy || ''), 'unrestricted', 'path policy metadata missing')
     let artifactBytes: number
     if (/\.docx$/i.test(artifact)) {
       const docx = await readFile(resolvedArtifact)

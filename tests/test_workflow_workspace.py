@@ -85,7 +85,12 @@ class WorkflowWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = workspace_metadata(Path(tmp))
             self.assertEqual(str(Path(tmp).resolve()), metadata["workspacePath"])
-            self.assertEqual("project-temp-workspace-write-v1", metadata["workspacePolicy"])
+            self.assertEqual("unrestricted", metadata["pathPolicy"])
+            self.assertEqual("unrestricted", metadata["workspacePolicy"])
+
+            explicit = workspace_metadata(Path(tmp), path_policy="workspace")
+            self.assertEqual("workspace", explicit["pathPolicy"])
+            self.assertEqual("workspace", explicit["workspacePolicy"])
 
     def test_run_workspace_is_a_sibling_directory_under_the_base_root(self):
         with tempfile.TemporaryDirectory() as tmp:

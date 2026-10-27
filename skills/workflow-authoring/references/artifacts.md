@@ -3,6 +3,13 @@
 Use values as the default handoff. Files are for deliverables, not for passing
 intermediate state between agents.
 
+## Path access
+
+`workspacePath` is the child cwd and artifact root. Path access is unrestricted
+by default; use `agent(..., { pathPolicy: "workspace" })` when a job needs a
+hard workspace boundary. `isolation: "worktree"` still changes the cwd to a
+private working copy even when path access is unrestricted.
+
 ## Pass values, don't share files
 
 - Analysis, research, review, and verification stages should return structured

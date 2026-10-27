@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -221,6 +222,40 @@ print('suffix=' + ''.join(p.suffixes))
             self.assertIn("guarded_write_ok", result["stdout"])
             self.assertNotIn("ModuleNotFoundError", result["stdout"])
             self.assertEqual("ok", (Path(workspace) / "inside.txt").read_text())
+
+    def test_unrestricted_python_clears_inherited_workspace_guard(self):
+        popen_kwargs = {}
+
+        class Proc:
+            stdout = None
+            def poll(self):
+                return 0
+            def kill(self):
+                pass
+
+        def fake_popen(_cmd, **kwargs):
+            popen_kwargs.update(kwargs)
+            return Proc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            inherited = {
+                "GA_WORKFLOW_WORKSPACE_ROOT": str(Path(tmp) / "old-workspace"),
+                "GA_WORKFLOW_BASH_CLAMP": '["python"]',
+                "GA_WORKFLOW_GUARD_STRICT": "1",
+            }
+            with patch.dict(os.environ, inherited, clear=False):
+                with patch.object(ga.subprocess, "Popen", side_effect=fake_popen):
+                    result = exhaust_generator(
+                        code_run('print("test")', "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd))
+                    )
+
+        self.assertEqual("success", result["status"])
+        child_env = popen_kwargs["env"]
+        self.assertNotIn("GA_WORKFLOW_WORKSPACE_ROOT", child_env)
+        self.assertNotIn("GA_WORKFLOW_BASH_CLAMP", child_env)
+        self.assertNotIn("GA_WORKFLOW_GUARD_STRICT", child_env)
 
     def test_workspace_guard_blocks_writes_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:

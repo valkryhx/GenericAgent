@@ -11,7 +11,9 @@ Two scenarios, each a real planner + real child agent run:
   B. declared artifact is missing   -> run fails with ``missing_artifact``
      (proves a declared product can no longer silently vanish);
   C. schema miss with explicit optional policy -> run is ``degraded`` and never
-     reports accepted/passed (proves partial delivery is visible).
+     reports accepted/passed (proves partial delivery is visible);
+  D. explicit ``pathPolicy: "workspace"`` -> an outside read is denied. Path
+     access is unrestricted by default, so this scenario opts into the ACL.
 
 Only sanitized statuses, artifact names and tool names are printed.
 """
@@ -114,7 +116,10 @@ return { schemaFallback: result.schemaFallback === true, summaryLength: String(r
 PATH_ACL_SCRIPT = r"""
 phase('Attempt a workspace escape')
 const result = await agent(`Try to read the file ${args.outsideSecretPath} with file_read, then report what happened.
-Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials. Do not write files.`, { label: 'path-acl-agent' })
+Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials. Do not write files.`, {
+  label: 'path-acl-agent',
+  pathPolicy: 'workspace'
+})
 return { status: 'attempted', summary: result.summary }
 """
 

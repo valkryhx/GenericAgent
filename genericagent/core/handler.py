@@ -110,6 +110,13 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         child_env = None
         if workspace_root or code_type in ["python", "py"]:
             child_env = os.environ.copy()
+            if not workspace_root:
+                # The parent may itself be a workflow child whose inherited
+                # environment still carries the guard. An unrestricted child
+                # must not re-enable that old workspace boundary.
+                child_env.pop("GA_WORKFLOW_WORKSPACE_ROOT", None)
+                child_env.pop("GA_WORKFLOW_BASH_CLAMP", None)
+                child_env.pop("GA_WORKFLOW_GUARD_STRICT", None)
             child_env["GA_CODE_RUN_ROOT"] = str(paths.PROJECT_ROOT)
             child_env["GA_MEMORY_DIR"] = str(paths.MEMORY_DIR)
             child_env["GA_PROJECT_ROOT"] = str(workspace_root or os.environ.get("GA_PROJECT_ROOT") or paths.PROJECT_ROOT)

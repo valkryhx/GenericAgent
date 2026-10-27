@@ -223,6 +223,62 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertEqual(str(workspace.resolve()), runner._child_cwd(job))
             self.assertIsNone(runner._job_isolation(job))
 
+    def test_build_handler_defaults_to_unrestricted_paths(self):
+        runner = NativeGPTChildAgentRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_unrestricted",
+                prompt="inspect the repository",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                },
+            )
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
+                prompt = runner._build_prompt(job)
+
+            self.assertIsNone(handler.workspace_root)
+            self.assertIn("pathPolicy: unrestricted", prompt)
+            self.assertIn("workspacePath is the default cwd and artifact root", prompt)
+
+    def test_build_handler_workspace_policy_keeps_hard_acl(self):
+        runner = NativeGPTChildAgentRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_workspace_acl",
+                prompt="inspect only the workspace",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "options": {"pathPolicy": "workspace"},
+                },
+            )
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                handler = runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
+                prompt = runner._build_prompt(job)
+
+            self.assertEqual(str(workspace.resolve()), handler.workspace_root)
+            self.assertIn("pathPolicy: workspace", prompt)
+            self.assertIn("hard-limited to workspacePath", prompt)
+
+    def test_build_handler_rejects_unknown_path_policy(self):
+        runner = NativeGPTChildAgentRunner()
+        job = WorkflowJob(
+            job_id="agent_bad_path_policy",
+            prompt="x",
+            metadata={"runId": "wf_test", "options": {"pathPolicy": "loose"}},
+        )
+
+        with self.assertRaisesRegex(ValueError, "pathPolicy"):
+            runner._build_handler(job, [], "inherit-current-permissions", "inherit-current-v1")
+
     def test_build_handler_carries_bash_command_clamp(self):
         runner = NativeGPTChildAgentRunner()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1017,6 +1073,115 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
         self.assertEqual(0, result.tool_summary["denied"])
 
+    def test_default_child_can_read_a_file_outside_workspace_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            outside = Path(td) / "outside.txt"
+            outside.write_text("OUTSIDE_READ_OK", encoding="utf-8")
+            client = StubToolClient([
+                StubToolResponse("<summary>read outside</summary>", [
+                    StubToolCall("file_read", {"path": str(outside), "show_linenos": False}),
+                ]),
+                StubToolResponse("<summary>done</summary>read outside complete"),
+            ])
+            job = WorkflowJob(
+                job_id="agent_unrestricted_read",
+                prompt="read a file outside the workspace",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                },
+            )
+            tools = [{"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}]
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            results = [
+                e for e in result.transcript_events
+                if e.get("type") == "tool_result" and e.get("toolName") == "file_read"
+            ]
+            self.assertTrue(results)
+            self.assertNotIn("path_acl", results[0]["data"])
+            self.assertIn("OUTSIDE_READ_OK", str(results[0]["data"]))
+            denied = [e for e in result.transcript_events if e.get("type") == "tool_denied" and e.get("toolName") == "file_read"]
+            self.assertEqual([], denied)
+
+    def test_default_child_can_read_the_genericagent_repository(self):
+        repo_file = Path(__file__).resolve().parents[1] / "genericagent/workflow/child_agent.py"
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            client = StubToolClient([
+                StubToolResponse("<summary>read repo</summary>", [
+                    StubToolCall("file_read", {"path": str(repo_file), "show_linenos": False, "count": 3}),
+                ]),
+                StubToolResponse("<summary>done</summary>repository read complete"),
+            ])
+            job = WorkflowJob(
+                job_id="agent_repo_read",
+                prompt="inspect the GenericAgent repository",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                },
+            )
+            tools = [{"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}]
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            results = [e for e in result.transcript_events if e.get("type") == "tool_result" and e.get("toolName") == "file_read"]
+            self.assertTrue(results)
+            self.assertNotIn("path_acl", results[0]["data"])
+            self.assertIn("from __future__ import annotations", str(results[0]["data"]))
+
+    def test_workspace_policy_denies_a_file_outside_workspace_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            outside = Path(td) / "outside.txt"
+            outside.write_text("OUTSIDE_SECRET", encoding="utf-8")
+            client = StubToolClient([
+                StubToolResponse("<summary>read outside</summary>", [
+                    StubToolCall("file_read", {"path": str(outside), "show_linenos": False}),
+                ]),
+                StubToolResponse("<summary>done</summary>read denied"),
+            ])
+            job = WorkflowJob(
+                job_id="agent_workspace_read",
+                prompt="read a file outside the workspace",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                    "options": {"pathPolicy": "workspace"},
+                },
+            )
+            tools = [{"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}}]
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            results = [e for e in result.transcript_events if e.get("type") == "tool_result" and e.get("toolName") == "file_read"]
+            self.assertTrue(results)
+            self.assertEqual(False, results[0]["data"]["path_acl"]["allowed"])
+            self.assertNotIn("OUTSIDE_SECRET", str(result.payload))
+
     def test_native_tool_runner_loads_skill_and_mcp_through_generic_handler_dispatch(self):
         import os
         import tempfile
@@ -1234,6 +1399,54 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertTrue((workspace / "report.json").is_file(), "code_run should have created the file")
             self.assertIn("report.json", result.tool_summary.get("writtenPaths") or [])
             self.assertNotIn("file_write", result.tool_summary.get("allowedTools") or [])
+
+    def test_default_code_run_can_write_outside_workspace_path(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            outside = Path(td) / "outside-write.txt"
+            script = (
+                "from pathlib import Path\n"
+                f"Path({str(outside)!r}).write_text('OUTSIDE_WRITE_OK', encoding='utf-8')\n"
+                "print('outside write complete')\n"
+            )
+            client = StubToolClient([
+                StubToolResponse("<summary>write outside</summary>", [
+                    StubToolCall("code_run", {"type": "python", "code": script}, id="tool_code"),
+                ]),
+                StubToolResponse("<summary>done</summary>outside write complete"),
+            ])
+            tools = [{"type": "function", "function": {"name": "code_run", "parameters": {"type": "object", "properties": {}}}}]
+            job = WorkflowJob(
+                job_id="agent_unrestricted_write",
+                prompt="write outside the workspace",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                },
+            )
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+            inherited_env = {
+                "GA_WORKFLOW_WORKSPACE_ROOT": str(workspace),
+                "GA_WORKFLOW_GUARD_STRICT": "1",
+            }
+
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]), \
+                 mock.patch.dict(os.environ, inherited_env, clear=False):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            self.assertEqual("OUTSIDE_WRITE_OK", outside.read_text(encoding="utf-8"))
+            results = [e for e in result.transcript_events if e.get("type") == "tool_result" and e.get("toolName") == "code_run"]
+            self.assertTrue(results)
+            self.assertNotIn("outside workspace", str(results[0]["data"]).lower())
 
     def test_child_tool_summary_detects_a_write_from_a_non_writer_tool_name(self):
         """Observation must key off the filesystem, not a tool-name allowlist.
