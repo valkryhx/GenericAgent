@@ -86,12 +86,30 @@ def _run_git(cmd, *, runner=None, timeout=120):
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
+def _assert_worktree_create_containment(repo_dir: Path, base_dir: Path, worktree_path: Path) -> None:
+    resolved_repo = repo_dir.resolve()
+    resolved_base = base_dir.resolve(strict=False)
+    resolved_target = worktree_path.resolve(strict=False)
+    allowed = {
+        (resolved_repo / ".ga" / "worktrees").resolve(strict=False),
+        (resolved_repo / "temp" / "subagents" / "worktrees").resolve(strict=False),
+    }
+    if resolved_base not in allowed:
+        raise ValueError(f"worktree base escapes repository-owned roots: {base_dir}")
+    if resolved_target == resolved_base or not resolved_target.is_relative_to(resolved_base):
+        raise ValueError(f"worktree target escapes its base: {worktree_path}")
+    for path in (repo_dir / ".ga", repo_dir / ".ga" / "worktrees", worktree_path):
+        if path.is_symlink():
+            raise ValueError(f"refusing symlink worktree path: {path}")
+
+
 def create_subagent_worktree(repo_dir, base_dir, run_id, *, runner=None):
     repo_dir = Path(repo_dir)
     if not (repo_dir / ".git").exists():
         raise ValueError(f"not a git repository: {repo_dir}")
     base_dir = Path(base_dir)
     worktree_path = base_dir / str(run_id)
+    _assert_worktree_create_containment(repo_dir, base_dir, worktree_path)
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["git", "-C", str(repo_dir), "worktree", "add", "--detach", str(worktree_path), "HEAD"]
     result = _run_git(cmd, runner=runner)
@@ -132,17 +150,45 @@ def summarize_subagent_worktree(worktree_path, *, runner=None, diff_args=None, m
     }
 
 
+def _safe_worktree_containment(repo_dir: Path, worktree_path: Path) -> tuple[bool, str | None]:
+    """Fail closed unless the target is a repository-owned worktree child."""
+    try:
+        resolved_repo = repo_dir.resolve()
+        resolved_target = worktree_path.resolve()
+    except OSError as exc:
+        return False, f"worktree path is not resolvable: {exc}"
+    bases = [
+        (resolved_repo / ".ga" / "worktrees").resolve(),
+        (resolved_repo / "temp" / "subagents" / "worktrees").resolve(),
+    ]
+    if not any(resolved_target != base and resolved_target.is_relative_to(base) for base in bases):
+        return False, f"worktree path escapes repository worktree roots: {resolved_target}"
+    if worktree_path.is_symlink():
+        return False, f"refusing symlink worktree path: {worktree_path}"
+    return True, None
+
+
 def remove_subagent_worktree(repo_dir, worktree_path, *, runner=None):
     repo_dir = Path(repo_dir)
     worktree_path = Path(worktree_path)
+    # A failed git cleanup is not permission to recursively delete an arbitrary
+    # path. Only clean leftovers after successful git removal; otherwise return
+    # a diagnostic and leave the tree untouched.
+    safe, reason = _safe_worktree_containment(repo_dir, worktree_path)
+    if not safe:
+        return {"status": "remove_refused", "worktree_path": str(worktree_path), "error": reason}
     result = _run_git(["git", "-C", str(repo_dir), "worktree", "remove", "--force", str(worktree_path)], runner=runner)
     status = "removed"
     error = None
     if getattr(result, "returncode", 1) != 0:
         status = "remove_failed"
         error = (getattr(result, "stderr", "") or "").strip() or "git worktree remove failed"
-    if worktree_path.exists():
-        shutil.rmtree(worktree_path, ignore_errors=True)
+    elif worktree_path.exists():
+        try:
+            shutil.rmtree(worktree_path)
+        except OSError as exc:
+            status = "remove_failed"
+            error = f"git remove succeeded but leftover cleanup failed: {exc}"
     payload = {"status": status, "worktree_path": str(worktree_path)}
     if error:
         payload["error"] = error

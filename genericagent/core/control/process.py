@@ -284,7 +284,13 @@ class ProcessSubagentAdapter:
     def _transcript_ref(self, state) -> str | None:
         if not state.parent_session_id or not state.run_id:
             return None
-        return f"sessions/{state.parent_session_id}/subagents/{state.run_id}.jsonl"
+        from genericagent.agents.transcript import SubagentTranscriptStore
+
+        session_data_dir = getattr(self.manager, "session_data_dir", None)
+        if not session_data_dir:
+            return None
+        store = SubagentTranscriptStore(session_data_dir, project_data_dir=session_data_dir)
+        return store.transcript_ref(state.parent_session_id, state.run_id)
 
     def _final_artifact(self, state) -> ArtifactRef | None:
         artifact_dir = state.artifact_dir

@@ -24,7 +24,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.
 const PYTHON = process.env.PYTHON || 'python'
 const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const PROFILE = process.env.GA_MULTI_SUBAGENT_E2E_PROFILE || 'deepseek-v4.1-flash'
-const EXPECTED_MODEL = process.env.GA_MULTI_SUBAGENT_E2E_MODEL || `${PROFILE}/deepseek-v4.1-flash`
+const EXPECTED_MODEL = process.env.GA_MULTI_SUBAGENT_E2E_MODEL || ''
 const START_TIMEOUT_MS = Number(process.env.GA_MULTI_SUBAGENT_E2E_START_TIMEOUT_MS || 300_000)
 const TOTAL_TIMEOUT_MS = Number(process.env.GA_MULTI_SUBAGENT_E2E_TIMEOUT_MS || 600_000)
 const STAMP = Date.now()
@@ -131,12 +131,27 @@ async function main(): Promise<number> {
     progress('bridge ready')
     await typeInput(stdin, `/model ${PROFILE}`)
     progress('switching model', { profile: PROFILE })
-    await waitFor(`${PROFILE} model selected`, () => (
+    await waitFor(`${PROFILE} model switch acknowledged`, () => (
       events.some(event => event.type === 'model_switch_result' && event.ok)
-      && events.some(event => event.type === 'model_status'
-        && event.models.some(model => model.current && model.name === EXPECTED_MODEL))
     ), 60_000)
-    progress('model selected')
+    const statusBeforeRefresh = events.filter(event => event.type === 'model_status').length
+    await typeInput(stdin, '/model ?')
+    await waitFor('refreshed model status', () => (
+      events.filter(event => event.type === 'model_status').length > statusBeforeRefresh
+    ), 30_000)
+    const selectedModel = [...events]
+      .reverse()
+      .find((event): event is Extract<BridgeEvent, { type: 'model_status' }> => event.type === 'model_status')
+      ?.models.find(model => model.current)?.name || null
+    summary.selectedModel = selectedModel
+    assert.ok(selectedModel, 'no current model in model_status')
+    assert.ok(
+      EXPECTED_MODEL ? selectedModel === EXPECTED_MODEL : selectedModel.toLowerCase().includes(PROFILE),
+      `selected model ${selectedModel} does not match ${EXPECTED_MODEL || PROFILE}`,
+    )
+    stdin.send(String.fromCharCode(27))
+    await delay(150)
+    progress('model selected', { model: selectedModel })
 
     await typeInput(stdin, '/permissions full')
     await waitFor('full access selected', () => (

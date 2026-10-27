@@ -39,7 +39,7 @@ export type InputDecision = {
   value: string
   cursorOffset?: number
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills' }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills'; includeLegacy?: boolean }
   /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
   pendingImagePaste?: boolean
   exit?: boolean
@@ -82,11 +82,15 @@ function parseSlashSubmit(
   skillNames: ReadonlySet<string> = new Set(),
 ): Pick<InputDecision, 'command' | 'action' | 'exit'> | null {
   const trimmed = text.trim()
-  const indexedResume = /^\/(?:resume|continue)\s+(\d+)$/.exec(trimmed)
+  const includeLegacy = /\s--all(?:\s|$)/.test(trimmed)
+  const slashText = trimmed.replace(/\s+--all(?:\s|$)/g, ' ').trim()
+  const indexedResume = /^\/(?:resume|continue)\s+(\d+)$/.exec(slashText)
   if (indexedResume) {
-    return { command: { type: 'resume_session_index', index: Number(indexedResume[1]) } }
+    return { command: { type: 'resume_session_index', index: Number(indexedResume[1]), ...(includeLegacy ? { includeLegacy: true } : {}) } }
   }
-  if (/^\/(?:resume|continue)$/.test(trimmed)) return { action: { type: 'open_resume' } }
+  if (/^\/(?:resume|continue)$/.test(slashText)) {
+    return { action: { type: 'open_resume', ...(includeLegacy ? { includeLegacy: true } : {}) } }
+  }
   if (/^\/(?:rewind|checkpoint)$/.test(trimmed)) return { action: { type: 'open_rewind' } }
   if (trimmed === '/mcp') return { action: { type: 'open_mcp' } }
   const mcpAction = /^\/mcp\s+(reconnect|enable|disable)\s+(.+)$/.exec(trimmed)
@@ -128,6 +132,7 @@ function parseSlashSubmit(
   if (compact) return { command: { type: 'compact', instructions: compact[1]?.trim() ?? '' } }
   if (trimmed === '/new' || trimmed === '/reset') return { command: { type: 'new_session' } }
   if (trimmed === '/stop') return { command: { type: 'stop' } }
+  if (/^\/workflows?\s+--all$/.test(trimmed)) return { command: { type: 'workflow_list', includeLegacy: true } }
   if (trimmed === '/workflows' || trimmed === '/workflow' || trimmed === '/workflow list') return { command: { type: 'workflow_list' } }
   // CC execution-time team view: roster + shared task board (/agents is the CC alias).
   if (trimmed === '/hooks') return { command: { type: 'hooks_status' } }

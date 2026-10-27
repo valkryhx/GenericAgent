@@ -153,6 +153,62 @@ class TranscriptGenericAgent:
 
 
 class AgentMainSubagentLifecycleTest(unittest.TestCase):
+    def test_startup_task_dir_prefers_explicit_task_dir(self):
+        from genericagent.core.app import _startup_task_dir_from_argv
+
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "explicit" / "agent"
+            argv = ["--task", "agent", "--task_dir", str(task_dir)]
+            self.assertEqual(str(task_dir.resolve()), _startup_task_dir_from_argv(argv))
+
+    def test_startup_task_dir_keeps_legacy_task_root_layout(self):
+        from genericagent.core.app import _startup_task_dir_from_argv
+
+        with tempfile.TemporaryDirectory() as td:
+            argv = ["--task", "agent", "--task_root", td]
+            self.assertEqual(
+                str((Path(td).resolve() / "temp" / "agent")),
+                _startup_task_dir_from_argv(argv),
+            )
+
+    def test_background_task_command_has_explicit_project_state_and_task_roots(self):
+        class FakeProc:
+            pid = 4321
+
+        captured = {}
+
+        def popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            state = Path(td) / "state"
+            task_dir = Path(td) / "tasks" / "agent"
+            project.mkdir()
+            state.mkdir()
+            pid = start_task_background(
+                "agent",
+                "hello",
+                project_root=project,
+                state_root=state,
+                task_dir=task_dir,
+                popen=popen,
+            )
+
+            self.assertEqual(4321, pid)
+            cmd = captured["cmd"]
+            self.assertIn("--task_dir", cmd)
+            self.assertIn("--project_root", cmd)
+            self.assertIn("--state_root", cmd)
+            self.assertNotIn("--task_root", cmd)
+            self.assertEqual(str(project.resolve()), captured["kwargs"]["cwd"])
+            env = captured["kwargs"]["env"]
+            self.assertEqual(str(project.resolve()), env["GA_PROJECT_ROOT"])
+            self.assertEqual(str(state.resolve()), env["GA_DATA_DIR"])
+            self.assertTrue(task_dir.joinpath("state.json").is_file())
+
     def test_start_task_background_writes_initial_state_registry_and_event(self):
         with tempfile.TemporaryDirectory() as td:
             calls = []

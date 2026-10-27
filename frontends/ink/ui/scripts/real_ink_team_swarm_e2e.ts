@@ -122,12 +122,16 @@ function readJson(file: string): any {
   }
 }
 
+function dataRoot(): string {
+  return path.join(process.env.LOCALAPPDATA || '', 'GenericAgent')
+}
+
 function newestTaskBoard(runStartMs: number): { listId: string; tasks: any[] } | null {
-  const teamsDir = path.join(REPO, 'temp', 'teams')
-  if (!fs.existsSync(teamsDir)) return null
+  const tasksRoot = path.join(dataRoot(), 'tasks')
+  if (!fs.existsSync(tasksRoot)) return null
   let best: { listId: string; tasks: any[]; mtime: number } | null = null
-  for (const listId of fs.readdirSync(teamsDir)) {
-    const file = path.join(teamsDir, listId, 'tasks.json')
+  for (const listId of fs.readdirSync(tasksRoot)) {
+    const file = path.join(tasksRoot, listId, 'tasks.json')
     if (!fs.existsSync(file)) continue
     const mtime = fs.statSync(file).mtimeMs
     if (mtime < runStartMs - 5_000) continue
@@ -139,31 +143,39 @@ function newestTaskBoard(runStartMs: number): { listId: string; tasks: any[] } |
 }
 
 function childrenSince(runStartMs: number): ChildEvidence[] {
-  const registryFile = path.join(REPO, 'temp', 'subagents', 'registry.json')
-  const registry = readJson(registryFile)
-  const agents = registry && registry.agents ? registry.agents : {}
+  const projectsRoot = path.join(dataRoot(), 'projects')
+  if (!fs.existsSync(projectsRoot)) return []
   const out: ChildEvidence[] = []
-  for (const entry of Object.values<any>(agents)) {
-    const createdMs = Date.parse(entry?.created_at || '')
-    if (!Number.isFinite(createdMs) || createdMs < runStartMs - 5_000) continue
-    const taskDir = entry.task_dir ? String(entry.task_dir) : path.join(REPO, 'temp', String(entry.task_name))
-    const state = readJson(path.join(taskDir, 'state.json'))
-    const capOptions = state?.capability_options || {}
-    let taskId: string | null = null
-    try {
-      const input = fs.readFileSync(path.join(taskDir, 'input.txt'), 'utf8')
-      taskId = input.match(/\[TEAM TASK PROTOCOL\][\s\S]*?#(\d+)/)?.[1] ?? null
-    } catch {
-      taskId = null
+  for (const project of fs.readdirSync(projectsRoot)) {
+    const projectDir = path.join(projectsRoot, project)
+    if (!fs.statSync(projectDir).isDirectory()) continue
+    for (const session of fs.readdirSync(projectDir)) {
+      const registryFile = path.join(projectDir, session, 'subagents', 'registry.json')
+      const registry = readJson(registryFile)
+      const agents = registry && registry.agents ? registry.agents : {}
+      for (const entry of Object.values<any>(agents)) {
+        const createdMs = Date.parse(entry?.created_at || '')
+        if (!Number.isFinite(createdMs) || createdMs < runStartMs - 5_000) continue
+        const taskDir = entry.task_dir ? String(entry.task_dir) : path.join(path.dirname(registryFile), 'tasks', String(entry.task_name))
+        const state = readJson(path.join(taskDir, 'state.json'))
+        const capOptions = state?.capability_options || {}
+        let taskId: string | null = null
+        try {
+          const input = fs.readFileSync(path.join(taskDir, 'input.txt'), 'utf8')
+          taskId = input.match(/\[TEAM TASK PROTOCOL\][\s\S]*?#(\d+)/)?.[1] ?? null
+        } catch {
+          taskId = null
+        }
+        out.push({
+          taskName: String(entry.task_name),
+          taskId,
+          teamMode: Boolean(capOptions.team_mode),
+          turnStatus: state?.turn_status ?? null,
+          processStatus: state?.process_status ?? null,
+          capabilityProfile: state?.capability_profile ?? null,
+        })
+      }
     }
-    out.push({
-      taskName: String(entry.task_name),
-      taskId,
-      teamMode: Boolean(capOptions.team_mode),
-      turnStatus: state?.turn_status ?? null,
-      processStatus: state?.process_status ?? null,
-      capabilityProfile: state?.capability_profile ?? null,
-    })
   }
   return out
 }
@@ -244,9 +256,21 @@ async function main(): Promise<number> {
     await waitFor('initial composer frame', () => chromeFrames(stdout).length > 0, 10_000)
     validateFrame(chromeFrames(stdout).at(-1) || '', 'initial')
 
-    const modelStatus = events.find((event): event is Extract<BridgeEvent, { type: 'model_status' }> => event.type === 'model_status')
+    // model_status is also emitted during bridge bootstrap, before the model
+    // list is always populated. Query it explicitly so team evidence records
+    // the actual current model instead of a transient null.
+    const modelStatusBefore = events.filter(event => event.type === 'model_status').length
+    await typeUserInput(stdin, '/model ?')
+    await waitFor('team model status refresh', () => (
+      events.filter(event => event.type === 'model_status').length > modelStatusBefore
+    ), 30_000)
+    const modelStatus = [...events]
+      .reverse()
+      .find((event): event is Extract<BridgeEvent, { type: 'model_status' }> => event.type === 'model_status')
     const current = modelStatus?.models.find(model => model.current)
     summary.model = current?.name ?? null
+    stdin.send('')
+    await delay(150)
 
     await typeUserInput(stdin, '/permissions full')
     await waitFor('full access command', () => commands.some(command => command.type === 'set_permission_mode' && command.mode === 'full_access'), 10_000)

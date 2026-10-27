@@ -840,7 +840,7 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             cmd, kwargs = calls["popen"][0]
             self.assertEqual(cmd[1:3], ["-m", "genericagent.core.app"])
             self.assertEqual(Path(kwargs["cwd"]), Path(handle.worktree_path))
-            self.assertIn("--task_root", cmd)
+            self.assertIn("--task_dir", cmd)
             self.assertIn(str(Path(td)), cmd)
             state = json.loads((Path(handle.task_dir) / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["isolation"], "worktree")
@@ -2506,6 +2506,55 @@ class TaskReclaimAndIdleTest(unittest.TestCase):
             inbox = Path(td) / "temp" / "subagents" / "inbox.jsonl"
             rows = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertTrue(any(row.get("type") == "idle_notification" for row in rows))
+
+
+class SubagentProjectSessionRootTest(unittest.TestCase):
+    def test_project_session_paths_are_session_local(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            data = root / "data"
+            project.mkdir()
+            manager = SubagentManager(
+                project_root=project,
+                project_state_root=data,
+                project_data_dir=data / "projects" / "key",
+                parent_session_id="session_a",
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 11})(),
+                python_executable="python-test",
+            )
+            handle = manager.spawn_agent("worker", "task")
+            expected = data / "projects" / "key" / "session_a" / "subagents"
+            self.assertEqual(expected, manager.session_data_dir)
+            self.assertEqual(expected / "tasks", Path(handle.task_dir).parent)
+            self.assertEqual(expected, manager.subagents_state_dir)
+
+    def test_child_env_carries_session_and_task_roots(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            data = root / "data"
+            project.mkdir()
+            seen = {}
+
+            def popen(cmd, **kwargs):
+                seen["cmd"] = cmd
+                seen["env"] = kwargs["env"]
+                return type("FakeProcess", (), {"pid": 12})()
+
+            manager = SubagentManager(
+                project_root=project,
+                project_state_root=data,
+                project_data_dir=data / "projects" / "key",
+                parent_session_id="session_b",
+                popen=popen,
+                python_executable="python-test",
+            )
+            handle = manager.spawn_agent("worker", "task")
+            self.assertEqual("session_b", seen["env"]["GA_PARENT_SESSION_ID"])
+            self.assertEqual(str(manager.task_root), seen["env"]["GA_TASK_ROOT"])
+            self.assertEqual(str(manager.session_data_dir), seen["env"]["GA_SESSION_DATA_DIR"])
+            self.assertEqual(str(Path(handle.task_dir).parent), seen["env"]["GA_TASK_ROOT"])
 
 
 if __name__ == "__main__":

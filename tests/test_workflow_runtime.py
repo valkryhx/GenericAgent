@@ -1,10 +1,12 @@
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from genericagent.workflow.child_agent import AgentResult, FakeChildAgentRunner, NativeGPTChildAgentRunner
 from genericagent.workflow.models import WorkflowJob, WorkflowRun as _WorkflowRun
@@ -794,21 +796,31 @@ return {summary: result.summary}
             self.assertEqual("workflow_finished", events[-1].event_type)
 
     def test_runtime_creates_and_persists_default_workspace(self):
-        """The default root is the project temp/ dir, not the launch cwd.
+        """The default root is the active project data bucket."""
+        from genericagent import paths as ga_paths
 
-        Deriving it from cwd put generated artifacts next to GA's own source for
-        a normal ``ga`` launch. The project temp/ directory is the product
-        default; an explicit workspace still wins.
-        """
         with tempfile.TemporaryDirectory() as tmp:
-            store = WorkflowStore(root=tmp)
+            project = Path(tmp) / "project"
+            data = Path(tmp) / "data"
+            project.mkdir()
+            roots = ga_paths.project_roots(project=project, data_root=data)
+            store = WorkflowStore(root=roots.project_data_dir)
             script = "return await agent('run without explicit workspace')"
             run = store.create_run(WorkflowRun(run_id="wf_default_workspace", session_id="session_test", script=script, status="running"))
             runner = WorkspaceRecordingRunner()
 
-            outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
+            with patch.dict(
+                os.environ,
+                {
+                    "GA_PROJECT_ROOT": str(project),
+                    "GA_DATA_DIR": str(data),
+                    "GA_WORKFLOW_WORKSPACE_ROOT": "",
+                },
+                clear=False,
+            ):
+                outcome = WorkflowRuntime(store=store, runner=runner, timeout_seconds=5.0).run(run)
 
-            expected = (Path(__file__).resolve().parents[1] / "temp").resolve()
+            expected = roots.project_data_dir.resolve()
             self.assertEqual("completed agent_1", outcome.result["summary"])
             self.assertTrue(expected.is_dir())
             self.assertEqual(str(expected), runner.started_jobs[0].metadata["workspacePath"])
@@ -2925,11 +2937,11 @@ return await new Promise(() => {})
 
             thread = threading.Thread(target=lambda: self._run_and_capture(runtime, run, errors), daemon=True)
             thread.start()
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 if any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")):
                     break
-                time.sleep(0.02)
+                time.sleep(0.01)
             self.assertTrue(any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")))
             killed = store.load_run("wf_test")
             killed.status = "killed"
@@ -3276,11 +3288,11 @@ return await new Promise(() => {})
 
             thread = threading.Thread(target=_run_in_thread, args=(runtime, run, errors), daemon=True)
             thread.start()
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 if any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")):
                     break
-                time.sleep(0.02)
+                time.sleep(0.01)
             self.assertTrue(any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")))
             cancelled = store.load_run("wf_test")
             cancelled.status = "cancelled"

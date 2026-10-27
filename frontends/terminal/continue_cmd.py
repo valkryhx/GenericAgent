@@ -165,8 +165,22 @@ def _scan_legacy_summary(path, stat):
     }
 
 
-def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
-    """Transcript sessions first, newest-first within each source."""
+def list_sessions(
+    exclude_pid=None,
+    exclude_path=None,
+    exclude_session_id=None,
+    session_roots=None,
+    include_legacy=False,
+    legacy_roots=None,
+):
+    """Transcript sessions first, newest-first within each source.
+
+    ``session_roots`` is the project-aware reader seam. It accepts the current
+    project bucket plus, for ``include_legacy=True``, the legacy root. The
+    legacy ``model_responses_*.txt`` scan is opt-in for project-aware callers;
+    callers that omit ``session_roots`` retain the historical scan behavior.
+    """
+    scan_legacy = bool(include_legacy or session_roots is None)
     transcripts = []
     transcript_keys = set()
     # 只有「首个用户消息出现在该 transcript 里」的 legacy 日志才可能是它的连续子序列，
@@ -174,17 +188,32 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
     # 滑窗比较（/resume 打开时剩下的主要耗时）。这是必要条件，结果与全量比对等价。
     sequences_by_first_user = {}
     if session_transcript is not None:
-        for s in session_transcript.list_sessions(root=_SESSION_ROOT):
-            transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
-            users = [text.strip() for text in getattr(s, 'user_texts', []) if text.strip()]
-            if users:
-                for text in set(users):
-                    sequences_by_first_user.setdefault(text, []).append(users)
-            if exclude_session_id and s.session_id == exclude_session_id:
+        roots = []
+        for root in (session_roots or [_SESSION_ROOT]):
+            if root is None:
                 continue
-            transcripts.append((s.path, s.mtime, s.preview, s.rounds))
+            path = os.path.abspath(str(root))
+            if path not in roots:
+                roots.append(path)
+        for root in roots:
+            for s in session_transcript.list_sessions(root=root):
+                transcript_keys.add(_session_fingerprint(s.preview, s.rounds))
+                users = [text.strip() for text in getattr(s, 'user_texts', []) if text.strip()]
+                if users:
+                    for text in set(users):
+                        sequences_by_first_user.setdefault(text, []).append(users)
+                if exclude_session_id and s.session_id == exclude_session_id:
+                    continue
+                transcripts.append((s.path, s.mtime, s.preview, s.rounds))
     out = []
-    files = glob.glob(_LOG_GLOB)
+    if legacy_roots:
+        files = []
+        for legacy_root in legacy_roots:
+            if legacy_root is None:
+                continue
+            files.extend(glob.glob(os.path.join(str(legacy_root), "model_responses_*.txt")))
+    else:
+        files = glob.glob(_LOG_GLOB) if scan_legacy else []
     if exclude_pid is not None:
         tag = f'model_responses_{exclude_pid}.txt'
         files = [f for f in files if not f.endswith(tag)]
@@ -192,7 +221,7 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
         excluded = os.path.abspath(exclude_path)
         files = [f for f in files if os.path.abspath(f) != excluded]
     cache_path = _legacy_listing_cache_path()
-    cached = listing_cache.load(cache_path) if listing_cache is not None else {}
+    cached = listing_cache.load(cache_path) if listing_cache is not None and scan_legacy else {}
     entries = {}
     changed = False
     for f in files:
@@ -216,7 +245,7 @@ def list_sessions(exclude_pid=None, exclude_path=None, exclude_session_id=None):
         if candidates and any(_is_contiguous_subsequence(users, seq) for seq in candidates):
             continue
         out.append((f, stat.st_mtime, entry.get('preview') or '', int(entry.get('rounds') or 0)))
-    if listing_cache is not None and (changed or len(entries) != len(cached)):
+    if listing_cache is not None and scan_legacy and (changed or len(entries) != len(cached)):
         listing_cache.save(cache_path, entries)
     transcripts.sort(key=lambda x: x[1], reverse=True)
     out.sort(key=lambda x: x[1], reverse=True)

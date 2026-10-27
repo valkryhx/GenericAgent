@@ -25,16 +25,48 @@ def _runtime_project_dir() -> str:
     override = os.environ.get("GA_PROJECT_ROOT")
     if override:
         return str(Path(override).expanduser().resolve())
+
+    # The caller's project owns the workspace, including editable installs where
+    # GA itself is imported from a source checkout. A user project may have its
+    # own pyproject.toml; that must not redirect the session into GA's checkout.
+    from genericagent import paths as ga_paths
+
+    caller = Path.cwd().resolve()
+    caller_project = ga_paths._project_boundary(caller)
     source = _source_project_dir()
     if source:
-        return source
+        source_path = Path(source).resolve()
+        if caller == source_path or source_path in caller.parents:
+            return str(source_path)
+        if caller_project == caller and not (caller / ".git").exists():
+            return str(caller)
+        return str(caller_project)
+
     # Installed wheel: the project workspace is the caller's current directory,
     # not site-packages and not GA's private user-data directory.
-    return str(Path.cwd().resolve())
+    return str(caller_project)
 
 
 PROJECT_DIR = _runtime_project_dir()
 
+
+
+def project_environment(*, project=None, launch=None, data_root=None):
+    """Return the project identity snapshot inherited by frontend children."""
+    from genericagent import paths as ga_paths
+
+    roots = ga_paths.project_roots(project=project, data_root=data_root)
+    launch_path = str(ga_paths._normalized_path(launch or ga_paths.launch_cwd()))
+    return {
+        "GA_PROJECT_ROOT": str(roots.project_root),
+        "GA_PROJECT_KEY": roots.project_key,
+        "GA_PROJECT_DATA_DIR": str(roots.project_data_dir),
+        "GA_DATA_DIR": str(roots.data_root),
+        "GA_LAUNCH_CWD": launch_path,
+        "GA_ORIGINAL_CWD": launch_path,
+        "GA_TOOL_CWD": str(roots.project_root),
+        "GA_WORKTREE_ROOT": str(roots.project_worktrees_dir),
+    }
 
 def _frontends() -> str:
     source = _source_project_dir()
@@ -76,13 +108,15 @@ def launch_frontend(cmd_parts, args=None):
     # user's original workspace through GA_PROJECT_ROOT.
     original_cwd = os.getcwd()
     env = os.environ.copy()
-    env["GA_PROJECT_ROOT"] = PROJECT_DIR
     try:
         from genericagent import paths as ga_paths
+        env.update(project_environment(project=PROJECT_DIR, launch=original_cwd))
         env.setdefault("GA_CONFIG_DIR", str(ga_paths.user_config_dir()))
         env.setdefault("GA_DATA_DIR", str(ga_paths.user_data_dir()))
     except Exception:
-        pass
+        env["GA_PROJECT_ROOT"] = PROJECT_DIR
+        env["GA_LAUNCH_CWD"] = original_cwd
+        env["GA_ORIGINAL_CWD"] = original_cwd
     ui_cwd = os.path.dirname(os.path.dirname(_frontends()))
     try:
         ui_dir = os.path.join(_frontends(), "ink", "ui")
@@ -133,6 +167,12 @@ COMMANDS = {
     "update": {
         "help": "更新项目 (git pull + pip install)",
         "desc": "从 Git 拉取最新代码并更新核心依赖",
+        "cmd": None,
+        "internal": True,
+    },
+    "migrate": {
+        "help": "显式迁移旧路径数据",
+        "desc": "默认 dry-run；--apply 只复制，不删除 legacy 源",
         "cmd": None,
         "internal": True,
     },
@@ -201,6 +241,86 @@ def cmd_update():
         print(r2.stderr[-500:])
 
 
+def _cmd_migrate(args):
+    """Run the explicit, copy-only path migration CLI.
+
+    Commands:
+      ga migrate paths [--apply] [--kinds sessions,workflows,named,teams] [--report]
+                       [--team-map OLD_LIST_ID=TEAM_KEY] [--operator NAME]
+      ga migrate claim <session.jsonl> [--apply]
+    """
+    import json
+    from dataclasses import asdict
+    from ga_cli import migrate_paths
+    from genericagent import paths as ga_paths
+
+    data_root = str(Path(os.environ.get("GA_DATA_DIR") or ga_paths.data_root()))
+    if not args or args[0] in {"-h", "--help", "help"}:
+        print("usage: ga migrate paths [--apply] [--kinds ...] [--report]")
+        print("       ga migrate paths --team-map OLD_LIST_ID=TEAM_KEY")
+        print("       ga migrate claim <session.jsonl> [--apply]")
+        return 0
+
+    action = args[0]
+    if action == "paths":
+        apply = "--apply" in args[1:]
+        report = "--report" in args[1:]
+        kinds = None
+        team_map = {}
+        operator = None
+        values = args[1:]
+        index = 0
+        while index < len(values):
+            value = values[index]
+            if value == "--kinds" and index + 1 < len(values):
+                kinds = {part.strip() for part in values[index + 1].split(",") if part.strip()}
+                index += 2
+                continue
+            if value == "--team-map" and index + 1 < len(values):
+                raw = values[index + 1]
+                old_id, separator, team_key = raw.partition("=")
+                if not separator or not old_id or not team_key:
+                    print("--team-map must be OLD_LIST_ID=TEAM_KEY", file=sys.stderr)
+                    return 2
+                team_map[old_id] = team_key
+                index += 2
+                continue
+            if value == "--operator" and index + 1 < len(values):
+                operator = values[index + 1]
+                index += 2
+                continue
+            index += 1
+        result = migrate_paths.run_migration(
+            PROJECT_DIR,
+            data_root,
+            apply=apply,
+            kinds=kinds,
+            report=report,
+            team_map=team_map,
+            operator=operator,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1 if result.get("conflicts") or result.get("apply_blocked") else 0
+
+    if action == "claim":
+        if len(args) < 2:
+            print("usage: ga migrate claim <session.jsonl> [--apply]", file=sys.stderr)
+            return 2
+        source = args[1]
+        apply = "--apply" in args[2:]
+        result = migrate_paths.claim_legacy_session(
+            source,
+            project_root=PROJECT_DIR,
+            data_root=data_root,
+            apply=apply,
+        )
+        print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+        return 1 if result.status == "conflict" else 0
+
+    print(f"[ERROR] unknown migrate action: {action}", file=sys.stderr)
+    return 2
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ga",
@@ -247,6 +367,9 @@ def main():
     if cmd == "update":
         cmd_update()
         return
+
+    if cmd == "migrate":
+        raise SystemExit(_cmd_migrate(list(args.args) + list(unknown)))
 
     if cmd in DEPRECATED_COMMANDS:
         print(f"[DEPRECATED] {cmd}: {DEPRECATED_COMMANDS[cmd]}")

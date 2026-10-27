@@ -14,20 +14,18 @@ class WorkspacePathError(ValueError):
 def default_workspace_root() -> Path:
     """The directory workflow artifacts are rooted at.
 
-    Product decision (2026-10-03): artifacts must not land next to GA's own
-    source. ``os.getcwd()`` did exactly that for the normal ``ga`` launch, which
-    starts in the repository root, so a finished report showed up beside
-    ``genericagent/core/app.py``. The default root is the repository ``temp/`` directory --
-    already the project's scratch-output location and already gitignored -- and
-    children may create subdirectories under it (or write a file directly in
-    it). ``GA_WORKFLOW_WORKSPACE_ROOT`` overrides the location for tests and
-    embedding; an explicitly supplied workspace still wins over both.
+    Runtime workspaces are project data, not user-project files. The explicit
+    environment override remains the test/embedding seam; otherwise use the
+    stable ``DATA_ROOT/projects/<projectKey>`` bucket.
     """
 
     override = os.environ.get("GA_WORKFLOW_WORKSPACE_ROOT")
     if override and str(override).strip():
         return Path(str(override).strip()).expanduser()
-    return paths.TEMP_DIR
+    # Runtime artifacts follow the active project's data bucket. Project-root
+    # deliverable writes are explicit; the workflow workspace never defaults to
+    # the launch cwd or the legacy shared temp directory.
+    return paths.runtime_paths().project_data_dir
 
 
 def resolve_workspace_root(raw: str | os.PathLike[str] | None = None) -> Path:

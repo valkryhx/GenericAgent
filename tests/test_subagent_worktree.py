@@ -35,7 +35,7 @@ class SubagentWorktreeTest(unittest.TestCase):
             repo = Path(td) / "repo"
             repo.mkdir()
             (repo / ".git").mkdir()
-            base = Path(td) / "worktrees"
+            base = repo / ".ga" / "worktrees"
 
             def fake_runner(cmd, **kwargs):
                 calls.append((cmd, kwargs))
@@ -83,8 +83,8 @@ class SubagentWorktreeTest(unittest.TestCase):
             calls = []
             repo = Path(td) / "repo"
             repo.mkdir()
-            worktree = Path(td) / "worktree"
-            worktree.mkdir()
+            worktree = repo / ".ga" / "worktrees" / "worktree"
+            worktree.mkdir(parents=True)
             (worktree / "leftover.txt").write_text("leftover", encoding="utf-8")
 
             def fake_runner(cmd, **kwargs):
@@ -96,6 +96,76 @@ class SubagentWorktreeTest(unittest.TestCase):
             self.assertEqual(result["status"], "removed")
             self.assertFalse(worktree.exists())
             self.assertEqual(calls[0][0], ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)])
+
+    def test_remove_subagent_worktree_does_not_delete_after_git_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            worktree = repo / ".ga" / "worktrees" / "worktree"
+            worktree.mkdir(parents=True)
+            (worktree / "keep.txt").write_text("keep", encoding="utf-8")
+
+            def fake_runner(cmd, **kwargs):
+                return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "busy"})()
+
+            result = remove_subagent_worktree(repo, worktree, runner=fake_runner)
+
+            self.assertEqual(result["status"], "remove_failed")
+            self.assertTrue((worktree / "keep.txt").is_file())
+
+    def test_remove_subagent_worktree_refuses_path_outside_owned_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            outside = Path(td) / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("keep", encoding="utf-8")
+
+            result = remove_subagent_worktree(repo, outside)
+
+            self.assertEqual(result["status"], "remove_refused")
+            self.assertTrue((outside / "keep.txt").is_file())
+
+
+class WorktreeCreateGuardTest(unittest.TestCase):
+    def test_create_rejects_base_outside_repo_owned_worktree_roots(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            outside = Path(td) / "outside"
+            with self.assertRaisesRegex(ValueError, "escapes repository-owned roots"):
+                create_subagent_worktree(repo, outside, "run_1", runner=lambda *_, **__: None)
+
+    def test_create_rejects_symlinked_ga_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            outside = Path(td) / "outside"
+            outside.mkdir()
+            try:
+                (repo / ".ga").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink unavailable")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                create_subagent_worktree(repo, repo / ".ga" / "worktrees", "run_1", runner=lambda *_, **__: None)
+
+    def test_create_accepts_project_worktree_base(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            calls = []
+
+            def runner(cmd, **kwargs):
+                calls.append(cmd)
+                Path(cmd[-2]).mkdir(parents=True)
+                return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+            result = create_subagent_worktree(repo, repo / ".ga" / "worktrees", "run_000001", runner=runner)
+            self.assertEqual(str(repo / ".ga" / "worktrees" / "run_000001"), result["path"])
+            self.assertEqual(calls[0][-2], str(repo / ".ga" / "worktrees" / "run_000001"))
 
 
 if __name__ == "__main__":

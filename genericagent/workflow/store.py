@@ -95,8 +95,20 @@ def normalize_named_workflow_name(name: str) -> str:
 
 
 class WorkflowStore:
-    def __init__(self, root: str | Path | None = None):
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        project_workflows_dir: str | Path | None = None,
+        user_workflows_dir: str | Path | None = None,
+        legacy_workflows_dir: str | Path | None = None,
+        named_workflow_resolver=None,
+    ):
         self.root = Path(root) if root is not None else paths.SESSIONS_DIR
+        self.project_workflows_dir = Path(project_workflows_dir) if project_workflows_dir is not None else None
+        self.user_workflows_dir = Path(user_workflows_dir) if user_workflows_dir is not None else None
+        self.legacy_workflows_dir = Path(legacy_workflows_dir) if legacy_workflows_dir is not None else None
+        self.named_workflow_resolver = named_workflow_resolver
 
     def create_run(self, run: WorkflowRun) -> WorkflowRun:
         artifact_dir = self._artifact_dir(run.session_id, run.run_id)
@@ -750,13 +762,46 @@ class WorkflowStore:
 
     @property
     def named_workflows_dir(self) -> Path:
+        if self.project_workflows_dir is not None:
+            return self.project_workflows_dir
         return self.root / "named-workflows"
+
+    def _named_scope_roots(self) -> list[tuple[str, Path]]:
+        roots: list[tuple[str, Path]] = []
+        if self.project_workflows_dir is not None:
+            roots.append(("project", self.project_workflows_dir))
+        if self.user_workflows_dir is not None:
+            roots.append(("user", self.user_workflows_dir))
+        if self.legacy_workflows_dir is not None:
+            roots.append(("legacy", self.legacy_workflows_dir))
+        if not roots:
+            roots.append(("legacy", self.named_workflows_dir))
+        return roots
+
+    def _named_definition_path(self, name: str, scope: str = "auto") -> tuple[str, Path]:
+        slug = normalize_named_workflow_name(name)
+        scope = str(scope or "auto").strip().lower()
+        if scope not in {"auto", "project", "user", "legacy"}:
+            raise ValueError(f"unknown named workflow scope: {scope!r}")
+        roots = self._named_scope_roots()
+        if scope == "auto":
+            for root_scope, directory in roots:
+                path = directory / f"{slug}.json"
+                if path.is_file():
+                    return root_scope, path
+            candidates = ", ".join(f"{root_scope}:{directory}" for root_scope, directory in roots)
+            raise FileNotFoundError(f"{slug} (candidates: {candidates})")
+        for root_scope, directory in roots:
+            if root_scope == scope:
+                return root_scope, directory / f"{slug}.json"
+        raise FileNotFoundError(f"{slug} (scope {scope} is not configured)")
 
     def save_named_workflow(
         self,
         name: str,
         script: str,
         *,
+        scope: str | None = None,
         source_run_id: str | None = None,
         description: str | None = None,
         overwrite: bool = False,
@@ -765,9 +810,13 @@ class WorkflowStore:
         if not script.strip():
             raise ValueError("workflow script is required")
         slug = normalize_named_workflow_name(name)
-        directory = self.named_workflows_dir
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{slug}.json"
+        # New callers with a configured project library save project-scoped by
+        # default. The historical store has no project/user split, so its
+        # direct ``WorkflowStore(root=...)`` API keeps the legacy location.
+        if scope is None:
+            scope = "project" if self.project_workflows_dir is not None else "legacy"
+        root_scope, path = self._named_definition_path(name, scope=scope)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not overwrite:
             raise FileExistsError(slug)
         record = {
@@ -779,33 +828,47 @@ class WorkflowStore:
             "scriptHash": hashlib.sha256(script.encode("utf-8")).hexdigest(),
             "sourceRunId": str(source_run_id) if source_run_id else None,
             "savedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "scope": root_scope,
+            "sourcePath": str(path),
         }
         self._write_json(path, record)
         return {key: value for key, value in record.items() if key != "script"}
 
-    def load_named_workflow(self, name: str) -> dict:
-        slug = normalize_named_workflow_name(name)
-        path = self.named_workflows_dir / f"{slug}.json"
+    def load_named_workflow(self, name: str, *, scope: str = "auto") -> dict:
+        root_scope, path = self._named_definition_path(name, scope=scope)
         if not path.exists():
-            raise FileNotFoundError(slug)
+            raise FileNotFoundError(normalize_named_workflow_name(name))
         data = read_json_retrying(path)
         if not isinstance(data, dict) or not isinstance(data.get("script"), str):
-            raise ValueError(f"named workflow {slug!r} is corrupt")
+            raise ValueError(f"named workflow {normalize_named_workflow_name(name)!r} is corrupt")
+        data.setdefault("scope", root_scope)
+        data.setdefault("sourcePath", str(path))
         return data
 
-    def list_named_workflows(self) -> list[dict]:
-        directory = self.named_workflows_dir
-        if not directory.exists():
-            return []
+    def list_named_workflows(self, *, include_shadowed: bool = False) -> list[dict]:
+        by_name: dict[str, dict] = {}
         records: list[dict] = []
-        for path in sorted(directory.glob("*.json")):
-            try:
-                data = read_json_retrying(path)
-            except Exception:
+        for root_scope, directory in self._named_scope_roots():
+            if not directory.exists():
                 continue
-            if not isinstance(data, dict) or not isinstance(data.get("script"), str):
-                continue
-            records.append({key: value for key, value in data.items() if key != "script"})
+            for path in sorted(directory.glob("*.json")):
+                try:
+                    data = read_json_retrying(path)
+                except Exception:
+                    continue
+                if not isinstance(data, dict) or not isinstance(data.get("script"), str):
+                    continue
+                name = str(data.get("name") or path.stem)
+                if name in by_name:
+                    if str(by_name[name].get("scope")) == "project":
+                        by_name[name]["user_shadowed"] = root_scope != "project"
+                    if not include_shadowed:
+                        continue
+                item = {key: value for key, value in data.items() if key != "script"}
+                item["scope"] = root_scope
+                item["sourcePath"] = str(path)
+                by_name.setdefault(name, item)
+                records.append(item)
         records.sort(key=lambda item: str(item.get("name") or ""))
         return records
 

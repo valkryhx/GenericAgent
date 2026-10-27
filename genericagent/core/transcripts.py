@@ -37,6 +37,16 @@ class TranscriptTurn:
     last_uuid: str = ""
 
 
+@dataclass(frozen=True)
+class SessionIdentity:
+    original_cwd: str | None = None
+    project_root: str | None = None
+    launch_cwd: str | None = None
+    project_key: str | None = None
+    data_root: str | None = None
+    layout: str | None = None
+
+
 @dataclass
 class LoadedSession:
     path: str
@@ -55,6 +65,7 @@ class LoadedSession:
     branch_rounds: int = 0
     working_state: dict | None = None
     working_states: dict = field(default_factory=dict)
+    identity: SessionIdentity | None = None
 
 
 @dataclass
@@ -126,7 +137,7 @@ def transcript_schema_version():
     return 1 if value in {"1", "v1", "legacy"} else 2
 
 
-def create_session(root=None, cwd=None, session_id=None, frontend=None, schema=None):
+def create_session(root=None, cwd=None, session_id=None, frontend=None, schema=None, identity=None):
     sid = session_id or new_session_id()
     path = session_path(sid, root=root)
     schema = int(schema or transcript_schema_version())
@@ -140,6 +151,11 @@ def create_session(root=None, cwd=None, session_id=None, frontend=None, schema=N
     }
     if schema == 2:
         event["schema"] = 2
+    if identity:
+        for key in ("original_cwd", "project_root", "launch_cwd", "project_key", "data_root", "layout"):
+            value = identity.get(key) if isinstance(identity, dict) else getattr(identity, key, None)
+            if value is not None:
+                event[key] = str(value)
     append_event(path, event)
     return str(path)
 
@@ -696,6 +712,7 @@ def load_v1_readonly(path):
         last_seq=last_seq,
         resumed_from_v1=True,
         branch_rounds=len(turns),
+        identity=_identity_from_events(_transcript_events(p)),
     )
 
 
@@ -850,6 +867,19 @@ def _message_origin(role, blocks):
     ):
         return {"kind": "tool_result"}
     return {"kind": "human"}
+
+
+def _identity_from_events(events):
+    for event in events or ():
+        if event.get("type") != "session_start":
+            continue
+        values = {
+            key: event.get(key)
+            for key in ("original_cwd", "project_root", "launch_cwd", "project_key", "data_root", "layout")
+            if event.get(key) is not None
+        }
+        return SessionIdentity(**values) if values else None
+    return None
 
 
 def load_v2(path):
@@ -1028,6 +1058,7 @@ def load_v2(path):
         branch_rounds=local_rounds,
         working_state=copy.deepcopy(working_state),
         working_states=copy.deepcopy(working_states),
+        identity=_identity_from_events(events),
     )
 
 
@@ -1127,6 +1158,13 @@ def _scan_session_summary(path, stat):
     }
 
 
+def project_session_root(project_root=None, data_root=None, *, roots=None) -> Path:
+    """Return ``PROJECT_DATA_DIR`` for new project-scoped transcripts."""
+    if roots is None:
+        roots = paths.project_roots(project=project_root, data_root=data_root)
+    return roots.project_data_dir
+
+
 def list_sessions(root=None, exclude_session_id=None, include_empty=False):
     """Summaries of ``session_*.jsonl`` under ``root``, newest-first.
 
@@ -1209,6 +1247,18 @@ def restore_agent_session(agent, path):
     agent.session_path = loaded.path
     agent.session_turn_id = int(loaded.branch_rounds or loaded.rounds)
     agent._resumed_from_v1 = bool(loaded.resumed_from_v1)
+    if loaded.identity is not None:
+        agent.original_cwd = loaded.identity.original_cwd
+        agent.project_root = loaded.identity.project_root
+        agent.launch_cwd = loaded.identity.launch_cwd
+        agent.project_key = loaded.identity.project_key
+        agent.data_root = loaded.identity.data_root
+        roots = paths.project_roots(
+            project=loaded.identity.project_root,
+            data_root=loaded.identity.data_root,
+        )
+        agent.project_data_dir = str(roots.project_data_dir)
+        agent.tool_cwd = str(roots.project_root)
     return RestoreResult(
         ok=True,
         message=f"已恢复 {loaded.rounds} 轮结构化会话（{Path(path).name}）",
@@ -1216,7 +1266,32 @@ def restore_agent_session(agent, path):
     )
 
 
-def ensure_agent_session(agent, *, root=None, frontend=None):
+def identity_from_environment(env=None):
+    source = os.environ if env is None else env
+    project_root = str(source.get("GA_PROJECT_ROOT") or "").strip()
+    if not project_root:
+        return None
+    from genericagent import paths
+    roots = paths.project_roots(project=project_root, data_root=source.get("GA_DATA_DIR") or None)
+    explicit_key = str(source.get("GA_PROJECT_KEY") or "").strip()
+    if explicit_key and explicit_key != roots.project_key:
+        raise ValueError("project_identity_mismatch: GA_PROJECT_KEY does not match GA_PROJECT_ROOT")
+    explicit_data = str(source.get("GA_PROJECT_DATA_DIR") or "").strip()
+    if explicit_data and Path(explicit_data).expanduser().resolve(strict=False) != roots.project_data_dir:
+        raise ValueError("project_identity_mismatch: GA_PROJECT_DATA_DIR does not match project identity")
+    launch = str(source.get("GA_LAUNCH_CWD") or source.get("GA_ORIGINAL_CWD") or roots.project_root)
+    original = str(source.get("GA_ORIGINAL_CWD") or launch)
+    return {
+        "original_cwd": original,
+        "project_root": str(roots.project_root),
+        "launch_cwd": launch,
+        "project_key": roots.project_key,
+        "data_root": str(roots.data_root),
+        "layout": "project-v1",
+    }
+
+
+def ensure_agent_session(agent, *, root=None, frontend=None, identity=None):
     resumed_from_v1 = bool(getattr(agent, "_resumed_from_v1", False))
     resumed_from_v1_path = getattr(agent, "session_path", None)
     if root is None and resumed_from_v1_path:
@@ -1237,11 +1312,36 @@ def ensure_agent_session(agent, *, root=None, frontend=None):
                     agent.session_turn_id = 0
             return agent.session_path
     sid = new_session_id()
-    path = create_session(root=root, cwd=os.getcwd(), session_id=sid, frontend=frontend)
+    identity = identity or identity_from_environment()
+    project_cwd = (identity or {}).get("project_root") or os.getcwd()
+    if root is None:
+        if identity and identity.get("project_root"):
+            root = project_session_root(
+                identity.get("project_root"),
+                identity.get("data_root"),
+            )
+        else:
+            # Legacy/direct construction remains on the historical root. New
+            # CLI/frontend sessions carry explicit identity, so a missing
+            # project root never silently creates a project bucket here.
+            root = DEFAULT_ROOT
+    path = create_session(root=root, cwd=project_cwd, session_id=sid, frontend=frontend, identity=identity)
     agent.session_id = sid
     agent.session_path = path
     agent.session_turn_id = 0
     agent._resumed_from_v1 = False
+    if identity:
+        agent.project_root = identity.get("project_root")
+        agent.launch_cwd = identity.get("launch_cwd")
+        agent.original_cwd = identity.get("original_cwd")
+        agent.data_root = identity.get("data_root")
+        agent.project_key = identity.get("project_key")
+        roots = paths.project_roots(
+            project=identity.get("project_root"),
+            data_root=identity.get("data_root"),
+        )
+        agent.project_data_dir = str(roots.project_data_dir)
+        agent.tool_cwd = str(roots.project_root)
     if resumed_from_v1:
         agent._resumed_from_v1_path = resumed_from_v1_path
         try:

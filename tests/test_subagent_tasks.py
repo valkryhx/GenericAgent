@@ -33,6 +33,31 @@ class SubagentTaskStoreTest(unittest.TestCase):
             self.assertEqual(task["subject"], "keep runtime state separate")
             self.assertFalse((Path(project_td) / "temp").exists())
 
+    def test_project_scoped_team_keys_do_not_share_a_task_board(self):
+        with tempfile.TemporaryDirectory() as data_td:
+            tasks_root = Path(data_td) / "tasks"
+            a = SubagentTaskStore(
+                Path(data_td) / "A",
+                list_id="session-demo",
+                tasks_root=tasks_root,
+                team_key="alpha-project--session-demo",
+            )
+            b = SubagentTaskStore(
+                Path(data_td) / "B",
+                list_id="session-demo",
+                tasks_root=tasks_root,
+                team_key="beta-project--session-demo",
+            )
+            a.create_task("A-only task")
+
+            self.assertNotEqual(a.tasks_path, b.tasks_path)
+            self.assertEqual(["A-only task"], [task["subject"] for task in a.list_tasks()])
+            self.assertEqual([], b.list_tasks())
+            self.assertEqual(
+                tasks_root / "alpha-project--session-demo" / "tasks.json",
+                a.tasks_path,
+            )
+
     def test_create_is_pending_unowned(self):
         task = self.store.create_task("write the parser", "see spec.md")
         self.assertEqual(task["status"], "pending")

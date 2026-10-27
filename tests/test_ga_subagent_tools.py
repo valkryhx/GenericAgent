@@ -138,7 +138,7 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertFalse((task_dir / "_history.json").exists())
             cmd, kwargs = calls[0]
             self.assertEqual(cmd[0], "python-test")
-            self.assertIn("--task_root", cmd)
+            self.assertIn("--task_dir", cmd)
             self.assertIn(str(Path(td)), cmd)
             self.assertNotIn("inspect inherited context", cmd)
             self.assertEqual(Path(kwargs["cwd"]), Path(td))
@@ -726,9 +726,13 @@ class GaSubagentToolsTest(unittest.TestCase):
     def test_global_memory_distinguishes_tool_cwd_from_workspace_root(self):
         prompt = get_global_memory()
 
-        self.assertIn("tool scratch/output dir", prompt)
-        self.assertIn("workspace root =", prompt)
+        self.assertIn("project root =", prompt)
+        self.assertIn("tool cwd =", prompt)
+        self.assertIn("data root =", prompt)
         self.assertIn("README.md", prompt)
+        self.assertIn("ordinary deliverables belong here", prompt)
+        self.assertIn("do not place user deliverables here", prompt)
+        self.assertIn("distinct roles", prompt)
 
     def test_wait_agent_tool_reports_completed_without_reading_final_output(self):
         with tempfile.TemporaryDirectory() as td:

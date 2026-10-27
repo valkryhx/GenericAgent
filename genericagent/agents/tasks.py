@@ -50,14 +50,22 @@ def sanitize_list_id(value) -> str:
 
 
 class SubagentTaskStore:
-    def __init__(self, root_dir, list_id="default", *, state_root=None):
+    def __init__(self, root_dir, list_id="default", *, state_root=None, tasks_root=None, team_key=None):
         self.root_dir = Path(root_dir)
         # ``root_dir`` identifies the project; ``state_root`` identifies the
         # writable GA runtime. They coincide in a source checkout/tests, but an
         # installed wheel must keep boards out of the user's project.
         self.state_root = Path(state_root) if state_root is not None else self.root_dir
         self.list_id = sanitize_list_id(list_id)
-        self.dir = self.state_root / "temp" / "teams" / self.list_id
+        self.team_key = str(team_key or "").strip() or None
+        if tasks_root is not None:
+            # Explicit global-layer root: DATA_ROOT/tasks/<teamKey>. This is
+            # intentionally independent from the subagent registry root.
+            base = Path(tasks_root)
+            self.dir = base / (self.team_key or self.list_id)
+        else:
+            # Legacy adapter: unchanged ``<state_root>/temp/teams/<listId>``.
+            self.dir = self.state_root / "temp" / "teams" / self.list_id
         self.tasks_path = self.dir / "tasks.json"
         self.lock_path = self.dir / "tasks.lock"
 

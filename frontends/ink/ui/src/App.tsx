@@ -215,7 +215,8 @@ function formatResumeSession(session: ResumeSession): string {
   const when = new Date(session.mtime * 1000)
   const stamp = `${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')} ${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
   const preview = session.preview.replace(/\s+/g, ' ').slice(0, 80) || '(no preview)'
-  return `${stamp} - ${age} - ${session.rounds} turns - ${preview}`
+  const source = session.source === 'legacy' ? '[legacy] ' : ''
+  return `${source}${stamp} - ${age} - ${session.rounds} turns - ${preview}`
 }
 function SelectorView({ selector, theme }: { selector: SelectorState; theme: InkTheme }) {
   const rows = visibleSelectorRows(selector, 8)
@@ -782,8 +783,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (decision.action?.type === 'open_resume') {
       setFooterPanel(null)
       resumePendingRef.current = true
-      setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true })
-      bridgeRef.current?.send({ type: 'list_resume_sessions' })
+      const includeLegacy = Boolean(decision.action.includeLegacy)
+      setSelector({ mode: 'resume', selected: 0, sessions: [], loading: true, includeLegacy })
+      bridgeRef.current?.send({ type: 'list_resume_sessions', ...(includeLegacy ? { includeLegacy: true } : {}) })
     } else if (decision.action?.type === 'open_rewind') {
       setFooterPanel(null)
       const options = rewindOptions(state.messages)
@@ -1008,7 +1010,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (event.type === 'resume_sessions') {
         if (!resumePendingRef.current) return
         resumePendingRef.current = false
-        setSelector({ mode: 'resume', selected: 0, sessions: newestResumeSessions(event.sessions) })
+        setSelector(current => ({ mode: 'resume', selected: 0, sessions: newestResumeSessions(event.sessions), includeLegacy: Boolean(current?.mode === 'resume' && current.includeLegacy) }))
         return
       }
       if (event.type === 'history_replace') {

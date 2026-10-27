@@ -206,3 +206,4 @@ frontends/ink/ui/research/
 frontends/ink/ui/liu_guoliang_introduction.html
 frontends/ink/ui/research_liu_guoliang_*.json
 .premerge-doc-backup-20261001/docs/superpowers/plans/2026-10-01-ga-dynamic-workflow-reliability.md.original
+projects/genericagent-*/

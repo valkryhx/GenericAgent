@@ -8,7 +8,7 @@ export type RewindOption = {
 }
 
 export type SelectorState =
-  | { mode: 'resume'; selected: number; sessions: ResumeSession[]; loading?: boolean }
+  | { mode: 'resume'; selected: number; sessions: ResumeSession[]; loading?: boolean; includeLegacy?: boolean }
   | { mode: 'rewind'; selected: number; options: RewindOption[] }
 
 export type SelectorDecision = {

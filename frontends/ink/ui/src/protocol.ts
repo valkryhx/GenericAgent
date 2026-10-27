@@ -34,9 +34,9 @@ export type BridgeCommand =
   | { type: 'submit'; text: string; images?: BridgeImageAttachment[] }
   | { type: 'stop' }
   | { type: 'new_session' }
-  | { type: 'list_resume_sessions' }
+  | { type: 'list_resume_sessions'; includeLegacy?: boolean }
   | { type: 'resume_session'; id: string }
-  | { type: 'resume_session_index'; index: number }
+  | { type: 'resume_session_index'; index: number; includeLegacy?: boolean }
   | { type: 'rewind'; taskId: number }
   | { type: 'mcp_status' }
   | { type: 'mcp_watch_start' }
@@ -56,9 +56,9 @@ export type BridgeCommand =
   | { type: 'workflow_approve'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_resume'; runId: string; args?: unknown; timeoutSeconds?: number }
   | { type: 'workflow_deny'; runId: string; reason?: string }
-  | { type: 'workflow_list' }
-  | { type: 'workflow_detail'; runId: string }
-  | { type: 'workflow_progress'; runId: string }
+  | { type: 'workflow_list'; includeLegacy?: boolean }
+  | { type: 'workflow_detail'; runId: string; includeLegacy?: boolean; sourcePath?: string | null }
+  | { type: 'workflow_progress'; runId: string; includeLegacy?: boolean; sourcePath?: string | null }
   | { type: 'workflow_stop'; runId: string; reason?: string }
   | { type: 'workflow_save'; runId: string; name?: string; overwrite?: boolean }
   | { type: 'workflow_run_named'; name: string; args?: unknown; timeoutSeconds?: number }
@@ -72,6 +72,7 @@ export type ResumeSession = {
   mtime: number
   preview: string
   rounds: number
+  source?: 'project' | 'legacy' | string
 }
 
 export type HistoryMessage = {
@@ -227,6 +228,8 @@ export type WorkflowRun = {
   error?: string | null
   metadata?: Record<string, unknown>
   recovery?: WorkflowRecoveryHint
+  sourceScope?: 'project' | 'legacy' | string
+  sourcePath?: string | null
 }
 
 /** A saved named workflow (CC m1906 "save as named workflow"). */
@@ -404,7 +407,7 @@ export type BridgeEvent =
   | { type: 'local_command_input'; text: string }
   | { type: 'local_command_output'; text: string }
   | { type: 'clear' }
-  | { type: 'resume_sessions'; sessions: ResumeSession[] }
+  | { type: 'resume_sessions'; sessions: ResumeSession[]; all?: boolean }
   | { type: 'history_replace'; messages: HistoryMessage[]; resetSession?: boolean }
   | { type: 'rewind_done'; taskId: number; text: string }
   | { type: 'mcp_status'; config_path: string; servers: McpServerStatus[]; tools: McpToolStatus[]; errors: Record<string, string>; loading?: boolean; discovery_running?: boolean; discovery_complete?: boolean | null }
@@ -426,7 +429,7 @@ export type BridgeEvent =
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }
-  | { type: 'workflow_runs'; runs: WorkflowRun[]; savedWorkflows?: string[] }
+  | { type: 'workflow_runs'; runs: WorkflowRun[]; savedWorkflows?: string[]; all?: boolean }
   | { type: 'workflow_detail'; run: WorkflowRun; script: string; events: WorkflowEvent[]; draft?: WorkflowDraftPayload | null; progress?: WorkflowProgressPayload | null }
   | { type: 'workflow_progress'; progress: WorkflowProgressPayload }
   | { type: 'workflow_live'; runId: string; jobs: WorkflowLiveJob[] }

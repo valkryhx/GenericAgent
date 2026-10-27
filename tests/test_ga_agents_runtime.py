@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-
+from unittest import mock
 
 from genericagent.core.project_instructions import (
     DEFAULT_GA_AGENTS_FILENAME,
@@ -10,8 +10,6 @@ from genericagent.core.project_instructions import (
     discover_ga_agents_paths,
     load_ga_project_instructions,
 )
-
-
 class GaAgentsRuntimeTest(unittest.TestCase):
     def test_discovers_docs_from_workspace_root_to_current_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -220,6 +218,55 @@ class RepoPromptLayersTest(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.base_en)
+
+
+    def test_prompt_project_root_does_not_depend_on_process_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            (project / DEFAULT_GA_AGENTS_FILENAME).write_text("project root rules", encoding="utf-8")
+            with mock.patch("genericagent.core.project_instructions.os.getcwd", return_value=str(Path(td) / "elsewhere")):
+                rendered = build_ga_project_instructions(project, current_dir=project)
+            self.assertIn("project root rules", rendered)
+
+    def test_project_doc_uses_explicit_current_dir_not_process_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            (project / DEFAULT_GA_AGENTS_FILENAME).write_text("project root rules", encoding="utf-8")
+            with mock.patch("genericagent.core.project_instructions.os.getcwd", return_value=str(Path(td) / "elsewhere")):
+                rendered = build_ga_project_instructions(project, current_dir=project)
+            self.assertIn("project root rules", rendered)
+
+
+class SubagentTranscriptLayoutTest(unittest.TestCase):
+    def test_workflow_transcript_path_is_under_workflows_run_id(self):
+        from genericagent.agents.transcript import SubagentTranscriptStore
+
+        with tempfile.TemporaryDirectory() as td:
+            store = SubagentTranscriptStore(Path(td))
+            path = store.transcript_path("session_a", "run_1", workflow_run_id="wf_1")
+            self.assertEqual(
+                Path(td) / "session_a" / "subagents" / "workflows" / "wf_1" / "run_1.jsonl",
+                path,
+            )
+            self.assertEqual("session_a/subagents/workflows/wf_1/run_1.jsonl", store.transcript_ref("session_a", "run_1", workflow_run_id="wf_1"))
+
+
+class ControlTranscriptRefTest(unittest.TestCase):
+    def test_control_reader_uses_same_transcript_store_path(self):
+        from types import SimpleNamespace
+        from genericagent.core.control.process import ProcessSubagentAdapter
+        from genericagent.agents.transcript import SubagentTranscriptStore
+
+        with tempfile.TemporaryDirectory() as td:
+            session_root = Path(td) / "session_a" / "subagents"
+            manager = SimpleNamespace(session_data_dir=session_root)
+            adapter = ProcessSubagentAdapter.__new__(ProcessSubagentAdapter)
+            adapter.manager = manager
+            state = SimpleNamespace(parent_session_id="session_a", run_id="run_1")
+            expected = SubagentTranscriptStore(session_root).transcript_ref("session_a", "run_1")
+            self.assertEqual(expected, adapter._transcript_ref(state))
 
 
 if __name__ == "__main__":

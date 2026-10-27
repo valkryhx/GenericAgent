@@ -192,6 +192,32 @@ class ContinueCmdResumeTest(unittest.TestCase):
             self.assertEqual("from transcript", sessions[0][2])
             self.assertEqual(str(legacy), sessions[1][0])
 
+    def test_list_sessions_reads_explicit_legacy_roots_instead_of_module_glob(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_bucket = root / "project-bucket"
+            explicit_legacy = root / "explicit-legacy"
+            stale_legacy = root / "stale-module-legacy"
+            project_bucket.mkdir()
+            explicit_legacy.mkdir()
+            stale_legacy.mkdir()
+            expected = explicit_legacy / "model_responses_111111.txt"
+            unexpected = stale_legacy / "model_responses_222222.txt"
+            write_native_log(expected, "explicit legacy")
+            write_native_log(unexpected, "stale module legacy")
+
+            with (
+                patch.object(continue_cmd, "_LOG_GLOB", str(stale_legacy / "model_responses_*.txt")),
+                patch.object(continue_cmd, "_SESSION_ROOT", str(project_bucket)),
+            ):
+                sessions = continue_cmd.list_sessions(
+                    include_legacy=True,
+                    session_roots=[project_bucket],
+                    legacy_roots=[explicit_legacy],
+                )
+
+            self.assertEqual([str(expected)], [item[0] for item in sessions])
+
     def test_list_sessions_does_not_show_legacy_log_when_transcript_covers_same_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

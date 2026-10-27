@@ -34,6 +34,7 @@ class FakeManager:
         self.resume_calls = []
         self.attach_calls = []
         self.detach_calls = []
+        self.session_data_dir = self.temp_dir
 
     def list_agents(self, *args, **kwargs):
         raise AssertionError("process adapter must use list_agent_snapshots")

@@ -373,6 +373,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(1, task_id)
         self.assertTrue(agent.inc_out)
         self.assertEqual([("hello", "user", [])], agent.prompts)
+        significant = [event for event in events if event.get("type") != "agent_snapshot"]
         self.assertEqual(
             [
                 {"type": "user", "taskId": 1, "text": "hello"},
@@ -382,8 +383,53 @@ class InkBridgeTest(unittest.TestCase):
                 {"type": "assistant_done", "taskId": 1, "text": "hello"},
                 {"type": "status", "status": "idle", "taskId": 1},
             ],
-            events,
+            significant,
         )
+        snapshot_index = next(i for i, event in enumerate(events) if event.get("type") == "agent_snapshot")
+        done_index = next(i for i, event in enumerate(events) if event.get("type") == "assistant_done")
+        idle_index = next(i for i, event in enumerate(events) if event.get("type") == "status" and event.get("status") == "idle")
+        self.assertLess(done_index, snapshot_index)
+        self.assertLess(snapshot_index, idle_index)
+
+    def test_submit_refreshes_agent_read_model_after_turn(self):
+        """The agent panel must observe subagents that finish during a turn.
+
+        A spawn turn returns before its child does. The child writes its terminal
+        state to the shared registry, but the bridge previously only refreshed the
+        common read model on workflow/control commands. The next ordinary submit
+        must therefore publish the updated snapshot at its turn boundary.
+        """
+        agent = FakeAgent()
+        events = []
+        control = FakeAgentControl()
+        bridge = GenericAgentBridge(
+            agent_factory=lambda: agent,
+            emit=events.append,
+            workflow_root=tempfile.mkdtemp(),
+            agent_control=control,
+        )
+        control.records = [
+            AgentRecord(
+                execution_id="process-agent:run-1:/root/worker",
+                engine="process",
+                record_kind="process_agent",
+                status="succeeded",
+                agent_path="/root/worker",
+                run_id="run-1",
+                task_name="worker",
+                turn_status="completed",
+                process_status="waiting_reply",
+                capabilities=AgentCapabilities(actions=frozenset({"read", "events"})),
+            ),
+        ]
+
+        bridge.submit("hello")
+        agent.queues[0].put({"done": "hello"})
+        bridge.wait_for_idle(timeout=1)
+
+        snapshots = [event for event in events if event["type"] == "agent_snapshot"]
+        self.assertTrue(snapshots)
+        self.assertEqual("succeeded", snapshots[-1]["snapshot"]["records"][0]["status"])
 
     def test_submit_leaves_semantic_multi_step_request_to_the_main_agent(self):
         """A merely workflow-friendly task must not hijack the main agent.
@@ -549,6 +595,27 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual(-1, result)
         self.assertEqual([("first", "user", [])], agent.prompts)
         self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+
+    def test_wait_for_idle_waits_until_agent_turn_finally_clears(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+
+        bridge.submit("hello")
+        agent.is_running = True
+        agent.queues[0].put({"done": "provider failed"})
+
+        def clear_running():
+            time.sleep(0.1)
+            agent.is_running = False
+
+        threading.Thread(target=clear_running, daemon=True).start()
+        started = time.monotonic()
+        bridge.wait_for_idle(timeout=1)
+        elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 0.08)
+        self.assertFalse(agent.is_running)
 
     def test_submit_can_drive_resume_agent_tool_through_frontend_bridge(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1006,11 +1073,77 @@ class InkBridgeTest(unittest.TestCase):
         with patch("frontends.ink.bridge.continue_list", return_value=[]) as list_sessions:
             bridge.list_resume_sessions()
 
-        list_sessions.assert_called_once_with(
-            exclude_pid=os.getpid(),
-            exclude_path="current-log.txt",
-            exclude_session_id="session_current",
-        )
+        list_sessions.assert_called_once()
+        kwargs = list_sessions.call_args.kwargs
+        self.assertEqual(os.getpid(), kwargs["exclude_pid"])
+        self.assertEqual("current-log.txt", kwargs["exclude_path"])
+        self.assertEqual("session_current", kwargs["exclude_session_id"])
+        self.assertTrue(kwargs["session_roots"])
+
+    def test_list_resume_sessions_all_marks_legacy_rows_only_on_explicit_request(self):
+        import tempfile
+        from genericagent import paths
+
+        agent = FakeAgent()
+        agent.session_id = "session_current"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            agent.project_root = str(Path(tmp) / "project")
+            agent.data_root = str(Path(tmp) / "data")
+            Path(agent.project_root).mkdir()
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            roots = paths.project_roots(project=agent.project_root, data_root=agent.data_root)
+            project_path = roots.project_data_dir / "session_project.jsonl"
+            legacy_path = roots.legacy_sessions_dir / "session_legacy.jsonl"
+            rows = [
+                (str(project_path), 1000.0, "project prompt", 1),
+                (str(legacy_path), 900.0, "legacy prompt", 2),
+            ]
+            with patch("frontends.ink.bridge.continue_list", return_value=rows):
+                bridge.list_resume_sessions(include_legacy=True)
+
+        payload = events[-1]
+        self.assertTrue(payload["all"])
+        self.assertEqual(["project", "legacy"], [item["source"] for item in payload["sessions"]])
+
+    def test_workflow_all_lists_and_opens_a_legacy_run_by_source_path(self):
+        import tempfile
+        from genericagent import paths
+        from genericagent.workflow.models import WorkflowRun
+        from genericagent.workflow.store import WorkflowStore
+
+        agent = FakeAgent()
+        agent.session_id = "session_current"
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            agent.project_root = str(Path(tmp) / "project")
+            agent.data_root = str(Path(tmp) / "data")
+            Path(agent.project_root).mkdir()
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            roots = paths.project_roots(project=agent.project_root, data_root=agent.data_root)
+            legacy_store = WorkflowStore(roots.legacy_sessions_dir)
+            legacy_store.create_run(WorkflowRun(
+                run_id="wf_legacy",
+                session_id="session_current",
+                script="return 1",
+                status="succeeded",
+            ))
+            legacy_state = roots.legacy_sessions_dir / "session_current" / "workflows" / "wf_legacy" / "state.json"
+
+            bridge.workflow_list(include_legacy=True)
+            listed = [event for event in events if event["type"] == "workflow_runs"][-1]
+            row = next(item for item in listed["runs"] if item["runId"] == "wf_legacy")
+            self.assertEqual("legacy", row["sourceScope"])
+            self.assertEqual(str(legacy_state.resolve()), row["sourcePath"])
+
+            bridge.workflow_detail(
+                "wf_legacy",
+                include_legacy=True,
+                source_path=row["sourcePath"],
+            )
+            detail = [event for event in events if event["type"] == "workflow_detail"][-1]
+            self.assertEqual("wf_legacy", detail["run"]["runId"])
+            self.assertEqual("legacy", detail["run"]["sourceScope"])
 
     def test_resume_session_by_index_excludes_current_log_and_session(self):
         agent = FakeAgent()
@@ -1025,11 +1158,12 @@ class InkBridgeTest(unittest.TestCase):
         ):
             bridge.resume_session_by_index(1)
 
-        list_sessions.assert_called_once_with(
-            exclude_pid=os.getpid(),
-            exclude_path="current-log.txt",
-            exclude_session_id="session_current",
-        )
+        list_sessions.assert_called_once()
+        kwargs = list_sessions.call_args.kwargs
+        self.assertEqual(os.getpid(), kwargs["exclude_pid"])
+        self.assertEqual("current-log.txt", kwargs["exclude_path"])
+        self.assertEqual("session_current", kwargs["exclude_session_id"])
+        self.assertTrue(kwargs["session_roots"])
         resume_session.assert_called_once_with("session-a.txt")
 
     def test_resume_session_replaces_history_messages(self):
@@ -1067,6 +1201,32 @@ class InkBridgeTest(unittest.TestCase):
         bridge.rewind(1)
         self.assertEqual([], agent.llmclient.backend.history)
         self.assertEqual({"type": "rewind_done", "taskId": 1, "text": "old q"}, events[-1])
+
+    def test_resume_rebinds_bridge_roots_to_restored_project(self):
+        from genericagent import paths
+
+        agent = FakeAgent()
+        agent.session_id = "session_b"
+        agent.project_root = r"D:\projects\B"
+        agent.data_root = r"D:\ga-data"
+        bridge = _REAL_GENERIC_AGENT_BRIDGE(agent_factory=lambda: agent, emit=lambda _event: None)
+        project_a = r"D:\projects\A"
+
+        with (
+            patch("frontends.ink.bridge.continue_reset"),
+            patch("frontends.ink.bridge.continue_restore", side_effect=lambda target, _path: (
+                setattr(target, "project_root", project_a)
+                or setattr(target, "session_id", "session_a")
+                or ("✅ restored", True)
+            )),
+            patch("frontends.ink.bridge.continue_extract", return_value=[]),
+        ):
+            bridge.resume_session("session-a.jsonl")
+
+        roots = paths.project_roots(project=project_a, data_root=agent.data_root)
+        self.assertEqual(roots.project_data_dir, bridge.workflow_store.root)
+        self.assertEqual(roots.project_worktrees_dir, bridge.project_roots.project_worktrees_dir)
+        self.assertEqual(roots.tasks_dir, bridge.subagent_manager.task_store_root)
 
     def test_resume_transcript_uses_exact_backend_history_before_each_turn_for_rewind(self):
         from genericagent.core import transcripts as session_transcript
@@ -4682,15 +4842,76 @@ return { resumed: true }
             self.assertEqual(first_run.run_id, second_run.metadata.get("resumeFromRunId"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class InkBridgeTeamListTest(unittest.TestCase):
     def setUp(self):
         bridge_patch = patch(f"{__name__}.GenericAgentBridge", new=make_isolated_bridge)
         bridge_patch.start()
         self.addCleanup(bridge_patch.stop)
+
+    def test_same_team_name_in_two_projects_does_not_share_board(self):
+        from genericagent.agents.tasks import SubagentTaskStore
+        from genericagent import paths
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            project_a = root / "A"
+            project_b = root / "B"
+            project_a.mkdir()
+            project_b.mkdir()
+            roots_a = paths.project_roots(project=project_a, data_root=data)
+            roots_b = paths.project_roots(project=project_b, data_root=data)
+            store_a = SubagentTaskStore(
+                project_a,
+                list_id="default",
+                state_root=data,
+                tasks_root=roots_a.tasks_dir,
+                team_key=paths.team_key(roots_a.project_key, "default"),
+            )
+            store_b = SubagentTaskStore(
+                project_b,
+                list_id="default",
+                state_root=data,
+                tasks_root=roots_b.tasks_dir,
+                team_key=paths.team_key(roots_b.project_key, "default"),
+            )
+            store_a.create_task("A only")
+            self.assertEqual([], store_b.list_tasks())
+
+    def test_bridge_manager_uses_project_qualified_team_key_for_task_board(self):
+        from genericagent import paths
+        from genericagent.agents.team import team_name_for
+
+        agent = FakeAgent()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            project = Path(tmp) / "Project"
+            project.mkdir()
+            roots = paths.project_roots(project=project, data_root=data)
+            bridge = GenericAgentBridge(
+                agent_factory=lambda: agent,
+                emit=events.append,
+                workflow_root=tmp,
+            )
+            try:
+                bridge.project_dir = project
+                bridge.state_root = data
+                bridge.agent.session_id = "session_project_scope"
+                bridge._rebind_runtime_paths()
+                bridge.agent_control = bridge._build_agent_control()
+                team_name = team_name_for("session_project_scope")
+                expected_key = paths.team_key(roots.project_key, team_name)
+                self.assertEqual(bridge.subagent_manager.team_key, expected_key)
+                store = bridge.subagent_manager.task_store()
+                self.assertEqual(store.dir, roots.tasks_dir / expected_key)
+                store.create_task("project-qualified task")
+                bridge.team_list()
+            finally:
+                bridge.stop()
+        roster = [event for event in events if event.get("type") == "team_roster"]
+        self.assertEqual(len(roster), 1)
+        self.assertEqual([task["subject"] for task in roster[0]["tasks"]], ["project-qualified task"])
 
     def test_team_list_emits_roster_and_shared_task_board(self):
         from genericagent.agents.agent_path import AgentPath
@@ -4701,8 +4922,11 @@ class InkBridgeTeamListTest(unittest.TestCase):
         events = []
         control = FakeAgentControl()
         with tempfile.TemporaryDirectory() as tmp:
+            from genericagent import paths
+
             temp = Path(tmp) / "temp"
-            registry = SubagentRegistry(temp / "subagents")
+            runtime_roots = paths.project_roots(project=tmp, data_root=Path(tmp) / "data")
+            registry = SubagentRegistry(runtime_roots.project_data_dir / "subagents")
             registry.create_child(
                 parent_path=AgentPath.root(),
                 task_name="agent_1",
@@ -4710,7 +4934,14 @@ class InkBridgeTeamListTest(unittest.TestCase):
                 state_path=temp / "agent_1" / "state.json",
                 pid=1234,
             )
-            store = SubagentTaskStore(tmp, list_id="default")
+            team_key = paths.team_key(runtime_roots.project_key, "default")
+            store = SubagentTaskStore(
+                tmp,
+                list_id="default",
+                state_root=runtime_roots.data_root,
+                tasks_root=runtime_roots.tasks_dir,
+                team_key=team_key,
+            )
             task = store.create_task("Add parser")
             store.claim_task(task["id"], "/root/agent_1", start=True)
             bridge = GenericAgentBridge(
@@ -4720,7 +4951,7 @@ class InkBridgeTeamListTest(unittest.TestCase):
                 agent_control=control,
             )
             bridge.project_dir = tmp
-            bridge.state_root = tmp
+            bridge.state_root = Path(tmp) / "data"
             bridge.team_list()
 
         roster = [event for event in events if event.get("type") == "team_roster"]

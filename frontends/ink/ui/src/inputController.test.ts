@@ -168,6 +168,22 @@ test('handleInput sends indexed resume commands without opening a selector', () 
   })
 })
 
+test('handleInput supports explicit legacy views for resume and workflow', () => {
+  const store = createPasteStore()
+  assert.deepEqual(handleInput('/resume --all', '', { return: true }, 'idle', store), {
+    value: '',
+    action: { type: 'open_resume', includeLegacy: true },
+  })
+  assert.deepEqual(handleInput('/continue 3 --all', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'resume_session_index', index: 3, includeLegacy: true },
+  })
+  assert.deepEqual(handleInput('/workflows --all', '', { return: true }, 'idle', store), {
+    value: '',
+    command: { type: 'workflow_list', includeLegacy: true },
+  })
+})
+
 test('handleInput parses mcp slash commands', () => {
   const store = createPasteStore()
 

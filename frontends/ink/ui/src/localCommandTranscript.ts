@@ -16,7 +16,7 @@ export function commandTextForLocalDecision(decision: Pick<InputDecision, 'actio
   if (command.type === 'model_status') return '/model ?'
   if (command.type === 'model_switch') return `/model ${command.selector}`
   if (command.type === 'compact') return `/compact ${command.instructions}`.trimEnd()
-  if (command.type === 'workflow_list') return '/workflows'
+  if (command.type === 'workflow_list') return command.includeLegacy ? '/workflows --all' : '/workflows'
   if (command.type === 'workflow_detail') return `/workflow detail ${command.runId}`
   if (command.type === 'workflow_resume') return `/workflow resume ${command.runId}`
   if (command.type === 'workflow_stop') return `/workflow stop ${command.runId}${command.reason ? ` ${command.reason}` : ''}`

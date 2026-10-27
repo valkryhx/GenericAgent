@@ -208,8 +208,9 @@ function workflowListRunRow(run: WorkflowRun, selected: boolean): string {
   const cursor = selected ? '›' : ' '
   const icon = workflowStatusIcon(run.status)
   const name = workflowDisplayName(run)
+  const source = run.sourceScope === 'legacy' ? '[legacy] ' : ''
   const agentCount = run.jobs?.length ?? 0
-  return `${cursor} ${icon} ${name}  ${agentCount} ${agentCount === 1 ? 'agent' : 'agents'}`
+  return `${cursor} ${icon} ${source}${name}  ${agentCount} ${agentCount === 1 ? 'agent' : 'agents'}`
 }
 
 function workflowDisplayName(run: WorkflowRun): string {
@@ -242,7 +243,16 @@ export function workflowListCommandForKey(
   }
   if (key.return) {
     const selected = panel.runs[panel.selected]
-    return selected ? { command: { type: 'workflow_detail', runId: selected.runId } } : null
+    if (!selected) return null
+    return {
+      command: {
+        type: 'workflow_detail',
+        runId: selected.runId,
+        ...(selected.sourceScope === 'legacy'
+          ? { includeLegacy: true, sourcePath: selected.sourcePath ?? null }
+          : {}),
+      },
+    }
   }
   return null
 }

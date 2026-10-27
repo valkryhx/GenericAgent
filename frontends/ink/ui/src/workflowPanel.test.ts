@@ -54,6 +54,23 @@ test('workflowListCommandForKey moves selection and opens detail on Enter', () =
   })
 })
 
+test('workflowListRows marks legacy runs and passes their source into detail', () => {
+  const legacy = {
+    ...workflowRuns[0]!,
+    runId: 'wf_legacy',
+    sourceScope: 'legacy',
+    sourcePath: 'C:/data/temp/sessions/old/workflows/wf_legacy/state.json',
+  }
+  const panel = { mode: 'list' as const, runs: [legacy], selected: 0 }
+  assert.match(workflowListRows(panel)[3]!, /\[legacy\] prompt-guided-planner-real-e2e-design/)
+  assert.deepEqual(workflowListCommandForKey(panel, { return: true }, '')?.command, {
+    type: 'workflow_detail',
+    runId: 'wf_legacy',
+    includeLegacy: true,
+    sourcePath: 'C:/data/temp/sessions/old/workflows/wf_legacy/state.json',
+  })
+})
+
 const awaitingRun: WorkflowRun = {
   runId: 'wf_demo',
   sessionId: 'session',

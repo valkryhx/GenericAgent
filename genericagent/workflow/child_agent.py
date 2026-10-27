@@ -36,7 +36,10 @@ def _isolated_workspace_base_root() -> Path:
     override = os.environ.get("GA_WORKFLOW_CHILD_AGENTS_ROOT")
     if override and override.strip():
         return Path(override).expanduser()
-    return paths.TEMP_DIR / "workflow_child_agents"
+    project_data_dir = os.environ.get("GA_PROJECT_DATA_DIR")
+    if project_data_dir and project_data_dir.strip():
+        return Path(project_data_dir).expanduser() / "workflow_child_agents"
+    return paths.project_workflow_children_dir()
 
 
 def _guarded_remove_tree(target: Path, base: Path) -> bool:
@@ -1188,12 +1191,13 @@ class NativeGPTChildAgentRunner:
         every operating rule had to be duplicated into GA_AGENTS.md to reach it.
         """
 
-        script_dir = str(paths.PROJECT_ROOT)
+        project_root = str(os.environ.get("GA_PROJECT_ROOT") or paths.PROJECT_ROOT)
+        tool_cwd = str(os.environ.get("GA_TOOL_CWD") or project_root)
         identity = self.system_prompt or "You are a workflow child agent. Complete only this assigned job and return a concise result."
         try:
             from genericagent.core.project_instructions import build_ga_project_instructions, load_base_system_prompt
-            base_prompt = load_base_system_prompt(script_dir, "_en" if os.environ.get("GA_LANG") == "en" else "")
-            project_prompt = build_ga_project_instructions(script_dir, os.getcwd())
+            base_prompt = load_base_system_prompt(project_root, "_en" if os.environ.get("GA_LANG") == "en" else "")
+            project_prompt = build_ga_project_instructions(project_root, tool_cwd)
         except Exception:
             base_prompt = ""
             project_prompt = ""

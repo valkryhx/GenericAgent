@@ -50,19 +50,28 @@ class WorkflowWorkspaceTest(unittest.TestCase):
             absolute = root / "tmp" / "report.html"
             self.assertEqual("tmp/report.html", normalize_workspace_relative(absolute, root))
 
-    def test_default_workspace_is_the_project_temp_dir_not_the_launch_cwd(self):
-        """Artifacts must not land in GA's own source tree.
+    def test_default_workspace_is_the_active_project_data_bucket(self):
+        """Artifacts must not land in GA's own source tree or the legacy temp root."""
 
-        A normal ``ga`` launch starts with cwd == the repository root, so the old
-        cwd-derived workspace put a finished report next to agentmain.py. The
-        default is the gitignored project temp/ directory instead.
-        """
         import os
+        from genericagent import paths as ga_paths
 
-        repo_root = Path(__file__).resolve().parents[1]
-        expected = (repo_root / "temp").resolve()
-        with patch.dict(os.environ, {"GA_WORKFLOW_WORKSPACE_ROOT": ""}, clear=False):
-            self.assertEqual(expected, default_workspace_root().resolve())
+        project = Path(tmp_project := tempfile.mkdtemp()) / "A"
+        data = Path(tmp_project) / "data"
+        project.mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp_project, ignore_errors=True))
+        roots = ga_paths.project_roots(project=project, data_root=data)
+        with patch.dict(
+            os.environ,
+            {
+                "GA_WORKFLOW_WORKSPACE_ROOT": "",
+                "GA_PROJECT_ROOT": str(project),
+                "GA_DATA_DIR": str(data),
+            },
+            clear=False,
+        ):
+            self.assertEqual(roots.project_data_dir.resolve(), default_workspace_root().resolve())
+            self.assertNotEqual(ga_paths.TEMP_DIR.resolve(), default_workspace_root().resolve())
 
     def test_explicit_env_override_wins_for_workspace_default(self):
         import os

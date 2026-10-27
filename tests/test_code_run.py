@@ -240,5 +240,75 @@ print('suffix=' + ''.join(p.suffixes))
             self.assertFalse(outside.exists())
 
 
+class ProjectToolCwdTest(unittest.TestCase):
+    def test_code_run_falls_back_to_project_tool_cwd(self):
+        popen_kwargs = {}
+
+        class EmptyStdout:
+            def readline(self):
+                return b""
+
+            def close(self):
+                pass
+
+        class Proc:
+            stdout = EmptyStdout()
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        def fake_popen(_cmd, **kwargs):
+            popen_kwargs.update(kwargs)
+            return Proc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            code_cwd = Path(tmp) / "runtime"
+            code_cwd.mkdir()
+            with patch.dict(ga.os.environ, {"GA_TOOL_CWD": str(project)}, clear=False):
+                with patch.object(ga.subprocess, "Popen", side_effect=fake_popen):
+                    result = exhaust_generator(code_run('print("cwd")', "python", timeout=5, cwd=None, code_cwd=str(code_cwd)))
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(str(project), popen_kwargs["cwd"])
+
+    def test_global_memory_prompt_uses_agent_project_roots(self):
+        class Agent:
+            project_root = r"D:\work\Alpha"
+            tool_cwd = r"D:\work\Alpha\src"
+            data_root = r"D:\ga-data"
+            project_data_dir = r"D:\ga-data\projects\Alpha-key"
+
+        prompt = ga.get_global_memory(Agent())
+        if prompt:
+            self.assertIn("project root = D:\\work\\Alpha", prompt)
+            self.assertIn("tool cwd = D:\\work\\Alpha\\src", prompt)
+            self.assertIn("project data = D:\\ga-data\\projects\\Alpha-key", prompt)
+
+
+class HandlerPathPromptTest(unittest.TestCase):
+    def test_prompt_roles_are_explicit_and_not_interchangeable(self):
+        from types import SimpleNamespace
+        from genericagent.core.handler import get_global_memory
+
+        agent = SimpleNamespace(
+            project_root="D:/work/project",
+            tool_cwd="D:/work/project",
+            data_root="D:/GA-data",
+            project_data_dir="D:/GA-data/projects/project-key",
+        )
+        prompt = get_global_memory(agent)
+        self.assertIn("project root = D:/work/project", prompt)
+        self.assertIn("tool cwd = D:/work/project", prompt)
+        self.assertIn("data root = D:/GA-data", prompt)
+        self.assertIn("project data = D:/GA-data/projects/project-key", prompt)
+        self.assertIn("ordinary deliverables belong here", prompt)
+        self.assertIn("do not place user deliverables here", prompt)
+        self.assertIn("distinct roles", prompt)
+
 if __name__ == "__main__":
     unittest.main()

@@ -247,24 +247,54 @@ class SubagentManager:
     STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
     STARTUP_HANDSHAKE_POLL_S = 0.05
 
-    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None, state_root=None):
-        self.root_dir = Path(root_dir or paths.PROJECT_ROOT)
-        # ``root_dir`` is the project workspace (cwd/repository for worktrees).
-        # ``state_root`` is where GA-owned subagent state is persisted. Keep the
-        # historical root_dir/temp layout for tests and source checkout, while a
-        # production wheel passes GA_DATA_DIR explicitly so a user project never
-        # receives GA runtime files.
-        if state_root is not None:
-            self.state_root = Path(state_root)
+    def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None, state_root=None, project_root=None, project_state_root=None, task_store_root=None, team_key=None, project_data_dir=None, session_data_dir=None, worktree_root=None, parent_session_id=None):
+        # ``project_root`` is the user's project (cwd for ordinary children and
+        # the repository for real git worktrees). ``project_state_root`` is the
+        # GA-owned data root. ``root_dir``/``state_root`` remain compatibility
+        # aliases so source-checkout tests and older callers keep their exact
+        # historical layout.
+        legacy_project = Path(root_dir or paths.PROJECT_ROOT)
+        self.project_root = Path(project_root or legacy_project)
+        self.root_dir = self.project_root
+        if project_state_root is not None:
+            self.project_state_root = Path(project_state_root)
+        elif state_root is not None:
+            self.project_state_root = Path(state_root)
         elif root_dir is not None:
-            self.state_root = self.root_dir
+            self.project_state_root = legacy_project
         else:
-            self.state_root = paths.RUNTIME_ROOT
-        self.temp_dir = self.state_root / "temp"
+            self.project_state_root = paths.RUNTIME_ROOT
+        self.state_root = self.project_state_root
+        # ``temp_dir`` is the legacy registry/task-dir adapter. New project
+        # buckets are explicit so session data and the shared runtime root can
+        # diverge without any caller guessing from cwd.
+        self.temp_dir = self.project_state_root / "temp"
+        self.project_data_dir = Path(project_data_dir) if project_data_dir is not None else self.temp_dir
+        self.parent_session_id = str(parent_session_id or "").strip() or None
+        # Project-bucket callers get the target shape:
+        # <projectData>/<sessionId>/subagents. Direct/legacy callers keep
+        # <stateRoot>/temp/<task> and <stateRoot>/temp/sessions.
+        if project_data_dir is not None and self.parent_session_id:
+            self.session_data_dir = self.project_data_dir / self.parent_session_id / "subagents"
+            self.task_root = self.session_data_dir / "tasks"
+            self.subagents_state_dir = self.session_data_dir
+        elif project_data_dir is not None:
+            self.session_data_dir = Path(session_data_dir) if session_data_dir is not None else self.project_data_dir
+            self.task_root = self.project_data_dir
+            self.subagents_state_dir = self.project_data_dir / "subagents"
+        else:
+            self.session_data_dir = Path(session_data_dir) if session_data_dir is not None else self.temp_dir / "sessions"
+            self.task_root = self.temp_dir
+            self.subagents_state_dir = self.temp_dir / "subagents"
+        self.project_workflows_dir = self.project_data_dir / "workflow-runs"
+        self.project_workflow_children_dir = self.project_data_dir / "workflow_child_agents"
+        self.worktree_root = Path(worktree_root) if worktree_root is not None else self.project_root / ".ga" / "worktrees"
+        self.task_store_root = Path(task_store_root) if task_store_root is not None else None
+        self.team_key = str(team_key or "").strip() or None
         from genericagent.agents.registry import resolve_tree_limits_from_env
 
         self.registry = SubagentRegistry(
-            self.temp_dir / "subagents",
+            self.subagents_state_dir,
             process_exists=process_exists or _default_process_exists,
             **resolve_tree_limits_from_env(),
         )
@@ -275,13 +305,13 @@ class SubagentManager:
         self.self_agent_path = self._resolve_self_agent_path(self_agent_path)
         self.realtime_channel_factory = realtime_channel_factory or self._env_realtime_channel_factory()
         self._realtime_channels = {}
-        self.event_bus = SubagentEventBus(self.temp_dir / "subagents", publisher=self._publish_realtime_event)
+        self.event_bus = SubagentEventBus(self.subagents_state_dir, publisher=self._publish_realtime_event)
         # Delivery receipts + provenance for the durable file bus (CC m0188 / m0300).
-        self.receipt_ledger = SubagentSendLedger(self.temp_dir / "subagents")
-        self.provenance_ledger = ProvenanceLedger(self.temp_dir / "subagents")
+        self.receipt_ledger = SubagentSendLedger(self.subagents_state_dir)
+        self.provenance_ledger = ProvenanceLedger(self.subagents_state_dir)
         # Swarm host singleton (CC m0184): one object owning the shared inbound
         # gate + idempotent mailbox ledger + task-list update signal.
-        self.swarm = get_swarm(self.temp_dir / "subagents", receipts=self.receipt_ledger)
+        self.swarm = get_swarm(self.subagents_state_dir, receipts=self.receipt_ledger)
         # Team (task-board list_id) this manager speaks for; ga.py sets it from the session.
         self.team_name = "default"
         self.process_exists = process_exists or _default_process_exists
@@ -292,7 +322,7 @@ class SubagentManager:
         self.python_executable = python_executable or os.environ.get("PYTHON", "python")
         self.worktree_creator = worktree_creator
         self.worktree_runner = worktree_runner
-        self.repo_dir = self.root_dir
+        self.repo_dir = self.project_root
         # Optional ``run_id -> info dict | None`` resolver so a dynamic-workflow run id can
         # be waited on like a subagent (GA defect A). The Ink bridge injects the
         # workflow-store-backed resolver; the default reads the durable run state.json.
@@ -317,7 +347,7 @@ class SubagentManager:
         def factory(run_id, task_name):
             from genericagent.agents.realtime_ipc import SubagentRealtimeChannel, default_channel_address, new_channel_authkey
 
-            channel_dir = self.temp_dir / "subagents" / "channels"
+            channel_dir = self.subagents_state_dir / "channels"
             # Per-run key, because the address is derived from a sequential run_id and is
             # therefore guessable by any local process.
             return SubagentRealtimeChannel(default_channel_address(channel_dir, run_id), authkey=new_channel_authkey())
@@ -378,9 +408,24 @@ class SubagentManager:
 
         env = {**os.environ, self.AGENT_PATH_ENV: str(agent_path)}
         # Child runtime state must follow the parent's writable data root even
-        # when the child's cwd is a project worktree.
-        env["GA_DATA_DIR"] = str(self.state_root)
-        env["GA_PROJECT_ROOT"] = str(self.root_dir)
+        # when the child's cwd is a project worktree. The project identity is
+        # a snapshot, not something the child re-derives from cwd.
+        roots = paths.project_roots(project=self.project_root, data_root=self.project_state_root)
+        env["GA_DATA_DIR"] = str(roots.data_root)
+        env["GA_PROJECT_ROOT"] = str(roots.project_root)
+        env["GA_PROJECT_KEY"] = roots.project_key
+        env["GA_PROJECT_DATA_DIR"] = str(roots.project_data_dir)
+        env["GA_WORKTREE_ROOT"] = str(roots.project_worktrees_dir)
+        env["GA_TASKS_ROOT"] = str(roots.tasks_dir)
+        env["GA_SESSION_DATA_DIR"] = str(self.session_data_dir)
+        env["GA_PARENT_SESSION_ID"] = str(self.parent_session_id or "")
+        env["GA_TASK_ROOT"] = str(self.task_root)
+        resolved_team_key = self.team_key
+        if not resolved_team_key:
+            from genericagent.agents.team import team_name_for
+
+            resolved_team_key = paths.team_key(roots.project_key, team_name_for())
+        env["GA_TEAM_KEY"] = resolved_team_key
         # A child gets its OWN session id (session_transcript.ensure_agent_session), so it
         # cannot derive the lead's team name from its own session: without this the teammate
         # would resolve a different team and its task-board calls would hit a DIFFERENT board
@@ -652,7 +697,7 @@ class SubagentManager:
         if workflow_state is not None:
             return workflow_state
         task_name = self._task_name_from_target(target)
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         state_path = task_dir / "state.json"
         raw = read_json_or_none(state_path) or {}
         refreshed = self._refresh_state(task_name, task_dir, raw)
@@ -674,7 +719,7 @@ class SubagentManager:
         """
         if not is_workflow_run_id(run_id):
             return None
-        sessions = self.temp_dir / "sessions"
+        sessions = self.session_data_dir
         for name in ("state.json", "run.json"):
             for path in sorted(sessions.glob(f"*/workflows/{run_id}/{name}")):
                 data = read_json_or_none(path) or {}
@@ -702,7 +747,7 @@ class SubagentManager:
     def _workflow_state_from_info(self, run_id, info):
         status = self._workflow_info_value(info, "status", "runStatus", "run_status")
         terminal = workflow_run_is_terminal(status)
-        artifact_dir = self._workflow_info_value(info, "artifactDir", "artifact_dir") or str(self.temp_dir / run_id)
+        artifact_dir = self._workflow_info_value(info, "artifactDir", "artifact_dir") or str(self.project_data_dir / run_id)
         result_ref = self._workflow_info_value(info, "resultRef", "result_ref")
         if not terminal:
             result_ref = None
@@ -755,7 +800,7 @@ class SubagentManager:
         if workflow_state is not None:
             return workflow_state
         task_name = self._task_name_from_target(target)
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         raw = read_json_or_none(task_dir / "state.json") or {}
         refreshed = self._refresh_state(task_name, task_dir, raw, persist_side_effects=False)
         return self._agent_state_from_dict(task_name, task_dir, refreshed)
@@ -810,7 +855,7 @@ class SubagentManager:
         effective_ipc_mode = "file"
         ipc_fallback_reason = None
         ipc_endpoint = None
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         state_path = task_dir / "state.json"
         registry_entry = self._create_child_or_reject(
             task_name=task_name,
@@ -851,7 +896,7 @@ class SubagentManager:
             from genericagent.agents.worktree import create_subagent_worktree
             creator = self.worktree_creator or create_subagent_worktree
             try:
-                worktree = creator(self.root_dir, self.temp_dir / "subagents" / "worktrees", registry_entry.run_id)
+                worktree = creator(self.project_root, self.worktree_root, registry_entry.run_id)
                 worktree_path = worktree.get("path")
             except Exception as e:
                 error = f"{type(e).__name__}: {e}"
@@ -988,7 +1033,7 @@ class SubagentManager:
         atomic_write_json(state_path, state)
         if parent_session_id:
             try:
-                SubagentTranscriptStore(self.temp_dir / "sessions").write_metadata(
+                SubagentTranscriptStore(self.session_data_dir, project_data_dir=self.session_data_dir).write_metadata(
                     session_id=parent_session_id,
                     run_id=registry_entry.run_id,
                     agent_path=str(registry_entry.agent_path),
@@ -1005,8 +1050,12 @@ class SubagentManager:
             "--task",
             task_name,
             "--nobg",
-            "--task_root",
-            str(self.root_dir),
+            "--task_dir",
+            str(task_dir),
+            "--project_root",
+            str(self.project_root),
+            "--state_root",
+            str(self.project_state_root),
             "--llm_no",
             str(llm_no),
             "--permission_profile",
@@ -1231,7 +1280,7 @@ class SubagentManager:
         task_dir = Path(previous.task_dir)
         state_path = task_dir / "state.json"
         raw = read_json_or_none(state_path) or {}
-        resume_context = SubagentTranscriptStore(self.temp_dir / "sessions").build_resume_context(previous.parent_session_id, previous.run_id)
+        resume_context = SubagentTranscriptStore(self.session_data_dir, project_data_dir=self.session_data_dir).build_resume_context(previous.parent_session_id, previous.run_id)
         for stale_name in ("_stop", "reply.txt"):
             try:
                 (task_dir / stale_name).unlink()
@@ -1255,8 +1304,12 @@ class SubagentManager:
             "--task",
             previous.task_name,
             "--nobg",
-            "--task_root",
-            str(self.root_dir),
+            "--task_dir",
+            str(task_dir),
+            "--project_root",
+            str(self.project_root),
+            "--state_root",
+            str(self.project_state_root),
             "--llm_no",
             str(llm_no),
             "--permission_profile",
@@ -1926,7 +1979,7 @@ class SubagentManager:
             if cleanup_worktree:
                 from genericagent.agents.worktree import remove_subagent_worktree
 
-                raw["worktree_cleanup"] = remove_subagent_worktree(self.root_dir, raw.get("worktree_path"), runner=self.worktree_runner)
+                raw["worktree_cleanup"] = remove_subagent_worktree(self.project_root, raw.get("worktree_path"), runner=self.worktree_runner)
         atomic_write_json(task_dir / "state.json", raw)
         append_jsonl_event(
             task_dir / "events.jsonl",
@@ -1952,7 +2005,7 @@ class SubagentManager:
         )
         if raw.get("parent_session_id") and raw.get("run_id"):
             try:
-                SubagentTranscriptStore(self.temp_dir / "sessions").append_event(
+                SubagentTranscriptStore(self.session_data_dir, project_data_dir=self.session_data_dir).append_event(
                     raw.get("parent_session_id"),
                     raw.get("run_id"),
                     "agent_closed",
@@ -2021,7 +2074,7 @@ class SubagentManager:
         task_name = str(self.self_agent_path).rstrip("/").split("/")[-1] or "root"
         if task_name == "root":
             raise ValueError("the root agent is the lead; it cannot message team-lead")
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
         message_id = "lead_%s_%s" % (task_name, os.urandom(4).hex())
         created_at = now_iso()
@@ -2079,7 +2132,13 @@ class SubagentManager:
     def task_store(self, list_id=None):
         from genericagent.agents.tasks import SubagentTaskStore
 
-        return SubagentTaskStore(self.root_dir, list_id=list_id or self.team_name, state_root=self.state_root)
+        return SubagentTaskStore(
+            self.project_root,
+            list_id=list_id or self.team_name,
+            state_root=self.project_state_root,
+            tasks_root=self.task_store_root,
+            team_key=self.team_key,
+        )
 
     def reclaim_tasks_for(self, agent_path, list_id=None):
         """Unassign every unfinished task owned by a terminated agent (CC m0300 N4e)."""
@@ -2107,7 +2166,7 @@ class SubagentManager:
 
         Mirrors CC ``m1448 zo``: an explicit lead DM suppresses the duplicate idle result.
         """
-        return sent_lead_dm_since_last_turn(self.temp_dir / task_name / "events.jsonl")
+        return sent_lead_dm_since_last_turn(self.task_root / task_name / "events.jsonl")
 
     def emit_idle_notification(
         self,
@@ -2132,7 +2191,7 @@ class SubagentManager:
             failure_reason=failure_reason,
             result=result,
         )
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
         append_parent_inbox_event(task_dir, frame)
         append_jsonl_event(task_dir / "events.jsonl", frame)
@@ -2142,7 +2201,7 @@ class SubagentManager:
         task_name = self._task_name_from_target(target)
         primary_path = f"/root/{task_name}"
         extra_paths = self._resolve_other_recipients(other_recipients, exclude=primary_path) if _fanout else []
-        task_dir = self.temp_dir / task_name
+        task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
         delivery_mode = TRIGGER_TURN if trigger_turn else QUEUE_ONLY
         row = SubagentMailbox(task_dir / "mailbox.jsonl").enqueue(
@@ -2242,7 +2301,7 @@ class SubagentManager:
         if not message_id:
             return
         task_name = self._task_name_from_target(agent_path)
-        mailbox = SubagentMailbox(self.temp_dir / task_name / "mailbox.jsonl")
+        mailbox = SubagentMailbox(self.task_root / task_name / "mailbox.jsonl")
         try:
             mailbox.annotate(message_id, other_recipients=peers)
         except Exception:
@@ -2261,7 +2320,7 @@ class SubagentManager:
         """Lazily built: the log touches the filesystem, and most managers never dedup at all."""
         log = getattr(self, "_submission_log", None)
         if log is None:
-            log = SubagentSubmissionLog(self.temp_dir / "subagents")
+            log = SubagentSubmissionLog(self.subagents_state_dir)
             self._submission_log = log
         return log
 
@@ -2426,7 +2485,7 @@ class SubagentManager:
         index = 0
         while True:
             candidate = base if index == 0 else f"{base}_{index}"
-            if not (self.temp_dir / candidate / "state.json").exists():
+            if not (self.task_root / candidate / "state.json").exists():
                 try:
                     self.registry.get(f"{parent}/{candidate}")
                 except FileNotFoundError:
@@ -2469,14 +2528,14 @@ class SubagentManager:
 
     def _event_size(self, target):
         task_name = self._task_name_from_target(target)
-        path = self.temp_dir / task_name / "events.jsonl"
+        path = self.task_root / task_name / "events.jsonl"
         try:
             return path.stat().st_size
         except FileNotFoundError:
             return 0
 
     def _parent_inbox_path(self):
-        return self.temp_dir / "subagents" / "inbox.jsonl"
+        return self.subagents_state_dir / "inbox.jsonl"
 
     def _parent_inbox_size(self):
         try:

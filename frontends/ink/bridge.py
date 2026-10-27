@@ -232,11 +232,9 @@ class GenericAgentBridge:
         agent_control: Any | None = None,
     ) -> None:
         self.agent_factory = agent_factory
-        # Artifacts must not land in GA's own source tree. ``os.getcwd()`` was
-        # the repository root for a normal ``ga`` launch, so a generated report
-        # appeared next to genericagent/core/app.py. The canonical root is the project's
-        # gitignored temp/ directory.
-        self.workspace_root = resolve_workspace_root(workspace_root or default_workspace_root())
+        # Runtime artifacts live under the project data bucket; an explicit
+        # workspace override remains available for tests/embedding.
+        self._workspace_root_override = workspace_root
         raw_emit = emit or make_stdout_emitter(sys.stdout)
         self.emit = lambda event: raw_emit(sanitize(event))
         with backend_output_redirect():
@@ -278,41 +276,108 @@ class GenericAgentBridge:
         # Overridable so tests can point the team view at a temp tree.
         self.project_dir = PROJECT_DIR
         self.state_root = ga_paths.RUNTIME_ROOT
-        self.workflow_store = WorkflowStore(root=workflow_root or ga_paths.SESSIONS_DIR)
-        self.workflow_controller = WorkflowController(store=self.workflow_store)
-        if agent_control is None:
-            with backend_output_redirect():
-                from genericagent.core.control.control import UnifiedAgentControl
-                from genericagent.core.control.process import ProcessSubagentAdapter
-                from genericagent.core.control.workflow import WorkflowChildAdapter
-                from genericagent.agents.manager import SubagentManager
-
-            process_manager = SubagentManager(
-                root_dir=PROJECT_DIR,
-                python_executable=sys.executable,
-                state_root=ga_paths.RUNTIME_ROOT,
-            )
-            agent_control = UnifiedAgentControl(
-                [
-                    ProcessSubagentAdapter(process_manager),
-                    # Scope the agent read model to the live session (CC keeps the
-                    # workflow view per session). Unscoped, temp/sessions grew without
-                    # bound and every workflow_detail/list/progress paid seconds of
-                    # list_records+events_since work (the "Enter to view is laggy" bug).
-                    WorkflowChildAdapter(
-                        self.workflow_store,
-                        self.workflow_controller,
-                        session_id_provider=lambda: getattr(self.agent, "session_id", None),
-                    ),
-                ]
-            )
-        self.agent_control = agent_control
+        self._workflow_root_override = workflow_root
+        self._agent_control_override = agent_control
+        self._rebind_runtime_paths()
+        self.agent_control = agent_control or self._build_agent_control()
         self.agent_cursors: dict[str, int] = self._initial_agent_cursors()
         self._agent_event_ids: set[str] = set()
         self._agent_errors: dict[str, str] = {}
         self._agent_snapshot_fingerprint: str | None = None
+        self._agent_read_model_lock = threading.Lock()
+        self._agent_watch_stop = threading.Event()
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
+        self._agent_watch_thread = threading.Thread(
+            target=self._watch_agent_state,
+            args=(self._agent_watch_stop,),
+            daemon=True,
+            name="ga-ink-agent-watch",
+        )
+        self._agent_watch_thread.start()
+
+    def _runtime_project_dir(self) -> Path:
+        return Path(
+            getattr(self.agent, "project_root", None)
+            or getattr(self, "project_dir", None)
+            or PROJECT_DIR
+        ).expanduser().resolve(strict=False)
+
+    def _runtime_data_root(self) -> Path:
+        return Path(
+            getattr(self.agent, "data_root", None)
+            or getattr(self, "state_root", None)
+            or ga_paths.RUNTIME_ROOT
+        ).expanduser().resolve(strict=False)
+
+    def _rebind_runtime_paths(self) -> None:
+        from genericagent.workflow.store import WorkflowStore
+        from genericagent.workflow.controller import WorkflowController
+        from genericagent.workflow.workspace import resolve_workspace_root
+
+        self.project_dir = self._runtime_project_dir()
+        self.state_root = self._runtime_data_root()
+        self.project_roots = ga_paths.project_roots(project=self.project_dir, data_root=self.state_root)
+        if self._workspace_root_override:
+            self.workspace_root = resolve_workspace_root(self._workspace_root_override)
+        else:
+            # The project bucket may not exist until the first run. The
+            # workflow workspace resolver is strict by design for explicit
+            # overrides, so the implicit project root is created here.
+            self.project_roots.project_data_dir.mkdir(parents=True, exist_ok=True)
+            self.workspace_root = resolve_workspace_root(self.project_roots.project_data_dir)
+        root_override = getattr(self, "_workflow_root_override", None)
+        if root_override is not None:
+            test_root = Path(root_override).expanduser().resolve()
+            self.workflow_store = WorkflowStore(
+                root=test_root,
+                project_workflows_dir=test_root / ".ga" / "workflows",
+                user_workflows_dir=test_root / "workflows",
+                legacy_workflows_dir=test_root / "temp" / "sessions" / "named-workflows",
+            )
+        else:
+            self.workflow_store = WorkflowStore(
+                root=self.project_roots.project_data_dir,
+                project_workflows_dir=self.project_roots.project_workflows_dir,
+                user_workflows_dir=self.project_roots.user_workflows_dir,
+                legacy_workflows_dir=self.project_roots.legacy_workflows_dir,
+            )
+        self.workflow_controller = WorkflowController(store=self.workflow_store)
+
+    def _build_agent_control(self):
+        from genericagent.core.control.control import UnifiedAgentControl
+        from genericagent.core.control.process import ProcessSubagentAdapter
+        from genericagent.core.control.workflow import WorkflowChildAdapter
+        from genericagent.agents.manager import SubagentManager
+
+        lead_session_id = str(getattr(self.agent, "session_id", "") or "").strip()
+        session_data_dir = ga_paths.project_subagents_dir(lead_session_id, roots=self.project_roots) if lead_session_id else None
+        from genericagent.agents.team import team_name_for
+
+        team_name = team_name_for(lead_session_id)
+        process_manager = SubagentManager(
+            project_root=self.project_roots.project_root,
+            python_executable=sys.executable,
+            project_state_root=self.project_roots.data_root,
+            project_data_dir=self.project_roots.project_data_dir,
+            session_data_dir=session_data_dir,
+            parent_session_id=lead_session_id or None,
+            task_store_root=self.project_roots.tasks_dir,
+            team_key=ga_paths.team_key(self.project_roots.project_key, team_name),
+            worktree_root=self.project_roots.project_worktrees_dir,
+        )
+        process_manager.team_name = team_name
+        self.subagent_manager = process_manager
+        return UnifiedAgentControl(
+            [
+                ProcessSubagentAdapter(process_manager),
+                WorkflowChildAdapter(
+                    self.workflow_store,
+                    self.workflow_controller,
+                    session_id_provider=lambda: getattr(self.agent, "session_id", None),
+                ),
+            ]
+        )
 
     def _bind_agent(self, agent: Any) -> None:
         """Attach the bridge-owned hooks to whichever agent currently runs turns.
@@ -498,11 +563,25 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent = self.agent_factory()
         self._bind_agent(self.agent)
+        self._rebind_runtime_paths()
+        if self._agent_control_override is None:
+            self.agent_control = self._build_agent_control()
         self._task_seq = 0
         self._rewind_snapshots.clear()
         self._consume_thread = None
+        self._agent_event_ids.clear()
+        self._agent_snapshot_fingerprint = None
+        self._agent_watch_stop.set()
+        self._agent_watch_stop = threading.Event()
         self._agent_thread = threading.Thread(target=self._run_agent, daemon=True, name="ga-ink-agent")
         self._agent_thread.start()
+        self._agent_watch_thread = threading.Thread(
+            target=self._watch_agent_state,
+            args=(self._agent_watch_stop,),
+            daemon=True,
+            name="ga-ink-agent-watch",
+        )
+        self._agent_watch_thread.start()
         self.emit({"type": "history_replace", "messages": [], "resetSession": True})
         self.emit({"type": "system", "text": "Started a new session."})
         self.emit({"type": "status", "status": "idle"})
@@ -1189,21 +1268,24 @@ class GenericAgentBridge:
     def _emit_named_workflows(self) -> None:
         self.emit({"type": "named_workflows", "workflows": self.workflow_store.list_named_workflows()})
 
-    def workflow_list(self) -> None:
+    def workflow_list(self, *, include_legacy: bool = False) -> None:
         try:
-            runs = self._list_workflow_runs()
+            runs = self._list_workflow_runs(include_legacy=include_legacy)
             # CC parity / perf: the workflow list+detail panels are fed by these
             # events, not by the generic agent read model. Emitting it here cost
             # ~1.3 s + ~1.6 MB per keypress (list_records/events_since over the
             # whole store), which is what made "Enter to view" feel frozen.
-            self.emit({
+            payload: dict[str, Any] = {
                 "type": "workflow_runs",
                 "runs": [self._workflow_run_summary(run) for run in runs],
                 # CC m1906 lists saved named workflows next to the run history;
                 # GA surfaces them as names so the list panel can hint
                 # ``/workflow run <name>``.
                 "savedWorkflows": [str(item.get("name") or "") for item in self.workflow_store.list_named_workflows()],
-            })
+            }
+            if include_legacy:
+                payload["all"] = True
+            self.emit(payload)
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_list_failed", "message": str(exc)})
 
@@ -1232,14 +1314,33 @@ class GenericAgentBridge:
             from genericagent.agents.registry import SubagentRegistry
             from genericagent.agents.tasks import SubagentTaskStore
             from genericagent.agents.team import SubagentTeam, team_name_for
+            from genericagent import paths
 
         project_dir = getattr(self, "project_dir", PROJECT_DIR)
         state_root = getattr(self, "state_root", ga_paths.RUNTIME_ROOT)
-        registry = SubagentRegistry(Path(state_root) / "temp" / "subagents")
+        # Test/embedding seams may override project_dir/state_root after
+        # construction. Re-derive the roots from those live values; otherwise
+        # the roster reader would point at the repository bucket rather than
+        # the injected temp tree.
+        roots = ga_paths.project_roots(project=project_dir, data_root=state_root)
+        manager = getattr(self, "subagent_manager", None)
+        registry_root = (
+            Path(manager.subagents_state_dir)
+            if manager is not None
+            else roots.project_data_dir / "subagents"
+        )
+        registry = SubagentRegistry(registry_root)
         team_name = team_name_for(self._current_session_id())
         team = SubagentTeam(registry, "/root", team_name=team_name)
         view = team.view()
-        store = SubagentTaskStore(project_dir, list_id=team_name, state_root=state_root)
+        team_key = paths.team_key(roots.project_key, team_name)
+        store = SubagentTaskStore(
+            roots.project_root,
+            list_id=team_name,
+            state_root=roots.data_root,
+            tasks_root=roots.tasks_dir,
+            team_key=team_key,
+        )
         try:
             tasks = store.list_tasks()
         except Exception:
@@ -1276,15 +1377,15 @@ class GenericAgentBridge:
             "tasks": tasks,
         }
 
-    def workflow_detail(self, run_id: str) -> None:
+    def workflow_detail(self, run_id: str, *, include_legacy: bool = False, source_path: str | None = None) -> None:
         try:
             with backend_output_redirect():
-                run = self.workflow_store.load_run(str(run_id or ""))
+                run = self._load_workflow_run(str(run_id or ""), include_legacy=include_legacy, source_path=source_path)
                 # The panel is built from run/draft/progress (workflowOverviewFromDetail
                 # never reads ``events``); CC's detail view reads agent transcripts on
                 # demand (m1460). Ship only a bounded tail instead of the whole journal
                 # so a long run cannot push a multi-hundred-KB frame on every Enter.
-                events = self.workflow_store.replay_events(run.run_id)[-_WORKFLOW_DETAIL_EVENT_TAIL:]
+                events = self._workflow_events_for_run(run)[-_WORKFLOW_DETAIL_EVENT_TAIL:]
                 draft = self._workflow_artifact_payload(run, run.metadata.get("workflowDraftRef"))
                 progress = self._workflow_artifact_payload(run, "workflow-progress.json")
             self.emit(
@@ -1300,19 +1401,23 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "workflow_detail_failed", "message": str(exc)})
 
-    def workflow_progress(self, run_id: str) -> None:
+    def workflow_progress(self, run_id: str, *, include_legacy: bool = False, source_path: str | None = None) -> None:
         try:
             with backend_output_redirect():
-                run = self.workflow_store.load_run(str(run_id or ""))
+                run = self._load_workflow_run(str(run_id or ""), include_legacy=include_legacy, source_path=source_path)
                 progress = self._workflow_artifact_payload(run, "workflow-progress.json")
                 if progress is None:
                     # A run created before the first job runs has no snapshot yet
                     # (or was written by an older build). Publish one from the
                     # run itself rather than reporting a failure for a healthy
                     # run: the caller asked for progress, and the run *is* the
-                    # source of truth for it.
-                    self.workflow_store.write_workflow_progress(run)
-                    progress = self._workflow_artifact_payload(run, "workflow-progress.json")
+                    # source of truth for it. Legacy is read-only, so derive the
+                    # view in memory and never write into an old artifact.
+                    if getattr(run, "source_scope", "") == "legacy":
+                        progress = self._workflow_progress_from_run(run)
+                    else:
+                        self.workflow_store.write_workflow_progress(run)
+                        progress = self._workflow_artifact_payload(run, "workflow-progress.json")
             if progress is None:
                 self.emit({"type": "error", "code": "workflow_progress_missing", "message": "workflow progress is not available"})
                 return
@@ -1638,8 +1743,53 @@ class GenericAgentBridge:
         return cursors
 
     def _emit_agent_read_model(self) -> None:
-        self._emit_agent_events()
-        self._emit_agent_snapshot()
+        # The agent watcher and a user turn may both publish at the same
+        # instant. Serialize the cursor/fingerprint update so one thread cannot
+        # emit a stale snapshot after another has already advanced the state.
+        with self._agent_read_model_lock:
+            self._emit_agent_events()
+            self._emit_agent_snapshot()
+
+    def _agent_state_signature(self) -> tuple[tuple[str, int, int] | None, ...]:
+        """Cheap durable-state fingerprint for the bridge's background watcher.
+
+        ``events.jsonl`` is append-only and can grow to many megabytes, so a
+        watcher must not re-read it on every poll. Registry and task state files
+        are atomically replaced when a child starts, completes, or closes; their
+        stat signatures are enough to know when the authoritative read model
+        needs refreshing.
+        """
+        manager = getattr(self, "subagent_manager", None)
+        state_dir = getattr(manager, "subagents_state_dir", None)
+        if state_dir is None:
+            return ()
+        root = Path(state_dir)
+        paths = [root / "registry.json"]
+        tasks = getattr(manager, "task_root", None)
+        if tasks is not None:
+            try:
+                paths.extend(sorted(Path(tasks).glob("*/state.json")))
+            except OSError:
+                pass
+        return tuple(_file_signature(os.fspath(path)) for path in paths)
+
+    def _watch_agent_state(self, stop: threading.Event) -> None:
+        """Publish common agent updates while a child runs in the background.
+
+        This is intentionally a cheap stat-only loop. The first poll only seeds
+        the fingerprint; subsequent registry/state replacements trigger a full
+        read model refresh. Workflow progress has its own watcher.
+        """
+        last_signature = self._agent_state_signature()
+        while not stop.wait(0.5):
+            signature = self._agent_state_signature()
+            if signature == last_signature:
+                continue
+            last_signature = signature
+            try:
+                self._emit_agent_read_model()
+            except Exception as exc:
+                self._agent_errors["control"] = redact_sensitive_text(str(exc))
 
     def _emit_agent_events(self) -> None:
         try:
@@ -1742,6 +1892,10 @@ class GenericAgentBridge:
         recovery = self._workflow_recovery_hint(run)
         if recovery:
             data["recovery"] = recovery
+        if isinstance(getattr(run, "source_scope", None), str):
+            data["sourceScope"] = run.source_scope
+        if isinstance(getattr(run, "source_path", None), str):
+            data["sourcePath"] = run.source_path
         return data
 
     # CC parity (m1906_0xe19cc02.js): the /workflows history list reads a
@@ -1785,13 +1939,18 @@ class GenericAgentBridge:
             if slim_metadata:
                 entry["metadata"] = slim_metadata
             jobs.append(entry)
-        return {
+        payload = {
             "runId": run.run_id,
             "sessionId": run.session_id,
             "status": run.status,
             "metadata": summary_metadata,
             "jobs": jobs,
         }
+        if isinstance(getattr(run, "source_scope", None), str):
+            payload["sourceScope"] = run.source_scope
+        if isinstance(getattr(run, "source_path", None), str):
+            payload["sourcePath"] = run.source_path
+        return payload
 
     # CC evidence: m0567_0xcdd6311.js CTn() injects
     # "Resume the paused workflow by calling: Workflow({scriptPath, resumeFromRunId})"
@@ -2261,17 +2420,113 @@ class GenericAgentBridge:
         value = str(getattr(self.agent, "session_id", "") or "").strip()
         return value or None
 
-    def _list_workflow_runs(self):
+    def _list_workflow_runs(self, *, include_legacy: bool = False):
         # CC's ``/workflows`` is per session (m1906: "No dynamic workflows in this
-        # session."). temp/sessions is shared by every GA session, so an unscoped
-        # scan both diverged from CC and loaded every historical run on each call.
+        # session."). The project store is already project-scoped; legacy is an
+        # explicit --all view and is never mixed into the default picker.
         runs = []
         with backend_output_redirect():
             try:
                 runs = list(self.workflow_store.list_runs(session_id=self._current_session_id()))
             except Exception:
                 runs = []
+            if include_legacy:
+                for run in self._list_legacy_workflow_runs():
+                    if all(existing.run_id != run.run_id for existing in runs):
+                        runs.append(run)
         runs.sort(key=lambda run: str(run.run_id))
+        return runs
+
+    def _legacy_workflow_root(self) -> Path | None:
+        roots = getattr(self, "project_roots", None)
+        if roots is None:
+            return None
+        path = Path(roots.legacy_sessions_dir)
+        return path if path.is_dir() else None
+
+    def _legacy_workflow_matches(self) -> list[Path]:
+        root = self._legacy_workflow_root()
+        if root is None:
+            return []
+        return sorted(root.glob("*/workflows/*/state.json"))
+
+    def _load_workflow_run(self, run_id: str, *, include_legacy: bool = False, source_path: str | None = None):
+        run_id_text = str(run_id or "").strip()
+        if source_path:
+            candidate = Path(source_path).expanduser().resolve(strict=False)
+            legacy_root = self._legacy_workflow_root()
+            if legacy_root is None:
+                raise FileNotFoundError(str(candidate))
+            try:
+                candidate.relative_to(legacy_root.resolve())
+            except (OSError, ValueError):
+                raise ValueError("workflow sourcePath is outside the legacy sessions root")
+            if candidate.name not in {"state.json", "run.json"} or not candidate.is_file():
+                raise FileNotFoundError(str(candidate))
+            return self._load_workflow_run_from_dir(candidate.parent)
+        if include_legacy:
+            matches = [p for p in self._legacy_workflow_matches() if p.parent.name == run_id_text]
+            if matches:
+                return self._load_workflow_run_from_dir(matches[0].parent)
+        run = self.workflow_store.load_run(run_id_text)
+        run.source_scope = "project"
+        run.source_path = str(Path(run.artifact_dir or "").resolve(strict=False))
+        return run
+
+    def _workflow_events_for_run(self, run):
+        artifact_dir = Path(run.artifact_dir or "")
+        journal_path = artifact_dir / "journal.jsonl"
+        if not journal_path.is_file():
+            return []
+        from genericagent.workflow.models import WorkflowEvent
+        events = []
+        for line in journal_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(WorkflowEvent.from_dict(json.loads(line)))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return events
+
+    def _workflow_progress_from_run(self, run) -> dict[str, Any]:
+        return {
+            "runId": run.run_id,
+            "sessionId": run.session_id,
+            "status": run.status,
+            "runArtifactDir": str(run.artifact_dir or ""),
+            "workflowProgress": [
+                {"jobId": job.job_id, "label": (job.metadata or {}).get("label") or job.job_id, "state": job.status}
+                for job in (run.jobs or [])
+            ],
+        }
+
+    def _load_workflow_run_from_dir(self, artifact_dir: Path):
+        from genericagent.workflow.models import WorkflowRun
+        data_path = artifact_dir / "state.json"
+        if not data_path.is_file():
+            data_path = artifact_dir / "run.json"
+        if not data_path.is_file():
+            raise FileNotFoundError(str(artifact_dir))
+        data = _read_json_object(str(data_path))
+        if not isinstance(data, dict):
+            raise ValueError(f"workflow state is not a JSON object: {data_path}")
+        run = WorkflowRun.from_dict(data)
+        run.artifact_dir = str(artifact_dir)
+        script_path = artifact_dir / "script.js"
+        if script_path.is_file():
+            run.script = script_path.read_text(encoding="utf-8", errors="replace")
+        run.source_scope = "legacy"
+        run.source_path = str(data_path.resolve(strict=False))
+        return run
+
+    def _list_legacy_workflow_runs(self):
+        runs = []
+        for state_path in self._legacy_workflow_matches():
+            try:
+                runs.append(self._load_workflow_run_from_dir(state_path.parent))
+            except Exception:
+                continue
         return runs
 
     def _auto_compact_if_needed(self, pending_text: str) -> bool:
@@ -2348,35 +2603,52 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "compact_transcript_failed", "message": str(exc)})
 
-    def list_resume_sessions(self) -> None:
+    def list_resume_sessions(self, *, include_legacy: bool = False) -> None:
         if continue_list is None:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
             return
         try:
-            sessions = continue_list(**self._resume_exclusion_kwargs())
-            self.emit(
-                {
-                    "type": "resume_sessions",
-                    "sessions": [
-                        {
-                            "id": path,
-                            "mtime": float(mtime),
-                            "preview": str(preview or ""),
-                            "rounds": int(rounds),
-                        }
-                        for path, mtime, preview, rounds in sessions
-                    ],
-                }
-            )
+            sessions = continue_list(**self._resume_exclusion_kwargs(include_legacy=include_legacy))
+            self._resume_session_paths = [str(path) for path, _mtime, _preview, _rounds in sessions]
+            self._resume_session_paths_all = bool(include_legacy)
+            payload: dict[str, Any] = {
+                "type": "resume_sessions",
+                "sessions": [
+                    {
+                        "id": path,
+                        "mtime": float(mtime),
+                        "preview": str(preview or ""),
+                        "rounds": int(rounds),
+                    }
+                    for path, mtime, preview, rounds in sessions
+                ],
+            }
+            # Keep the historical /resume event byte-for-byte compatible.
+            # Source metadata and the ``all`` flag exist only for the explicit
+            # /resume --all view, where legacy rows need to be distinguishable.
+            if include_legacy:
+                payload["all"] = True
+                for item in payload["sessions"]:
+                    source = self._session_source_scope(str(item["id"]))
+                    if source:
+                        item["source"] = source
+            self.emit(payload)
         except Exception as exc:
             self.emit({"type": "error", "code": "resume_list_failed", "message": str(exc)})
 
-    def resume_session_by_index(self, index: int) -> None:
+    def resume_session_by_index(self, index: int, *, include_legacy: bool = False) -> None:
         if continue_list is None:
             self.emit({"type": "error", "code": "resume_unavailable", "message": "/resume is unavailable"})
             return
         try:
-            sessions = continue_list(**self._resume_exclusion_kwargs())
+            cached = getattr(self, "_resume_session_paths", None)
+            cached_all = bool(getattr(self, "_resume_session_paths_all", False))
+            if cached and cached_all == bool(include_legacy):
+                sessions = [(path, 0.0, "", 0) for path in cached]
+            else:
+                sessions = continue_list(**self._resume_exclusion_kwargs(include_legacy=include_legacy))
+                self._resume_session_paths = [str(path) for path, _mtime, _preview, _rounds in sessions]
+                self._resume_session_paths_all = bool(include_legacy)
             idx = int(index) - 1
             if not (0 <= idx < len(sessions)):
                 self.emit({"type": "system", "text": f"索引越界（有效范围 1-{len(sessions)}）"})
@@ -2396,6 +2668,9 @@ class GenericAgentBridge:
             continue_reset(self.agent, message=None)
             result, _ = continue_restore(self.agent, path)
             if str(result).startswith(("✅", "✓")):
+                self._rebind_runtime_paths()
+                if self._agent_control_override is None:
+                    self.agent_control = self._build_agent_control()
                 self.emit({"type": "history_replace", "messages": self._resume_ui_messages_with_checkpoints(path)})
             self.emit({"type": "system", "text": str(result)})
         except Exception as exc:
@@ -2580,12 +2855,35 @@ class GenericAgentBridge:
         except Exception:
             return None
 
-    def _resume_exclusion_kwargs(self) -> dict[str, Any]:
+    def _resume_exclusion_kwargs(self, include_legacy: bool = False) -> dict[str, Any]:
+        roots = getattr(self, "project_roots", None)
+        session_roots = None
+        if roots is not None:
+            session_roots = [roots.project_data_dir]
+            if include_legacy:
+                session_roots.append(roots.legacy_sessions_dir)
+        legacy_roots = [roots.legacy_sessions_dir] if include_legacy and roots is not None else None
         return {
             "exclude_pid": os.getpid(),
             "exclude_path": getattr(self.agent, "log_path", None),
             "exclude_session_id": getattr(self.agent, "session_id", None),
+            "session_roots": session_roots,
+            "include_legacy": include_legacy,
+            "legacy_roots": legacy_roots,
         }
+
+    def _session_source_scope(self, path: str) -> str | None:
+        roots = getattr(self, "project_roots", None)
+        if roots is None:
+            return None
+        try:
+            resolved = Path(path).resolve()
+            project = roots.project_data_dir.resolve()
+            if resolved == project or project in resolved.parents:
+                return "project"
+        except Exception:
+            return None
+        return "legacy"
 
     def _resume_ui_messages_with_checkpoints(self, path: str) -> list[dict[str, Any]]:
         if session_transcript is not None and session_transcript.is_transcript_path(path):
@@ -2657,8 +2955,29 @@ class GenericAgentBridge:
         return messages
 
     def wait_for_idle(self, timeout: float | None = None) -> None:
+        """Wait for the whole turn, not just its display queue.
+
+        The queue can receive the final ``done`` item while GenericAgent is
+        still executing its ``finally`` block. In particular, a provider error
+        is rendered into the queue before ``is_running`` is cleared. Returning
+        at that point makes the next workflow/submit command race the turn and
+        incorrectly report ``busy``.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+
+        def remaining() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - time.monotonic())
+
         if self._consume_thread is not None:
-            self._consume_thread.join(timeout=timeout)
+            self._consume_thread.join(timeout=remaining())
+
+        while getattr(self.agent, "is_running", False):
+            left = remaining()
+            if left is not None and left <= 0:
+                return
+            time.sleep(min(0.01, left) if left is not None else 0.01)
 
     def _is_consuming(self) -> bool:
         return self._consume_thread is not None and self._consume_thread.is_alive()
@@ -2751,10 +3070,16 @@ class GenericAgentBridge:
                 if "done" in item:
                     emit_usage_if_changed()
                     self.emit({"type": "assistant_done", "taskId": task_id, "text": str(item.get("done") or "")})
+                    # A subagent can finish after the spawn turn and while this
+                    # queue is idle. Refresh the common read model at the turn
+                    # boundary so the Ink agent panel observes the terminal
+                    # state without waiting for an unrelated control command.
+                    self._emit_agent_read_model()
                     self.emit({"type": "status", "status": "idle", "taskId": task_id})
                     return
         except Exception as exc:
             self.emit({"type": "error", "code": "consume_failed", "message": str(exc), "taskId": task_id})
+            self._emit_agent_read_model()
             self.emit({"type": "status", "status": "idle", "taskId": task_id})
 
 
@@ -2785,11 +3110,17 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
         elif cmd_type == "new_session":
             bridge.new_session()
         elif cmd_type == "list_resume_sessions":
-            bridge.list_resume_sessions()
+            if command.get("includeLegacy"):
+                bridge.list_resume_sessions(include_legacy=True)
+            else:
+                bridge.list_resume_sessions()
         elif cmd_type == "resume_session":
             bridge.resume_session(str(command.get("id") or ""))
         elif cmd_type == "resume_session_index":
-            bridge.resume_session_by_index(int(command.get("index") or 0))
+            if command.get("includeLegacy"):
+                bridge.resume_session_by_index(int(command.get("index") or 0), include_legacy=True)
+            else:
+                bridge.resume_session_by_index(int(command.get("index") or 0))
         elif cmd_type == "rewind":
             bridge.rewind(int(command.get("taskId") or 0))
         elif cmd_type == "mcp_status":
@@ -2877,11 +3208,32 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
         elif cmd_type == "hooks_status":
             bridge.hooks_status()
         elif cmd_type == "workflow_list":
-            bridge.workflow_list()
+            if command.get("includeLegacy"):
+                bridge.workflow_list(include_legacy=True)
+            else:
+                bridge.workflow_list()
         elif cmd_type == "workflow_detail":
-            bridge.workflow_detail(str(command.get("runId") or command.get("run_id") or ""))
+            run_id = str(command.get("runId") or command.get("run_id") or "")
+            source_path = str(command.get("sourcePath") or "") or None
+            if command.get("includeLegacy") or source_path:
+                bridge.workflow_detail(
+                    run_id,
+                    include_legacy=bool(command.get("includeLegacy")),
+                    source_path=source_path,
+                )
+            else:
+                bridge.workflow_detail(run_id)
         elif cmd_type == "workflow_progress":
-            bridge.workflow_progress(str(command.get("runId") or command.get("run_id") or ""))
+            run_id = str(command.get("runId") or command.get("run_id") or "")
+            source_path = str(command.get("sourcePath") or "") or None
+            if command.get("includeLegacy") or source_path:
+                bridge.workflow_progress(
+                    run_id,
+                    include_legacy=bool(command.get("includeLegacy")),
+                    source_path=source_path,
+                )
+            else:
+                bridge.workflow_progress(run_id)
         elif cmd_type == "workflow_deny":
             bridge.workflow_deny(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "workflow_stop":

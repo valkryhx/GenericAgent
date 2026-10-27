@@ -17,8 +17,13 @@ def _startup_task_dir_from_argv(argv=None):
     task_name = value_for('--task')
     if not task_name:
         return None
-    root_dir = value_for('--task_root') or str(paths.RUNTIME_ROOT)
-    return os.path.join(os.path.abspath(root_dir), 'temp', task_name)
+    explicit_task_dir = value_for('--task_dir')
+    if explicit_task_dir:
+        return os.path.abspath(explicit_task_dir)
+    # New child protocol: state_root owns task state. The old task_root
+    # remains an exact legacy alias and is never treated as project_root.
+    state_root = value_for('--state_root') or value_for('--task_root') or str(paths.RUNTIME_ROOT)
+    return os.path.join(os.path.abspath(state_root), 'temp', task_name)
 
 
 def _record_startup_phase(phase, task_dir=None, **details):
@@ -501,20 +506,22 @@ SYSTEM_PROMPT_SECTION_ORDER = (
 def build_system_prompt_sections(agent=None):
     """Named prompt sections in render order; ``render_system_prompt`` joins them."""
 
+    project_root = str(getattr(agent, "project_root", None) or script_dir)
+    current_dir = str(getattr(agent, "tool_cwd", None) or project_root)
     is_subagent = bool(getattr(agent, 'task_dir', None))
     notifications = ""
     if not is_subagent:
         try:
             from genericagent.agents.notifications import build_subagent_notifications_prompt
-            notifications = build_subagent_notifications_prompt(script_dir)
+            notifications = build_subagent_notifications_prompt(project_root)
         except Exception:
             pass
     return {
-        "base": load_base_system_prompt(script_dir, lang_suffix),
+        "base": load_base_system_prompt(project_root, lang_suffix),
         "date": f"\nToday: {time.strftime('%Y-%m-%d %a')}\n",
-        "project": build_ga_project_instructions(script_dir, os.getcwd()),
+        "project": build_ga_project_instructions(project_root, current_dir),
         "notifications": notifications,
-        "memory": get_global_memory(),
+        "memory": get_global_memory(agent),
         "skills": build_skill_prompt(),
         "role_hint": "\n" + build_agent_role_usage_hint(
             is_subagent=is_subagent,
@@ -637,10 +644,25 @@ class GenericAgent:
         self.session_path = None
         self.session_turn_id = 0
         self.hook_runtime = None
+        identity = session_transcript.identity_from_environment()
+        if identity:
+            self.original_cwd = identity.get("original_cwd")
+            self.project_root = identity.get("project_root")
+            self.launch_cwd = identity.get("launch_cwd")
+            self.project_key = identity.get("project_key")
+            self.data_root = identity.get("data_root")
+            self.tool_cwd = self.project_root
+        else:
+            self.original_cwd = os.getcwd()
+            self.project_root = str(paths.PROJECT_ROOT)
+            self.launch_cwd = str(paths.launch_cwd())
+            self.project_key = paths.project_key(self.project_root)
+            self.data_root = str(paths.data_root())
+            self.tool_cwd = self.project_root
         _record_startup_phase('agent_session_init_started')
         session_status, session_error = 'ok', None
         try:
-            session_transcript.ensure_agent_session(self)
+            session_transcript.ensure_agent_session(self, identity=identity)
         except Exception as e:
             session_status, session_error = 'error', f'{type(e).__name__}: {e}'
             print(f"[WARN] Failed to initialize session transcript: {e}")
@@ -1067,7 +1089,9 @@ class GenericAgent:
                 print(f"[Prompt] system prompt sections changed: {', '.join(changed_sections)}")
             sys_prompt = render_system_prompt(sections) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
-            handler = GenericAgentHandler(self, self.history, str(paths.TEMP_DIR), workspace_root=str(paths.PROJECT_ROOT))
+            project_root = str(getattr(self, "project_root", None) or paths.PROJECT_ROOT)
+            tool_cwd = str(getattr(self, "tool_cwd", None) or project_root)
+            handler = GenericAgentHandler(self, self.history, tool_cwd, workspace_root=project_root)
             handler.hook_runtime = self.hook_runtime
             resumed_state = getattr(self, "_resumed_working_state", None)
             if isinstance(resumed_state, dict):
@@ -1637,8 +1661,22 @@ def _teammate_idle_hook(task_dir, task_name):
         from genericagent.agents.team import team_name_for
 
         state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
-        root_dir = os.path.dirname(os.path.dirname(task_dir))
-        store = SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
+        tasks_root = os.environ.get('GA_TASKS_ROOT')
+        team_key = os.environ.get('GA_TEAM_KEY')
+        if tasks_root and team_key:
+            # The parent child-env snapshot is authoritative. Never infer the
+            # task board root from task_dir depth when identity is present.
+            store = SubagentTaskStore(
+                os.environ.get('GA_PROJECT_ROOT') or task_dir,
+                list_id=team_name_for(state.get('parent_session_id')),
+                state_root=os.environ.get('GA_DATA_DIR') or os.path.dirname(os.path.dirname(task_dir)),
+                tasks_root=tasks_root,
+                team_key=team_key,
+            )
+        else:
+            # Legacy task workers did not receive an identity snapshot.
+            root_dir = os.path.dirname(os.path.dirname(task_dir))
+            store = SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
         events_path = os.path.join(task_dir, 'events.jsonl')
         # A completed turn is only a process fact, not proof that the assigned
         # task succeeded.  The teammate must call task_update(status="completed")
@@ -2000,6 +2038,9 @@ def start_task_background(
     llm_no=0,
     verbose=False,
     root_dir=None,
+    project_root=None,
+    state_root=None,
+    task_dir=None,
     popen=None,
     python_executable=None,
     fork_turns=None,
@@ -2011,8 +2052,17 @@ def start_task_background(
 ):
     from genericagent.agents.manager import SubagentManager
 
-    root_dir = os.path.abspath(root_dir or str(paths.RUNTIME_ROOT))
-    manager = SubagentManager(root_dir=root_dir, popen=popen, python_executable=python_executable or sys.executable)
+    legacy_root = os.path.abspath(root_dir or str(paths.RUNTIME_ROOT))
+    project_path = os.path.abspath(project_root or legacy_root)
+    state_path_root = os.path.abspath(state_root or legacy_root)
+    task_dir = os.path.abspath(task_dir or os.path.join(state_path_root, 'temp', task_name))
+    manager = SubagentManager(
+        root_dir=legacy_root,
+        project_root=project_path,
+        project_state_root=state_path_root,
+        popen=popen,
+        python_executable=python_executable or sys.executable,
+    )
     task_name = manager._task_name_from_target(task_name)
     if fork_turns is None:
         fork_turns = 'all' if fork_history is not None else 'none'
@@ -2021,7 +2071,6 @@ def start_task_background(
     permission_metadata = normalize_permission_metadata(
         {'permission_profile': permission_profile, 'permission_options': permission_options or {}, 'parent_permission_mode': parent_permission_mode}
     )
-    task_dir = os.path.join(root_dir, 'temp', task_name)
     os.makedirs(task_dir, exist_ok=True)
     input_path = os.path.join(task_dir, 'input.txt')
     output_path = os.path.join(task_dir, 'output.txt')
@@ -2076,8 +2125,12 @@ def start_task_background(
         '--task',
         task_name,
         '--nobg',
-        '--task_root',
-        root_dir,
+        '--task_dir',
+        task_dir,
+        '--project_root',
+        project_path,
+        '--state_root',
+        state_path_root,
         '--llm_no',
         str(llm_no),
         '--permission_profile',
@@ -2097,7 +2150,16 @@ def start_task_background(
     try:
         # A parent bridge may be blocked reading its stdin pipe.  Do not inherit that handle:
         # on Windows the child can otherwise remain in process startup before process_entry.
-        kwargs = {'cwd': root_dir, 'stdout': stdout, 'stderr': stderr, 'stdin': subprocess.DEVNULL}
+        roots = paths.project_roots(project=project_path, data_root=state_path_root)
+        child_env = {
+            **os.environ,
+            'GA_PROJECT_ROOT': str(roots.project_root),
+            'GA_PROJECT_KEY': roots.project_key,
+            'GA_PROJECT_DATA_DIR': str(roots.project_data_dir),
+            'GA_DATA_DIR': str(roots.data_root),
+            'GA_TOOL_CWD': str(roots.project_root),
+        }
+        kwargs = {'cwd': project_path, 'env': child_env, 'stdout': stdout, 'stderr': stderr, 'stdin': subprocess.DEVNULL}
         if os.name == 'nt':
             kwargs['creationflags'] = 0x08000000
         proc = (popen or __import__('subprocess').Popen)(cmd, **kwargs)
@@ -2146,7 +2208,10 @@ if __name__ == '__main__':
     parser.add_argument('--task', metavar='IODIR', help='一次性任务模式(文件IO)')
     parser.add_argument('--reflect', metavar='SCRIPT', help='反射模式：加载监控脚本，check()触发时发任务')
     parser.add_argument('--input', help='prompt')
-    parser.add_argument('--task_root', default=str(paths.RUNTIME_ROOT), help='子智能体任务根目录')
+    parser.add_argument('--task_root', default=None, help='legacy task/state root alias')
+    parser.add_argument('--project_root', default=None, help='project workspace for the child process')
+    parser.add_argument('--state_root', default=None, help='GA runtime state root')
+    parser.add_argument('--task_dir', default=None, help='explicit task I/O directory')
     parser.add_argument('--llm_no', type=int, default=0)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--nobg', action='store_true')
@@ -2193,10 +2258,14 @@ if __name__ == '__main__':
     _record_startup_phase('agent_thread_started')
 
     if args.task:
-        task_root = os.path.abspath(args.task_root or str(paths.RUNTIME_ROOT))
+        task_dir = (
+            os.path.abspath(args.task_dir)
+            if args.task_dir
+            else os.path.join(os.path.abspath(args.state_root or args.task_root or str(paths.RUNTIME_ROOT)), 'temp', args.task)
+        )
         run_task_worker_loop(
             agent,
-            os.path.join(task_root, f'temp/{args.task}'),
+            task_dir,
             input_text=args.input,
             permission_profile=args.permission_profile,
             parent_permission_mode=args.parent_permission_mode,

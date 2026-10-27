@@ -63,10 +63,11 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     powershell/bash: 运行单行指令（命令模式）
     优先使用python，仅在必要系统操作时使用powershell"""
     preview = (code[:60].replace(chr(10), ' ') + '...') if len(code) > 60 else code.strip()
+    cwd = cwd or os.environ.get("GA_TOOL_CWD") or str(paths.PROJECT_ROOT)
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
     if workspace_root and code_type not in {"python", "py"}:
         return {"status": "error", "msg": "workflow code_run only permits Python under the workspace guard"}
-    cwd = cwd or str(paths.TEMP_DIR); tmp_path = None
+    tmp_path = None
     if code_type in ["python", "py"]:
         if code_cwd is not None and not os.path.isdir(code_cwd):
             return {"status": "error", "msg": f"code_cwd does not exist: {code_cwd}"}
@@ -111,6 +112,8 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
             child_env = os.environ.copy()
             child_env["GA_CODE_RUN_ROOT"] = str(paths.PROJECT_ROOT)
             child_env["GA_MEMORY_DIR"] = str(paths.MEMORY_DIR)
+            child_env["GA_PROJECT_ROOT"] = str(workspace_root or os.environ.get("GA_PROJECT_ROOT") or paths.PROJECT_ROOT)
+            child_env["GA_TOOL_CWD"] = str(cwd)
         if workspace_root:
             child_env["GA_WORKFLOW_WORKSPACE_ROOT"] = str(Path(workspace_root).resolve())
             if bash_clamp:
@@ -1052,8 +1055,30 @@ class GenericAgentHandler(BaseHandler):
             return manager
         from genericagent.agents.manager import SubagentManager
 
-        created = SubagentManager(root_dir=script_dir, python_executable=sys.executable, state_root=paths.RUNTIME_ROOT)
+        project_root = str(
+            getattr(self.parent, "project_root", None)
+            or os.environ.get("GA_PROJECT_ROOT")
+            or script_dir
+        )
+        data_root = str(
+            getattr(self.parent, "data_root", None)
+            or os.environ.get("GA_DATA_DIR")
+            or paths.RUNTIME_ROOT
+        )
+        roots = paths.project_roots(project=project_root, data_root=data_root)
+        parent_session_id = str(getattr(self.parent, "session_id", "") or "").strip()
+        created = SubagentManager(
+            project_root=roots.project_root,
+            python_executable=sys.executable,
+            project_state_root=roots.data_root,
+            project_data_dir=roots.project_data_dir,
+            session_data_dir=(roots.project_data_dir / parent_session_id / "subagents") if parent_session_id else None,
+            parent_session_id=parent_session_id,
+            task_store_root=roots.tasks_dir,
+            worktree_root=roots.project_worktrees_dir,
+        )
         created.team_name = self._team_name()
+        created.team_key = paths.team_key(roots.project_key, created.team_name)
         return created
 
     def _current_backend_history_snapshot(self):
@@ -1605,7 +1630,13 @@ class GenericAgentHandler(BaseHandler):
         manager = self._get_subagent_manager()
         from genericagent.agents.tasks import SubagentTaskStore
 
-        return SubagentTaskStore(manager.root_dir, list_id=list_id or self._team_name(), state_root=manager.state_root)
+        return SubagentTaskStore(
+            manager.root_dir,
+            list_id=list_id or self._team_name(),
+            state_root=manager.state_root,
+            tasks_root=manager.task_store_root,
+            team_key=manager.team_key,
+        )
 
     @staticmethod
     def _as_list_arg(args, *names):
@@ -1944,7 +1975,7 @@ class GenericAgentHandler(BaseHandler):
                 if parent_session_id and run_id:
                     from genericagent.agents.transcript import SubagentTranscriptStore
 
-                    transcript_store = SubagentTranscriptStore(manager.temp_dir / "sessions")
+                    transcript_store = SubagentTranscriptStore(manager.session_data_dir, project_data_dir=manager.session_data_dir)
                     if include_transcript_replay:
                         payload["transcript_replay"] = transcript_store.replay(parent_session_id, run_id)
                     if include_transcript_timeline:
@@ -2319,7 +2350,7 @@ class GenericAgentHandler(BaseHandler):
         for hook in getattr(self.parent, '_turn_end_hooks', {}).values(): hook(locals())  # current readonly
         return next_prompt
 
-def get_global_memory():
+def get_global_memory(agent=None):
     prompt = "\n"
     try:
         suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
@@ -2329,8 +2360,31 @@ def get_global_memory():
             structure_path = str(paths.BUNDLED_ASSETS_DIR / f'insight_fixed_structure{suffix}.txt')
         with open(insight_path, 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
         with open(structure_path, 'r', encoding='utf-8') as f: structure = f.read()
-        prompt += f'cwd = {paths.TEMP_DIR} (./; tool scratch/output dir)' + chr(10)
-        prompt += f'workspace root = {script_dir} (project files such as README.md usually live here)' + chr(10)
+        project_root = str(getattr(agent, "project_root", None) or os.environ.get("GA_PROJECT_ROOT") or paths.PROJECT_ROOT)
+        tool_cwd = str(getattr(agent, "tool_cwd", None) or os.environ.get("GA_TOOL_CWD") or project_root)
+        data_root = str(getattr(agent, "data_root", None) or os.environ.get("GA_DATA_DIR") or paths.data_root())
+        project_data = str(getattr(agent, "project_data_dir", None) or "")
+        prompt += (
+            f'project root = {project_root} '
+            '(project files such as README.md and GA_AGENTS.md live here)' + chr(10)
+        )
+        prompt += (
+            f'tool cwd = {tool_cwd} '
+            '(./; relative tool read/write target; ordinary deliverables belong here)' + chr(10)
+        )
+        prompt += (
+            f'data root = {data_root} '
+            '(GA runtime state; do not place user deliverables here)' + chr(10)
+        )
+        if project_data:
+            prompt += (
+                f'project data = {project_data} '
+                '(session/workflow/subagent artifacts only)' + chr(10)
+            )
+        prompt += (
+            'project root, tool cwd, and project data are distinct roles; '
+            'use project data paths only for GA-managed artifacts' + chr(10)
+        )
         prompt += chr(10) + f"[Memory] ({paths.MEMORY_DIR})" + chr(10)
         prompt += structure + chr(10) + str(paths.MEMORY_DIR / 'global_mem_insight.txt') + ':' + chr(10)
         prompt += insight + "\n"

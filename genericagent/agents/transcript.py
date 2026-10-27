@@ -11,8 +11,11 @@ _SECRET_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password)=([^\s,;]+)")
 
 
 class SubagentTranscriptStore:
-    def __init__(self, sessions_dir):
-        self.sessions_dir = Path(sessions_dir)
+    def __init__(self, sessions_dir, *, project_data_dir=None):
+        # New callers pass the project bucket directly; the legacy
+        # ``sessions_dir`` shape remains supported for old transcripts/tests.
+        self.project_data_dir = Path(project_data_dir) if project_data_dir is not None else None
+        self.sessions_dir = self.project_data_dir if self.project_data_dir is not None else Path(sessions_dir)
 
     def write_metadata(self, *, session_id, run_id, agent_path, **extra):
         path = self._meta_path(session_id, run_id)
@@ -228,11 +231,22 @@ class SubagentTranscriptStore:
         except Exception:
             return {}
 
-    def _events_path(self, session_id, run_id):
+    def _events_path(self, session_id, run_id, *, workflow_run_id=None):
+        if workflow_run_id:
+            return self.sessions_dir / str(session_id) / "subagents" / "workflows" / str(workflow_run_id) / f"{run_id}.jsonl"
         return self.sessions_dir / str(session_id) / "subagents" / f"{run_id}.jsonl"
 
-    def _meta_path(self, session_id, run_id):
+    def _meta_path(self, session_id, run_id, *, workflow_run_id=None):
+        if workflow_run_id:
+            return self.sessions_dir / str(session_id) / "subagents" / "workflows" / str(workflow_run_id) / f"{run_id}.meta.json"
         return self.sessions_dir / str(session_id) / "subagents" / f"{run_id}.meta.json"
+
+    def transcript_path(self, session_id, run_id, *, workflow_run_id=None) -> Path:
+        return self._events_path(session_id, run_id, workflow_run_id=workflow_run_id)
+
+    def transcript_ref(self, session_id, run_id, *, workflow_run_id=None) -> str:
+        path = self.transcript_path(session_id, run_id, workflow_run_id=workflow_run_id)
+        return path.relative_to(self.sessions_dir).as_posix()
 
 
 def _payload_text(payload, key):
