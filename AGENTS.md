@@ -177,6 +177,8 @@ Step-Code 本地源码位于 `D:\git_codes\Step-Code`（stepfun-ai 的 Code CLI�
 
 Child-agent turn budgets: workflow `agent(prompt, options)` supports `maxTurns` as an integer in `1..80`; the default is `80` per execution. This is the step budget for one child attempt, not a retry switch. `retryPolicy.maxAttempts` remains capped at `3`; only a `max_turns_exceeded` retry increases the per-attempt budget by 40 (capped at 80), so retries remain finite. The runner validates the value again before calling `agent_runner_loop`.
 
+Real-LLM regression (opt in): `$env:GA_RUN_REAL_WORKFLOW_MAX_TURNS_E2E='1'; $env:PYTHONPATH=(Get-Location).Path; python tests/real_workflow_max_turns_retry_e2e.py`. It uses the `default` profile, forces the first attempt to exhaust `maxTurns: 1`, verifies the retry receives 41 steps, and verifies an omitted budget reaches the child as 80.
+
 4. **预算与超时 fail-closed**。token budget 是 input+output 累计，超额对整个 run 报 `budget_exceeded`，即使脚本 catch 了异常；agent 有默认 30 分钟超时；并发有硬上限。GA 的 retry/delegation 上限应保持同样"有界且不可被脚本绕过"的语义。
 5. **journal 可重放 + resumeFromRunId**。相同 script+args 可重放 cached journal 前缀，首个变化点之后才重新执行。GA 的 run store/journal 可对齐这一可恢复性。
 6. **显式停止条件**。`iterate()` 用 coverage 目标、stagnation 上限、max iterations、empty objective 四类停止条件；`parallel()` 是 barrier 且抛错的 task 变 null、`pipeline()` 无 barrier 逐项并发。GA 的 wave 调度可借用这套"barrier vs pipeline"区分。
