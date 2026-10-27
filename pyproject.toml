@@ -78,7 +78,6 @@ packages = [
     "genericagent.resources.assets",
     "genericagent.resources.assets.tmwd_cdp_bridge",
     "genericagent.resources.skills",
-    "genericagent.resources.skills.workflow-authoring",
     "genericagent.services",
     "genericagent.tools",
     "genericagent.tools.web_fetch",
