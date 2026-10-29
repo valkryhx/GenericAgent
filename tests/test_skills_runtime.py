@@ -271,5 +271,34 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertNotIn("$ARGUMENTS", loaded["content"])
 
 
+
+class WorkflowAuthoringPathDisciplineTest(unittest.TestCase):
+    """Guard the path-discipline contract in the workflow-authoring skill.
+
+    Regression for a real run where the main agent hardcoded the repo root into
+    child prompts, so children ignored their workspacePath and leaked artifacts
+    outside the run workspace.
+    """
+
+    def test_shipped_and_packaged_skill_are_identical(self):
+        for sub in (
+            "SKILL.md",
+            "references/api.md",
+            "references/artifacts.md",
+        ):
+            shipped = REPO_ROOT / "skills" / "workflow-authoring" / sub
+            packaged = REPO_ROOT / "genericagent" / "resources" / "skills" / "workflow-authoring" / sub
+            self.assertEqual(
+                shipped.read_text(encoding="utf-8"),
+                packaged.read_text(encoding="utf-8"),
+                f"{sub} drifted between skills/ and genericagent/resources/",
+            )
+
+    def test_skill_forbids_hardcoding_repo_root_in_prompts(self):
+        skill = (REPO_ROOT / "skills" / "workflow-authoring" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Never hardcode the repository", skill)
+        self.assertIn("${args.workspacePath}", skill)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -68,6 +68,11 @@ Spawns one child agent. Without `options.schema` it returns the child's final
 text as a string. With `options.schema` it returns the validated structured
 object.
 
+Prompt the child with **workspace-relative** artifact paths. The child runs with
+cwd = the run's `workspacePath`; never embed the repository's absolute root in
+the prompt. If a child truly needs the absolute workspace root, interpolate
+`${args.workspacePath}` (the runtime injects it) rather than hardcoding a path.
+
 GA-supported options:
 
 - `label` — display label. Use a stable, descriptive label.

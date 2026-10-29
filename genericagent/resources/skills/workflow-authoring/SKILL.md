@@ -93,6 +93,13 @@ See `references/api.md`.
 
 ## Common pitfalls
 
+- Never hardcode the repository's absolute root (or any absolute path) into an
+  `agent()` prompt. A child runs with cwd = the run's `workspacePath`, so write
+  prompts in workspace-relative terms; if a child truly needs an absolute root,
+  interpolate `${args.workspacePath}` (the runtime injects it) instead of
+  pasting a path like `D:\repo`. A literal repo root in the prompt makes the
+  child ignore its real `workspacePath` and leak artifacts outside the run
+  workspace.
 - Do not invent CC-only fields such as `budget`, `model`, `effort`, `agentType`,
   or `disallowedTools`; GA does not implement them.
 - Do not use `isolation: "remote"`. Cloud/session isolation is out of scope:

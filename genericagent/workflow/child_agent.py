@@ -1589,6 +1589,9 @@ class NativeGPTChildAgentRunner:
             f"workspacePath: {self._child_cwd(job)}",
             f"pathPolicy: {path_policy}",
             workspace_policy,
+            "pathRoot: treat workspacePath as the only artifact root and resolve every relative output path "
+            "against it. If the task text names a different absolute root, workspacePath wins: write artifacts "
+            "under workspacePath, never the conflicting absolute path quoted in the task.",
             "toolBoundary: the full connected tool set is available. role/toolProfile are planning hints, not "
             "hard capability limits; choose the safest effective tool for the assigned work.",
             (

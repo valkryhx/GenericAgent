@@ -10,6 +10,15 @@ by default; use `agent(..., { pathPolicy: "workspace" })` when a job needs a
 hard workspace boundary. `isolation: "worktree"` still changes the cwd to a
 private working copy even when path access is unrestricted.
 
+## Prompt paths
+
+A child's cwd is the run `workspacePath`, so write prompts in workspace-relative
+terms (`demos/out.py`, not `D:\repo\demos\out.py`). Do not hardcode the
+repository root into any `agent()` prompt: the child follows the literal
+absolute path and drops artifacts outside the run workspace. When a child
+genuinely needs an absolute root, use `${args.workspacePath}` -- the runtime
+always injects it.
+
 ## Pass values, don't share files
 
 - Analysis, research, review, and verification stages should return structured

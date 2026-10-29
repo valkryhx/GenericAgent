@@ -244,6 +244,10 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertIsNone(handler.workspace_root)
             self.assertIn("pathPolicy: unrestricted", prompt)
             self.assertIn("workspacePath is the default cwd and artifact root", prompt)
+            # A conflicting absolute root in the task text must never win over
+            # workspacePath: lock the hardening that prevents stray artifact writes.
+            self.assertIn("pathRoot: treat workspacePath as the only artifact root", prompt)
+            self.assertIn("workspacePath wins", prompt)
 
     def test_build_handler_workspace_policy_keeps_hard_acl(self):
         runner = NativeGPTChildAgentRunner()
