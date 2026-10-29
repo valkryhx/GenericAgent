@@ -1,7 +1,7 @@
 # GA hooks 语义补全实施文档（goal 与 mods 的前置地基）
 
 日期：2026-10-29
-状态：Stage A / Stage B 已实现并提交（Stop 门禁 + 会话级动态 hook 注册表）；阶段 C–G 仍为设计稿
+状态：Stage A / B / C 已实现并提交（Stop 门禁 + 会话级动态 hook + 守卫 fail-closed）；阶段 D–G 仍为设计稿
 范围：GenericAgent 本地 hooks 运行时的语义补全；为 goal 模式提供“回合内可阻塞 Stop”，为后续 mods 提供“可动态装载的事件面”。
 关联材料：
 - GA 侧差异分析：`docs/20261028-GA-hooks机制与CC303差异分析.md`（提交 `4099a2c`）
@@ -298,6 +298,45 @@ python -m pytest tests/ -q
 - 范围：`config.py` / `runtime.py` / `runner.py`
 - 验收：守卫事件配置错误/执行错误 → blocked；非守卫事件仍 non-blocking；已有 `onFailure:continue` 显式降级可用。
 
+#### 阶段 C 实现结果（已落地，2026-10-29）
+
+**先纠正了文档原稿的一处偏差**（按 CC 303 源码复核）：
+
+- 文档 §5.3 把 `UserPromptSubmit` 和 `PreToolUse`/`PermissionRequest` 并列为 fail-closed。源码显示这是**两个不同集合**：
+  - **配置加载失败** fail-closed 集合 = `T4 = {PreToolUse, PermissionRequest}`（`m0062:2815`；理由 `m0062:2893`：“坏守卫可能正是权限门”）。
+  - **执行失败**（error/timeout/无效输出）fail-closed 集合 = `Ilt()`（`m0459:158274`，`n6` 去掉 `PostToolBatch/TaskCreated/PreCompact`，含 `UserPromptSubmit` 等），由 `F1e`（`m0459:55482`）转 `blockingError`，`PermissionRequest` 同时返回 `behavior:deny`。
+- GA 侧据此拆成两个常量：`GUARD_EVENTS`（执行失败，含 UserPromptSubmit）与 `CONFIG_GUARD_EVENTS = {PreToolUse, PermissionRequest}`（配置失败）。
+- 另：文档 §3.8 提到 GA 拒绝 `PermissionRequest + agent`。CC 的 handler schema 五类对所有事件通用（`m0062:2704` `she()` 并集），说明这是 GA 自身能力限制、而非 CC 非法配置。所以这条**不计入守卫配置 fail-closed**，否则一个 CC 合法配置会让所有 PermissionRequest 被全量 deny。
+
+| 文件 | 改动 |
+| --- | --- |
+| `genericagent/hooks/models.py` | 新增 `CONFIG_GUARD_EVENTS`；`HookHandler.on_failure_explicit`（区分“未设置”与显式 `continue`，守卫默认靠它区分） |
+| `genericagent/hooks/config.py` | `HookRegistry.guard_config_errors` 记录守卫事件的配置错误；`_parse_file` 按事件折叠（排除 PermissionRequest+agent 策略性拒绝） |
+| `genericagent/hooks/runner.py` | 把原先散在 command/http 两处 + runtime 一处的 onFailure 提升，统一成 `_apply_failure_policy`（在 `execute_handler` 末尾调用，五类 handler 一致） |
+| `genericagent/hooks/runtime.py` | `run_event` 开头对 `CONFIG_GUARD_EVENTS` 的配置错误注入 blocking 结果（PermissionRequest 为 deny） |
+| `tests/test_hooks_guard_fail_closed.py` | 新增 12 个用例（守卫执行失败默认 block / 显式 continue 放行 / 无效输出 / 超时 / 非守卫默认放行 / 非守卫 opt-in block / Stop 类永不提升 / 配置错误 fail-closed / UserPromptSubmit 配置错误不 fail-closed / PermissionRequest+agent 不 fail-closed） |
+
+**统一后的失败策略（`_apply_failure_policy`）**：
+
+| 事件类别 | 默认 | 显式 `onFailure:continue` | 显式 `onFailure:block` |
+| --- | --- | --- | --- |
+| Stop 类（Stop/SubagentStop/StopFailure/TaskCompleted/TeammateIdle） | 放行 | 放行 | **仍放行**（坏 beep 不锁会话） |
+| 守卫事件（GUARD_EVENTS） | **阻止**（fail-closed） | 放行 | 阻止 |
+| 其它事件 | 放行 | 放行 | 阻止 |
+
+**测试命令与结果**：
+
+```bash
+python -m pytest tests/test_hooks_guard_fail_closed.py -q
+# 12 passed, 4 subtests passed
+python -m pytest tests/test_hooks_runtime.py tests/test_hooks_lifecycle.py \
+  tests/test_hooks_tool_runtime.py tests/test_hooks_stop_gate.py \
+  tests/test_hooks_session_registry.py tests/test_hooks_guard_fail_closed.py -q
+# 76 passed, 8 subtests passed
+python -m pytest tests/ -q
+# 1937 passed, 4 skipped, 278 subtests passed
+```
+
 ### 阶段 D（P1）：结构化输出通道
 - 范围：`models.py`（`output_schema`）、`runner.py`（严格解析）
 - 验收：合法三态 JSON 通过；非 JSON/缺字段 → `invalid_output` 且**不**退化为 additionalContext。
@@ -327,7 +366,7 @@ python -m pytest tests/ -q
 - [ ] 默认配置下，GA 行为与现状完全一致（无 hook 时零行为变化）
 - [x] Stop 门禁：block 续跑 / preventContinuation 停止 / 错误放行，三类单测齐全（阶段 A 已完成）
 - [x] 会话级动态 hook：add/remove/list + 幂等 + 生命周期（阶段 B 已完成）
-- [ ] 守卫 fail-closed：三守卫事件错误默认阻塞，可显式降级
+- [x] 守卫 fail-closed：守卫事件错误默认阻塞，可显式降级（阶段 C 已完成；配置失败限 PreToolUse/PermissionRequest）
 - [ ] 结构化输出：invalid_output 不再静默吞掉
 - [ ] `event_status()` 与实际发射点一致（无“自称 integrated 但从未发射”）
 - [ ] 全部现有 hooks 测试 + 新增测试通过；`pytest tests/test_hooks_*.py`
@@ -346,7 +385,7 @@ python -m pytest tests/ -q
 
 ## 10. 本文不做的事
 
-- 阶段 C–G 仍是设计稿，不改源码；阶段 A/B 已落地（见 §6 阶段 A、B 的“已实现”小节）；
+- 阶段 D–G 仍是设计稿，不改源码；阶段 A/B/C 已落地（见 §6 阶段 A/B/C 的“已实现”小节）；
 - 不实现 goal / mods，只定义它们与 hooks 的接口边界；
 - 不改 33 事件词表本身（词表已对齐 CC）；
 - 不引入 cloud / device / 远程 rollout 相关能力。

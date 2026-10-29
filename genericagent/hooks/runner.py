@@ -14,6 +14,7 @@ from typing import Any, Callable
 import requests
 
 from genericagent.hooks.models import (
+    GUARD_EVENTS,
     STOP_LIKE_EVENTS,
     HookHandler,
     HookPayload,
@@ -185,14 +186,8 @@ def _command_execute(handler: HookHandler, payload: dict[str, Any], result: Hook
     else:
         result.status = "success"
         _parse_stdout(result, result.stdout)
-        if (
-            result.status != "success"
-            and handler.on_failure == "block"
-            and result.event not in ON_FAILURE_IGNORED_EVENTS
-        ):
-            result.status = "blocking"
-            result.blocking = True
-            result.output = {"decision": "block", "reason": result.error or "hook output was invalid"}
+    # Failure->block promotion is centralized in execute_handler so all five
+    # handler kinds share one policy (guard default + explicit onFailure).
 
 
 def _run_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
@@ -284,14 +279,6 @@ def _http_execute(
         return
     result.status = "success"
     _parse_stdout(result, result.stdout, allow_text=False)
-    if (
-        result.status != "success"
-        and handler.on_failure == "block"
-        and result.event not in ON_FAILURE_IGNORED_EVENTS
-    ):
-        result.status = "blocking"
-        result.blocking = True
-        result.output = {"decision": "block", "reason": result.error or "invalid http hook output"}
 
 
 def _mcp_execute(handler: HookHandler, payload: dict[str, Any], result: HookResult, mcp_call) -> None:
@@ -383,6 +370,33 @@ def _validate_output(handler: HookHandler, result: HookResult) -> None:
             result.error = "PermissionRequest decision.interrupt must be a boolean"
 
 
+def _apply_failure_policy(handler: HookHandler, result: HookResult) -> None:
+    """Promote a failed hook to a blocking verdict per CC 303 rules.
+
+    A hook is *failed* when it errored, timed out, or produced invalid output
+    (running/blocking/success results are left untouched). The policy:
+      - Stop-likes (Stop/SubagentStop/StopFailure/TaskCompleted/TeammateIdle):
+        never promote - a broken beep/notification must not trap a turn.
+      - Guard events (PreToolUse/PermissionRequest/UserPromptSubmit):
+        fail-closed by default (an unset onFailure still blocks; CC m0459:158274
+        Ilt()/F1e()). An explicit ``onFailure: continue`` opts out.
+      - Every other event: opt-in only via ``onFailure: block``.
+    """
+    if result.status not in {"error", "timeout", "invalid_output"}:
+        return
+    if result.event in ON_FAILURE_IGNORED_EVENTS:
+        return
+    policy = handler.on_failure_explicit
+    if policy == "continue":
+        return
+    should_block = policy == "block" or result.event in GUARD_EVENTS
+    if not should_block:
+        return
+    result.status = "blocking"
+    result.blocking = True
+    result.output = {"decision": "block", "reason": result.error or "hook failed"}
+
+
 def execute_handler(
     handler: HookHandler,
     payload: dict[str, Any],
@@ -417,5 +431,6 @@ def execute_handler(
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
         _validate_output(handler, result)
+        _apply_failure_policy(handler, result)
         result.duration_ms = int((time.perf_counter() - started) * 1000)
     return result

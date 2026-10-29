@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from genericagent import paths
-from genericagent.hooks.models import EVENT_NAMES, HANDLER_TYPES, HookEntry, HookHandler
+from genericagent.hooks.models import (
+    CONFIG_GUARD_EVENTS,
+    EVENT_NAMES,
+    HANDLER_TYPES,
+    HookEntry,
+    HookHandler,
+)
 
 
 @dataclass
@@ -29,6 +35,13 @@ class HookRegistry:
     # an explicit deny-all policy and must remain distinguishable from absent.
     allowed_http_hook_urls: list[str] | None = None
     http_hook_allowed_env_vars: list[str] | None = None
+    # Config-guard events (PreToolUse / PermissionRequest) whose config could
+    # not be loaded. CC is fail-closed here (m0062:2815, set T4): a broken guard
+    # may be the permission gate itself, so it must block, not be ignored.
+    guard_config_errors: dict[str, list[str]] = field(default_factory=dict)
+
+    def add_guard_config_error(self, event: str, message: str) -> None:
+        self.guard_config_errors.setdefault(event, []).append(message)
 
     def for_event(self, event: str) -> list[HookEntry]:
         return [entry for entry in self.entries if entry.event == event]
@@ -149,8 +162,14 @@ def _parse_file(path: Path, source: str, source_rank: int, registry: HookRegistr
         if event_name not in EVENT_NAMES:
             registry.add_issue(source, str(path), f"unknown hook event: {event_name}")
             continue
+        # Track issues produced while parsing this event so a guard event with
+        # a broken/partial config can be made fail-closed at runtime (CC 303
+        # m0062:2815 keeps PreToolUse/PermissionRequest hooks fail-closed).
+        _issues_before = len(registry.issues)
         if not isinstance(entries, list):
             registry.add_issue(source, str(path), f"hook event {event_name} must be an array")
+            if event_name in CONFIG_GUARD_EVENTS:
+                registry.add_guard_config_error(event_name, registry.issues[-1].message)
             continue
         for entry_index, raw_entry in enumerate(entries):
             if not isinstance(raw_entry, dict):
@@ -190,6 +209,17 @@ def _parse_file(path: Path, source: str, source_rank: int, registry: HookRegistr
                 source_rank=source_rank,
                 entry_index=entry_index,
             ))
+        if event_name in CONFIG_GUARD_EVENTS and len(registry.issues) > _issues_before:
+            seen = {str(item) for item in registry.guard_config_errors.get(event_name, [])}
+            for issue in registry.issues[_issues_before:]:
+                # The PermissionRequest+agent rejection is a GA capability
+                # limit (CC's schema allows it for every event), not a broken
+                # guard - do not turn it into a blanket deny.
+                if "agent handler is not supported for PermissionRequest" in str(issue.message):
+                    continue
+                if str(issue.message) not in seen:
+                    registry.add_guard_config_error(event_name, issue.message)
+                    seen.add(str(issue.message))
 
 
 def _home_dir() -> Path:

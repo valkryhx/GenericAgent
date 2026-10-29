@@ -48,11 +48,18 @@ EVENT_NAMES = frozenset({
 })
 
 HANDLER_TYPES = frozenset({"command", "prompt", "agent", "http", "mcp_tool"})
+# Guard events whose *execution failure* is fail-closed (CC 303 Ilt() =
+# m0459:158274; includes UserPromptSubmit etc. minus PostToolBatch/TaskCreated/
+# PreCompact). Unset onFailure on these blocks; explicit onFailure:continue opts out.
 GUARD_EVENTS = frozenset({
     "UserPromptSubmit",
     "PreToolUse",
     "PermissionRequest",
 })
+# Guard events whose *config-load error* is fail-closed (CC 303 T4 = m0062:2815).
+# A guard that cannot be loaded may be the permission gate itself, so it blocks
+# unconditionally (no per-hook opt-out - there is no handler to carry onFailure).
+CONFIG_GUARD_EVENTS = frozenset({"PreToolUse", "PermissionRequest"})
 STOP_LIKE_EVENTS = frozenset({"Stop", "SubagentStop", "StopFailure"})
 
 
@@ -73,6 +80,19 @@ class HookHandler:
     def on_failure(self) -> str:
         value = str(self.options.get("onFailure") or "continue").strip().lower()
         return "block" if value == "block" else "continue"
+
+    @property
+    def on_failure_explicit(self) -> str | None:
+        """Raw onFailure policy, or None when the author did not set it.
+
+        None matters for guard events: an unset onFailure defaults to
+        fail-closed, while an explicit ``continue`` opts out.
+        """
+        raw = self.options.get("onFailure")
+        if raw is None:
+            return None
+        value = str(raw).strip().lower()
+        return value if value in ("block", "continue") else None
 
     @property
     def once(self) -> bool:

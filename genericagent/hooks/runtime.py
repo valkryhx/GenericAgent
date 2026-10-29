@@ -20,6 +20,7 @@ from genericagent.hooks.config import (
 )
 from genericagent.hooks.matcher import entry_matches, handler_matches
 from genericagent.hooks.models import (
+    CONFIG_GUARD_EVENTS,
     EVENT_NAMES,
     GUARD_EVENTS,
     STOP_LIKE_EVENTS,
@@ -391,18 +392,8 @@ class HookRuntime:
                     allowed_http_urls=self.registry.allowed_http_hook_urls,
                     global_allowed_env_vars=self.registry.http_hook_allowed_env_vars,
                 )
-                # A failed command/HTTP/prompt guard can fail closed when the
-                # config explicitly says onFailure=block. Stop-like events are
-                # notification-first in GA v1 so a broken beep cannot trap the
-                # user inside a completed turn.
-                if (
-                    handler.on_failure == "block"
-                    and event in GUARD_EVENTS
-                    and result.status in {"error", "timeout", "invalid_output"}
-                ):
-                    result.status = "blocking"
-                    result.blocking = True
-                    result.output = {"decision": "block", "reason": result.error or "hook failed"}
+                # Failure->block promotion now lives in runner.execute_handler
+                # (_apply_failure_policy) so all handler kinds share one rule.
                 if handler.once:
                     with self._lock:
                         self._once_seen.add(once_key)
@@ -549,6 +540,14 @@ class HookRuntime:
             return aggregate
         payload = self._payload(agent, event, data)
         payload_dict = payload.as_dict()
+        # A guard event whose config could not be loaded is fail-closed: a bad
+        # guard may be the very permission gate, so we block rather than run a
+        # partial/empty guard. Non-guard events ignore config errors.
+        config_errors = self.registry.guard_config_errors.get(event) if event in CONFIG_GUARD_EVENTS else None
+        if config_errors:
+            aggregate.add(self._config_error_result(event, config_errors))
+            if aggregate.blocked:
+                return aggregate
         # Static entries run first, then session-scoped dynamic entries (CC
         # ordering). Each pass stops early on a blocking guard verdict.
         self._run_entries(self.registry.for_event(event), event, payload, payload_dict, aggregate, emit, dynamic=False)
@@ -557,6 +556,22 @@ class HookRuntime:
             if dynamic_entries:
                 self._run_entries(dynamic_entries, event, payload, payload_dict, aggregate, emit, dynamic=True)
         return aggregate
+
+    def _config_error_result(self, event: str, messages: list[str]) -> HookResult:
+        handler = HookHandler(kind="command", options={"type": "command", "command": "<invalid-guard-config>"})
+        detail = "; ".join(str(m) for m in messages)
+        reason = "Guard hook configuration could not be loaded; blocking to stay fail-closed. " + detail
+        result = HookResult(
+            event=event, handler=handler, source="config", source_path="config:guard-error",
+            hook_run_id="hook_cfg_" + uuid.uuid4().hex, status="blocking", blocking=True,
+            error=detail, output={"decision": "block", "reason": reason},
+        )
+        if event == "PermissionRequest":
+            result.output = {"hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": reason},
+            }}
+        return result
 
     def recent_events(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.audit.recent_events(limit=limit)
