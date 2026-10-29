@@ -13,13 +13,19 @@ from typing import Any, Callable
 
 from genericagent import paths
 from genericagent.hooks.audit import HookAudit
-from genericagent.hooks.config import HookRegistry, load_hook_registry
+from genericagent.hooks.config import (
+    HookRegistry,
+    load_hook_registry,
+    parse_dynamic_handler,
+)
 from genericagent.hooks.matcher import entry_matches, handler_matches
 from genericagent.hooks.models import (
     EVENT_NAMES,
     GUARD_EVENTS,
     STOP_LIKE_EVENTS,
     HookAggregate,
+    HookEntry,
+    HookHandler,
     HookPayload,
     HookResult,
     HookWakeRequest,
@@ -86,6 +92,10 @@ class HookRuntime:
         self._once_seen: set[str] = set()
         self._lock = threading.Lock()
         self.session_started = False
+        # Session-scoped dynamic hooks (goal / mods). Keyed for idempotent
+        # replacement; insertion order is the execution order after static
+        # entries. Not shared across agents: one dict per HookRuntime.
+        self._session_hooks: dict[str, HookEntry] = {}
         self.last_errors: list[dict[str, Any]] = []
         self._async_threads: set[threading.Thread] = set()
         self._async_requests: queue.Queue[HookWakeRequest] = queue.Queue()
@@ -280,6 +290,7 @@ class HookRuntime:
                 "allowedEnvVarCount": len(self.registry.http_hook_allowed_env_vars or []),
             },
             "configured": configured,
+            "sessionHooks": self.list_session_hooks(),
             "events": events,
             "issues": [
                 {"source": issue.source, "path": issue.path, "message": issue.message}
@@ -327,13 +338,14 @@ class HookRuntime:
         }
         return {event: emitted.get(event, "contract-only") for event in sorted(EVENT_NAMES)}
 
-    def run_event(self, agent, event: str, data: dict[str, Any] | None = None, *, emit=None) -> HookAggregate:
-        aggregate = HookAggregate(event=event)
-        if event not in EVENT_NAMES:
-            return aggregate
-        payload = self._payload(agent, event, data)
-        payload_dict = payload.as_dict()
-        for entry in self.registry.for_event(event):
+    def _run_entries(self, entries, event, payload, payload_dict, aggregate, emit, *, dynamic):
+        """Execute a list of HookEntry objects against one payload.
+
+        ``dynamic`` marks session-scoped hooks; those may never grant an
+        ``allow`` verdict on a guard event (they can only tighten: deny/ask or
+        add context), so a runtime-registered hook cannot escalate privileges.
+        """
+        for entry in entries:
             if not entry_matches(entry, payload):
                 continue
             for handler_index, handler in enumerate(entry.handlers):
@@ -429,9 +441,121 @@ class HookRuntime:
                         "durationMs": result.duration_ms,
                     })
                     self.last_errors = self.last_errors[-50:]
+                # Security boundary: dynamic (session) hooks cannot widen
+                # permissions on guard events. A forged allow is downgraded to
+                # ask so the host still decides; deny/ask/context pass through.
+                if dynamic and event in GUARD_EVENTS:
+                    result = self._neutralize_dynamic_allow(result)
                 aggregate.add(result)
                 if aggregate.blocked and event in GUARD_EVENTS:
                     return aggregate
+        return aggregate
+
+    def _neutralize_dynamic_allow(self, result: HookResult) -> HookResult:
+        # PreToolUse stores allow in permissionDecision; PermissionRequest
+        # stores it in nested decision.behavior. Cover both.
+        if result.permission_decision != 'allow' and result.permission_behavior != 'allow':
+            return result
+        output = result.output_dict
+        specific = output.get('hookSpecificOutput')
+        if isinstance(specific, dict):
+            if specific.get('permissionDecision') == 'allow':
+                specific['permissionDecision'] = 'ask'
+            decision = specific.get('decision')
+            if isinstance(decision, dict) and decision.get('behavior') == 'allow':
+                decision['behavior'] = 'ask'
+        self.last_errors.append({
+            'hookRunId': result.hook_run_id,
+            'event': result.event,
+            'source': result.source,
+            'handlerType': result.handler.kind,
+            'status': 'downgraded',
+            'message': 'dynamic session hook may not grant allow on a guard event; downgraded to ask',
+            'durationMs': result.duration_ms,
+        })
+        self.last_errors = self.last_errors[-50:]
+        return result
+
+    # ---- session-scoped dynamic hooks (goal / mods) -------------------
+
+    def add_session_hook(self, event: str, handler_spec, *, key: str | None = None, matcher: str | None = None,
+                         emit=None) -> str:
+        """Register (or replace) one session-scoped hook.
+
+        ``handler_spec`` is either a ``HookHandler`` or a raw config dict (the
+        same shape used in ``hooks.json``). ``key`` makes it idempotent: adding
+        again with the same key replaces the previous entry in place, so goal
+        re-installing ``goal:stop`` never stacks duplicates. Returns the key.
+
+        Dynamic hooks run after static file hooks and, on guard events, can
+        only tighten (deny/ask/context) - never grant ``allow`` (see
+        ``_neutralize_dynamic_allow``).
+        """
+        if event not in EVENT_NAMES:
+            raise ValueError(f'unknown hook event: {event}')
+        if isinstance(handler_spec, HookHandler):
+            handler = handler_spec
+        else:
+            handler = parse_dynamic_handler(handler_spec)
+        if key is None or not str(key).strip():
+            key = 'session:' + uuid.uuid4().hex
+        key = str(key)
+        with self._lock:
+            if key in self._session_hooks:
+                index = self._session_hooks[key].entry_index
+            else:
+                index = len(self._session_hooks)
+            self._session_hooks[key] = HookEntry(
+                event=event,
+                matcher=matcher,
+                handlers=(handler,),
+                source='session',
+                source_path=f'session:{key}',
+                source_rank=900,
+                entry_index=index,
+            )
+        self._emit(emit, 'session_hook_registered', event=event, key=key, handlerType=handler.kind)
+        return key
+
+    def remove_session_hook(self, key: str) -> bool:
+        with self._lock:
+            return self._session_hooks.pop(str(key), None) is not None
+
+    def list_session_hooks(self, event: str | None = None) -> list[dict[str, Any]]:
+        out = []
+        for key, entry in self._session_hooks.items():
+            if event is not None and entry.event != event:
+                continue
+            for handler in entry.handlers:
+                out.append({
+                    'key': key,
+                    'event': entry.event,
+                    'matcher': entry.matcher or '',
+                    'type': handler.kind,
+                    'timeout': handler.timeout,
+                })
+        return out
+
+    def clear_session_hooks(self) -> int:
+        """Drop all dynamic hooks (session end / agent teardown)."""
+        with self._lock:
+            count = len(self._session_hooks)
+            self._session_hooks.clear()
+        return count
+
+    def run_event(self, agent, event: str, data: dict[str, Any] | None = None, *, emit=None) -> HookAggregate:
+        aggregate = HookAggregate(event=event)
+        if event not in EVENT_NAMES:
+            return aggregate
+        payload = self._payload(agent, event, data)
+        payload_dict = payload.as_dict()
+        # Static entries run first, then session-scoped dynamic entries (CC
+        # ordering). Each pass stops early on a blocking guard verdict.
+        self._run_entries(self.registry.for_event(event), event, payload, payload_dict, aggregate, emit, dynamic=False)
+        if not (aggregate.blocked and event in GUARD_EVENTS):
+            dynamic_entries = [e for e in self._session_hooks.values() if e.event == event]
+            if dynamic_entries:
+                self._run_entries(dynamic_entries, event, payload, payload_dict, aggregate, emit, dynamic=True)
         return aggregate
 
     def recent_events(self, limit: int = 50) -> list[dict[str, Any]]:

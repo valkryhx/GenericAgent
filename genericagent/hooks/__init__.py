@@ -10,6 +10,7 @@ from genericagent.hooks.models import (
     HookPayload,
     HookResult,
 )
+from genericagent.hooks.config import parse_dynamic_handler
 from genericagent.hooks.runtime import HookRuntime, hook_runtime_for_agent, run_hook_event
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "HookPayload",
     "HookResult",
     "HookRuntime",
+    "parse_dynamic_handler",
     "hook_runtime_for_agent",
     "run_hook_event",
 ]

@@ -95,6 +95,22 @@ def _parse_handler(raw: Any, registry: HookRegistry, source: str, path: str) -> 
     return HookHandler(kind=kind, options=options)
 
 
+def parse_dynamic_handler(raw: Any) -> HookHandler:
+    """Validate and build a HookHandler from an in-memory spec.
+
+    Used by session-scoped dynamic hooks (``HookRuntime.add_session_hook``).
+    It reuses the exact same validation as file-based hooks so dynamic
+    handlers cannot sidestep config rules (timeouts, async constraints,
+    required fields). Raises ``ValueError`` with the first issue message.
+    """
+    scratch = HookRegistry()
+    handler = _parse_handler(raw, scratch, source="session", path="session:hook")
+    if handler is None:
+        message = scratch.issues[0].message if scratch.issues else "invalid hook handler spec"
+        raise ValueError(message)
+    return handler
+
+
 def _parse_file(path: Path, source: str, source_rank: int, registry: HookRegistry) -> None:
     registry.files.append(str(path))
     try:

@@ -1,7 +1,7 @@
 # GA hooks 语义补全实施文档（goal 与 mods 的前置地基）
 
 日期：2026-10-29
-状态：Stage A 已实现并提交（Stop 门禁最小闭环）；阶段 B–G 仍为设计稿
+状态：Stage A / Stage B 已实现并提交（Stop 门禁 + 会话级动态 hook 注册表）；阶段 C–G 仍为设计稿
 范围：GenericAgent 本地 hooks 运行时的语义补全；为 goal 模式提供“回合内可阻塞 Stop”，为后续 mods 提供“可动态装载的事件面”。
 关联材料：
 - GA 侧差异分析：`docs/20261028-GA-hooks机制与CC303差异分析.md`（提交 `4099a2c`）
@@ -257,6 +257,43 @@ python -m pytest tests/ -q
   - 幂等 key：重复 add 只保留一条；
   - 不影响静态文件加载（现有 hooks 配置测试全绿）。
 
+#### 阶段 B 实现结果（已落地，2026-10-29）
+
+| 文件 | 改动 |
+| --- | --- |
+| `genericagent/hooks/config.py` | 新增 `parse_dynamic_handler(raw)`：复用文件 hook 的同一套校验生成 `HookHandler`，非法 spec 抛 `ValueError` |
+| `genericagent/hooks/runtime.py` | `HookRuntime` 新增 `_session_hooks`；`add_session_hook/remove_session_hook/list_session_hooks/clear_session_hooks`；`run_event` 拆出 `_run_entries`，**静态在前、动态在后**，守卫事件上动态 hook 不能给 allow |
+| `genericagent/hooks/__init__.py` | 导出 `parse_dynamic_handler` |
+| `tests/test_hooks_session_registry.py` | 新增 10 个用例（增删查、幂等替换、事件过滤、清空、非法事件/spec、静态优先顺序、动态 allow 降级） |
+
+**API 契约**（`HookRuntime`，每个 agent 一份）：
+
+- `add_session_hook(event, handler_spec, *, key=None, matcher=None, emit=None) -> str`
+  - `handler_spec` 可以是 `HookHandler` 或配置字典（与 `hooks.json` 同形），字典走 `parse_dynamic_handler` 校验；
+  - `key` 幂等：同 key 再次 add 是**原位替换**（goal 用固定 key `goal:stop`，重复设置不会叠加）；
+  - 返回 key（未传则生成 `session:<uuid>`）。
+- `remove_session_hook(key) -> bool`、`list_session_hooks(event=None) -> list[dict]`、`clear_session_hooks() -> int`。
+- `status_snapshot()` 新增 `sessionHooks` 字段，便于 `/status` 类 UI 展示动态 hook。
+
+**合并顺序**：`run_event` 先跑静态 `registry.for_event(event)`，静态**已 blocked** 且是守卫事件则短路；否则再跑同事件的会话动态 hook。聚合仍走同一 `HookAggregate.add`，所以 `additional_context` 顺序天然是“静态在前、动态在后”。
+
+**安全边界（硬约束，非仅文档）**：守卫事件（`UserPromptSubmit` / `PreToolUse` / `PermissionRequest`）上，动态 hook 产出的 `allow` 会被 `_neutralize_dynamic_allow` 就地降级为 `ask`，并在 `last_errors` 记一条 `downgraded`。两处 allow 都覆盖：`PreToolUse` 的 `permissionDecision` 与 `PermissionRequest` 的嵌套 `decision.behavior`。语义是“动态 hook 只能收紧，不能提权”。
+
+**生命周期**：动态 hook 存在各自 runtime 上，随 agent 销毁回收；另提供 `clear_session_hooks()` 供显式 teardown。`SessionEnd` 事件 GA 目前全仓库没有发射点（历史现状），本阶段**未新增**该发射以免改变既有行为——goal 侧清理直接调 `clear_session_hooks()` 即可。
+
+**测试命令与结果**：
+
+```bash
+python -m pytest tests/test_hooks_session_registry.py -q
+# 10 passed
+python -m pytest tests/test_hooks_lifecycle.py tests/test_hooks_runtime.py \
+  tests/test_hooks_tool_runtime.py tests/test_hooks_stop_gate.py \
+  tests/test_hooks_session_registry.py -q
+# 64 passed, 4 subtests passed
+python -m pytest tests/ -q
+# 1925 passed, 4 skipped, 274 subtests passed
+```
+
 ### 阶段 C（P1）：守卫 fail-closed
 - 范围：`config.py` / `runtime.py` / `runner.py`
 - 验收：守卫事件配置错误/执行错误 → blocked；非守卫事件仍 non-blocking；已有 `onFailure:continue` 显式降级可用。
@@ -289,7 +326,7 @@ python -m pytest tests/ -q
 
 - [ ] 默认配置下，GA 行为与现状完全一致（无 hook 时零行为变化）
 - [x] Stop 门禁：block 续跑 / preventContinuation 停止 / 错误放行，三类单测齐全（阶段 A 已完成）
-- [ ] 会话级动态 hook：add/remove/list + 幂等 + 生命周期
+- [x] 会话级动态 hook：add/remove/list + 幂等 + 生命周期（阶段 B 已完成）
 - [ ] 守卫 fail-closed：三守卫事件错误默认阻塞，可显式降级
 - [ ] 结构化输出：invalid_output 不再静默吞掉
 - [ ] `event_status()` 与实际发射点一致（无“自称 integrated 但从未发射”）
@@ -309,7 +346,7 @@ python -m pytest tests/ -q
 
 ## 10. 本文不做的事
 
-- 阶段 B–G 仍是设计稿，不改源码；阶段 A 已落地（见 §6 阶段 A 的“已实现”小节）；
+- 阶段 C–G 仍是设计稿，不改源码；阶段 A/B 已落地（见 §6 阶段 A、B 的“已实现”小节）；
 - 不实现 goal / mods，只定义它们与 hooks 的接口边界；
 - 不改 33 事件词表本身（词表已对齐 CC）；
 - 不引入 cloud / device / 远程 rollout 相关能力。
