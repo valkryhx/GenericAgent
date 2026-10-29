@@ -1680,6 +1680,27 @@ class WorkflowSchedulerTest(unittest.TestCase):
         self.assertEqual({"agent_1", "agent_2"}, runner.cancelled_job_ids)
         self.assertEqual(3, self.event_types(store).count("agent_cancelled"))
 
+    def test_ticks_return_dependency_skipped_jobs_for_rpc_settlement(self):
+        # bug#1 regression: a job skipped because its upstream failed must be
+        # surfaced from tick()/run_all() as a completed job, otherwise the
+        # runtime never answers its pending agent() RPC and the worker hangs
+        # until the deadline. See runtime._complete_pending_rpc.
+        runner = LabelAwareRunner(fail_labels={"collect"})
+        scheduler, store, run = self.make_scheduler(max_concurrent=4, runner=runner)
+        scheduler.register_agent(prompt="collect", label="collect", options={"phase": "Collect"})
+        dependent = scheduler.register_agent(
+            prompt="synthesize",
+            label="synthesize",
+            options={"phase": "Synthesis", "dependsOn": ["collect"]},
+        )
+
+        completed = scheduler.run_all()
+
+        self.assertIn(dependent.job_id, [job.job_id for job in completed])
+        loaded = store.load_run(run.run_id)
+        self.assertEqual("skipped", loaded.jobs[1].status)
+        self.assertEqual("dependency_failed", loaded.jobs[1].metadata.get("skipReason"))
+
 
 if __name__ == "__main__":
     unittest.main()

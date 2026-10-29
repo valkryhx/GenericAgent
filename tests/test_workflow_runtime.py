@@ -3547,3 +3547,51 @@ return await workflow(42)
 
             with self.assertRaisesRegex(RuntimeError, r'workflow\(\) expects'):
                 WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+
+
+class WorkflowFailurePropagationRegressionTest(unittest.TestCase):
+    """Regression tests for two real-GA bugs found by the e2e probe suite.
+
+    bug#1: a job skipped because an upstream dependency failed never settled
+           its pending agent() RPC, so the workflow worker hung until the
+           runtime deadline. Fixed by answering the pending RPC with ok:false.
+    bug#2: a partial child failure (one job failed, the script completed) was
+           reported as integrationStatus=accepted / finalAuditStatus=passed,
+           contradicting executionOutcome=partial. Fixed so a partial run is
+           no longer reported as a clean pass (every-layer status coherence).
+    """
+
+    def test_partial_child_failure_is_not_reported_as_a_clean_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const results = await parallel([() => agent('succeeds first'), () => agent('fails second')])
+return results
+"""
+            run = store.create_run(
+                WorkflowRun(run_id="wf_partial_audit", session_id="session_test", script=script, status="running")
+            )
+            WorkflowRuntime(
+                store=store,
+                runner=SucceedsThenFailsRunner(),
+                scheduler_config=SchedulerConfig(max_concurrent=2),
+                timeout_seconds=5.0,
+            ).run(run)
+
+            loaded = store.load_run(run.run_id)
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            progress = json.loads((Path(loaded.artifact_dir) / "workflow-progress.json").read_text(encoding="utf-8"))
+            # Contract preserved: the script completed and one child succeeded.
+            self.assertEqual("succeeded", loaded.status)
+            self.assertEqual("partial", loaded.metadata["executionOutcome"])
+            self.assertEqual(1, loaded.metadata["childSummary"]["failed"])
+            # The fix: partial failure is reflected in every status layer.
+            self.assertEqual("degraded", loaded.metadata["integrationStatus"])
+            self.assertEqual("degraded", loaded.metadata["finalAuditStatus"])
+            self.assertEqual("partial", final_result["executionOutcome"])
+            self.assertEqual("degraded", final_result["finalAuditStatus"])
+            self.assertEqual("degraded", progress["integrationStatus"])
+            self.assertEqual("degraded", progress["finalAuditStatus"])
+
+if __name__ == "__main__":
+    unittest.main()

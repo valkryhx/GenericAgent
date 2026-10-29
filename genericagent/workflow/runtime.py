@@ -323,18 +323,34 @@ class WorkflowRuntime:
                         metadata["finalAuditStatus"] = "failed"
                         run.metadata = metadata
                         raise RuntimeError(gate_error or verification_error or execution_contract_error or artifact_integrity_error or acceptance_error)
+                    # Decide the terminal run status from the live child
+                    # states FIRST, then derive the execution outcome from that
+                    # final status. Doing it in this order is what makes a
+                    # partial or degraded child outcome impossible to report as
+                    # a clean pass.
+                    #
+                    # The script-level status intentionally stays "succeeded"
+                    # when the script completed but some children failed: that
+                    # is a partial execution, not a script failure (CC
+                    # parallel()/allSettled semantics). It only degrades when a
+                    # child returned a degraded result or workflowIssues exist.
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
                     degraded = str(run.status or "") == "degraded" or bool(metadata.get("workflowIssues"))
-                    metadata["integrationStatus"] = "degraded" if degraded else "accepted"
+                    run.status = "degraded" if degraded else "succeeded"
+                    run.error = None
+                    _, execution_outcome = refresh_workflow_execution_metadata(run)
+                    metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+                    # Any outcome other than a clean "succeeded" (partial,
+                    # degraded, failed) must not be presented as accepted/passed.
+                    clean_pass = execution_outcome == "succeeded"
+                    metadata["integrationStatus"] = "accepted" if clean_pass else "degraded"
                     metadata["integrationIssues"] = []
                     # Non-full runs keep the historic "integration outcome"
-                    # meaning; full runs overwrite this from the audit file. A
-                    # degraded run never reports a clean pass.
-                    metadata["finalAuditStatus"] = "degraded" if degraded else "passed"
+                    # meaning; full runs overwrite finalAuditStatus from the
+                    # audit file. With no shared surfaces the audit renders
+                    # insufficient_evidence rather than a false pass.
+                    metadata["finalAuditStatus"] = "passed" if clean_pass else "degraded"
                     run.metadata = metadata
-                    run.status = metadata["integrationStatus"] if degraded else "succeeded"
-                    run.error = None
-                    refresh_workflow_execution_metadata(run)
                     self.store.save_run(run)
                     self.store.write_workflow_progress(run)
                     self._write_final_audit(run)
@@ -1549,6 +1565,13 @@ class WorkflowRuntime:
         pending_rpc_jobs.pop(rpc_id, None)
         if job.status in {"succeeded", "degraded"}:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": True, "value": scheduler.downstream_result(job)})
+        elif job.status == "skipped":
+            # A job skipped because an upstream dependency failed will never
+            # produce a result; settle its agent() promise as rejected so
+            # Promise.allSettled/parallel() observe the dependency failure
+            # instead of hanging until the runtime deadline.
+            error = job.error or job.metadata.get("skipReason") or "dependency_failed"
+            self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": redact_sensitive_text(str(error))})
         else:
             self._send(process, {"type": "rpc_result", "id": rpc_id, "ok": False, "error": redact_sensitive_text(job.error or f"workflow agent failed: {job.job_id}")})
 

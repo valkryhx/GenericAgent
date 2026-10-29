@@ -432,7 +432,7 @@ class AgentScheduler:
 
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
         completed: list[WorkflowJob] = []
-        self._start_queued_jobs()
+        completed.extend(self._start_queued_jobs())
         for job in list(self.jobs):
             if job.status != "running":
                 continue
@@ -565,14 +565,14 @@ class AgentScheduler:
             {"reason": "implicit-parallel-writer", "parallelBatch": batch},
         )
 
-    def _start_queued_jobs(self) -> None:
+    def _start_queued_jobs(self) -> list[WorkflowJob]:
         if self._stopping:
-            return
-        self._skip_blocked_jobs()
+            return []
+        skipped = self._skip_blocked_jobs()
         slots = self.config.max_concurrent - self.running_count
         for job in self.jobs:
             if slots <= 0:
-                return
+                break
             if job.status != "queued":
                 continue
             if not self._dependencies_satisfied(job):
@@ -601,6 +601,7 @@ class AgentScheduler:
             self._append("agent_started", job, {"label": job.metadata.get("label"), "wave": job.metadata.get("wave")})
             slots -= 1
         self.store.save_run(self.run)
+        return skipped
 
     def _dependencies_satisfied(self, job: WorkflowJob) -> bool:
         for dependency in job.metadata.get("dependsOn") or []:
@@ -612,7 +613,8 @@ class AgentScheduler:
                 return False
         return True
 
-    def _skip_blocked_jobs(self) -> None:
+    def _skip_blocked_jobs(self) -> list[WorkflowJob]:
+        skipped: list[WorkflowJob] = []
         for job in self.jobs:
             if job.status != "queued" or not job.metadata.get("dependsOn"):
                 continue
@@ -623,6 +625,8 @@ class AgentScheduler:
                 job.error = "dependency_failed"
                 job.metadata["skipReason"] = "dependency_failed"
                 self._append("agent_skipped", job, {"reason": "dependency_failed", "dependsOn": job.metadata.get("dependsOn")})
+                skipped.append(job)
+        return skipped
 
     def _has_failed_dependency(self, job: WorkflowJob) -> bool:
         for dependency in job.metadata.get("dependsOn") or []:
