@@ -16,11 +16,11 @@ function Invoke-Python {
     }
 }
 
-Write-Host "[1/6] Checking build toolchain..."
+Write-Host "[1/7] Checking build toolchain..."
 Invoke-Python @("-c", "import build, setuptools; print('build', build.__version__)")
 
 if (-not $SkipClean) {
-    Write-Host "[2/6] Cleaning previous GA build and release artifacts..."
+    Write-Host "[2/7] Cleaning previous GA build and release artifacts..."
     $BuildDir = Join-Path $RepoRoot "build"
     if (Test-Path -LiteralPath $BuildDir) {
         $ResolvedBuild = (Resolve-Path -LiteralPath $BuildDir).Path
@@ -41,10 +41,36 @@ if (-not $SkipClean) {
         Get-ChildItem -Path $_ -ErrorAction SilentlyContinue | Remove-Item -Force
     }
 } else {
-    Write-Host "[2/6] Cleaning skipped."
+    Write-Host "[2/7] Cleaning skipped."
 }
 
-Write-Host "[3/6] Building wheel and sdist..."
+Write-Host "[3/7] Syncing packaged assets from assets/ ..."
+$SourceAssets = Join-Path $RepoRoot "assets"
+$PackagedAssets = Join-Path $RepoRoot "genericagent\resources\assets"
+if (-not (Test-Path -LiteralPath $SourceAssets)) {
+    throw "Source assets directory not found: $SourceAssets"
+}
+if (-not (Test-Path -LiteralPath $PackagedAssets)) {
+    throw "Packaged assets directory not found: $PackagedAssets"
+}
+# Keep the wheel's bundled copy a byte-exact mirror of the source-of-truth
+# assets/ tree for every curated file that ships. Only files already present
+# under resources/assets are copied, so large non-runtime assets
+# (pdf/images/demo) are never pulled into the wheel. Copying unconditionally
+# is idempotent and avoids depending on Get-FileHash being available.
+$SyncedAssets = 0
+foreach ($TargetFile in (Get-ChildItem -LiteralPath $PackagedAssets -Recurse -File)) {
+    $Relative = $TargetFile.FullName.Substring($PackagedAssets.Length).TrimStart('\')
+    $SourceFile = Join-Path $SourceAssets $Relative
+    if (-not (Test-Path -LiteralPath $SourceFile)) {
+        throw "Packaged asset has no counterpart in assets/: $Relative"
+    }
+    Copy-Item -LiteralPath $SourceFile -Destination $TargetFile.FullName -Force
+    $SyncedAssets++
+}
+Write-Host ("  packaged assets synced ({0} file(s))" -f $SyncedAssets)
+
+Write-Host "[4/7] Building wheel and sdist..."
 Invoke-Python @("-m", "build", "--wheel", "--sdist")
 
 $Wheel = Get-ChildItem -Path "dist\genericagent-*.whl" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -52,7 +78,7 @@ if (-not $Wheel) {
     throw "Wheel was not produced in dist/."
 }
 
-Write-Host "[4/6] Auditing wheel contents..."
+Write-Host "[5/7] Auditing wheel contents..."
 $AuditScript = @'
 import sys
 import zipfile
@@ -126,7 +152,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Wheel audit failed."
 }
 
-Write-Host "[5/6] Packaging release files..."
+Write-Host "[6/7] Packaging release files..."
 Copy-Item -Force "llm.yaml.example" "dist\llm.yaml.example"
 Copy-Item -Force "scripts\install_release.ps1" "dist\install_release.ps1"
 
@@ -159,5 +185,5 @@ $ReportJson = ($Report | ConvertTo-Json -Depth 4).Replace("`r`n", "`n")
 $ReportPath = Join-Path (Join-Path (Get-Location) "dist") "build-report.json"
 [System.IO.File]::WriteAllText($ReportPath, $ReportJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
-Write-Host "[6/6] Release artifacts:"
+Write-Host "[7/7] Release artifacts:"
 Get-ChildItem -Path "dist" | Select-Object Name, Length | Format-Table -AutoSize
