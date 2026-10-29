@@ -194,6 +194,29 @@ wf_abc123...
 - `GA_WORKFLOW_WORKSPACE_ROOT` 只对**直接创建的 WorkflowRuntime**生效（覆盖默认 workspace 根）；
   Ink bridge 会显式传自己的 `workspace_root`，因此该变量不改变 Ink 会话的 workspace。
 
+### 三个环境变量的区别
+
+| 变量 | 作用层 | 示例（默认 data_root 在 AppData 时） | 对默认 workspace 的影响 |
+| --- | --- | --- | --- |
+| `GA_PROJECT_ROOT` | 项目身份（project_root → projectKey） | `D:\someproj` → key `someproj-<hash>` | 只换项目桶名：`<data_root>\projects\someproj-<hash>`；data_root 不变 |
+| `GA_DATA_DIR` | 运行时数据根（data_root） | `D:\gadata` | 整棵 `projects/<key>` 搬到 `D:\gadata\projects\<key>` |
+| `GA_WORKFLOW_WORKSPACE_ROOT` | workflow 工作区根（直接覆盖） | `D:\extws` | workspace 直接等于 `D:\extws`（仅直接 new `WorkflowRuntime` 生效；Ink 不生效） |
+
+推导关系：
+
+```text
+project_root --(算 key)--> projectKey
+data_root + projectKey  --> 默认 workspace = <data_root>/projects/<projectKey>
+GA_WORKFLOW_WORKSPACE_ROOT --直接覆盖--> workspace（跳过上面两步）
+```
+
+快速选择：
+
+- 只让某一次 run 写到外部目录 → 传 `args.workspacePath`（最精准，per-run）。
+- 把这台机器的全部运行时状态（会话、历史、workflow）挪到大盘 → `GA_DATA_DIR`（注意不只产物）。
+- 切换"在哪个项目里工作" → `GA_PROJECT_ROOT`（产物仍在 AppData 项目桶，不搬）。
+- 嵌入/脚本直接跑 runtime、想换产物根 → `GA_WORKFLOW_WORKSPACE_ROOT`。
+
 Ink 默认命令行没有 `--workspace` 开关：不显式传 `workspacePath` 时，产物在数据桶（默认即 AppData）
 的 `projects/<projectKey>/workflow-runs/<run_id>/` 下。
 
