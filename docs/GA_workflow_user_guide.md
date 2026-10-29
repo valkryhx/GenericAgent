@@ -165,6 +165,28 @@ wf_abc123...
 
 `--manual` 会被忽略，不会进入人工审批。
 
+### 4.4 指定工作目录（workspace）与外部目录
+
+每次 workflow run 的产物都在一个独立 workspace 里。默认位置是项目数据桶下的
+`<data_root>/projects/<projectKey>/workflow-runs/<run_id>/`（Windows 上
+`data_root` 为 `%LOCALAPPDATA%\GenericAgent`），因此不同 run 的产物互不覆盖、可事后查看。
+
+前提：**显式指定的 workspace 必须是已存在的目录**，否则 workflow 启动即失败
+（`workflow workspace must be an existing directory`）。GA 不会替你创建该目录。
+
+把 run 指向外部目录（例如 `D:\test20260416`）有三个入口：
+
+- runtime / 嵌入 / SDK：`runtime.run(run, args={"workspacePath": "D:\\test20260416"})`，
+  产物直接落在该目录；`workspace` 是兼容别名，两者同时给出时必须指向同一目录。
+- 嵌入 Ink bridge：`GenericAgentBridge(workspace_root="D:\\test20260416")`，每次 run 落在
+  `D:\\test20260416\\workflow-runs\\<run_id>\\`（多一层 run 子目录，避免互相覆盖）。
+- Ink 内通过 workflow 工具：工具入参 `args` 会原样传给 runtime，令脚本以
+  `args: {"workspacePath": "D:\\test20260416"}` 调用即可让这次 run 写到该外部目录。
+
+注意：`GA_PROJECT_ROOT` 只改变项目身份（projectKey），data_root 仍在 `%LOCALAPPDATA%\GenericAgent`，
+不会把产物搬到该路径；要让产物物理落在外部目录，用上面的入口。Ink 默认命令行也没有
+`--workspace` 开关，不显式传 `workspacePath` 时产物在 AppData 项目桶里。
+
 ---
 
 ## 5. 复杂任务测试示例
@@ -364,7 +386,7 @@ wf_abc123...
 - 输入多步自然语言后若没有 workflow：确认文本包含两个独立动作及顺序信号；或直接使用 `/workflow <任务>`。
 - planner 失败或计划被拒绝：查看错误码、workflow detail 与 run journal；执行任务缺 `executionContract`、required tool、write scope、action mapping 或 artifact check 时会 fail-closed，不会静默降级为“只返回计划”。
 - required MCP 缺失：检查事件中的 `workflow_capability_snapshot` / `workflow_capability_preflight_failed`；host 使用该 run 的固定 capability snapshot，缺少必需工具时不会启动 child。
-- 未提供 workspacePath：runtime 会在 run artifact 目录下创建并持久化 workspace；resume 会继承源 run workspace，cache key 同时纳入原始 args 与规范化 workspace。
+- 未提供 workspacePath：runtime 会在 run artifact 目录下创建并持久化 workspace；resume 会继承源 run workspace，cache key 同时纳入原始 args 与规范化 workspace。显式提供的 workspacePath 必须是已存在目录，否则启动失败（见 §4.4）。
 - 成功闭环应包含 required tool transcript evidence、artifact 存在与 read-back 证据，以及 `workflow_finished` 终态事件；Ink UI 最终回到 idle。
 
 ## 12. 判断测试是否成功
