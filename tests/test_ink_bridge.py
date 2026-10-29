@@ -470,6 +470,22 @@ class InkBridgeTest(unittest.TestCase):
         user_event = next(event for event in events if event.get("type") == "user")
         self.assertEqual("用 workflow 帮我并行调研 A、B、C，然后综合验证", user_event["text"])
 
+    def test_workflow_session_mode_beats_team_nudge_for_multi_signal_task(self):
+        # After ``/workflow on``, a substantive multi-signal task must get the
+        # WORKFLOW opt-in (with workflow-authoring skill), not the team nudge.
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        bridge.submit("/workflow on")
+        bridge.submit("并行执行三个独立子任务：写 a.py、写 b.py、写 c.html，最后汇总并检查")
+        agent.queues[0].put({"done": "ok"})
+        bridge.wait_for_idle(timeout=1)
+
+        submitted = agent.prompts[0][0]
+        self.assertIn("WORKFLOW OPT-IN", submitted)
+        self.assertIn("workflow-authoring", submitted)
+        self.assertNotIn("TEAM ORCHESTRATION OPT-IN", submitted)
+
     def test_submit_injects_team_opt_in_reminder_for_parallel_request(self):
         agent = FakeAgent()
         events = []

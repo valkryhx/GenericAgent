@@ -116,18 +116,22 @@ def resolve_workflow_activation(task_text: str, *, session_enabled: bool = False
     if _SYNTHESIZE.search(text):
         signals.append("synthesis")
     has_sequence = bool(_MULTI_STEP.search(text))
-    # Semantic activation requires multiple independent action classes and an
-    # explicit sequence/composition marker. A lone verb never starts a workflow.
-    if len(signals) >= 2 and has_sequence:
-        return _decision("semantic", "recommended", text, confidence=0.9,
-                         signals=tuple(signals), reason="multi-step task spans independent action classes",
-                         fanout=len(signals) >= 3, phases=True)
+    # A standing ``/workflow on`` opt-in must win over the softer semantic
+    # recommendation. Otherwise a substantive task that happens to look
+    # multi-signal is demoted to ``recommended`` before session mode is even
+    # consulted, and the team nudge steals it from the workflow path.
     if session_enabled:
         if _is_conversational_turn(text):
             return _decision("none", "none", text, confidence=0.0, signals=tuple(signals),
                              reason="conversational turn: standing workflow mode does not auto-orchestrate chat")
         return _decision("session", "requested", text, confidence=0.95,
                          signals=tuple(signals), reason="explicit session workflow mode", fanout=True, phases=True)
+    # Semantic activation requires multiple independent action classes and an
+    # explicit sequence/composition marker. A lone verb never starts a workflow.
+    if len(signals) >= 2 and has_sequence:
+        return _decision("semantic", "recommended", text, confidence=0.9,
+                         signals=tuple(signals), reason="multi-step task spans independent action classes",
+                         fanout=len(signals) >= 3, phases=True)
     return _decision("none", "none", text, confidence=0.0, signals=tuple(signals), reason="insufficient independent workflow signals")
 
 

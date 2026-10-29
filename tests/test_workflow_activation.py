@@ -29,6 +29,15 @@ class WorkflowActivationTest(unittest.TestCase):
         self.assertEqual('none', state.handle('generate report').action)
 
 
+    def test_session_mode_wins_over_semantic_recommendation(self):
+        # ``/workflow on`` must not be demoted to ``recommended`` just because
+        # the task also looks multi-signal; otherwise the team nudge steals it.
+        state = WorkflowActivationState()
+        state.handle('/workflow on')
+        task = '并行执行三个子任务：写 a.py、写 b.py、写 c.html，最后汇总并检查'
+        decision = state.handle(task)
+        self.assertEqual(('session', 'requested'), (decision.mode, decision.action))
+
     def test_session_mode_ignores_conversational_turns(self):
         state = WorkflowActivationState()
         state.handle('/workflow on')
