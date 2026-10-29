@@ -362,6 +362,23 @@ def consume_file(dr, file):
         os.remove(os.path.join(dr, file))
         return content
 
+# Stop gate consecutive-block cap. Mirrors CC 303 CLAUDE_CODE_STOP_HOOK_BLOCK_CAP
+# (m0039:2817 D.int() -> m0671:8983 ``?? 8``): default 8 consecutive blocked
+# turn-ends before the gate overrides and ends the turn; a non-positive value
+# disables the cap (never force-end on cap). Shared by goal and every other
+# Stop hook, exactly as CC treats goal_active as telemetry only.
+STOP_HOOK_BLOCK_CAP_ENV = "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"
+DEFAULT_STOP_HOOK_BLOCK_CAP = 8
+
+def _stop_hook_block_cap(default=DEFAULT_STOP_HOOK_BLOCK_CAP):
+    raw = os.environ.get(STOP_HOOK_BLOCK_CAP_ENV)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
 class GenericAgentHandler(BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
     def __init__(self, parent, last_history=None, cwd='./temp', workspace_root=None):
@@ -445,7 +462,7 @@ class GenericAgentHandler(BaseHandler):
         runtime = getattr(self, 'hook_runtime', None) or getattr(agent, 'hook_runtime', None)
         return runtime is not None
 
-    def run_stop_gate(self, exit_reason=None, *, max_checks=8):
+    def run_stop_gate(self, exit_reason=None, *, max_checks=None):
         """Turn-end Stop gate (mirrors CC blockable_turn_end Stop semantics).
 
         Emitted when the model wants to stop its turn (agent_runner_loop is about
@@ -459,9 +476,11 @@ class GenericAgentHandler(BaseHandler):
         if not self._stop_gate_active():
             return ('none', '', None)
         agent = self._hook_agent()
+        cap = _stop_hook_block_cap() if max_checks is None else int(max_checks)
         count = getattr(self, '_stop_gate_count', 0)
-        if count >= max_checks:
-            # Failsafe: a runaway Stop hook cannot trap the user forever.
+        if cap > 0 and count >= cap:
+            # Failsafe (CC CLAUDE_CODE_STOP_HOOK_BLOCK_CAP): a runaway Stop hook
+            # cannot trap the user forever. cap<=0 disables the cap.
             return ('none', '', None)
         self._stop_gate_count = count + 1
         self.stop_emitted = True
