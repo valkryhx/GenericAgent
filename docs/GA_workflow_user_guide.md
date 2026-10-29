@@ -188,7 +188,8 @@ wf_abc123...
 环境变量：
 
 - `GA_PROJECT_ROOT` 只改变**项目身份**（projectKey 及其项目桶子目录），`data_root` 仍在
-  `%LOCALAPPDATA%\GenericAgent`，不会把产物搬到该路径。
+  `%LOCALAPPDATA%\GenericAgent`，不会把产物搬到该路径；它也**不会**把 GA 自身的
+  `assets/skills/memory/temp` 运行时目录搬进你的项目（这些固定在 GA 安装位置或 `GA_DATA_DIR`）。
 - `GA_DATA_DIR` 改的是 **data_root 本身**（默认 `%LOCALAPPDATA%\GenericAgent`）；设成其它目录后，
   `projects/<projectKey>/workflow-runs/<run_id>/` 会整体落到该目录下。
 - `GA_WORKFLOW_WORKSPACE_ROOT` 覆盖 workflow 工作区根，**Ink 会话与直接创建的 WorkflowRuntime 都生效**；
