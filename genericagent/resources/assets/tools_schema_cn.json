@@ -1,7 +1,7 @@
 [
   {"type": "function", "function": {
     "name": "code_run",
-    "description": "代码执行器。优先使用python。支持Multi-call，并行时用script参数。无script参数时正文代码块会被执行，单次调用优先使用以免转义。禁硬编码大量数据",
+    "description": "代码执行器。优先使用python。支持Multi-call，并行时用script参数。无script参数时正文代码块会被执行，单次调用优先使用以免转义。禁硬编码大量数据。若目标文本必须使用严格 LF 换行，请优先用 file_write；若必须在 Python 里写文件，请用 open(path, 'w', encoding='utf-8', newline='') 或直接写二进制，因为 Windows 文本模式会把 LF 变成 CRLF。",
     "parameters": {"type": "object", "properties": {
       "script": {"type": "string", "description": "[Optional] 要执行的代码。为免转义建议留空，改用正文代码块（与此参数互斥）"},
       "type": {"type": "string", "enum": ["python", "powershell"], "description": "代码类型", "default": "python"},

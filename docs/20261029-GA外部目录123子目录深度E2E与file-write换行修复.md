@@ -115,8 +115,18 @@
 `open(path, "w", encoding="utf-8")` 写文件，Windows 就会把 `\n` 翻成 `\r\n` —— 这是**被执行的用户代码**的行为，
 与 GA 的 `file_write` / `file_patch` 工具无关。本轮 `workflow` 的 `summary.md` 就是这种情况（子任务用 `code_run` 写）。
 
-处理原则：**不改 `code_run`**。它是通用 Python 执行器，不应替用户代码强行改写换行；要生成严格 LF 的文本，
-应使用 GA 的 `file_write`（现已修复），或在 `code_run` 脚本里显式 `open(..., newline="\n")` / 写二进制。
+### 建议（明确操作约定）
+
+要产出**严格 LF** 的文本文件，按下面优先级执行：
+
+1. **首选 GA 的 `file_write`**：它现在硬保证保留模型给的 `\n`（修复 `b37021f`），Windows 上不再注入 CRLF。
+2. 若必须在 `code_run` 的 Python 里写，显式关闭换行翻译：`open(path, "w", encoding="utf-8", newline="")`（或直接写二进制 `open(path, "wb")`）。
+3. **不要**在 Windows 上用默认文本模式 `open(path, "w", encoding="utf-8")` 写需要严格 LF 的文件——那会把 `\n` 翻成 `\r\n`。
+
+为让模型自然遵守这条约定，`code_run` 的工具描述（`assets/tools_schema.json` 与 `assets/tools_schema_cn.json`，含
+`genericagent/resources/assets/` 镜像）已各加一句软提示：需要严格 LF 时优先 `file_write`，或在 Python 里用
+`newline=''` / 写二进制。**`code_run` 的执行逻辑本身未改**——它是通用 Python 执行器，不替用户代码强行改写换行，
+以免破坏二进制写入或用户预期。
 
 ---
 
@@ -153,3 +163,5 @@ python work/_e2e_dtest123.py
 
 - `b37021f` fix(file-tools): preserve LF newlines in file_write/file_patch on Windows
 - 本文件（docs）：记录本轮 `D:\test20260416\123` 深度 E2E 与换行修复复核结论
+- 本文件（docs）：§6 新增“严格 LF 优先用 file_write”的明确操作约定
+- `code_run` 工具描述（英/中 × assets + genericagent/resources/assets 共 4 份镜像）：加入一句软提示，不改执行逻辑
