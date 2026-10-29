@@ -93,8 +93,13 @@ GA-supported options:
   `implementation`, `verification`, `review`, `repair`, `summary`, `synthesis`.
 - `toolProfile` — planning hint only: `planner`, `research`, `authoring`, `verify`, or `*`. Workflow children receive the full connected tool schema; the host does not pre-deny tools from this value.
 - `pathPolicy` — `"unrestricted"` (default) or `"workspace"`. `workspacePath` is always the child cwd and artifact root. The default allows reads/writes/commands outside it; set `"workspace"` to opt into the hard workspace path ACL.
-- `writeScope` — array of workspace-relative paths this agent may write.
-- `deliverables` — array of expected output paths or names.
+- `writeScope` — array of workspace-relative paths this agent may write. A planning
+  hint, not a filesystem ACL: it does not block writes elsewhere (use
+  `pathPolicy: "workspace"` for a hard boundary) and never turns a missing path
+  into a failure.
+- `deliverables` — array of expected output paths or names. Advisory: it drives
+  artifact attribution and handoff `artifactRefs`, but GA does **not** fail a job
+  when a listed deliverable is absent.
 - `acceptanceChecks` — array of machine-checkable acceptance ids.
 - `capabilities` — array from `web_search`, `web_fetch`, `file_read`,
   `file_write`, `execute`.

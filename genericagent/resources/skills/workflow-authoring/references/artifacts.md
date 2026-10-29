@@ -19,6 +19,17 @@ absolute path and drops artifacts outside the run workspace. When a child
 genuinely needs an absolute root, use `${args.workspacePath}` -- the runtime
 always injects it.
 
+## Deliverables are not enforced
+
+`writeScope`/`deliverables` declare intent and drive artifact attribution and
+handoff `artifactRefs`; they do **not** enforce existence and are **not** a write
+ACL. A child that writes to the wrong path, or writes nothing, still leaves the
+job `succeeded` -- this is why a stray artifact does not fail orchestration. Use
+`pathPolicy: "workspace"` to hard-block outside writes, and verify planned
+products explicitly (an in-script readback check, or a host
+`executionContract`/`requiredToolEvidence` provisioned in `run.metadata` by the
+caller) when a run must fail on a missing deliverable.
+
 ## Pass values, don't share files
 
 - Analysis, research, review, and verification stages should return structured
