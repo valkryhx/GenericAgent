@@ -29,7 +29,7 @@
   }},
   {"type": "function", "function": {
     "name": "file_write",
-    "description": "用于文件的新建、全量覆盖或追加写入。对于精细的代码修改，应优先使用 file_patch。写入内容支持 {{file:路径:起始行:结束行}} 语法引用文件片段，写入前自动展开",
+    "description": "用于文件的新建、全量覆盖或追加写入。对于精细的代码修改，应优先使用 file_patch。写入内容支持 {{file:路径:起始行:结束行}} 语法引用文件片段，写入前自动展开。覆盖已有文件前，请先用 file_read 读取其内容，确保覆盖基于最新内容",
     "parameters": {"type": "object", "properties": {
       "path": {"type": "string", "description": "文件路径"},
       "content": {"type": "string"},

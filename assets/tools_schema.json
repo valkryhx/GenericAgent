@@ -29,7 +29,7 @@
   }},
   {"type": "function", "function": {
     "name": "file_write",
-    "description": "Create/overwrite/append files. HUGE edits ONLY. Supports {{file:path:startLine:endLine}}, auto-expanded",
+    "description": "Create/overwrite/append files. HUGE edits ONLY. Supports {{file:path:startLine:endLine}}, auto-expanded. Before overwriting an existing file, read it first (file_read) so the overwrite is based on its current content",
     "parameters": {"type": "object", "properties": {
       "path": {"type": "string", "description": "File path"},
       "content": {"type": "string"},	
