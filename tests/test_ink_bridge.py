@@ -4780,6 +4780,14 @@ return { ok: true }
             self.assertIn("workflow_run", event_types)
             self.assertIn("workflow_progress", event_types)
             self.assertIn("workflow_final", event_types)
+            # O1: the startup workflow_run event (emitted before the runtime
+            # thread runs) must already carry the planner/mode metadata the UI
+            # and adapters read.
+            launched = next(event for event in events if event.get("type") == "workflow_run")
+            launched_metadata = launched["run"]["metadata"]
+            self.assertEqual("model_authored", launched_metadata.get("plannerMode"))
+            self.assertEqual("workflow", launched_metadata.get("mode"))
+            self.assertEqual("dynamic_workflow", launched_metadata.get("workflowTaskType"))
 
     def test_launch_from_tool_rejects_invalid_script_without_creating_run(self):
         events = []

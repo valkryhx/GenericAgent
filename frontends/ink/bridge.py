@@ -1129,6 +1129,11 @@ class GenericAgentBridge:
                     "workflowName": workflow_name,
                     "workflowSummary": summary,
                     "workflowTaskType": "dynamic_workflow",
+                    # Planner/mode are reported on the workflow_run event that is
+                    # emitted before the runtime thread starts, so they must be set
+                    # here as well as in WorkflowRuntime.run().
+                    "plannerMode": "model_authored",
+                    "mode": "workflow",
                     "launchedBy": "workflow_tool",
                     "scriptSource": source_kind,
                     # ``_workflow_handoff_payload`` quotes the originating request

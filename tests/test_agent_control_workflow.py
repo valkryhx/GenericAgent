@@ -91,6 +91,23 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertEqual(1, run_record.metadata["childSummary"]["failed"])
         self.assertEqual("partial", run_record.metadata["executionOutcome"])
 
+    def test_workflow_run_record_surfaces_planner_mode_and_mode(self):
+        run = WorkflowRun(
+            run_id="wf_modes",
+            session_id="session_modes",
+            script="return {}",
+            status="running",
+            metadata={"plannerMode": "model_authored", "mode": "workflow"},
+            jobs=[WorkflowJob(job_id="agent_1", status="running")],
+        )
+        self.store.create_run(run)
+        from genericagent.core.control.workflow import WorkflowChildAdapter
+
+        records = WorkflowChildAdapter(self.store, self.controller).list_records(include_terminal=True)
+        run_record = next(record for record in records if record.record_kind == "workflow_run")
+        self.assertEqual("model_authored", run_record.metadata["plannerMode"])
+        self.assertEqual("workflow", run_record.metadata["mode"])
+
     def test_workflow_job_preserves_cached_stale_failed_and_cancelled(self):
         jobs = [
             WorkflowJob(job_id=f"agent_{index}", status=status)

@@ -238,6 +238,7 @@ class WorkflowChildAdapter:
                 "permissionProfile",
                 "permissionPolicyVersion",
                 "resumeFromRunId",
+                "mode",
                 "plannerMode",
                 "workflowTaskType",
                 "workflowDraftRef",

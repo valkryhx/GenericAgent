@@ -67,7 +67,7 @@ def _run(
 ) -> tuple[Any, WorkflowRun, float]:
     run = store.create_run(WorkflowRun(run_id=run_id, session_id="workflow_degraded_e2e", script=script, status="running"))
     runner = (
-        NativeGPTChildAgentRunner(profile_name=PROFILE, max_tokens=1024, max_turns=8)
+        NativeGPTChildAgentRunner(profile_name=PROFILE, max_turns=8)
         if real
         else FakeChildAgentRunner(results={"agent_1": {"summary": "stub"}})
     )
@@ -85,6 +85,7 @@ def _run(
 
 
 REAL_ARTIFACT_SCRIPT = r"""
+export const meta = { name: 'degraded-declared-artifact-e2e', description: 'child writes a declared artifact' }
 phase('Write declared artifact')
 const result = await agent(`Use file_write to create exactly this workspace-relative file, then file_read it back and quote the first line.
 Path: ${args.workspacePath}/ga-degraded-e2e/report.md
@@ -95,6 +96,7 @@ return { status: 'written', summary: result.summary }
 """
 
 MISSING_ARTIFACT_SCRIPT = r"""
+export const meta = { name: 'degraded-missing-artifact-e2e', description: 'declared artifact is never written' }
 phase('Declare an artifact the child never writes')
 const result = await agent(`Do not call tools. Reply with the single word DONE.
 Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials. Do not write files.`, { label: 'noop-agent' })
@@ -102,6 +104,7 @@ return { status: 'noop', summary: result.summary }
 """
 
 DEGRADED_SCRIPT = r"""
+export const meta = { name: 'degraded-schema-fallback-e2e', description: 'optional schema falls back to text' }
 phase('Explicit optional schema fallback')
 const result = await agent(`Reply with one plain-language sentence, not JSON.
 Include the token GA_DEGRADED_E2E_OK.
@@ -114,6 +117,7 @@ return { schemaFallback: result.schemaFallback === true, summaryLength: String(r
 """
 
 PATH_ACL_SCRIPT = r"""
+export const meta = { name: 'degraded-path-acl-e2e', description: 'child attempts a workspace escape' }
 phase('Attempt a workspace escape')
 const result = await agent(`Try to read the file ${args.outsideSecretPath} with file_read, then report what happened.
 Do not read mykey.py, mykey.json, mcp.json, API keys, tokens, or credentials. Do not write files.`, {
@@ -217,12 +221,33 @@ def main() -> int:
             "workflowIssueCodes": [issue.get("code") for issue in degraded_metadata.get("workflowIssues") or []],
             "elapsedSeconds": round(degraded_elapsed, 2),
         }
-        if degraded_loaded.status != "degraded":
-            summary["issues"].append("schema_fallback_run_not_degraded")
-        if degraded_metadata.get("integrationStatus") != "degraded":
-            summary["issues"].append("degraded_integration_status_not_marked")
-        if degraded_metadata.get("finalAuditStatus") != "degraded":
-            summary["issues"].append("degraded_final_audit_status_not_marked")
+        # A live model may satisfy the optional schema outright (calling
+        # structured_output) or ignore it and reply in plain text. Both are
+        # valid: what the host must guarantee is a *consistent* projection --
+        # fallback (or a degraded job) is reported degraded; a satisfied or
+        # missing schema never masquerades as a degraded run. The degraded
+        # status projection itself is pinned deterministically by
+        # real_workflow_slice7_schema_fallback_e2e.py.
+        degraded_job_statuses = [job.status for job in degraded_loaded.jobs]
+        fallback_applied = (
+            "degraded" in degraded_job_statuses
+            or any(
+                issue.get("fallbackApplied")
+                for issue in degraded_metadata.get("workflowIssues") or []
+            )
+        )
+        if fallback_applied:
+            if degraded_loaded.status != "degraded":
+                summary["issues"].append("schema_fallback_run_not_degraded")
+            if degraded_metadata.get("integrationStatus") != "degraded":
+                summary["issues"].append("degraded_integration_status_not_marked")
+            if degraded_metadata.get("finalAuditStatus") != "degraded":
+                summary["issues"].append("degraded_final_audit_status_not_marked")
+        else:
+            if degraded_loaded.status != "succeeded":
+                summary["issues"].append("degraded_run_not_succeeded_after_schema_satisfied")
+            if degraded_metadata.get("finalAuditStatus") not in {None, "passed"}:
+                summary["issues"].append("degraded_run_audit_inconsistent")
 
         # D. host path ACL: a real child that tries to read outside the
         # workspace must be denied at the tool boundary.

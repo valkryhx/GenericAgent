@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import os
 import re
@@ -20,12 +18,13 @@ from genericagent.workflow.child_agent import NativeGPTChildAgentRunner  # noqa:
 from genericagent.workflow.models import WorkflowRun  # noqa: E402
 from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
 from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
+from genericagent.workflow.llm import binding_from_profile  # noqa: E402
 from genericagent.workflow.store import WorkflowStore  # noqa: E402
 
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
+PROFILE_NAME = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "deepseek-v4.1-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 
 SECRET_PATTERNS = [
@@ -36,6 +35,7 @@ SECRET_PATTERNS = [
 ]
 
 SLICE7_SCRIPT = r"""
+export const meta = { name: 'slice7-schema-fallback-real-e2e', description: 'declared schema falls back to plain text' }
 phase('Slice 7 Schema Fallback');
 log('start real schema fallback agent');
 const result = await agent(`You are running a GenericAgent Slice 7 real E2E check.
@@ -64,20 +64,15 @@ return {
 
 
 def check_profile(summary: dict[str, Any]) -> bool:
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from genericagent.llm.core import reload_mykeys
-
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
+    binding = binding_from_profile(PROFILE_NAME)
     profile = {
-        "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode") or cfg.get("apiMode") or "chat_completions",
-        "loadLogChars": len(captured.getvalue()),
+        "profileName": binding.profile_name,
+        "model": binding.model_id,
     }
     summary["profile"] = sanitize(profile)
-    summary["profileOk"] = profile["model"] == EXPECTED_MODEL and (not EXPECTED_NAME or profile["name"] == EXPECTED_NAME)
+    summary["profileOk"] = bool(binding.model_id) and (
+        not EXPECTED_MODEL or binding.model_id == EXPECTED_MODEL
+    )
     return bool(summary["profileOk"])
 
 
@@ -102,14 +97,14 @@ def main() -> int:
         "passed": False,
         "skipped": False,
         "case": "slice7_schema_fallback_real_child_agent",
-        "configName": CONFIG_NAME,
+        "profileName": PROFILE_NAME,
         "expectedName": EXPECTED_NAME,
         "expectedModel": EXPECTED_MODEL,
         "root": str(root),
         "issues": [],
     }
     if not OPT_IN:
-        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real gpt-5.5 Slice 7 E2E"})
+        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run the real schema-fallback E2E"})
         print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
         return 0
 
@@ -130,8 +125,7 @@ def main() -> int:
             )
         )
         runner = NativeGPTChildAgentRunner(
-            config_name=CONFIG_NAME,
-            max_tokens=256,
+            profile_name=PROFILE_NAME,
             max_turns=4,
             enable_tools=False,
         )

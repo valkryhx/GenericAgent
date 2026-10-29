@@ -24,6 +24,10 @@ _last_prune_at = 0.0
 
 DEFAULT_CHILD_MAX_TURNS = 80
 MAX_CHILD_MAX_TURNS = 80
+# Per-turn output budget for real workflow/child agents. Overrides the
+# profile's llm.yaml max_tokens so long tool-heavy children are not truncated
+# with "max_output_tokens". Pass max_tokens=None explicitly to fall back.
+DEFAULT_CHILD_MAX_TOKENS = 102400
 
 
 def _isolated_workspace_base_root() -> Path:
@@ -696,7 +700,7 @@ class NativeGPTChildAgentRunner:
         client_factory=None,
         tools_schema_factory=None,
         system_prompt: str | None = None,
-        max_tokens: int | None = None,
+        max_tokens: int | None = DEFAULT_CHILD_MAX_TOKENS,
         enable_tools: bool = True,
         max_turns: int = DEFAULT_CHILD_MAX_TURNS,
         telemetry_min_interval: float = 1.0,

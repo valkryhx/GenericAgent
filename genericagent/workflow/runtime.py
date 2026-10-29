@@ -195,6 +195,14 @@ class WorkflowRuntime:
         self._phases = []
         self._test_gates = []
         self._last_worker_result = None
+        # Surface how this run was planned. CC exposes these on the run
+        # metadata; the Ink panel/status bar and downstream adapters read them.
+        # Defaults describe the direct-JS path (the model authored the script);
+        # callers that recorded an explicit plannerMode/mode keep their value.
+        _run_meta = dict(run.metadata) if isinstance(run.metadata, dict) else {}
+        _run_meta.setdefault("plannerMode", "model_authored")
+        _run_meta.setdefault("mode", "workflow")
+        run.metadata = _run_meta
         # Record LLM binding snapshot for audit (best-effort; no secrets).
         try:
             from genericagent.workflow.llm import binding_from_env, resolve_binding

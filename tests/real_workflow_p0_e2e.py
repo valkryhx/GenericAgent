@@ -26,11 +26,12 @@ from genericagent.workflow.scheduler import SchedulerConfig
 from genericagent.workflow.store import WorkflowStore
 
 
-PROFILE = "luna"
-EXPECTED_MODEL = "gpt-5.6-luna"
+PROFILE = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_P0_WORKFLOW_E2E") == "1"
 
 WORKFLOW_SCRIPT = r"""
+export const meta = { name: 'p0-green-gate-repair-e2e', description: 'red gate -> repair -> green gate workflow' }
 phase('Green Gate and Repair')
 const repair = await repairAndRetest({
   workspacePath: args.workspacePath,
@@ -96,7 +97,7 @@ def main() -> int:
         "issues": [],
     }
     if not OPT_IN:
-        summary["reason"] = "set GA_RUN_REAL_P0_WORKFLOW_E2E=1 to run the real gpt-5.6-luna P0 E2E"
+        summary["reason"] = "set GA_RUN_REAL_P0_WORKFLOW_E2E=1 to run the real P0 workflow E2E"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
 
@@ -136,7 +137,6 @@ def main() -> int:
         runner = NativeGPTChildAgentRunner(
             profile_name=PROFILE,
             enable_tools=True,
-            max_tokens=768,
             max_turns=12,
         )
         outcome = WorkflowRuntime(

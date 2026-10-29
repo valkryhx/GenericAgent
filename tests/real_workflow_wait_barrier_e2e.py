@@ -19,6 +19,7 @@ EXPECTED_MODEL = os.environ.get('GA_REAL_API_EXPECTED_MODEL', 'deepseek-v4.1-fla
 EXPECTED_NAME = os.environ.get('GA_REAL_API_EXPECTED_NAME', 'deepseek-v4.1-flash')
 
 WORKFLOW_SCRIPT = r'''
+export const meta = { name: 'wait-barrier-e2e', description: 'dependency barrier between module analysis and test suggestions' }
 phase('Module analysis');
 const analysis = await agent(`Read ${args.sourcePath} with file_read. ${args.mcpInstruction}Write ${args.workspacePath}/analysis.md with two concrete boundary conditions using file_write. Do not modify the repository. Final answer must contain GA_BARRIER_ANALYSIS_DONE.`, {label:'module-analysis'});
 phase('Test suggestions');
@@ -96,7 +97,7 @@ class RealWorkflowWaitBarrierE2E(unittest.TestCase):
             script=WORKFLOW_SCRIPT, status='running',
             metadata={'workflowName': 'real-wait-barrier-e2e', 'profile': profile, 'mcpRequired': MCP_OPT_IN},
         ))
-        runner = NativeGPTChildAgentRunner(profile_name=PROFILE, max_tokens=1024, max_turns=12)
+        runner = NativeGPTChildAgentRunner(profile_name=PROFILE, max_turns=12)
         started = time.monotonic()
         metrics = {
             'profile': profile, 'mcpRequired': MCP_OPT_IN,
@@ -116,7 +117,7 @@ class RealWorkflowWaitBarrierE2E(unittest.TestCase):
                 timeout_seconds=900,
             ).run(run, args={
                 'workspacePath': str(workspace),
-                'sourcePath': str(REPO / 'workflow_script_validation.py'),
+                'sourcePath': str(REPO / 'genericagent' / 'workflow' / 'script_validation.py'),
                 'mcpInstruction': instruction,
             })
             loaded = store.load_run(run.run_id)

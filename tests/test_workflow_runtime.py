@@ -265,6 +265,38 @@ return {summary: result.summary}
             self.assertEqual(expected, loaded.metadata["workspacePath"])
             self.assertEqual(expected, loaded.jobs[0].metadata["workspacePath"])
 
+    def test_runtime_records_planner_mode_and_mode_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('noop', {label: 'coder'})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(run_id="wf_modes", session_id="session_test", script=script, status="running"))
+            WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("model_authored", loaded.metadata["plannerMode"])
+            self.assertEqual("workflow", loaded.metadata["mode"])
+
+    def test_runtime_preserves_explicit_planner_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const result = await agent('noop', {label: 'coder'})
+return {summary: result.summary}
+"""
+            run = store.create_run(WorkflowRun(
+                run_id="wf_modes_explicit",
+                session_id="session_test",
+                script=script,
+                status="running",
+                metadata={"plannerMode": "deterministic", "mode": "delegated"},
+            ))
+            WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
+            loaded = store.load_run(run.run_id)
+            self.assertEqual("deterministic", loaded.metadata["plannerMode"])
+            self.assertEqual("delegated", loaded.metadata["mode"])
+
     def test_runtime_accepts_worktree_isolation_option(self):
         # Mirrors Claude Code agent({isolation:'worktree'}): the option survives
         # the RPC whitelist and reaches the child job's metadata.
