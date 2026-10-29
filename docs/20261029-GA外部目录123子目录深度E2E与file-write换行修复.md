@@ -165,3 +165,15 @@ python work/_e2e_dtest123.py
 - 本文件（docs）：记录本轮 `D:\test20260416\123` 深度 E2E 与换行修复复核结论
 - 本文件（docs）：§6 新增“严格 LF 优先用 file_write”的明确操作约定
 - `code_run` 工具描述（英/中 × assets + genericagent/resources/assets 共 4 份镜像）：加入一句软提示，不改执行逻辑
+
+---
+
+## 10. 软提示生效复核（提交 c273618 后重跑）
+
+同一个驱动脚本、同一模型（`default/deepseek-v4.1-flash`）在 `D:\test20260416\123` 再跑一轮：
+
+- 证据 bundle：`temp/dtest123/run_20261029-144458`，仍是 **43/43 检查项 PASS**。
+- 新 workflow run `wf_51ec91155cc140d1ba96a6a3c2417c07` 的 `reports/q1/summary.md`：**CRLF=0（纯 LF）**。
+- 对照上一轮（加提示前）`wf_7d6b79...` 的同名文件：CRLF=2；两轮正文内容逐字节一致（仅行尾不同）。
+- 十六进制对照：新文件行尾为 `0x0a`，旧文件为 `0x0d 0x0a`。
+- 结论：`code_run` 工具描述里的那句软提示生效，子任务改用了 LF 安全的写法；旧产物按用户要求保留、未删除。
