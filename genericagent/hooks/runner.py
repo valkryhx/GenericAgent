@@ -13,17 +13,19 @@ from typing import Any, Callable
 
 import requests
 
-from genericagent.hooks.models import HookHandler, HookPayload, HookResult
+from genericagent.hooks.models import (
+    STOP_LIKE_EVENTS,
+    HookHandler,
+    HookPayload,
+    HookResult,
+)
 
 
 # CC 303 m0459:57412-57435: stop/notification-like events ignore
 # onFailure=block.  A broken beep or notification must never trap a turn.
-ON_FAILURE_IGNORED_EVENTS = frozenset({
-    "Stop",
-    "SubagentStop",
-    "TaskCompleted",
-    "TeammateIdle",
-})
+# Derived from the shared STOP_LIKE_EVENTS set plus task/idle notifications so
+# the stop-like vocabulary has a single source of truth.
+ON_FAILURE_IGNORED_EVENTS = frozenset(STOP_LIKE_EVENTS | {"TaskCompleted", "TeammateIdle"})
 
 
 def _json_text(value: Any) -> str:

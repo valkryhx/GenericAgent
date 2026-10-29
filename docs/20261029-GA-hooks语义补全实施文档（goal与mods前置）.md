@@ -1,7 +1,7 @@
 # GA hooks 语义补全实施文档（goal 与 mods 的前置地基）
 
 日期：2026-10-29
-状态：实施文档（先文档、后代码；本文不改任何源码）
+状态：Stage A 已实现并提交（Stop 门禁最小闭环）；阶段 B–G 仍为设计稿
 范围：GenericAgent 本地 hooks 运行时的语义补全；为 goal 模式提供“回合内可阻塞 Stop”，为后续 mods 提供“可动态装载的事件面”。
 关联材料：
 - GA 侧差异分析：`docs/20261028-GA-hooks机制与CC303差异分析.md`（提交 `4099a2c`）
@@ -205,6 +205,51 @@ mods 只需消费 5.2：
   - 单测：hook 抛错/超时 → 正常结束，不卡死；
   - 回归：现有 `tests/test_hooks_lifecycle.py`（断言 Stop 每 task 一次）需同步更新，避免与新语义冲突。
 
+#### 阶段 A 实现结果（已落地，2026-10-29）
+
+改动的文件与职责：
+
+| 文件 | 改动 |
+| --- | --- |
+| `genericagent/core/handler.py` | 新增 `_stop_gate_active()` / `run_stop_gate()` / 每回合 `_stop_gate_count` / `stop_emitted`；Stop 走统一入口 `run_hook_event` |
+| `genericagent/core/loop.py` | `agent_runner_loop` 在“模型想停”处调用门禁；先处理排队续跑、再做真停判断；`EXITED` 硬停不门禁 |
+| `genericagent/core/app.py` | 收尾 Stop 降级为兜底：本回合门禁已发过则不再发，避免同义双发；兜底 payload 带 `phase: user_turn_end` |
+| `genericagent/hooks/runner.py` | `ON_FAILURE_IGNORED_EVENTS` 由 `STOP_LIKE_EVENTS` 派生，消除重复常量 |
+| `tests/test_hooks_stop_gate.py` | 新增 13 个用例（门禁三态、防死循环、错误放行、beep 一次/两次语义、无 hook 不变） |
+
+**门禁触发点与顺序**（`loop.py`）：
+
+1. `exit_reason.result == 'EXITED'` → 硬停，直接 `break`，不发门禁（app 收尾仍会兜底发 Stop）；
+2. `handler._done_hooks` 非空 → 还有排队续跑，说明这一轮不是真停，**不触发门禁**；
+3. 否则才是“模型真的想停”，调用 `handler.run_stop_gate(exit_reason)`。
+
+**三态返回**：
+
+- `"continue"`：`blocked`（`decision:block`），把 `reason` 注入下一轮输入并清空 `exit_reason`，继续循环；
+- `"stop"`：`prevent_continuation`，停止并展示 `[Stop] reason`（`prevent_continuation` 优先于一般 blocked）；
+- `"none"`：正常结束。
+
+**Stop-beep 语义（本次修正的重点）**：Stop 在“agent 想停的那一刻”发，beep 就在此时响；若 hook 阻塞导致下一轮又停，会**再次**发 Stop 且 `stop_hook_active=True`（CC 语义），所以 beep 是“每次停一次”，不是“每用户回合一次”。app 收尾的 Stop 只在“本回合门禁**没发过**”时兜底补发（无 hook runtime、`EXITED`、异常、用户中途 abort），保证不漏 beep、也不双响。
+
+**防死循环**：每回合门禁最多 8 次（`max_checks`）；`stop_hook_active` 随门禁次数递增；`max_turns` 仍是最外层上界。hook 报错/超时由 `run_hook_event` 吞错并返回良性 aggregate，门禁返回 `"none"` 放行，坏 hook 不锁会话。
+
+**payload 契约**：门禁期 `phase: turn_end`、`source: turn_end`；app 兜底 `phase: user_turn_end`。`exit_reason` 统一为 `aborted`（`stop_sig`）或 `completed`。子 agent 走 `SubagentStop`，主 Stop 门禁对 `is_subagent` 关闭（`_stop_gate_active()` 为假）。
+
+**验证命令与结果**：
+
+```bash
+python -m pytest tests/test_hooks_lifecycle.py tests/test_hooks_runtime.py \
+  tests/test_hooks_tool_runtime.py tests/test_hooks_stop_gate.py -q
+# 54 passed, 4 subtests passed
+python -m pytest tests/test_agent_loop_parallel_tools.py tests/test_ga_subagent_tools.py \
+  tests/test_ink_bridge.py tests/test_workflow_child_agent.py -q
+# 283 passed, 21 subtests passed
+python -m pytest tests/ -q
+# 1915 passed, 4 skipped, 274 subtests passed
+```
+
+> 与阶段 A 原验收的一处差异：原计划“现有 `test_hooks_lifecycle.py` 断言 Stop 每 task 一次需同步更新”。实测无需改测试——因为正常直答路径下门禁正好发一次、app 兜底因 `stop_emitted` 不再发，行为仍是一次；只有真正发生 block 续跑或循环未走到门禁时才会多一次/由兜底补一次。
+
 ### 阶段 B（P0）：会话级动态 hook 注册表
 - 范围：`runtime.py`（`add/remove/list`、`run_event` 合并）、`HookRuntime` 生命周期
 - 验收：
@@ -243,7 +288,7 @@ mods 只需消费 5.2：
 ## 8. 验收与 DoD
 
 - [ ] 默认配置下，GA 行为与现状完全一致（无 hook 时零行为变化）
-- [ ] Stop 门禁：block 续跑 / preventContinuation 停止 / 错误放行，三类单测齐全
+- [x] Stop 门禁：block 续跑 / preventContinuation 停止 / 错误放行，三类单测齐全（阶段 A 已完成）
 - [ ] 会话级动态 hook：add/remove/list + 幂等 + 生命周期
 - [ ] 守卫 fail-closed：三守卫事件错误默认阻塞，可显式降级
 - [ ] 结构化输出：invalid_output 不再静默吞掉
@@ -264,7 +309,7 @@ mods 只需消费 5.2：
 
 ## 10. 本文不做的事
 
-- 不改任何源码（本文=设计稿）；
+- 阶段 B–G 仍是设计稿，不改源码；阶段 A 已落地（见 §6 阶段 A 的“已实现”小节）；
 - 不实现 goal / mods，只定义它们与 hooks 的接口边界；
 - 不改 33 事件词表本身（词表已对齐 CC）；
 - 不引入 cloud / device / 远程 rollout 相关能力。

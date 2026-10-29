@@ -388,6 +388,11 @@ class GenericAgentHandler(BaseHandler):
         self.permission_runtime = None
         self.hook_runtime = None
         self.last_hook_aggregate = None
+        # Per-user-turn budget for the Stop gate (goal / stop-guard hook).
+        self._stop_gate_count = 0
+        # Whether a Stop event was emitted for this handler's user turn, so
+        # the app-level turn-end Stop stays a pure fallback (no double beep).
+        self.stop_emitted = False
 
     def _hook_agent(self):
         return getattr(self, 'hook_parent_agent', None) or self.parent
@@ -409,6 +414,63 @@ class GenericAgentHandler(BaseHandler):
         aggregate = runtime.run_event(self._hook_agent(), event, data)
         self.last_hook_aggregate = aggregate
         return aggregate
+
+    def _stop_gate_active(self):
+        """Whether the turn-end Stop gate runs for this handler.
+
+        True only for the main (non-subagent) agent that has a hook runtime.
+        Subagents use SubagentStop, so the lead Stop gate must stay off for
+        them to avoid firing lead Stop hooks on child turns.
+        """
+        agent = self._hook_agent()
+        if getattr(agent, 'is_subagent', False):
+            return False
+        runtime = getattr(self, 'hook_runtime', None) or getattr(agent, 'hook_runtime', None)
+        return runtime is not None
+
+    def run_stop_gate(self, exit_reason=None, *, max_checks=8):
+        """Turn-end Stop gate (mirrors CC blockable_turn_end Stop semantics).
+
+        Emitted when the model wants to stop its turn (agent_runner_loop is about
+        to break). A Stop hook that blocks keeps the turn alive by returning a
+        continue prompt; ``preventContinuation`` stops the turn with a message.
+
+        Returns ``(action, text, aggregate)`` where action is one of
+        ``"continue"`` (inject text and keep going), ``"stop"`` (stop now),
+        ``"none"`` (normal end).
+        """
+        if not self._stop_gate_active():
+            return ('none', '', None)
+        agent = self._hook_agent()
+        count = getattr(self, '_stop_gate_count', 0)
+        if count >= max_checks:
+            # Failsafe: a runaway Stop hook cannot trap the user forever.
+            return ('none', '', None)
+        self._stop_gate_count = count + 1
+        self.stop_emitted = True
+        data = {
+            'stop_hook_active': count > 0,
+            'last_assistant_message': getattr(self, 'last_assistant_message', '') or '',
+            'exit_reason': ('aborted' if getattr(agent, 'stop_sig', False) else 'completed'),
+            'source': 'turn_end',
+            'phase': 'turn_end',
+        }
+        # Route through the shared entry point so the Stop gate obeys the same
+        # runtime resolution / emit plumbing as every other app-level hook.
+        # run_hook_event swallows hook errors and returns a benign aggregate,
+        # so a broken Stop hook can never lock the session.
+        from genericagent.hooks.runtime import run_hook_event
+        agg = run_hook_event(agent, 'Stop', data, emit=getattr(agent, 'hook_emit', None))
+        self.last_hook_aggregate = agg
+        if agg is None:
+            return ('none', '', None)
+        # preventContinuation wins: stop the turn but surface the reason.
+        if getattr(agg, 'prevent_continuation', False):
+            return ('stop', agg.reason or 'Stop hook prevented continuation', agg)
+        # A blocking decision keeps the turn alive with the hook's reason.
+        if agg.blocked:
+            return ('continue', agg.reason or 'Continue working toward the goal.', agg)
+        return ('none', '', agg)
 
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
         """Execute one tool and its post-hook life cycle.

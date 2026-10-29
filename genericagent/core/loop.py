@@ -274,8 +274,27 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             if exit_reason:
                 break
         if len(next_prompts) == 0 or exit_reason:
-            if len(handler._done_hooks) == 0 or exit_reason.get('result', '') == 'EXITED': break
-            next_prompts.add(handler._done_hooks.pop(0))
+            # An explicit exit (EXITED) is a hard stop: never gate it. The
+            # app-level turn-end Stop still fires as a fallback (e.g. beep).
+            if exit_reason.get('result', '') == 'EXITED':
+                break
+            # A queued continuation means the turn is NOT actually ending, so
+            # the Stop gate must not fire yet (fire it only on a real stop).
+            if handler._done_hooks:
+                next_prompts.add(handler._done_hooks.pop(0))
+            else:
+                stop_gate = handler.run_stop_gate(exit_reason) if hasattr(handler, 'run_stop_gate') else ('none', '', None)
+                if stop_gate[0] == 'continue':
+                    # A Stop hook blocked the turn end: inject its reason and
+                    # keep looping instead of breaking (CC blocking semantics).
+                    next_prompts.add(stop_gate[1])
+                    exit_reason = {}
+                elif stop_gate[0] == 'stop':
+                    if stop_gate[1]:
+                        yield "\n[Stop] " + str(stop_gate[1]) + "\n"
+                    break
+                else:
+                    break
         next_prompt = handler.turn_end_callback(response, tool_calls, tool_results, turn, '\n'.join(next_prompts), exit_reason)
         post_batch = _run_post_tool_batch_hook(handler, tool_calls, tool_results, turn, exit_reason)
         if post_batch.context_text:

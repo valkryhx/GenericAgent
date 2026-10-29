@@ -1260,16 +1260,24 @@ class GenericAgent:
                     print(f"[WARN] Failed to record session transcript: {e}")
                 if not getattr(self, 'is_subagent', False):
                     try:
-                        run_hook_event(
-                            self, 'Stop',
-                            {
-                                'stop_hook_active': False,
-                                'last_assistant_message': final_assistant_text,
-                                'exit_reason': 'aborted' if self.stop_sig else 'completed',
-                                'source': source,
-                            },
-                            emit=getattr(self, 'hook_emit', None),
-                        )
+                        # The Stop gate inside agent_runner_loop already emitted
+                        # Stop when the model wanted to stop. Emit here only as a
+                        # fallback for turns the gate never reached (no hook
+                        # runtime, explicit exit, error, or user abort mid-loop),
+                        # so a beep still fires exactly once and never doubles.
+                        _stop_already_emitted = bool(getattr(handler, 'stop_emitted', False))
+                        if not _stop_already_emitted:
+                            run_hook_event(
+                                self, 'Stop',
+                                {
+                                    'stop_hook_active': False,
+                                    'last_assistant_message': final_assistant_text,
+                                    'exit_reason': 'aborted' if self.stop_sig else 'completed',
+                                    'source': source,
+                                    'phase': 'user_turn_end',
+                                },
+                                emit=getattr(self, 'hook_emit', None),
+                            )
                     except Exception as hook_err:
                         print(f"[WARN] Stop hooks failed: {hook_err}")
             except Exception as e:
