@@ -321,11 +321,18 @@ class GenericAgentBridge:
         if self._workspace_root_override:
             self.workspace_root = resolve_workspace_root(self._workspace_root_override)
         else:
-            # The project bucket may not exist until the first run. The
-            # workflow workspace resolver is strict by design for explicit
-            # overrides, so the implicit project root is created here.
-            self.project_roots.project_data_dir.mkdir(parents=True, exist_ok=True)
-            self.workspace_root = resolve_workspace_root(self.project_roots.project_data_dir)
+            env_override = str(os.environ.get("GA_WORKFLOW_WORKSPACE_ROOT") or "").strip()
+            if env_override:
+                # Honour GA_WORKFLOW_WORKSPACE_ROOT on the product (Ink) path too,
+                # not only by a directly constructed WorkflowRuntime. Without this
+                # the variable parses fine but silently does nothing under Ink.
+                self.workspace_root = resolve_workspace_root(env_override)
+            else:
+                # The project bucket may not exist until the first run. The
+                # workflow workspace resolver is strict by design for explicit
+                # overrides, so the implicit project root is created here.
+                self.project_roots.project_data_dir.mkdir(parents=True, exist_ok=True)
+                self.workspace_root = resolve_workspace_root(self.project_roots.project_data_dir)
         root_override = getattr(self, "_workflow_root_override", None)
         if root_override is not None:
             test_root = Path(root_override).expanduser().resolve()

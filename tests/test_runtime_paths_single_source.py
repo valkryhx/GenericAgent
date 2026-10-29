@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from frontends.ink.bridge import GenericAgentBridge
 from genericagent import paths
@@ -54,6 +55,52 @@ class RuntimePathsSingleSourceTest(unittest.TestCase):
                 roots.project_data_dir / "session_single_source" / "subagents",
                 bridge.subagent_manager.session_data_dir,
             )
+
+    def test_bridge_honours_workspace_root_env_on_product_path(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "A"
+            data = Path(td) / "data"
+            external = Path(td) / "external-ws"
+            project.mkdir()
+            external.mkdir()
+            agent = _Agent()
+            agent.project_root = str(project)
+            agent.data_root = str(data)
+            bridge = GenericAgentBridge.__new__(GenericAgentBridge)
+            bridge.agent = agent
+            bridge.project_dir = Path(td)
+            bridge.state_root = Path(td) / "unused"
+            bridge._workspace_root_override = None
+            bridge._workflow_root_override = None
+            with patch.dict(os.environ, {"GA_WORKFLOW_WORKSPACE_ROOT": str(external)}, clear=False):
+                bridge._rebind_runtime_paths()
+            self.assertEqual(external.resolve(), bridge.workspace_root)
+
+    def test_explicit_workspace_root_override_beats_env(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "A"
+            data = Path(td) / "data"
+            explicit = Path(td) / "explicit"
+            external = Path(td) / "external-ws"
+            project.mkdir()
+            explicit.mkdir()
+            external.mkdir()
+            agent = _Agent()
+            agent.project_root = str(project)
+            agent.data_root = str(data)
+            bridge = GenericAgentBridge.__new__(GenericAgentBridge)
+            bridge.agent = agent
+            bridge.project_dir = Path(td)
+            bridge.state_root = Path(td) / "unused"
+            bridge._workspace_root_override = str(explicit)
+            bridge._workflow_root_override = None
+            with patch.dict(os.environ, {"GA_WORKFLOW_WORKSPACE_ROOT": str(external)}, clear=False):
+                bridge._rebind_runtime_paths()
+            self.assertEqual(explicit.resolve(), bridge.workspace_root)
 
     def test_manager_project_layout_does_not_use_legacy_temp_fallback(self):
         with tempfile.TemporaryDirectory() as td:
