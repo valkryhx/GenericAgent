@@ -167,9 +167,11 @@ wf_abc123...
 
 ### 4.4 指定工作目录（workspace）与外部目录
 
-每次 workflow run 的产物都在一个独立 workspace 里。默认位置是项目数据桶下的
+每次 workflow run 的产物都在一个独立 workspace 里。默认位置是**项目数据桶**下的
 `<data_root>/projects/<projectKey>/workflow-runs/<run_id>/`（Windows 上
 `data_root` 为 `%LOCALAPPDATA%\GenericAgent`），因此不同 run 的产物互不覆盖、可事后查看。
+**默认不是 GA 源码/代码项目目录**：即使从源码 checkout 启动，workspace 也落在数据桶里，
+不会把产物写进仓库根或 `D:\git_codes\GenericAgent`。
 
 前提：**显式指定的 workspace 必须是已存在的目录**，否则 workflow 启动即失败
 （`workflow workspace must be an existing directory`）。GA 不会替你创建该目录。
@@ -183,9 +185,17 @@ wf_abc123...
 - Ink 内通过 workflow 工具：工具入参 `args` 会原样传给 runtime，令脚本以
   `args: {"workspacePath": "D:\\test20260416"}` 调用即可让这次 run 写到该外部目录。
 
-注意：`GA_PROJECT_ROOT` 只改变项目身份（projectKey），data_root 仍在 `%LOCALAPPDATA%\GenericAgent`，
-不会把产物搬到该路径；要让产物物理落在外部目录，用上面的入口。Ink 默认命令行也没有
-`--workspace` 开关，不显式传 `workspacePath` 时产物在 AppData 项目桶里。
+环境变量：
+
+- `GA_PROJECT_ROOT` 只改变**项目身份**（projectKey 及其项目桶子目录），`data_root` 仍在
+  `%LOCALAPPDATA%\GenericAgent`，不会把产物搬到该路径。
+- `GA_DATA_DIR` 改的是 **data_root 本身**（默认 `%LOCALAPPDATA%\GenericAgent`）；设成其它目录后，
+  `projects/<projectKey>/workflow-runs/<run_id>/` 会整体落到该目录下。
+- `GA_WORKFLOW_WORKSPACE_ROOT` 只对**直接创建的 WorkflowRuntime**生效（覆盖默认 workspace 根）；
+  Ink bridge 会显式传自己的 `workspace_root`，因此该变量不改变 Ink 会话的 workspace。
+
+Ink 默认命令行没有 `--workspace` 开关：不显式传 `workspacePath` 时，产物在数据桶（默认即 AppData）
+的 `projects/<projectKey>/workflow-runs/<run_id>/` 下。
 
 ---
 
