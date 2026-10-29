@@ -340,16 +340,29 @@ class WorkflowRuntime:
                     run.error = None
                     _, execution_outcome = refresh_workflow_execution_metadata(run)
                     metadata = dict(run.metadata) if isinstance(run.metadata, dict) else {}
-                    # Any outcome other than a clean "succeeded" (partial,
-                    # degraded, failed) must not be presented as accepted/passed.
+                    # Presentation mapping by execution outcome:
+                    #   succeeded -> accepted / passed   (clean delivery)
+                    #   partial   -> degraded / degraded (script completed, some children failed)
+                    #   degraded  -> degraded / degraded (lower-fidelity delivery)
+                    #   failed    -> rejected / failed   (nothing was delivered)
+                    # A run where every child failed must not look merely
+                    # "partial"; promote it to a genuine failed run.
                     clean_pass = execution_outcome == "succeeded"
-                    metadata["integrationStatus"] = "accepted" if clean_pass else "degraded"
+                    run_failed = execution_outcome == "failed"
+                    if run_failed:
+                        run.status = "failed"
+                        run.error = run.error or "all workflow children failed"
+                    metadata["integrationStatus"] = (
+                        "accepted" if clean_pass else ("rejected" if run_failed else "degraded")
+                    )
                     metadata["integrationIssues"] = []
                     # Non-full runs keep the historic "integration outcome"
                     # meaning; full runs overwrite finalAuditStatus from the
                     # audit file. With no shared surfaces the audit renders
                     # insufficient_evidence rather than a false pass.
-                    metadata["finalAuditStatus"] = "passed" if clean_pass else "degraded"
+                    metadata["finalAuditStatus"] = (
+                        "passed" if clean_pass else ("failed" if run_failed else "degraded")
+                    )
                     run.metadata = metadata
                     self.store.save_run(run)
                     self.store.write_workflow_progress(run)

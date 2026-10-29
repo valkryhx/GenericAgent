@@ -71,7 +71,12 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     if code_type in ["python", "py"]:
         if code_cwd is not None and not os.path.isdir(code_cwd):
             return {"status": "error", "msg": f"code_cwd does not exist: {code_cwd}"}
-        tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
+        # Keep the temporary script OUT of ``code_cwd`` (the workspace). Writing
+        # it there polluted concurrent "count *.py in workspace" tasks with
+        # ``tmp*.ai.py`` leftovers and could be mistaken for a business file.
+        # It runs from the system temp dir; ``GA_CODE_RUN_CWD`` (set below) keeps
+        # the workspace importable so imports of local modules still resolve.
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8')
         cr_header = os.path.join(paths.RESOURCES_DIR, 'code_run_header.py')
         if os.path.exists(cr_header):
             with open(cr_header, encoding='utf-8') as header:
@@ -118,6 +123,8 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
                 child_env.pop("GA_WORKFLOW_BASH_CLAMP", None)
                 child_env.pop("GA_WORKFLOW_GUARD_STRICT", None)
             child_env["GA_CODE_RUN_ROOT"] = str(paths.PROJECT_ROOT)
+            if code_cwd and os.path.isdir(code_cwd):
+                child_env["GA_CODE_RUN_CWD"] = str(Path(code_cwd).resolve())
             child_env["GA_MEMORY_DIR"] = str(paths.MEMORY_DIR)
             child_env["GA_PROJECT_ROOT"] = str(workspace_root or os.environ.get("GA_PROJECT_ROOT") or paths.PROJECT_ROOT)
             child_env["GA_TOOL_CWD"] = str(cwd)

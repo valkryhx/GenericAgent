@@ -3549,6 +3549,23 @@ return await workflow(42)
                 WorkflowRuntime(store=store, runner=FakeChildAgentRunner()).run(run)
 
 
+class AllChildrenFailRunner:
+    """Every child fails (used to verify a total failure is reported failed)."""
+
+    def __init__(self):
+        self.started_job_ids = []
+        self.cancelled_job_ids = set()
+
+    def start(self, job):
+        self.started_job_ids.append(job.job_id)
+
+    def poll(self, job):
+        return AgentResult(job_id=job.job_id, status="failed", payload={"error": "child failed"})
+
+    def cancel(self, job):
+        self.cancelled_job_ids.add(job.job_id)
+
+
 class WorkflowFailurePropagationRegressionTest(unittest.TestCase):
     """Regression tests for two real-GA bugs found by the e2e probe suite.
 
@@ -3560,6 +3577,32 @@ class WorkflowFailurePropagationRegressionTest(unittest.TestCase):
            contradicting executionOutcome=partial. Fixed so a partial run is
            no longer reported as a clean pass (every-layer status coherence).
     """
+
+    def test_all_children_failed_is_reported_as_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            script = """
+const results = await parallel([() => agent('fails one'), () => agent('fails two')])
+return results
+"""
+            run = store.create_run(
+                WorkflowRun(run_id="wf_all_failed", session_id="session_test", script=script, status="running")
+            )
+            WorkflowRuntime(
+                store=store,
+                runner=AllChildrenFailRunner(),
+                scheduler_config=SchedulerConfig(max_concurrent=2),
+                timeout_seconds=5.0,
+            ).run(run)
+
+            loaded = store.load_run(run.run_id)
+            final_result = json.loads((Path(loaded.artifact_dir) / "final-result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", loaded.status)
+            self.assertEqual("failed", loaded.metadata["executionOutcome"])
+            self.assertEqual("rejected", loaded.metadata["integrationStatus"])
+            self.assertEqual("failed", loaded.metadata["finalAuditStatus"])
+            self.assertEqual("failed", final_result["status"])
+            self.assertEqual("failed", final_result["finalAuditStatus"])
 
     def test_partial_child_failure_is_not_reported_as_a_clean_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

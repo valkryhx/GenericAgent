@@ -275,6 +275,55 @@ print('suffix=' + ''.join(p.suffixes))
             self.assertFalse(outside.exists())
 
 
+
+
+class CodeRunTempIsolationTest(unittest.TestCase):
+    """bug P1: the temp ``.ai.py`` must not land in the workspace root.
+
+    A live agent-team run counted ``*.py`` while a teammate's ``code_run``
+    temp script was present in the repo root, inflating the count. The script
+    now runs from the system temp dir; local-module imports keep working
+    because ``code_cwd`` is added to ``sys.path`` by the inlined header.
+    """
+
+    def test_temp_script_not_created_in_code_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            (code_cwd / "sentinel.py").write_text("X = 1" + chr(10), encoding="utf-8")
+            # Running code that enumerates its own directory (*.py) while the
+            # temp script is alive: with the old behavior the live ``.ai.py``
+            # was visible here (count >= 2). It must report only sentinel.py.
+            code = (
+                "import os, glob" + chr(10)
+                + "d = " + repr(str(code_cwd)) + chr(10)
+                + "print('cnt=' + str(len(glob.glob(os.path.join(d, '*.py')))))" + chr(10)
+                + "print('names=' + ','.join(sorted(os.path.basename(x) for x in glob.glob(os.path.join(d,'*.py')))))" + chr(10)
+            )
+
+            result = exhaust_generator(code_run(code, "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd)))
+
+            self.assertEqual("success", result["status"], result)
+            self.assertIn("cnt=1", result["stdout"])
+            self.assertNotIn(".ai.py", result["stdout"])
+            self.assertEqual([], list(code_cwd.glob("*.ai.py")))
+
+    def test_code_cwd_modules_importable_after_temp_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code_cwd = Path(tmp) / "code_cwd"
+            code_cwd.mkdir()
+            (code_cwd / "localmod_xyz.py").write_text("VALUE = 4242" + chr(10), encoding="utf-8")
+            code = (
+                "import localmod_xyz" + chr(10)
+                + "print('val=' + str(localmod_xyz.VALUE))" + chr(10)
+            )
+
+            result = exhaust_generator(code_run(code, "python", timeout=5, cwd=tmp, code_cwd=str(code_cwd)))
+
+            self.assertEqual("success", result["status"], result)
+            self.assertIn("val=4242", result["stdout"])
+
+
 class ProjectToolCwdTest(unittest.TestCase):
     def test_code_run_falls_back_to_project_tool_cwd(self):
         popen_kwargs = {}

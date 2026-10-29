@@ -164,6 +164,21 @@ class WorkflowModelsTest(unittest.TestCase):
         self.assertEqual("partial", project_workflow_execution_outcome("succeeded", summary))
         self.assertEqual("failed", project_workflow_execution_outcome("failed", summary))
 
+    def test_all_children_failed_projects_to_failed_not_partial(self):
+        jobs = [
+            WorkflowJob(job_id="agent_1", status="failed"),
+            WorkflowJob(job_id="agent_2", status="skipped"),
+        ]
+
+        summary = summarize_workflow_jobs(jobs)
+
+        self.assertEqual(2, summary["total"])
+        self.assertEqual(0, summary["succeeded"])
+        # Nothing was delivered: a total failure must not look like "partial".
+        self.assertEqual("failed", project_workflow_execution_outcome("succeeded", summary))
+        self.assertEqual("failed", project_workflow_execution_outcome("degraded", summary))
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,13 @@ def project_workflow_execution_outcome(
             return "succeeded" if degraded == 0 else "degraded"
     if raw_status in {"succeeded", "completed", "degraded"}:
         success_like = _success_like_count(summary)
+        # A run where every child failed (or was skipped because its
+        # dependency failed) delivered nothing. Report it as ``failed`` rather
+        # than ``partial`` so the run-level status is not a misleading
+        # "some progress happened". This mirrors the ``running`` branch above,
+        # which already resolves a no-success run to ``failed``.
+        if success_like == 0 and total > 0:
+            return "failed"
         if success_like != total:
             return "partial"
         return "succeeded" if clean_success == total else "degraded"
