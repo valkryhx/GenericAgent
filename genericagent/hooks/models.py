@@ -95,6 +95,19 @@ class HookHandler:
         return value if value in ("block", "continue") else None
 
     @property
+    def output_schema(self) -> dict[str, Any] | None:
+        """Optional JSON schema for a prompt/agent hook's model output.
+
+        When set, the executor parses the model reply strictly against it
+        (no plain-text fallback). Used by the goal evaluator triple
+        ``{ok, reason, impossible?}`` (CC 303 m0459:154361-154451).
+        """
+        value = self.options.get("outputSchema")
+        if value is None:
+            value = self.options.get("output_schema")
+        return value if isinstance(value, dict) and value else None
+
+    @property
     def once(self) -> bool:
         return bool(self.options.get("once", False))
 
@@ -331,3 +344,20 @@ class HookAggregate:
             self.updated_output_set = True
         if output.get("preventContinuation") is True:
             self.prevent_continuation = True
+        # Evaluator-style structured decision {ok, reason, impossible?}
+        # (CC 303 m0459:154463-154490). ok=false is a block; impossible=true
+        # is a non-blocking terminal signal (goal clears without continuing).
+        ok = output.get("ok")
+        evaluator_hook = result.handler.kind in ("prompt", "agent") and result.handler.output_schema
+        if evaluator_hook and isinstance(ok, bool) and ("reason" in output or "impossible" in output):
+            reason = str(output.get("reason") or "")
+            if ok:
+                if reason:
+                    self.reason = reason
+            elif output.get("impossible") is True:
+                if reason:
+                    self.reason = reason
+            else:
+                self.decision = "block"
+                if reason:
+                    self.reason = reason

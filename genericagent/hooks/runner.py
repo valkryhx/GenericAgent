@@ -199,6 +199,86 @@ def _run_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
             raise TimeoutError(f"hook timed out after {timeout:g}s") from exc
 
 
+def _strip_code_fence(text: str) -> str:
+    """Strip a surrounding ``` or ```json fence (CC 303 jB = m0045:969)."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        first_nl = t.find(chr(10))
+        if first_nl != -1:
+            t = t[first_nl + 1:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+def _strict_json(text: str):
+    """Parse a model reply as one JSON value; fence-tolerant, no extraction."""
+    return json.loads(_strip_code_fence(text))
+
+
+def _validate_against_schema(data: Any, schema: dict[str, Any]) -> str:
+    """Minimal JSON-schema subset check (type/required/properties/enum).
+
+    Returns "" when valid, else a short error string. Covers exactly what the
+    goal evaluator needs and avoids a new runtime dependency.
+    """
+    def type_ok(value: Any, expected: str) -> bool:
+        return {
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "string": isinstance(value, str),
+            "boolean": isinstance(value, bool),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+            "null": value is None,
+        }.get(expected, True)
+
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str) and not type_ok(data, expected_type):
+        return f"expected type {expected_type}"
+    if isinstance(expected_type, list) and not any(type_ok(data, t) for t in expected_type):
+        return f"expected one of types {expected_type}"
+    if "enum" in schema and data not in schema.get("enum", []):
+        return f"value {data!r} not in enum"
+    if isinstance(data, dict):
+        for req in schema.get("required", []) or []:
+            if req not in data:
+                return f"missing required field {req!r}"
+        props = schema.get("properties") or {}
+        if schema.get("additionalProperties") is False:
+            extra = [k for k in data if k not in props]
+            if extra:
+                return f"unexpected field(s) {extra}"
+        for key, sub in props.items():
+            if key in data and isinstance(sub, dict):
+                err = _validate_against_schema(data[key], sub)
+                if err:
+                    return f"{key}: {err}"
+    if isinstance(data, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(data):
+            err = _validate_against_schema(item, schema["items"])
+            if err:
+                return f"[{i}]: {err}"
+    return ""
+
+
+def _parse_structured(result: HookResult, text: str, schema: dict[str, Any]) -> None:
+    """Strictly parse + schema-check a prompt/agent reply (no text fallback)."""
+    result.stdout = text or ""
+    try:
+        data = _strict_json(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        result.status = "invalid_output"
+        result.error = f"hook output is not valid JSON: {exc}"
+        return
+    err = _validate_against_schema(data, schema)
+    if err:
+        result.status = "invalid_output"
+        result.error = f"hook output does not match output_schema: {err}"
+        return
+    result.output = data if isinstance(data, dict) else {"result": data}
+
+
 def _prompt_execute(handler: HookHandler, payload: dict[str, Any], result: HookResult, prompt_runner) -> None:
     if prompt_runner is None:
         result.status = "error"
@@ -220,6 +300,13 @@ def _prompt_execute(handler: HookHandler, payload: dict[str, Any], result: HookR
         result.error = f"{type(exc).__name__}: {exc}"
         return
     result.status = "success"
+    schema = handler.output_schema
+    if schema is not None:
+        # Structured channel: strict parse + schema validation, and never fall
+        # back to additionalContext (a free-text reply is a hard failure).
+        text = value if isinstance(value, str) else _json_text(value)
+        _parse_structured(result, text, schema)
+        return
     if isinstance(value, dict):
         result.output = value
     else:

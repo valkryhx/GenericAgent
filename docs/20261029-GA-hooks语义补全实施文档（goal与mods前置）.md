@@ -1,7 +1,7 @@
 # GA hooks 语义补全实施文档（goal 与 mods 的前置地基）
 
 日期：2026-10-29
-状态：Stage A / B / C 已实现并提交（Stop 门禁 + 会话级动态 hook + 守卫 fail-closed）；阶段 D–G 仍为设计稿
+状态：Stage A–D 已实现并提交（Stop 门禁 + 会话级动态 hook + 守卫 fail-closed + 结构化输出）；阶段 E–G 仍为设计稿
 范围：GenericAgent 本地 hooks 运行时的语义补全；为 goal 模式提供“回合内可阻塞 Stop”，为后续 mods 提供“可动态装载的事件面”。
 关联材料：
 - GA 侧差异分析：`docs/20261028-GA-hooks机制与CC303差异分析.md`（提交 `4099a2c`）
@@ -341,6 +341,40 @@ python -m pytest tests/ -q
 - 范围：`models.py`（`output_schema`）、`runner.py`（严格解析）
 - 验收：合法三态 JSON 通过；非 JSON/缺字段 → `invalid_output` 且**不**退化为 additionalContext。
 
+#### 阶段 D 实现结果（已落地，2026-10-29）
+
+**契约来源（CC 303 源码核对）**：求值器系统提示词要求三种形状（`m0459:154361-154400`），`outputFormat` 为 `json_schema`、`required:["ok","reason"]`、`additionalProperties:false`（`m0459:154400+`）。判定落地（`m0459:154445-154490`）：
+
+- `ok:true` → 成功放行（reason 仅记录）；
+- `ok:false` 且 `impossible:true` → **成功但不阻塞**（goal 侧据此清目标）；
+- `ok:false` 且非 impossible → `blocking`（reason 作为阻断原因）。
+- JSON 解析失败 → `stderr:"JSON validation failed"`；schema 失败 → `"Schema validation failed"`（`m0459:154441-154451`）。这正是 `f1a69959` 里 14 条 `hook_non_blocking_error` 的来源。
+
+| 文件 | 改动 |
+| --- | --- |
+| `genericagent/hooks/models.py` | `HookHandler.output_schema`（读 `outputSchema`，兼容 `output_schema`）；`HookAggregate.add` 解释求值三态（**仅限 prompt/agent 且声明了 output_schema**，避免普通 command hook 的 `{"ok":...}` 被误当决策） |
+| `genericagent/hooks/runner.py` | 新增 `_strict_json`（容忍 ```json 围栏，不做事后截取）、`_validate_against_schema`（type/required/properties/enum/items/additionalProperties 子集，零新依赖）、`_parse_structured`；`_prompt_execute` 在 `output_schema` 存在时走严格解析并**直接 return，绝不回退 additionalContext** |
+| `tests/test_hooks_structured_output.py` | 新增 15 用例（合法三态 / 代码围栏 / 非 JSON 不退化为 context / 缺字段 / 多余字段 / 类型错 / 无 schema 时普通文本仍可用 / 三态决策解释 / command hook 的 ok 不误判 / schema 子集校验） |
+
+**严格解析要点**：
+
+- 只剥“整段包住”的 ``` 围栏（对齐 CC `jB`=`m0045:969` 的 `trim().replace`），**不做**“取第一个 `{...}`”这类宽松提取——这正是 CC 的行为，也是 `f1a69959` 揭示的问题点。GA 额外的“宽松提取 + 重试”留给 goal 层按 `f1a69959` §6 自行叠加，不在本层隐式放宽。
+- 无效输出在守卫事件上经阶段 C 的 `_apply_failure_policy` 自动转为 blocking；在 Stop 事件上按 Stop 类忽略集放行（不添加新的失败语义），求值器错误由 goal 层记 `evaluator_error` 处理。
+
+**测试命令与结果**：
+
+```bash
+python -m pytest tests/test_hooks_structured_output.py -q
+# 15 passed
+python -m pytest tests/test_hooks_runtime.py tests/test_hooks_lifecycle.py \
+  tests/test_hooks_tool_runtime.py tests/test_hooks_stop_gate.py \
+  tests/test_hooks_session_registry.py tests/test_hooks_guard_fail_closed.py \
+  tests/test_hooks_structured_output.py -q
+# 91 passed, 8 subtests passed
+python -m pytest tests/ -q
+# 1952 passed, 4 skipped, 278 subtests passed
+```
+
 ### 阶段 E（P2）：补齐高价值事件发射
 - 建议优先：`SessionEnd`、`Notification`、`MessageDisplay`、`UserPromptExpansion`、`PreModelSwitch`/`PostModelSwitch`（修正 `event_status` 自报失真）。
 - 每个事件都要有“发射点 + 载荷字段 + 测试”三件套，禁止只加词表不加发射。
@@ -367,7 +401,7 @@ python -m pytest tests/ -q
 - [x] Stop 门禁：block 续跑 / preventContinuation 停止 / 错误放行，三类单测齐全（阶段 A 已完成）
 - [x] 会话级动态 hook：add/remove/list + 幂等 + 生命周期（阶段 B 已完成）
 - [x] 守卫 fail-closed：守卫事件错误默认阻塞，可显式降级（阶段 C 已完成；配置失败限 PreToolUse/PermissionRequest）
-- [ ] 结构化输出：invalid_output 不再静默吞掉
+- [x] 结构化输出：invalid_output 不再静默吞掉（阶段 D 已完成；prompt/agent + outputSchema 严格解析）
 - [ ] `event_status()` 与实际发射点一致（无“自称 integrated 但从未发射”）
 - [ ] 全部现有 hooks 测试 + 新增测试通过；`pytest tests/test_hooks_*.py`
 
@@ -385,7 +419,7 @@ python -m pytest tests/ -q
 
 ## 10. 本文不做的事
 
-- 阶段 D–G 仍是设计稿，不改源码；阶段 A/B/C 已落地（见 §6 阶段 A/B/C 的“已实现”小节）；
+- 阶段 E–G 仍是设计稿，不改源码；阶段 A–D 已落地（见 §6 各阶段“已实现”小节）；
 - 不实现 goal / mods，只定义它们与 hooks 的接口边界；
 - 不改 33 事件词表本身（词表已对齐 CC）；
 - 不引入 cloud / device / 远程 rollout 相关能力。
