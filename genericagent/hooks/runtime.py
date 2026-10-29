@@ -307,9 +307,9 @@ class HookRuntime:
             "PostToolUse": "integrated",
             "PostToolUseFailure": "integrated",
             "PostToolBatch": "integrated",
-            "Notification": "contract-only",
+            "Notification": "integrated",
             "UserPromptSubmit": "integrated",
-            "UserPromptExpansion": "contract-only",
+            "UserPromptExpansion": "integrated",
             "SessionStart": "integrated",
             "SessionEnd": "integrated",
             "Stop": "integrated",
@@ -335,7 +335,7 @@ class HookRuntime:
             "CwdChanged": "contract-only",
             "FileChanged": "contract-only",
             "DirectoryAdded": "contract-only",
-            "MessageDisplay": "contract-only",
+            "MessageDisplay": "integrated",
         }
         return {event: emitted.get(event, "contract-only") for event in sorted(EVENT_NAMES)}
 

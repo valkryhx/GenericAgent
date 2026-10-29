@@ -1,7 +1,7 @@
 # GA hooks 语义补全实施文档（goal 与 mods 的前置地基）
 
 日期：2026-10-29
-状态：Stage A–D 已实现并提交（Stop 门禁 + 会话级动态 hook + 守卫 fail-closed + 结构化输出）；阶段 E–G 仍为设计稿
+状态：Stage A–E 已实现并提交（Stop 门禁 + 会话级动态 hook + 守卫 fail-closed + 结构化输出 + 事件发射补齐）；阶段 F–G 仍为设计稿
 范围：GenericAgent 本地 hooks 运行时的语义补全；为 goal 模式提供“回合内可阻塞 Stop”，为后续 mods 提供“可动态装载的事件面”。
 关联材料：
 - GA 侧差异分析：`docs/20261028-GA-hooks机制与CC303差异分析.md`（提交 `4099a2c`）
@@ -379,6 +379,45 @@ python -m pytest tests/ -q
 - 建议优先：`SessionEnd`、`Notification`、`MessageDisplay`、`UserPromptExpansion`、`PreModelSwitch`/`PostModelSwitch`（修正 `event_status` 自报失真）。
 - 每个事件都要有“发射点 + 载荷字段 + 测试”三件套，禁止只加词表不加发射。
 
+#### 阶段 E 实现结果（已落地，2026-10-29）
+
+**先更正一处过时结论**：文档 §3.7 说 `SessionEnd` / `PreModelSwitch` / `PostModelSwitch` 被误标 `integrated` 但从不发射——按当前源码复核，**已经不成立**：
+- `SessionEnd` 在 `frontends/ink/bridge.py::_end_hook_session_once`（`reason` = `clear`/`exit`，幂等只发一次）；
+- `PreModelSwitch` / `PostModelSwitch` 在 `frontends/ink/bridge.py::model_switch`（带 `model` / `reasoning_effort`，Pre 可 deny 阻断）。
+- 这些已有 `tests/test_ink_bridge.py` 覆盖。所以 §3.7 的“误标”一项按现状应删除；真正缺发射的是下面三个。
+
+本阶段补齐三个**真正没有发射点**的高价值事件（每个都是“发射点 + 载荷 + 测试”三件套，且均为观测型、不改既有控制流）：
+
+| 事件 | 发射点 | 载荷（CC m0120 对齐） | 能力 |
+| --- | --- | --- | --- |
+| `UserPromptExpansion` | `GenericAgent._expand_prompt`，`/resume` 展开为 prompt 时 | `expansion_type`、`command_name`、`command_args`、`prompt` | `additionalContext` 追加到 prompt；`suppressOriginalPrompt=true` 时返回 `None`（run() 直接跳过该任务） |
+| `MessageDisplay` | `GenericAgent._emit_message_display`，回合最终消息 `done` 前 | `turn_id`、`message_id`、`index`、`final`、`delta` | `displayContent` 覆盖屏幕显示；**transcript 不受影响**（仍按 committed model text 落盘） |
+| `Notification` | `GenericAgentHandler._notify`，交互式权限审批阻塞等待前 | `message`、`title?`、`notification_type`（`permission_request`） | 纯观测，失败吞掉 |
+
+| 文件 | 改动 |
+| --- | --- |
+| `genericagent/core/app.py` | 新增 `_expand_prompt` / `_emit_message_display`；`/resume` 展开走 `UserPromptExpansion`；回合 done 显示前走 `MessageDisplay` |
+| `genericagent/core/handler.py` | 新增 `_notify`；交互式 `ask` 等待审批前发 `Notification` |
+| `genericagent/hooks/runtime.py` | `event_status` 把 `Notification` / `MessageDisplay` / `UserPromptExpansion` 从 `contract-only` 更正为 `integrated` |
+| `tests/test_hooks_event_emission.py` | 新增 8 用例（三事件发射 + 载荷字段 + 观测不改控制流 + 失败吞掉 + event_status 自报） |
+
+**仍保持 `contract-only` 的事件**（诚实标记，未新增发射）：`Setup`、`Elicitation`、`ElicitationResult`、`ConfigChange`、`WorktreeCreate`、`WorktreeRemove`、`InstructionsLoaded`、`CwdChanged`、`FileChanged`、`DirectoryAdded`。这些在 GA 当前产品面没有对应动作，强行造发射点会变成“假上报”，故不做。
+
+**测试命令与结果**：
+
+```bash
+python -m pytest tests/test_hooks_event_emission.py -q
+# 8 passed
+python -m pytest tests/test_hooks_runtime.py tests/test_hooks_lifecycle.py \
+  tests/test_hooks_tool_runtime.py tests/test_hooks_stop_gate.py \
+  tests/test_hooks_session_registry.py tests/test_hooks_guard_fail_closed.py \
+  tests/test_hooks_structured_output.py tests/test_hooks_event_emission.py \
+  tests/test_ink_bridge.py -q
+# 248 passed, 11 subtests passed
+python -m pytest tests/ -q
+# 1960 passed, 4 skipped, 278 subtests passed
+```
+
 ### 阶段 F：goal 落地（另立方案，消费 A+B+D）
 ### 阶段 G：mods 落地（另立方案，消费 B）
 
@@ -402,7 +441,7 @@ python -m pytest tests/ -q
 - [x] 会话级动态 hook：add/remove/list + 幂等 + 生命周期（阶段 B 已完成）
 - [x] 守卫 fail-closed：守卫事件错误默认阻塞，可显式降级（阶段 C 已完成；配置失败限 PreToolUse/PermissionRequest）
 - [x] 结构化输出：invalid_output 不再静默吞掉（阶段 D 已完成；prompt/agent + outputSchema 严格解析）
-- [ ] `event_status()` 与实际发射点一致（无“自称 integrated 但从未发射”）
+- [x] `event_status()` 与实际发射点一致（阶段 E 已核对并补齐 Notification/MessageDisplay/UserPromptExpansion；SessionEnd/ModelSwitch 本就有发射点）
 - [ ] 全部现有 hooks 测试 + 新增测试通过；`pytest tests/test_hooks_*.py`
 
 ---
@@ -419,7 +458,7 @@ python -m pytest tests/ -q
 
 ## 10. 本文不做的事
 
-- 阶段 E–G 仍是设计稿，不改源码；阶段 A–D 已落地（见 §6 各阶段“已实现”小节）；
+- 阶段 F–G 仍是设计稿，不改源码；阶段 A–E 已落地（见 §6 各阶段“已实现”小节）；
 - 不实现 goal / mods，只定义它们与 hooks 的接口边界；
 - 不改 33 事件词表本身（词表已对齐 CC）；
 - 不引入 cloud / device / 远程 rollout 相关能力。

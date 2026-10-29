@@ -970,6 +970,34 @@ class GenericAgent:
         return display_queue
 
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
+    def _expand_prompt(self, expansion_type, command_name, command_args, prompt):
+        """Run UserPromptExpansion for a slash-command -> prompt expansion.
+
+        CC fires this when a slash command / MCP prompt is expanded into the
+        prompt that reaches the model (m0120:6871). Hooks may add context or
+        suppress the original prompt; both are observational-only here.
+        """
+        text = prompt
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            agg = run_hook_event(self, 'UserPromptExpansion', {
+                'expansion_type': expansion_type,
+                'command_name': command_name,
+                'command_args': command_args,
+                'prompt': prompt,
+            }, emit=getattr(self, 'hook_emit', None))
+            if agg.context_text:
+                text = text + chr(10) + chr(10) + '<hook_context>' + chr(10) + agg.context_text + chr(10) + '</hook_context>'
+            suppress = False
+            for result in agg.results:
+                if result.hook_specific.get('suppressOriginalPrompt') is True:
+                    suppress = True
+            if suppress:
+                return None
+        except Exception as e:
+            print(f"[WARN] UserPromptExpansion hooks failed: {e}")
+        return text
+
     def _handle_slash_cmd(self, raw_query, display_queue):
         if not raw_query.startswith('/'): return raw_query
         if _sm := re.match(r'/session\.(\w+)=(.*)', raw_query.strip()):
@@ -985,7 +1013,8 @@ class GenericAgent:
             self._manual_compact(_cm.group(1) or "", display_queue)
             return None
         if raw_query.strip() == '/resume':
-            return r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
+            _expanded = r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
+            return self._expand_prompt('slash_command', '/resume', '', _expanded)
         return raw_query
 
     def _manual_compact(self, instructions, display_queue):
@@ -1040,6 +1069,32 @@ class GenericAgent:
                         message=result.message, backend_history_after=copy.deepcopy(self.llmclient.backend.history))
         except Exception: pass
         display_queue.put({'done': smart_format(result.message, max_str_len=500), 'source': 'system'})
+
+    def _emit_message_display(self, handler, final_text):
+        """Run MessageDisplay for the turn's final assistant message.
+
+        Display-only (CC m0120:7053): a hook may return displayContent to alter
+        what is shown; the stored transcript is unaffected (it is recorded from
+        the committed model text separately).
+        """
+        shown = final_text
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            turn_id = getattr(handler, 'current_turn', 0)
+            agg = run_hook_event(self, 'MessageDisplay', {
+                'turn_id': turn_id,
+                'message_id': getattr(self, 'session_turn_id', 0),
+                'index': 0,
+                'final': True,
+                'delta': final_text,
+            }, emit=getattr(self, 'hook_emit', None))
+            for result in agg.results:
+                content = result.hook_specific.get('displayContent')
+                if isinstance(content, str):
+                    shown = content
+        except Exception as e:
+            print(f"[WARN] MessageDisplay hooks failed: {e}")
+        return shown
 
     def run(self):
         while True:
@@ -1235,7 +1290,8 @@ class GenericAgent:
                 # makes the full payload diverge from the stream-commit prefix and the
                 # Ink UI re-paints Turn 1 + tools a second time. Display spacing belongs
                 # in the frontend formatter (formatAssistantText).
-                display_queue.put({'done': full_resp, 'source': source})
+                _display_text = self._emit_message_display(handler, full_resp)
+                display_queue.put({'done': _display_text, 'source': source})
                 # full_resp is the UI stream (turn banner + tool progress +
                 # final prose). CC's Stop payload is the last assistant message
                 # text, so persist/send the committed model text separately

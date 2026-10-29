@@ -397,6 +397,23 @@ class GenericAgentHandler(BaseHandler):
     def _hook_agent(self):
         return getattr(self, 'hook_parent_agent', None) or self.parent
 
+    def _notify(self, notification_type, message, title=None):
+        """Fire an observational Notification hook (never blocks the flow).
+
+        CC m0120:6859 payload: {message, title?, notification_type}. Used when
+        the agent surfaces something the user must act on (e.g. a blocking
+        permission request). Emission failures are swallowed.
+        """
+        try:
+            from genericagent.hooks.runtime import run_hook_event
+            agent = self._hook_agent()
+            data = {'message': str(message), 'notification_type': str(notification_type)}
+            if title:
+                data['title'] = str(title)
+            run_hook_event(agent, 'Notification', data, emit=getattr(agent, 'hook_emit', None))
+        except Exception:
+            pass
+
     def _run_tool_hook(self, event, tool_name, args, response, ret=None, error=None):
         runtime = getattr(self, 'hook_runtime', None)
         if runtime is None:
@@ -605,6 +622,9 @@ class GenericAgentHandler(BaseHandler):
                     from genericagent.core.permissions.runtime import ACCEPT, DENY
                     runtime = getattr(self, 'permission_runtime', None)
                     yield f"[Permission] waiting for approval: {tool_name} ({decision.reason})" + chr(10)
+                    self._notify('permission_request',
+                                 f'Permission needed for {tool_name}: {decision.reason}',
+                                 title='Permission required')
                     user_decision = DENY
                     if runtime is not None:
                         parent = getattr(self, 'parent', None)
