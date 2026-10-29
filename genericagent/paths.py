@@ -64,16 +64,33 @@ def is_source_checkout() -> bool:
     return (PACKAGE_ROOT.parent / "pyproject.toml").is_file()
 
 
+def _checkout_root() -> Path:
+    """Return the repository that contains this package, ignoring GA_PROJECT_ROOT.
+
+    GA-owned runtime state (temp/assets/skills/memory) belongs to the GA
+    installation, not to the user's project.  Deriving it from the package
+    location keeps that true no matter what ``GA_PROJECT_ROOT`` is set to.
+    """
+    return PACKAGE_ROOT.parent.resolve()
+
+
 def runtime_root() -> Path:
-    """Return the writable root for GA-owned runtime state."""
-    return PROJECT_ROOT if is_source_checkout() else user_data_dir()
+    """Return the writable root for GA-owned runtime state.
+
+    Deliberately independent of ``GA_PROJECT_ROOT``: that variable names the
+    user's project identity only.  Honouring it here (as a previous version did
+    via ``PROJECT_ROOT``) seeded GA's own assets/skills/memory/temp into the
+    user's checkout.  A source checkout keeps runtime state at the repository
+    root for backward compatibility; an installed wheel uses ``GA_DATA_DIR``.
+    """
+    return _checkout_root() if is_source_checkout() else user_data_dir()
 
 
 SOURCE_CHECKOUT = is_source_checkout()
 PROJECT_ROOT = _discover_project_root()
 # Runtime state is writable user state, not the user's project checkout.  In a
-# source checkout these paths intentionally remain at the repository root for
-# backward compatibility; in an installed wheel they live under GA_DATA_DIR.
+# source checkout these paths remain at *this repository's* root (independent of
+# GA_PROJECT_ROOT); in an installed wheel they live under GA_DATA_DIR.
 RUNTIME_ROOT = runtime_root()
 TEMP_DIR = RUNTIME_ROOT / "temp"
 ASSETS_DIR = RUNTIME_ROOT / "assets"

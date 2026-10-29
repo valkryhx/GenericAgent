@@ -561,6 +561,19 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
 
             self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
 
+    def test_child_launch_puts_ga_package_on_pythonpath_for_source_checkout(self):
+        """The child runs ``python -m genericagent.core.app`` from the user's
+        project cwd; in a source checkout the package is only importable via
+        PYTHONPATH, so the manager must add the checkout root."""
+        from genericagent import paths
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+            kwargs = manager._child_popen_kwargs(
+                None, stdout=object(), stderr=object(), agent_path="/root/worker"
+            )
+            entries = str(kwargs["env"].get("PYTHONPATH", "")).split(os.pathsep)
+            self.assertIn(str(paths.PACKAGE_ROOT.parent), entries)
+
     def test_child_launch_propagates_the_team_name(self):
         with tempfile.TemporaryDirectory() as td:
             manager = SubagentManager(root_dir=td)

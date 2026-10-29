@@ -107,6 +107,20 @@ class InstalledLayoutPathTest(unittest.TestCase):
                     self.assertEqual(data.resolve(), paths.runtime_root())
                     self.assertEqual([config / "llm.yaml", config / "llm.yml"], candidates)
 
+    def test_runtime_root_ignores_ga_project_root_in_source_checkout(self):
+        """GA_PROJECT_ROOT names the user project only; GA's own runtime state
+        (temp/assets/skills/memory) must stay at the GA checkout root."""
+        package = self.root / "GenericAgent" / "genericagent"
+        package.mkdir(parents=True)
+        (package.parent / "pyproject.toml").write_text("[project]" + chr(10), encoding="utf-8")
+        user_project = self.root / "user-project"
+        user_project.mkdir()
+        with patch.object(paths, "PACKAGE_ROOT", package):
+            with patch.dict(os.environ, {"GA_PROJECT_ROOT": str(user_project)}, clear=False):
+                self.assertTrue(paths.is_source_checkout())
+                self.assertEqual(package.parent.resolve(), paths.runtime_root())
+                self.assertNotEqual(user_project.resolve(), paths.runtime_root())
+
     def test_source_checkout_keeps_project_local_config_priority(self):
         project = self.root / "project"
         project.mkdir()

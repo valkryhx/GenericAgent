@@ -407,6 +407,15 @@ class SubagentManager:
         from genericagent.agents.team import TEAM_NAME_ENV
 
         env = {**os.environ, self.AGENT_PATH_ENV: str(agent_path)}
+        # The child is launched with ``python -m genericagent.core.app`` from a
+        # cwd that is the user's project (or its data bucket), not the GA
+        # checkout. When GA runs from a source tree (not pip-installed) the
+        # package is only importable via PYTHONPATH; without this the child dies
+        # at import with ModuleNotFoundError before its startup handshake.
+        package_parent = str(paths.PACKAGE_ROOT.parent)
+        _existing_pp = env.get("PYTHONPATH") or ""
+        if package_parent not in _existing_pp.split(os.pathsep):
+            env["PYTHONPATH"] = package_parent + (os.pathsep + _existing_pp if _existing_pp else "")
         # Child runtime state must follow the parent's writable data root even
         # when the child's cwd is a project worktree. The project identity is
         # a snapshot, not something the child re-derives from cwd.
