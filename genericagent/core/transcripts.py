@@ -618,6 +618,76 @@ def record_workflow_event(path, *, session_id, run_id, event_type, artifact_dir,
     append_event(path, event)
 
 
+def record_goal_status(
+    path,
+    *,
+    session_id,
+    met,
+    failed=False,
+    condition,
+    reason="",
+    iterations=0,
+    duration_ms=None,
+    tokens=None,
+    sentinel=False,
+):
+    """Append a goal_status event (CC m0459 ``Met`` / m1556 sentinel).
+
+    Sentinel events only mark a set/clear transition and are not surfaced by
+    the UI; ``met`` still records whether the goal was met when it was cleared.
+    Regular evaluation results use ``sentinel=False``.
+    """
+    event = {
+        "version": _detect_session_version(path),
+        "type": "goal_status",
+        "session_id": session_id,
+        "created_at": _now_iso(),
+        "met": bool(met),
+        "failed": bool(failed),
+        "condition": str(condition or ""),
+        "reason": str(reason or ""),
+        "iterations": int(iterations or 0),
+        "sentinel": bool(sentinel),
+    }
+    if duration_ms is not None:
+        event["duration_ms"] = int(duration_ms)
+    if tokens is not None:
+        event["tokens"] = int(tokens)
+    append_event(path, event)
+    return event
+
+
+def record_active_goal(path, *, session_id, goal):
+    """Append an active_goal snapshot event (goal set / changed / cleared).
+
+    ``goal`` is an ActiveGoal-like object or a plain dict; ``None`` records a
+    clear. Phase 1 emits these on transitions; the reader ignores them for
+    history projection (see ``load_v2``).
+    """
+    version = _detect_session_version(path)
+    if goal is None:
+        payload = None
+    elif isinstance(goal, dict):
+        payload = dict(goal)
+    else:
+        payload = {
+            "condition": getattr(goal, "condition", ""),
+            "iterations": int(getattr(goal, "iterations", 0) or 0),
+            "set_at": getattr(goal, "set_at", None),
+            "origin": getattr(goal, "origin", "user"),
+            "last_reason": getattr(goal, "last_reason", None),
+        }
+    event = {
+        "version": version,
+        "type": "active_goal",
+        "session_id": session_id,
+        "created_at": _now_iso(),
+        "goal": payload,
+    }
+    append_event(path, event)
+    return event
+
+
 def _history_equal(left, right):
     return (left or []) == (right or [])
 
@@ -969,7 +1039,7 @@ def load_v2(path):
             state_turn = event.get("turn_id")
             if state_turn is not None:
                 working_states[int(state_turn)] = copy.deepcopy(event)
-        elif kind in {"session_start", "resumed_from", "workflow_started", "workflow_completed", "workflow_failed"}:
+        elif kind in {"session_start", "resumed_from", "workflow_started", "workflow_completed", "workflow_failed", "goal_status", "active_goal"}:
             continue
         else:
             warnings.append(f"unsupported v2 event: {kind}")

@@ -71,6 +71,7 @@ from genericagent.core.loop import agent_runner_loop
 from genericagent.core.handler import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 from genericagent.core.skills import build_skill_prompt
 from genericagent.core import transcripts as session_transcript
+from genericagent.core import goal as goal_core
 from genericagent.media import image_codec
 try:
     from genericagent.core.context import compact_agent_context, replace_log_with_compact_history
@@ -643,6 +644,9 @@ class GenericAgent:
         self.session_id = None
         self.session_path = None
         self.session_turn_id = 0
+        # Session goal mode (Stage F). Phase 0: state + /goal command only.
+        self.active_goal = None
+        self._queued_goal_origin = None
         self.hook_runtime = None
         identity = session_transcript.identity_from_environment()
         if identity:
@@ -1015,7 +1019,86 @@ class GenericAgent:
         if raw_query.strip() == '/resume':
             _expanded = r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
             return self._expand_prompt('slash_command', '/resume', '', _expanded)
+        if _gm := re.match(r'/goal(?:\s+([\s\S]*))?$', raw_query.strip()):
+            self._handle_goal_command(_gm.group(1) or '', display_queue)
+            return None
         return raw_query
+
+    def _goal_status_text(self):
+        g = getattr(self, 'active_goal', None)
+        if g is None:
+            return "No goal set."
+        turns = f"{g.iterations} turn" + ("s" if g.iterations != 1 else "")
+        text = "Goal active: %s (%s)" % (g.condition, turns)
+        if g.last_reason:
+            text += "\nLast check: %s" % g.last_reason
+        return text
+
+    def _record_goal_status(self, *, met, failed=False, condition, reason="", iterations=0, sentinel=False):
+        """Best-effort goal_status transcript event (never raises upward)."""
+        try:
+            path = getattr(self, 'session_path', None)
+            if not path:
+                return
+            session_transcript.record_goal_status(
+                path,
+                session_id=getattr(self, 'session_id', '') or '',
+                met=met, failed=failed, condition=condition, reason=reason,
+                iterations=iterations, sentinel=sentinel,
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to record goal_status: {e}")
+
+    def _record_active_goal(self):
+        try:
+            path = getattr(self, 'session_path', None)
+            if not path:
+                return
+            session_transcript.record_active_goal(
+                path, session_id=getattr(self, 'session_id', '') or '',
+                goal=getattr(self, 'active_goal', None),
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to record active_goal: {e}")
+
+    def _set_goal(self, condition, origin=goal_core.ORIGIN_USER):
+        self.active_goal = goal_core.ActiveGoal(condition=condition, origin=origin)
+        self._record_active_goal()
+        self._record_goal_status(met=False, condition=condition, iterations=0, sentinel=True)
+        return self.active_goal
+
+    def _clear_goal(self, *, met, failed=False, reason=""):
+        g = getattr(self, 'active_goal', None)
+        if g is None:
+            return None
+        self.active_goal = None
+        self._record_active_goal()
+        self._record_goal_status(
+            met=met, failed=failed, condition=g.condition, reason=reason,
+            iterations=g.iterations,
+        )
+        return g
+
+    def _handle_goal_command(self, arg, display_queue):
+        cmd = goal_core.parse_goal_command(arg)
+        if cmd.kind == 'error':
+            display_queue.put({'done': cmd.error, 'source': 'system'})
+            return
+        if cmd.kind == 'status':
+            display_queue.put({'done': self._goal_status_text(), 'source': 'system'})
+            return
+        if cmd.kind == 'clear':
+            cleared = self._clear_goal(met=False, reason='cleared by user')
+            if cleared is None:
+                display_queue.put({'done': 'No goal set.', 'source': 'system'})
+            else:
+                display_queue.put({'done': f'Goal cleared: {cleared.condition}', 'source': 'system'})
+            return
+        # set
+        origin = getattr(self, '_queued_goal_origin', None) or goal_core.ORIGIN_USER
+        self._queued_goal_origin = None
+        g = self._set_goal(cmd.condition, origin=origin)
+        display_queue.put({'done': f'Goal set: {g.condition}', 'source': 'system'})
 
     def _manual_compact(self, instructions, display_queue):
         """手动 /compact：用 LLM 摘要替换长历史。CLI/TUI 复用与 ink 相同的核心。"""
