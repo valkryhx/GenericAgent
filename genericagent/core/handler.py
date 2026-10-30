@@ -493,12 +493,31 @@ class GenericAgentHandler(BaseHandler):
         }
         # Goal evaluator needs the conversation transcript; attach it only when
         # a goal is active so ordinary Stop hooks pay no cost.
-        if getattr(agent, 'active_goal', None) is not None:
+        goal_active = getattr(agent, 'active_goal', None) is not None
+        goal_defer = False
+        if goal_active:
             try:
                 from genericagent.core import goal_evaluator
-                data['goal_transcript'] = goal_evaluator.transcript_from_agent(agent)
+                # Stage 2-A: if background sub-agents are still working, defer
+                # goal evaluation this turn (evaluating now would misjudge and
+                # wrongly block the turn end).
+                goal_defer = goal_evaluator.has_in_flight_agents(agent, self)
             except Exception:
-                pass
+                goal_defer = False
+            if goal_defer:
+                data['goal_defer'] = True
+                rec_defer = getattr(agent, '_record_goal_deferred', None)
+                if rec_defer is not None:
+                    try:
+                        rec_defer()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    from genericagent.core import goal_evaluator as _ge
+                    data['goal_transcript'] = _ge.transcript_from_agent(agent)
+                except Exception:
+                    pass
         # Route through the shared entry point so the Stop gate obeys the same
         # runtime resolution / emit plumbing as every other app-level hook.
         # run_hook_event swallows hook errors and returns a benign aggregate,
@@ -509,7 +528,7 @@ class GenericAgentHandler(BaseHandler):
         # Goal accounting: interpret the strict {ok,reason,impossible?} verdict
         # and update active_goal / goal_status. This only records state; the
         # block/continue/stop action below is still driven by the aggregate.
-        if getattr(agent, 'active_goal', None) is not None:
+        if goal_active and not goal_defer:
             try:
                 from genericagent.core.goal import interpret_verdict
                 apply_verdict = getattr(agent, '_apply_goal_verdict', None)

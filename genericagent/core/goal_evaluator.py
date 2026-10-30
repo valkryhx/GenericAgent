@@ -152,3 +152,71 @@ def unregister_goal_hook(agent) -> bool:
 def goal_payload_extra(agent) -> dict:
     """Extra Stop payload fields the goal evaluator needs (transcript text)."""
     return {"goal_transcript": transcript_from_agent(agent)}
+
+
+# --- Stage 2-A: defer goal evaluation while background sub-agents run --------
+#
+# CC defers goal evaluation when background agents/shells are still producing
+# (m0671:3304-3348): evaluating "is the goal met?" before the background work
+# lands would misjudge it and wrongly block the turn. GA's async sub-agents are
+# tracked by SubagentManager; a descendant is "in flight" when its process is
+# alive and its turn is pending/running.
+
+_IN_FLIGHT_TURN_STATUSES = frozenset({"pending", "running"})
+_TERMINAL_PROCESS_STATUSES = frozenset({"exited", "shutdown", "killed"})
+
+
+def is_in_flight_agent_state(state) -> bool:
+    """Whether one sub-agent state means 'still working'."""
+    process_status = str(getattr(state, "process_status", "") or "").strip().lower()
+    if process_status in _TERMINAL_PROCESS_STATUSES:
+        return False
+    turn_status = str(getattr(state, "turn_status", "") or "").strip().lower()
+    return turn_status in _IN_FLIGHT_TURN_STATUSES or process_status == "alive"
+
+
+def _manager_for(agent, handler):
+    """Resolve a SubagentManager from the handler, falling back to the agent.
+
+    In production the manager factory lives on GenericAgentHandler (it needs the
+    per-session ``session_data_dir`` and team identity), while ``run_stop_gate``
+    has the handler at hand but ``_hook_agent()`` only yields the GenericAgent.
+    So the handler is the primary source; the agent fallback keeps unit tests
+    that attach the factory to a fake agent working.
+    """
+    for owner in (handler, agent):
+        if owner is None:
+            continue
+        getter = getattr(owner, "_get_subagent_manager", None)
+        if getter is None:
+            continue
+        manager = getter()
+        if manager is not None:
+            return manager
+    return None
+
+
+def has_in_flight_agents(agent, handler=None) -> bool:
+    """True when this session has at least one in-flight background sub-agent.
+
+    Best-effort: any failure to reach the manager is treated as 'not in flight'
+    so a broken query never silently defers goal evaluation forever, and a bug
+    here can never trap the user's turn open.
+
+    ``handler`` is optional for backward compatibility and for unit tests; the
+    real caller in ``run_stop_gate`` always passes it because that is where the
+    sub-agent manager factory (and the authoritative session id) live.
+    """
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id and handler is not None:
+        session_id = str(getattr(getattr(handler, "parent", None), "session_id", "") or "").strip()
+    if not session_id:
+        return False
+    try:
+        manager = _manager_for(agent, handler)
+        if manager is None:
+            return False
+        states = manager.list_descendants(session_id)
+    except Exception:
+        return False
+    return any(is_in_flight_agent_state(s) for s in states)

@@ -1090,6 +1090,23 @@ class GenericAgent:
         )
         return g
 
+    def _record_goal_deferred(self):
+        """Record a deferred goal evaluation (background sub-agents in flight).
+
+        Stage 2-A: the goal is still active but this turn's evaluation was
+        skipped so the in-flight background work can land. Not met, not failed.
+        """
+        g = getattr(self, 'active_goal', None)
+        if g is None:
+            return
+        try:
+            self._record_goal_status(
+                met=False, condition=g.condition, reason='deferred',
+                iterations=g.iterations,
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to record deferred goal_status: {e}")
+
     def _apply_goal_verdict(self, status):
         """Apply an interpreted goal verdict from the Stop gate.
 
