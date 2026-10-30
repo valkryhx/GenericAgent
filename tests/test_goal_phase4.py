@@ -64,11 +64,21 @@ class SettingTests(unittest.TestCase):
     def test_unknown_value_is_auto(self):
         self.assertEqual(gp.read_model_proposed_goals_setting(settings_path=_settings_file({"modelProposedGoals": "weird"})), gp.SETTING_AUTO)
 
-    def test_env_off_feature(self):
-        with mock.patch.dict(os.environ, {"GA_PROPOSE_GOAL_ENABLED": "0"}):
+    def test_feature_off_by_default(self):
+        # Default OFF: each propose_goal pops an approval dialog, so an
+        # auto-proposing model would nag the user; opt-in only.
+        env = dict(os.environ)
+        env.pop("GA_PROPOSE_GOAL_ENABLED", None)
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertFalse(gp.is_feature_enabled())
-        with mock.patch.dict(os.environ, {"GA_PROPOSE_GOAL_ENABLED": "1"}):
-            self.assertTrue(gp.is_feature_enabled())
+
+    def test_feature_on_when_enabled(self):
+        for v in ("1", "true", "yes", "on", "ON"):
+            with mock.patch.dict(os.environ, {"GA_PROPOSE_GOAL_ENABLED": v}):
+                self.assertTrue(gp.is_feature_enabled(), v)
+        for v in ("0", "false", "no", "off", ""):
+            with mock.patch.dict(os.environ, {"GA_PROPOSE_GOAL_ENABLED": v}):
+                self.assertFalse(gp.is_feature_enabled(), v)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -220,11 +230,12 @@ class ApplyProposalTests(unittest.TestCase):
     def test_gate_plan_mode(self):
         a = self._agent()
         a.handler = SimpleNamespace(_in_plan_mode=lambda: "/tmp/plan.md")
-        self.assertIn("plan mode", (a._goal_proposal_gate() or ""))
+        with mock.patch.object(gp, "is_feature_enabled", return_value=True),              mock.patch.object(gp, "read_model_proposed_goals_setting", return_value=gp.SETTING_AUTO):
+            self.assertIn("plan mode", (a._goal_proposal_gate() or ""))
 
     def test_gate_disabled_setting(self):
         a = self._agent()
-        with mock.patch.object(gp, "read_model_proposed_goals_setting", return_value=gp.SETTING_DISABLED):
+        with mock.patch.object(gp, "is_feature_enabled", return_value=True),              mock.patch.object(gp, "read_model_proposed_goals_setting", return_value=gp.SETTING_DISABLED):
             self.assertIsNotNone(a._goal_proposal_gate())
 
     def test_gate_allows_when_clear(self):

@@ -44,12 +44,12 @@ def _truthy(raw: object) -> bool:
 def is_feature_enabled() -> bool:
     """Kill switch for the whole feature (CC ``tengu_propose_goal``).
 
-    Deviation from CC: GA ships this ON by default (single-user local agent; the
-    user asked for a working feature). ``GA_PROPOSE_GOAL_ENABLED=0/off`` disables.
+    Off by default. Each ``propose_goal`` call pops a user-approval dialog, so a
+    model that proposes goals on its own can interrupt the user repeatedly; that
+    is disruptive enough to require opt-in. Set ``GA_PROPOSE_GOAL_ENABLED=1``
+    (or true/yes/on) to let the model propose goals in this session.
     """
     raw = __import__("os").environ.get("GA_PROPOSE_GOAL_ENABLED")
-    if raw is None:
-        return True
     return _truthy(raw)
 
 
