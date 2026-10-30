@@ -1652,6 +1652,10 @@ class GenericAgent:
             if prompt_hooks.system_text:
                 print(f"[Hook] {prompt_hooks.system_text}")
             self.is_running = True
+            # Stage 2-A (workflow): reset the "this turn launched a workflow"
+            # flag at every turn boundary so a later handoff/user turn evaluates
+            # the goal normally (only the launching turn defers).
+            self._workflow_launched_this_turn = False
             # A new user turn supersedes any pending goal wake timer.
             try:
                 if source != "goal_wake":

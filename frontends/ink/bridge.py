@@ -414,6 +414,13 @@ class GenericAgentBridge:
         # bridge-owned store; without it a run id is answered by an orphan subagent
         # state that never reaches a terminal status (GA defect A).
         agent.workflow_run_resolver = self._resolve_workflow_run_info
+        # Goal deferral (stage 2-A) has to see *background workflows* too, not just
+        # SubagentManager descendants. Workflows run on their own launcher threads
+        # and never register with the subagent manager, so without this read-only
+        # callback an active goal evaluates the pre-workflow transcript, blocks the
+        # turn, and spins the main agent until the Stop-hook cap. Bind only a
+        # query function so core stays decoupled from the workflow store.
+        agent.workflow_in_flight_provider = self._workflow_in_flight_labels
         # ask 档阻塞审批：把 emit 注入 agent.permission_runtime，使 dispatch 可发 permission_request
         try:
             runtime = getattr(agent, "permission_runtime", None)
@@ -1252,6 +1259,16 @@ class GenericAgentBridge:
         )
         self._workflow_threads[run.run_id] = thread
         thread.start()
+        # Stage 2-A (workflow): a turn that launches a background workflow must
+        # NOT be goal-evaluated at its own Stop, even if the run races to a
+        # terminal status before the model stops. Judging this turn's transcript
+        # would misjudge the not-yet-handed-off result and block the turn, which
+        # spins the main agent until the Stop-hook cap. The workflow handoff
+        # starts a fresh turn; that is where the goal gets evaluated.
+        try:
+            setattr(self.agent, '_workflow_launched_this_turn', True)
+        except Exception:
+            pass
         artifact_dir = os.fspath(run.artifact_dir or "")
         return {
             "status": "async_launched",
@@ -1905,6 +1922,41 @@ class GenericAgentBridge:
             )
         except Exception as exc:
             self._agent_errors["control"] = redact_sensitive_text(str(exc))
+
+    def _workflow_in_flight_labels(self) -> list[str]:
+        """Short labels for background workflows that are still producing.
+
+        Used by goal stage 2-A to defer Stop-time goal evaluation while a
+        workflow runs in the background. A run only counts as in flight when its
+        status is live *and* the launcher thread that owns it is still alive:
+        a thread that died without writing a terminal status (process kill /
+        crash outside the runtime's try/except) must not defer forever. Any
+        query failure returns an empty list so a broken store can never trap the
+        turn open.
+        """
+        session_id = self._current_session_id()
+        if not session_id:
+            return []
+        try:
+            runs = self.workflow_store.list_runs(session_id=session_id)
+        except Exception:
+            return []
+        labels: list[str] = []
+        for run in runs:
+            try:
+                status = str(getattr(run, 'status', '') or '').strip().lower()
+                if status not in {'running', 'awaiting_approval'}:
+                    continue
+                thread = getattr(self, '_workflow_threads', {}).get(run.run_id)
+                if thread is not None and hasattr(thread, 'is_alive') and not thread.is_alive():
+                    # Launcher died without a terminal status: treat as stale.
+                    continue
+                metadata = getattr(run, 'metadata', None) or {}
+                name = str(metadata.get('workflowName') or '').strip() or run.run_id
+                labels.append(f"{name} · workflow")
+            except Exception:
+                continue
+        return labels
 
     def _resolve_workflow_run_info(self, run_id: str) -> dict[str, Any] | None:
         """Authoritative run status for wait_agent(condition="workflow_terminal").

@@ -168,6 +168,11 @@ def goal_payload_extra(agent) -> dict:
 _IN_FLIGHT_TURN_STATUSES = frozenset({"pending", "running"})
 _TERMINAL_PROCESS_STATUSES = frozenset({"exited", "shutdown", "killed"})
 
+# Workflow run statuses that mean "background work is still producing". A goal
+# must not be evaluated (and the turn must not block) while one of these exists:
+# the transcript it would judge is still missing the workflow output.
+_IN_FLIGHT_WORKFLOW_STATUSES = frozenset({"running", "awaiting_approval"})
+
 
 def is_in_flight_agent_state(state) -> bool:
     """Whether one sub-agent state means 'still working'."""
@@ -199,6 +204,68 @@ def _manager_for(agent, handler):
     return None
 
 
+def _workflow_runs_in_flight(agent) -> list:
+    """Workflow runs still producing for this session (best-effort, fail-open).
+
+    Workflows are NOT tracked by SubagentManager: the Ink bridge launches each
+    run on its own daemon thread, so stage 2-A's sub-agent check never sees them.
+    The bridge binds ``agent.workflow_in_flight_provider`` (a zero-arg callable
+    returning already-filtered labels). Headless callers / unit tests that do not
+    go through the bridge fall back to the store on the agent, if any.
+
+    Every failure path returns ``[]``: a broken query must never defer goal
+    evaluation forever (that would trap the user's turn open).
+    """
+    provider = getattr(agent, "workflow_in_flight_provider", None)
+    if callable(provider):
+        try:
+            labels = provider()
+        except Exception:
+            return []
+        return [str(item) for item in (labels or []) if str(item).strip()]
+    store = getattr(agent, "workflow_store", None)
+    if store is None:
+        return []
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id:
+        return []
+    try:
+        runs = store.list_runs(session_id=session_id)
+    except Exception:
+        return []
+    labels = []
+    for run in runs or []:
+        try:
+            status = str(getattr(run, "status", "") or "").strip().lower()
+            if status not in _IN_FLIGHT_WORKFLOW_STATUSES:
+                continue
+            metadata = getattr(run, "metadata", None) or {}
+            name = str(metadata.get("workflowName") or "").strip() or str(
+                getattr(run, "run_id", "") or "workflow"
+            )
+            labels.append(f"{name} · workflow")
+        except Exception:
+            continue
+    return labels
+
+
+def has_in_flight_workflows(agent) -> bool:
+    """True when this session has at least one background workflow still running."""
+    return bool(_workflow_runs_in_flight(agent))
+
+
+def workflow_launched_this_turn(agent) -> bool:
+    """True when the current turn launched a background workflow.
+
+    A turn that launches a workflow must defer goal evaluation at its own Stop
+    even if the run reaches a terminal status before the model stops: the result
+    has not been handed back yet, so judging this turn's transcript would
+    misjudge the goal and block the turn (spin). The workflow handoff starts a
+    fresh turn, which is where the goal is evaluated.
+    """
+    return bool(getattr(agent, "_workflow_launched_this_turn", False))
+
+
 def list_in_flight_task_labels(agent, handler=None) -> list:
     """Human labels for in-flight background sub-agents (2-B check-in copy).
 
@@ -227,6 +294,8 @@ def list_in_flight_task_labels(agent, handler=None) -> list:
             labels.append(f"{name} · {typ}")
         except Exception:
             continue
+    # Background workflows also count as in-flight work for the check-in copy.
+    labels.extend(_workflow_runs_in_flight(agent))
     return labels
 
 def has_in_flight_agents(agent, handler=None) -> bool:
@@ -240,6 +309,11 @@ def has_in_flight_agents(agent, handler=None) -> bool:
     real caller in ``run_stop_gate`` always passes it because that is where the
     sub-agent manager factory (and the authoritative session id) live.
     """
+    # Workflows are checked first: they are invisible to SubagentManager, and a
+    # session that launched a background workflow must defer even if no sub-agent
+    # exists. ``_workflow_runs_in_flight`` is fail-open, so this cannot trap a turn.
+    if _workflow_runs_in_flight(agent):
+        return True
     session_id = str(getattr(agent, "session_id", "") or "").strip()
     if not session_id and handler is not None:
         session_id = str(getattr(getattr(handler, "parent", None), "session_id", "") or "").strip()

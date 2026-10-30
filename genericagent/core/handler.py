@@ -502,7 +502,10 @@ class GenericAgentHandler(BaseHandler):
                 # Stage 2-A: if background sub-agents are still working, defer
                 # goal evaluation this turn (evaluating now would misjudge and
                 # wrongly block the turn end).
-                goal_defer = goal_evaluator.has_in_flight_agents(agent, self)
+                goal_defer = (
+                    goal_evaluator.has_in_flight_agents(agent, self)
+                    or goal_evaluator.workflow_launched_this_turn(agent)
+                )
             except Exception:
                 goal_defer = False
             if goal_defer:
