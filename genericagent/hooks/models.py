@@ -108,6 +108,15 @@ class HookHandler:
         return value if isinstance(value, dict) and value else None
 
     @property
+    def retry_on_invalid_output(self) -> bool:
+        """One extra attempt when a structured reply fails strict parsing.
+
+        Opt-in per handler (``retryOnInvalidOutput``); only the goal evaluator
+        sets it. Ordinary hooks keep single-attempt semantics.
+        """
+        return bool(self.options.get("retryOnInvalidOutput", False))
+
+    @property
     def once(self) -> bool:
         return bool(self.options.get("once", False))
 

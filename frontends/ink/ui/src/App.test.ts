@@ -1471,3 +1471,8 @@ test('App resets the viewport and remounts Static when ctrl+o toggles tool expan
     instance.unmount()
   }
 })
+
+test('App help documents the /goal command', () => {
+  assert.match(helpText(), /\/goal \[condition\] - set a stop-condition goal/)
+  assert.match(helpText(), /\/goal clear - remove the current goal/)
+})

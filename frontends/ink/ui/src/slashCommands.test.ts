@@ -141,3 +141,11 @@ test('slashSelectionAction executes built-in commands on Enter and completes ski
   assert.deepEqual(slashSelectionAction('/he', help, 'tab'), { type: 'complete', value: '/help ' })
   assert.deepEqual(slashSelectionAction('/im', imagegen, 'enter'), { type: 'complete', value: '/imagegen ' })
 })
+
+test('slashSuggestions includes /goal and completes before execution', () => {
+  const goal = slashSuggestions('/goa').find(command => command.name === '/goal')!
+
+  assert.ok(goal, '/goal should be suggested')
+  assert.equal(goal.requiresArgs, true)
+  assert.deepEqual(slashSelectionAction('/goa', goal, 'enter'), { type: 'complete', value: '/goal ' })
+})

@@ -53,6 +53,9 @@ def build_goal_handler_spec(condition: str, *, timeout: float = DEFAULT_GOAL_TIM
         "prompt": build_goal_prompt(condition),
         "outputSchema": GOAL_OUTPUT_SCHEMA,
         "timeout": float(timeout),
+        # One reinforced retry on invalid JSON (weak models occasionally wrap
+        # the object in prose). Scoped to the goal handler only.
+        "retryOnInvalidOutput": True,
         # A broken/timeout evaluator must never trap the turn (Stop is in
         # ON_FAILURE_IGNORED_EVENTS, but be explicit for readability).
         "onFailure": "continue",

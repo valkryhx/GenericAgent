@@ -1075,21 +1075,31 @@ class GenericAgent:
             pass
         return 0
 
-    def _notify_goal_metadata(self, *, terminal=None):
+    def _notify_goal_metadata(self, *, terminal=None, force=False):
         """Push goal metadata to the UI/SDK when it materially changed (S0).
 
         Mirrors CC ``notifyMetadataChanged`` (m0696): shallow-compare the small
         field set, and on a terminal transition push a ``terminal`` badge with
         ``goal`` cleared so the card disappears but the badge persists.
+
+        ``force=True`` bypasses the diff so a reconnecting / re-mounting UI can
+        get the current snapshot even when nothing changed (S1 robustness). A
+        restored terminal badge stashed in ``_pending_terminal_goal`` is flushed
+        once on the next push.
         """
         try:
             g = getattr(self, 'active_goal', None)
             current_tokens = self._goal_token_position() if g is not None else None
             meta = goal_metadata.goal_metadata(g, current_tokens=current_tokens)
+            pending_terminal = getattr(self, '_pending_terminal_goal', None)
+            if g is None and pending_terminal is not None:
+                terminal = pending_terminal
             previous = getattr(self, '_last_goal_metadata', None)
-            if not goal_metadata.differs(previous, meta) and terminal is None:
+            if not force and not goal_metadata.differs(previous, meta) and terminal is None:
                 return
             self._last_goal_metadata = meta
+            if g is None and pending_terminal is not None:
+                self._pending_terminal_goal = None
             emit = getattr(self, 'hook_emit', None)
             if emit is None:
                 return
@@ -1099,6 +1109,10 @@ class GenericAgent:
             emit(event)
         except Exception as e:
             print(f"[WARN] Failed to emit goal_metadata: {e}")
+
+    def emit_goal_snapshot(self):
+        """Emit the current goal metadata unconditionally (bridge ready/resume)."""
+        self._notify_goal_metadata(force=True)
 
     def _goal_data_root(self):
         return getattr(self, 'data_root', None)
@@ -1131,7 +1145,40 @@ class GenericAgent:
         except Exception as e:
             print(f"[WARN] Failed to record active_goal: {e}")
 
+    def _supersede_goal(self, old):
+        """Record that an existing goal was replaced by a new one (design 9.3).
+
+        Clears the in-memory goal, writes an ``active_goal=None`` snapshot plus a
+        sentinel ``goal_status`` (reason=superseded), and emits a ``goal_cleared``
+        telemetry row with ``outcome='superseded'`` so an overwrite is never a
+        silent mutation.
+        """
+        try:
+            duration_ms = None
+            try:
+                duration_ms = max(0, int((time.time() - float(old.set_at or time.time())) * 1000))
+            except Exception:
+                duration_ms = None
+            tokens_spent = max(0, self._goal_token_position() - int(old.tokens_at_start or 0))
+            self.active_goal = None
+            self._record_active_goal()
+            self._record_goal_status(
+                met=False, condition=old.condition, reason='superseded',
+                iterations=old.iterations, sentinel=True,
+                duration_ms=duration_ms, tokens=tokens_spent,
+            )
+            goal_telemetry.record(
+                goal_telemetry.EVENT_CLEARED, data_root=self._goal_data_root(),
+                origin=getattr(old, 'origin', None), iterations=int(old.iterations),
+                durationMs=duration_ms, tokens=int(tokens_spent), outcome='superseded',
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to supersede previous goal: {e}")
+
     def _set_goal(self, condition, origin=goal_core.ORIGIN_USER):
+        previous = getattr(self, 'active_goal', None)
+        if previous is not None:
+            self._supersede_goal(previous)
         tokens_at_start = self._goal_token_position()
         self.active_goal = goal_core.ActiveGoal(
             condition=condition, origin=origin, tokens_at_start=tokens_at_start,
@@ -1149,7 +1196,7 @@ class GenericAgent:
         )
         return self.active_goal
 
-    def _clear_goal(self, *, met, failed=False, reason="", iterations=None):
+    def _clear_goal(self, *, met, failed=False, reason="", iterations=None, outcome=None):
         g = getattr(self, 'active_goal', None)
         if g is None:
             return None
@@ -1181,9 +1228,12 @@ class GenericAgent:
         self._notify_goal_metadata(terminal=terminal)
         event = goal_telemetry.EVENT_ACHIEVED if met else (
             goal_telemetry.EVENT_FAILED if failed else goal_telemetry.EVENT_CLEARED)
+        if outcome is None:
+            outcome = 'met' if met else ('failed' if failed else 'user_cleared')
         goal_telemetry.record(
             event, data_root=self._goal_data_root(), origin=getattr(g, 'origin', None),
             iterations=int(iters), durationMs=duration_ms, tokens=int(tokens_spent),
+            outcome=outcome,
         )
         return g
 
@@ -1326,7 +1376,7 @@ class GenericAgent:
             display_queue.put({'done': self._goal_status_text(), 'source': 'system'})
             return
         if cmd.kind == 'clear':
-            cleared = self._clear_goal(met=False, reason='cleared by user')
+            cleared = self._clear_goal(met=False, reason='cleared by user', outcome='user_cleared')
             if cleared is None:
                 display_queue.put({'done': 'No goal set.', 'source': 'system'})
             else:

@@ -468,7 +468,7 @@ class InputArea(InputHistoryMixin, TextArea):
 
 
 # ---------- 顶部栏 ----------
-def render_topbar(session_name: str, status: str, model: str, tasks_running: int) -> Table:
+def render_topbar(session_name: str, status: str, model: str, tasks_running: int, goal_line: str = "") -> Table:
     t = Table.grid(expand=True)
     t.add_column(ratio=1, justify="left")
     t.add_column(ratio=1, justify="center")
@@ -490,6 +490,9 @@ def render_topbar(session_name: str, status: str, model: str, tasks_running: int
     mid.append("  ·  ", style=C_DIM)
     mid.append("tasks: ", style=C_MUTED)
     mid.append(str(tasks_running), style=C_FG)
+    if goal_line:
+        mid.append("  ·  ", style=C_DIM)
+        mid.append(_truncate(goal_line, 48), style=C_GREEN)
 
     right = Text()
     right.append(time.strftime("%H:%M:%S"), style=C_FG)
@@ -1596,7 +1599,13 @@ class GenericAgentTUI(App[None]):
         try: model = s.agent.get_llm_name(model=True)
         except Exception: model = "?"
         tasks_running = sum(1 for x in self.sessions.values() if x.status == "running")
-        self.query_one("#topbar", Static).update(render_topbar(s.name, s.status, model, tasks_running))
+        goal_line = ""
+        try:
+            from genericagent.core import goal_metadata as _gm
+            goal_line = _gm.active_goal_line(getattr(s.agent, "active_goal", None))
+        except Exception:
+            goal_line = ""
+        self.query_one("#topbar", Static).update(render_topbar(s.name, s.status, model, tasks_running, goal_line))
 
     def _refresh_sidebar(self):
         if not self.is_mounted: return

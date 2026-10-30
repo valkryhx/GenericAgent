@@ -601,6 +601,8 @@ export function helpText(): string {
     '/hooks - show hook configuration, coverage and recent executions',
     '/workflow on|off - opt this session into dynamic workflow orchestration (the agent then authors a JS workflow script)',
     '/workflow detail|resume|stop RUN_ID - inspect or control workflows',
+    '/goal [condition] - set a stop-condition goal (auto-clears when met)',
+    '/goal clear - remove the current goal; bare /goal shows it',
     '/clear - clear display only',
     '/status - show current frontend status',
     '/model, /llm - show and switch AI models',

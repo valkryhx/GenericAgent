@@ -66,6 +66,10 @@ class LoadedSession:
     working_state: dict | None = None
     working_states: dict = field(default_factory=dict)
     identity: SessionIdentity | None = None
+    # Goal state reconstructed from the last ``active_goal`` event (None means
+    # no active goal) and the last terminal ``goal_status`` (met/failed badge).
+    active_goal: dict | None = None
+    terminal_goal: dict | None = None
 
 
 @dataclass
@@ -98,6 +102,13 @@ class RestoreResult:
 
 def _now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _as_int_or_none(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _root(root=None):
@@ -289,6 +300,7 @@ def append_working_state(
     handler_working,
     last_tools="",
     last_usage_tokens=None,
+    session_output_tokens=None,
     turn_id=None,
 ):
     event = {
@@ -299,6 +311,7 @@ def append_working_state(
         "handler_working": _lightweight_handler_working(handler_working),
         "last_tools": str(last_tools or ""),
         "last_usage_tokens": copy.deepcopy(last_usage_tokens),
+        "session_output_tokens": _as_int_or_none(session_output_tokens),
     }
     if turn_id is not None:
         event["turn_id"] = int(turn_id)
@@ -446,6 +459,7 @@ def record_compact_v2(
             handler_working=working_state.get("handler_working"),
             last_tools=working_state.get("last_tools") or "",
             last_usage_tokens=working_state.get("last_usage_tokens"),
+            session_output_tokens=working_state.get("session_output_tokens"),
             turn_id=turn_id,
         )
     return boundary_uuid, summary_uuid
@@ -675,6 +689,7 @@ def record_active_goal(path, *, session_id, goal):
             "iterations": int(getattr(goal, "iterations", 0) or 0),
             "set_at": getattr(goal, "set_at", None),
             "origin": getattr(goal, "origin", "user"),
+            "tokens_at_start": int(getattr(goal, "tokens_at_start", 0) or 0),
             "last_reason": getattr(goal, "last_reason", None),
         }
     event = {
@@ -966,6 +981,8 @@ def load_v2(path):
     working_state = None
     working_states = {}
     last_message_uuid = ""
+    latest_active_goal = None
+    terminal_goal = None
     compact_history = None
     rewind_history = None
 
@@ -1039,7 +1056,27 @@ def load_v2(path):
             state_turn = event.get("turn_id")
             if state_turn is not None:
                 working_states[int(state_turn)] = copy.deepcopy(event)
-        elif kind in {"session_start", "resumed_from", "workflow_started", "workflow_completed", "workflow_failed", "goal_status", "active_goal"}:
+        elif kind == "active_goal":
+            payload = event.get("goal")
+            if isinstance(payload, dict):
+                latest_active_goal = copy.deepcopy(payload)
+                # A (re)set goal supersedes any prior terminal badge.
+                terminal_goal = None
+            else:
+                latest_active_goal = None
+        elif kind == "goal_status":
+            # Only met/failed (non-sentinel) transitions leave a terminal badge.
+            if not event.get("sentinel") and (event.get("met") or event.get("failed")):
+                terminal_goal = {
+                    "met": bool(event.get("met")),
+                    "failed": bool(event.get("failed")),
+                    "condition": str(event.get("condition") or ""),
+                    "reason": str(event.get("reason") or ""),
+                    "iterations": int(event.get("iterations") or 0),
+                    "tokens": event.get("tokens"),
+                    "duration_ms": event.get("duration_ms"),
+                }
+        elif kind in {"session_start", "resumed_from", "workflow_started", "workflow_completed", "workflow_failed"}:
             continue
         else:
             warnings.append(f"unsupported v2 event: {kind}")
@@ -1129,6 +1166,8 @@ def load_v2(path):
         working_state=copy.deepcopy(working_state),
         working_states=copy.deepcopy(working_states),
         identity=_identity_from_events(events),
+        active_goal=copy.deepcopy(latest_active_goal),
+        terminal_goal=copy.deepcopy(terminal_goal),
     )
 
 
@@ -1310,6 +1349,12 @@ def restore_agent_session(agent, path):
         backend_for_state = getattr(client, "backend", None)
         if isinstance(usage, dict) and backend_for_state is not None:
             backend_for_state.last_usage_tokens = copy.deepcopy(usage)
+        stored_output = state.get("session_output_tokens")
+        if backend_for_state is not None and stored_output is not None:
+            try:
+                backend_for_state.session_output_tokens = int(stored_output)
+            except (TypeError, ValueError):
+                pass
     if hasattr(agent, "handler"):
         agent.handler = None
     agent._resumed_working_state = copy.deepcopy(state) if isinstance(state, dict) else None
@@ -1329,11 +1374,53 @@ def restore_agent_session(agent, path):
         )
         agent.project_data_dir = str(roots.project_data_dir)
         agent.tool_cwd = str(roots.project_root)
+    _restore_goal_state(agent, loaded)
     return RestoreResult(
         ok=True,
         message=f"已恢复 {loaded.rounds} 轮结构化会话（{Path(path).name}）",
         session=loaded,
     )
+
+
+def _restore_goal_state(agent, loaded):
+    """Best-effort goal restore for a resumed session.
+
+    Rebuilds ``agent.active_goal`` from the last ``active_goal`` transcript
+    event and re-registers the ``goal:stop`` Stop hook so the gate works again.
+    A terminal (met/failed) goal leaves a one-shot badge via ``_restore_terminal``
+    without re-arming the hook. Any failure here must never abort the resume.
+    """
+    try:
+        from genericagent.core import goal as goal_core
+    except Exception:
+        return
+    payload = getattr(loaded, "active_goal", None)
+    if isinstance(payload, dict) and str(payload.get("condition") or "").strip():
+        try:
+            set_at = payload.get("set_at")
+            goal = goal_core.ActiveGoal(
+                condition=str(payload.get("condition") or ""),
+                iterations=int(payload.get("iterations") or 0),
+                origin=str(payload.get("origin") or goal_core.ORIGIN_USER),
+                tokens_at_start=int(payload.get("tokens_at_start") or 0),
+                last_reason=payload.get("last_reason"),
+                **({"set_at": float(set_at)} if set_at is not None else {}),
+            )
+            agent.active_goal = goal
+            # Reset the metadata diff so the bridge re-pushes the restored card.
+            agent._last_goal_metadata = None
+            try:
+                from genericagent.core import goal_evaluator
+                goal_evaluator.register_goal_hook(agent, goal.condition)
+            except Exception:
+                pass
+        except Exception:
+            return
+        return
+    # No active goal: optionally surface a terminal badge, never re-arm the hook.
+    terminal = getattr(loaded, "terminal_goal", None)
+    if isinstance(terminal, dict) and (terminal.get("met") or terminal.get("failed")):
+        agent._pending_terminal_goal = dict(terminal)
 
 
 def identity_from_environment(env=None):
@@ -1527,6 +1614,7 @@ def _record_agent_turn_v2(agent, path, *, turn_id, user_text, assistant_text,
         handler_working=working,
         last_tools=getattr(client, "last_tools", "") if client is not None else "",
         last_usage_tokens=getattr(backend, "last_usage_tokens", None) if backend is not None else None,
+        session_output_tokens=getattr(backend, "session_output_tokens", None) if backend is not None else None,
         turn_id=turn_id,
     )
 

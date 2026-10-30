@@ -306,6 +306,35 @@ def _prompt_execute(handler: HookHandler, payload: dict[str, Any], result: HookR
         # back to additionalContext (a free-text reply is a hard failure).
         text = value if isinstance(value, str) else _json_text(value)
         _parse_structured(result, text, schema)
+        if result.status == "invalid_output" and handler.retry_on_invalid_output:
+            # One reinforced retry for weak models that wrap JSON in prose. Only
+            # goal-style handlers opt in; ordinary hooks stay single-attempt.
+            reinforced = prompt + (
+                chr(10) * 2
+                + "IMPORTANT: Your previous reply was rejected because it was "
+                + "not strict JSON. Reply with ONLY a single JSON object that "
+                + "matches the schema. No prose, no markdown, no code fences."
+            )
+            try:
+                retry_value = _run_with_timeout(
+                    lambda: prompt_runner(handler.kind, reinforced, payload),
+                    handler.timeout,
+                )
+            except TimeoutError as exc:
+                result.status = "timeout"
+                result.error = str(exc)
+                return
+            except Exception as exc:
+                # Keep the original invalid_output error; the retry failing to
+                # run is not a new success.
+                return
+            retry_text = retry_value if isinstance(retry_value, str) else _json_text(retry_value)
+            # ``_parse_structured`` only flags failures; it never sets success,
+            # so reset status/error before the second parse or a valid retry
+            # would keep the stale invalid_output state.
+            result.status = "success"
+            result.error = ""
+            _parse_structured(result, retry_text, schema)
         return
     if isinstance(value, dict):
         result.output = value

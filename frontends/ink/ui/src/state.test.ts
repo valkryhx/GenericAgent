@@ -569,3 +569,18 @@ test('applyBridgeEvent sets and clears the passive goal nudge', () => {
   state = applyBridgeEvent(state, { type: 'status', status: 'running' })
   assert.equal(state.goalNudge, null)
 })
+
+test('applyBridgeEvent clears goal card, badge and nudge when history replacement starts a new session', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'goal_metadata',
+    goal: { condition: 'old goal', iterations: 0, set_at: 1, tokens_at_start: 0, tokens_spent: 0, met: false },
+  } as any)
+  state = applyBridgeEvent(state, { type: 'goal_nudge', text: 'tip' } as any)
+  assert.equal(state.goalMetadata?.condition, 'old goal')
+
+  state = applyBridgeEvent(state, { type: 'history_replace', messages: [], resetSession: true })
+  assert.equal(state.goalMetadata, null)
+  assert.equal(state.goalTerminal, null)
+  assert.equal(state.goalNudge, null)
+})

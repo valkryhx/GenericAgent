@@ -446,6 +446,20 @@ class GenericAgentBridge:
         except Exception:
             pass
 
+    def emit_goal_snapshot(self) -> None:
+        """Re-push current goal metadata unconditionally (ready/resume).
+
+        A reconnecting or re-mounting UI would otherwise miss the card until the
+        next goal state change (S1 robustness).
+        """
+        fn = getattr(self.agent, "emit_goal_snapshot", None)
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:
+            pass
+
     def _run_agent(self) -> None:
         with backend_output_redirect():
             self.agent.run()
@@ -2727,6 +2741,7 @@ class GenericAgentBridge:
                 if self._agent_control_override is None:
                     self.agent_control = self._build_agent_control()
                 self.emit({"type": "history_replace", "messages": self._resume_ui_messages_with_checkpoints(path)})
+                self.emit_goal_snapshot()
             self.emit({"type": "system", "text": str(result)})
         except Exception as exc:
             self.emit({"type": "error", "code": "resume_failed", "message": str(exc)})
@@ -3145,6 +3160,7 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
     ga_paths.ensure_runtime_dirs()
     bridge = GenericAgentBridge(emit=make_stdout_emitter(stdout))
     bridge.emit({"type": "ready", "version": 1})
+    bridge.emit_goal_snapshot()
     bridge.emit_goal_nudge_if_any()
     for line in stdin:
         line = line.strip()

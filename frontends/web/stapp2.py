@@ -972,6 +972,13 @@ def render_sidebar():
     st.session_state.selected_llm_idx = current_idx
     llm_labels = {idx: f"{idx}: {(name or '').strip()}" for idx, name, _ in llm_options}
     st.caption(f"当前使用的LLM为：{current_idx}: {agent.get_llm_name()}", help="可在下方选择链路")
+    try:
+        from genericagent.core import goal_metadata as _gm
+        _goal_line = _gm.active_goal_line(getattr(agent, "active_goal", None))
+    except Exception:
+        _goal_line = ""
+    if _goal_line:
+        st.caption(_goal_line)
     st.markdown(f'<div data-testid="sidebar-llm-max-label" style="display:none">{html.escape(max(llm_labels.values(), key=len, default=""))}</div>', unsafe_allow_html=True)
     selected_idx = st.selectbox("选择链路：", [idx for idx, _, _ in llm_options], index=next((i for i, (idx, _, _) in enumerate(llm_options) if idx == current_idx), 0), format_func=llm_labels.get, key="sidebar_llm_select")
     if selected_idx != current_idx:

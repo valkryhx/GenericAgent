@@ -43,6 +43,22 @@ def goal_metadata(active_goal: Any, *, current_tokens: int | None = None) -> dic
     return meta
 
 
+def active_goal_line(active_goal: Any) -> str:
+    """One-line read-only goal status for non-Ink frontends (terminal/web).
+
+    Returns "" when there is no goal so callers can cheaply hide the line. This
+    is display-only; it never mutates state and never needs ``hook_emit``.
+    """
+    if active_goal is None:
+        return ""
+    condition = str(getattr(active_goal, "condition", "") or "").strip()
+    if not condition:
+        return ""
+    iterations = _int(getattr(active_goal, "iterations", 0))
+    turns = "%d turn" % iterations + ("s" if iterations != 1 else "")
+    return "Goal: %s (%s)" % (condition, turns)
+
+
 def differs(previous: dict | None, current: dict | None) -> bool:
     """True when the metadata changed enough to warrant a push (CC shallow diff)."""
     if previous is current:

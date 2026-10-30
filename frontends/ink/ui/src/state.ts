@@ -243,6 +243,9 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       workflowDetails: startsNewSession ? {} : state.workflowDetails,
       workflowResults: startsNewSession ? {} : state.workflowResults,
       liveTelemetry: startsNewSession ? {} : state.liveTelemetry,
+      goalMetadata: startsNewSession ? null : state.goalMetadata,
+      goalTerminal: startsNewSession ? null : state.goalTerminal,
+      goalNudge: startsNewSession ? null : state.goalNudge,
       messages: event.messages.map((message, index) => {
         let id = `h-${index}`
         if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`
