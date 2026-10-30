@@ -653,6 +653,7 @@ class GenericAgent:
         self.active_goal = None
         self._queued_goal_origin = None
         self._last_goal_metadata = None
+        self.last_turn_outcome = None
         self.hook_runtime = None
         # Phase 4: one-keypress approval runtime for model-proposed goals.
         try:
@@ -1485,6 +1486,65 @@ class GenericAgent:
             print(f"[WARN] MessageDisplay hooks failed: {e}")
         return shown
 
+    def _classify_turn_outcome(self, loop_exit):
+        """Normalize a completed agent turn into a goal-retry decision input.
+
+        Returns {"kind": <str>, "exit_reason": <str|None>, ...}. Phase 3
+        auto-retry uses ``kind`` to decide whether to re-prompt the model.
+        Kinds: completed / max_turns / exited / user_abort / error / unknown.
+        """
+        result = ""
+        if isinstance(loop_exit, dict):
+            result = str(loop_exit.get("result") or "")
+        if getattr(self, "stop_sig", False):
+            kind = "user_abort"
+            cause = "the turn was stopped by the user"
+        elif result == "MAX_TURNS_EXCEEDED":
+            kind = "max_turns"
+            cause = "the turn hit the step limit before the goal was evaluated"
+        elif result == "EXITED":
+            kind = "exited"
+            cause = "the model ended the turn with an explicit exit"
+        elif result == "CURRENT_TASK_DONE":
+            kind = "completed"
+            cause = "the turn completed normally"
+        elif result:
+            kind = "completed"
+            cause = "the turn completed normally"
+        else:
+            kind = "unknown"
+            cause = "the turn ended without a recorded exit reason"
+        return {"kind": kind, "exit_reason": (result or None), "cause": cause}
+
+    def _drain_agent_stream(self, gen, display_queue, source):
+        """Consume the streaming generator, capture its return value, and
+        flush the incremental display tail. Returns (full_resp, outcome).
+
+        The generator returns {"result": ...}; `for chunk in gen` would drop
+        it, so we drive `next()` and read StopIteration.value instead. The
+        outcome (completed/max_turns/exited/user_abort/error/unknown) feeds
+        goal auto-retry (phase 3).
+        """
+        full_resp = ""
+        last_pos = 0
+        loop_exit = None
+        while True:
+            try:
+                chunk = next(gen)
+            except StopIteration as stop:
+                loop_exit = stop.value
+                break
+            if consume_file(self.task_dir, '_stop'): self.abort()
+            if self.stop_sig: break
+            full_resp += chunk
+            if should_flush_display_delta(full_resp, last_pos, chunk):
+                display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 'source': source})
+                last_pos = len(full_resp)
+        outcome = self._classify_turn_outcome(loop_exit)
+        if self.inc_out and last_pos < len(full_resp):
+            display_queue.put({'next': full_resp[last_pos:], 'source': source})
+        return full_resp, outcome
+
     def run(self):
         while True:
             task = self.task_queue.get()
@@ -1665,15 +1725,7 @@ class GenericAgent:
                                 initial_user_content=initial_content)
             stop_watcher = self._start_stop_file_watcher()
             try:
-                full_resp = ""; last_pos = 0
-                for chunk in gen:
-                    if consume_file(self.task_dir, '_stop'): self.abort()
-                    if self.stop_sig: break
-                    full_resp += chunk
-                    if should_flush_display_delta(full_resp, last_pos, chunk):
-                        display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 'source': source})
-                        last_pos = len(full_resp)
-                if self.inc_out and last_pos < len(full_resp): display_queue.put({'next': full_resp[last_pos:], 'source': source})
+                full_resp, self.last_turn_outcome = self._drain_agent_stream(gen, display_queue, source)
                 # Do NOT rewrite markup only on `done` (e.g. </summary> → </summary>\n\n).
                 # Streamed `next` chunks already shipped the raw text; a done-only rewrite
                 # makes the full payload diverge from the stream-commit prefix and the
@@ -1727,6 +1779,7 @@ class GenericAgent:
                         print(f"[WARN] Stop hooks failed: {hook_err}")
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
+                self.last_turn_outcome = {'kind': 'error', 'exit_reason': None, 'error': format_error(e)}
                 failed_resp = full_resp + f'\n```\n{format_error(e)}\n```'
                 display_queue.put({'done': failed_resp, 'source': source})
                 final_assistant_text = (
