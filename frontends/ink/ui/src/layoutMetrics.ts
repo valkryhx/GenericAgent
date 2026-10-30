@@ -7,6 +7,8 @@ export type LayoutMetricInput = {
   hasSlashSuggestions: boolean
   panelRows?: number
   inputRows?: number
+  /** Rows reserved for the read-only goal status card (phase 5). */
+  goalRows?: number
   /** When 0, no title/status header band (default inline scrollback). */
   headerRows?: number
 }
@@ -48,7 +50,8 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const headerRows = Math.max(0, Math.floor(input.headerRows ?? 1))
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
   const baseBottomRows = 3 + inputRows
-  const activityRows = 1
+  const goalRows = Math.max(0, Math.floor(input.goalRows ?? 0))
+  const activityRows = 1 + goalRows
   const errorRows = input.hasError ? 1 : 0
   const requestedPanelRows = input.hasPanel || input.hasSlashSuggestions
     ? Math.max(0, input.panelRows ?? (input.hasSlashSuggestions ? 6 : 8))

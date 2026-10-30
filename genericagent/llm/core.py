@@ -451,6 +451,13 @@ def _record_usage(usage, api_mode, sess=None):
                     "cache_creation_tokens": cache_creation,
                 }
             sess.last_usage_tokens = normalized
+            # Accumulate per-request output tokens. This mirrors the existing
+            # cache_stats.record_usage() summation and the message_start(0)
+            # + message_delta(final) pattern, so it does not double-count.
+            sess.session_output_tokens = (
+                int(getattr(sess, 'session_output_tokens', 0) or 0)
+                + max(0, int(normalized.get('output_tokens') or 0))
+            )
         except Exception: pass
     try:
         record_cache_usage(usage, api_mode, sess)
@@ -827,6 +834,9 @@ class BaseSession:
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens')
         self.last_usage_tokens = None
+        # Session-level cumulative OUTPUT tokens (mirrors CC costLedger
+        # totalOutputTokens -> Th()); used by goal metadata "tokens spent".
+        self.session_output_tokens = 0
         self._init_cancel_state()
     def _init_cancel_state(self):
         self._cancel_event = threading.Event()

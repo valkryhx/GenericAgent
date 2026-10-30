@@ -74,6 +74,9 @@ from genericagent.core import transcripts as session_transcript
 from genericagent.core import goal as goal_core
 from genericagent.core import goal_evaluator
 from genericagent.core import goal_proposal
+from genericagent.core import goal_metadata
+from genericagent.core import goal_telemetry
+from genericagent.core import goal_nudge
 from genericagent.media import image_codec
 try:
     from genericagent.core.context import compact_agent_context, replace_log_with_compact_history
@@ -649,6 +652,7 @@ class GenericAgent:
         # Session goal mode (Stage F). Phase 0: state + /goal command only.
         self.active_goal = None
         self._queued_goal_origin = None
+        self._last_goal_metadata = None
         self.hook_runtime = None
         # Phase 4: one-keypress approval runtime for model-proposed goals.
         try:
@@ -1048,7 +1052,58 @@ class GenericAgent:
             text += "\nLast check: %s" % g.last_reason
         return text
 
-    def _record_goal_status(self, *, met, failed=False, condition, reason="", iterations=0, sentinel=False):
+    def _goal_token_position(self):
+        """Cumulative OUTPUT tokens spent this session (mirrors CC ``Th()``).
+
+        CC's goal card/token accounting uses ``costLedger.totalOutputTokens()``
+        (m0017:4936), so ``tokens spent`` = this counter minus the value captured
+        when the goal was set. We read ``session_output_tokens`` first; if a
+        backend predates that counter we fall back to the latest request's output
+        tokens so the figure is never silently zero.
+        """
+        try:
+            backend = getattr(getattr(self, 'llmclient', None), 'backend', None)
+            cumulative = getattr(backend, 'session_output_tokens', None)
+            if isinstance(cumulative, (int, float)) and cumulative >= 0:
+                return int(cumulative)
+            usage = getattr(backend, 'last_usage_tokens', None)
+            if isinstance(usage, dict):
+                out = usage.get('output_tokens')
+                if isinstance(out, (int, float)):
+                    return int(out)
+        except Exception:
+            pass
+        return 0
+
+    def _notify_goal_metadata(self, *, terminal=None):
+        """Push goal metadata to the UI/SDK when it materially changed (S0).
+
+        Mirrors CC ``notifyMetadataChanged`` (m0696): shallow-compare the small
+        field set, and on a terminal transition push a ``terminal`` badge with
+        ``goal`` cleared so the card disappears but the badge persists.
+        """
+        try:
+            g = getattr(self, 'active_goal', None)
+            current_tokens = self._goal_token_position() if g is not None else None
+            meta = goal_metadata.goal_metadata(g, current_tokens=current_tokens)
+            previous = getattr(self, '_last_goal_metadata', None)
+            if not goal_metadata.differs(previous, meta) and terminal is None:
+                return
+            self._last_goal_metadata = meta
+            emit = getattr(self, 'hook_emit', None)
+            if emit is None:
+                return
+            event = {'type': 'goal_metadata', 'goal': meta}
+            if terminal is not None:
+                event['terminal'] = terminal
+            emit(event)
+        except Exception as e:
+            print(f"[WARN] Failed to emit goal_metadata: {e}")
+
+    def _goal_data_root(self):
+        return getattr(self, 'data_root', None)
+
+    def _record_goal_status(self, *, met, failed=False, condition, reason="", iterations=0, sentinel=False, duration_ms=None, tokens=None):
         """Best-effort goal_status transcript event (never raises upward)."""
         try:
             path = getattr(self, 'session_path', None)
@@ -1059,6 +1114,7 @@ class GenericAgent:
                 session_id=getattr(self, 'session_id', '') or '',
                 met=met, failed=failed, condition=condition, reason=reason,
                 iterations=iterations, sentinel=sentinel,
+                duration_ms=duration_ms, tokens=tokens,
             )
         except Exception as e:
             print(f"[WARN] Failed to record goal_status: {e}")
@@ -1076,7 +1132,10 @@ class GenericAgent:
             print(f"[WARN] Failed to record active_goal: {e}")
 
     def _set_goal(self, condition, origin=goal_core.ORIGIN_USER):
-        self.active_goal = goal_core.ActiveGoal(condition=condition, origin=origin)
+        tokens_at_start = self._goal_token_position()
+        self.active_goal = goal_core.ActiveGoal(
+            condition=condition, origin=origin, tokens_at_start=tokens_at_start,
+        )
         # Register the Stop evaluator hook (idempotent on key="goal:stop").
         try:
             goal_evaluator.register_goal_hook(self, condition)
@@ -1084,6 +1143,10 @@ class GenericAgent:
             print(f"[WARN] Failed to register goal hook: {e}")
         self._record_active_goal()
         self._record_goal_status(met=False, condition=condition, iterations=0, sentinel=True)
+        self._notify_goal_metadata()
+        goal_telemetry.record(
+            goal_telemetry.EVENT_SET, data_root=self._goal_data_root(), origin=origin,
+        )
         return self.active_goal
 
     def _clear_goal(self, *, met, failed=False, reason="", iterations=None):
@@ -1091,6 +1154,12 @@ class GenericAgent:
         if g is None:
             return None
         iters = g.iterations if iterations is None else int(iterations)
+        duration_ms = None
+        try:
+            duration_ms = max(0, int((time.time() - float(g.set_at or time.time())) * 1000))
+        except Exception:
+            duration_ms = None
+        tokens_spent = max(0, self._goal_token_position() - int(g.tokens_at_start or 0))
         self.active_goal = None
         try:
             goal_evaluator.unregister_goal_hook(self)
@@ -1099,7 +1168,22 @@ class GenericAgent:
         self._record_active_goal()
         self._record_goal_status(
             met=met, failed=failed, condition=g.condition, reason=reason,
-            iterations=iters,
+            iterations=iters, duration_ms=duration_ms, tokens=tokens_spent,
+        )
+        terminal = None
+        if met or failed:
+            terminal = {
+                'met': bool(met), 'failed': bool(failed), 'condition': g.condition,
+                'iterations': int(iters), 'tokens': int(tokens_spent),
+            }
+            if duration_ms is not None:
+                terminal['durationMs'] = int(duration_ms)
+        self._notify_goal_metadata(terminal=terminal)
+        event = goal_telemetry.EVENT_ACHIEVED if met else (
+            goal_telemetry.EVENT_FAILED if failed else goal_telemetry.EVENT_CLEARED)
+        goal_telemetry.record(
+            event, data_root=self._goal_data_root(), origin=getattr(g, 'origin', None),
+            iterations=int(iters), durationMs=duration_ms, tokens=int(tokens_spent),
         )
         return g
 
@@ -1172,6 +1256,14 @@ class GenericAgent:
         except Exception as e:
             self._queued_goal_origin = None
             return f"failed to queue goal: {e}"
+        goal_telemetry.record(
+            goal_telemetry.EVENT_PROPOSED, data_root=self._goal_data_root(),
+            origin=origin, ask_user=bool(ask_user), reason_len=len(str(condition or "")),
+        )
+        goal_telemetry.record(
+            goal_telemetry.EVENT_PROPOSAL_DECIDED, data_root=self._goal_data_root(),
+            origin=origin, ask_user=bool(ask_user), outcome='approved' if ask_user else 'direct',
+        )
         if ask_user:
             return "goal approved; it takes effect when this turn ends. Keep working; do not wait for a kickoff."
         return "goal set directly; it takes effect when this turn ends. Keep working; do not wait for a kickoff."
@@ -1196,11 +1288,24 @@ class GenericAgent:
                 met=False, condition=g.condition,
                 reason=status.error_kind, iterations=g.iterations,
             )
+            goal_telemetry.record(
+                goal_telemetry.EVENT_MET, data_root=self._goal_data_root(),
+                outcome=status.error_kind, met=False, iterations=int(g.iterations),
+            )
             return
         if status.met:
+            goal_telemetry.record(
+                goal_telemetry.EVENT_MET, data_root=self._goal_data_root(),
+                outcome='met', met=True, iterations=int(g.iterations + 1),
+            )
             self._clear_goal(met=True, reason=status.reason, iterations=g.iterations + 1)
             return
         if status.failed:
+            outcome = 'impossible' if getattr(status, 'impossible', False) else 'failed'
+            goal_telemetry.record(
+                goal_telemetry.EVENT_MET, data_root=self._goal_data_root(),
+                outcome=outcome, met=False, iterations=int(g.iterations + 1),
+            )
             self._clear_goal(met=False, failed=True, reason=status.reason, iterations=g.iterations + 1)
             return
         # not met: keep working toward it
@@ -1210,6 +1315,7 @@ class GenericAgent:
             met=False, condition=g.condition, reason=status.reason,
             iterations=self.active_goal.iterations,
         )
+        self._notify_goal_metadata()
 
     def _handle_goal_command(self, arg, display_queue):
         cmd = goal_core.parse_goal_command(arg)

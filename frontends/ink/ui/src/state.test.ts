@@ -542,3 +542,30 @@ test('common agent events do not replace workflow detail or progress state', () 
   assert.equal(state.workflowDetails.wf_detail_common.script, 'return 1')
   assert.equal(state.workflowDetails.wf_detail_common.progress?.workflowProgress[0]?.label, 'worker')
 })
+
+test('applyBridgeEvent stores goal metadata and clears it on null with terminal badge', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'goal_metadata',
+    goal: { condition: 'all tests pass', iterations: 0, set_at: 1, tokens_at_start: 0, tokens_spent: 0, met: false },
+  } as any)
+  assert.equal(state.goalMetadata?.condition, 'all tests pass')
+  assert.equal(state.goalTerminal, null)
+
+  state = applyBridgeEvent(state, {
+    type: 'goal_metadata',
+    goal: null,
+    terminal: { met: true, iterations: 2, tokens: 100, durationMs: 5000 },
+  } as any)
+  assert.equal(state.goalMetadata, null)
+  assert.equal(state.goalTerminal?.met, true)
+})
+
+test('applyBridgeEvent sets and clears the passive goal nudge', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'goal_nudge', text: 'use /goal' } as any)
+  assert.equal(state.goalNudge, 'use /goal')
+  // A new turn clears the nudge so it cannot linger over live work.
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  assert.equal(state.goalNudge, null)
+})

@@ -4,11 +4,15 @@ import {
   committedAssistantPrefix,
   remainingAssistantTextAfterCommits,
 } from './streamCommit.js'
+import type { GoalMetadata, GoalTerminal } from './goalCard.js'
 
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
   activityLabel: string | null
   tokenUsage: TokenUsage | null
+  goalMetadata: GoalMetadata | null
+  goalTerminal: GoalTerminal | null
+  goalNudge: string | null
   messages: ChatMessage[]
   error: string | null
   workflows: WorkflowRun[]
@@ -31,6 +35,9 @@ export const initialState: AppState = {
   status: 'connecting',
   activityLabel: null,
   tokenUsage: null,
+  goalMetadata: null,
+  goalTerminal: null,
+  goalNudge: null,
   messages: [],
   error: null,
   workflows: [],
@@ -60,6 +67,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       ...state,
       status: nextStatus,
       activityLabel: nextStatus === 'idle' ? null : state.activityLabel,
+      goalNudge: nextStatus === 'running' ? null : state.goalNudge,
       tokenUsage: nextStatus === 'running' ? null : state.tokenUsage,
       messages,
       error: null,
@@ -84,6 +92,18 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'error') {
     return { ...state, error: event.message }
+  }
+
+  if (event.type === 'goal_metadata') {
+    if (event.goal) {
+      // A (re)set goal supersedes any previous terminal badge.
+      return { ...state, goalMetadata: event.goal, goalTerminal: event.terminal ?? null, error: null }
+    }
+    // Cleared: keep the card gone; if this was a terminal transition show a badge.
+    return { ...state, goalMetadata: null, goalTerminal: event.terminal ?? state.goalTerminal, error: null }
+  }
+  if (event.type === 'goal_nudge') {
+    return { ...state, goalNudge: event.text, error: null }
   }
 
   if (event.type === 'workflow_draft' || event.type === 'workflow_run') {
@@ -207,7 +227,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     }
   }
   if (event.type === 'clear') {
-    return { ...state, messages: [], error: null }
+    return { ...state, messages: [], error: null, goalMetadata: null, goalTerminal: null, goalNudge: null }
   }
   if (event.type === 'history_replace') {
     // ``/new`` starts a new backend session. Workflow runs are session-scoped UI

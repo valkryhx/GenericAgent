@@ -407,6 +407,7 @@ export type BridgeEvent =
   | { type: 'system'; text: string }
   | { type: 'local_command_input'; text: string }
   | { type: 'local_command_output'; text: string }
+  | { type: 'goal_nudge'; text: string }
   | { type: 'clear' }
   | { type: 'resume_sessions'; sessions: ResumeSession[]; all?: boolean }
   | { type: 'history_replace'; messages: HistoryMessage[]; resetSession?: boolean }
@@ -429,6 +430,26 @@ export type BridgeEvent =
   | { type: 'permission_request_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
   | { type: 'goal_proposal_request'; requestId: string; condition: string }
   | { type: 'goal_proposal_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
+  | {
+      type: 'goal_metadata'
+      goal: {
+        condition: string
+        iterations: number
+        set_at: number
+        tokens_at_start: number
+        tokens_spent: number
+        met: boolean
+        last_reason?: string
+      } | null
+      terminal?: {
+        met: boolean
+        failed?: boolean
+        condition?: string
+        iterations?: number
+        tokens?: number
+        durationMs?: number
+      }
+    }
   | { type: 'skill_status'; skills: SkillStatus[] }
   | { type: 'workflow_draft'; run: WorkflowRun }
   | { type: 'workflow_run'; run: WorkflowRun }

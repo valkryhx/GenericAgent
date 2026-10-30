@@ -36,6 +36,7 @@ import {
   type TeamPanelState,
 } from './teamPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
+import { goalCardLines, goalTerminalLines } from './goalCard.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
   liveTranscriptViewportLines,
@@ -538,6 +539,20 @@ function WorkflowStatusBarView({ rows, theme }: { rows: string[]; theme: InkThem
   return (
     <Box paddingX={1}>
       <Text color={theme.warning} wrap="truncate-end">{rows.join(' · ')}</Text>
+    </Box>
+  )
+}
+
+function GoalStatusCardView({ lines, terminal, theme }: { lines: string[]; terminal: string[]; theme: InkTheme }) {
+  if (lines.length === 0 && terminal.length === 0) return null
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      {lines.map((line, index) => (
+        <Text key={`g-${index}`} color={index === 0 ? theme.accent : theme.muted} wrap="truncate-end">{line}</Text>
+      ))}
+      {terminal.map((line, index) => (
+        <Text key={`gt-${index}`} color={line.startsWith('✓') ? theme.success : theme.error} wrap="truncate-end">{line}</Text>
+      ))}
     </Box>
   )
 }
@@ -1244,6 +1259,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setExpandedTools(value => !value)
       return
     }
+    // A passive goal nudge is dismissed with Esc when idle (never blocks stop).
+    if (key.escape && state.goalNudge && (state.status === 'idle') && input.trim() === '') {
+      dispatch({ type: 'goal_nudge', text: '' })
+      return
+    }
     if (footerPanel) {
       if (key.escape) {
         setFooterPanel(null)
@@ -1653,6 +1673,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
+  const goalCardLinesOut = goalCardLines(state.goalMetadata, now)
+  const goalTerminalLinesOut = state.status === 'running' || state.status === 'stopping' ? [] : goalTerminalLines(state.goalTerminal)
+  const showGoalCard = (goalCardLinesOut.length > 0 || goalTerminalLinesOut.length > 0) && !activePanel && slashItems.length === 0
+  const goalRows = showGoalCard ? goalCardLinesOut.length + goalTerminalLinesOut.length : 0
   const promptViewport = useMemo(() => inputViewport(input, {
     columns: inputContentColumns(canvasColumns),
     maxRows: 6,
@@ -1707,6 +1731,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     hasSlashSuggestions: slashItems.length > 0,
     inputRows,
     panelRows,
+    goalRows,
     // Inline scrollback: no title/status header. A live "GenericAgent running"
     // band sits after <Static> and looks jammed into the middle of output.
     // Full mouse mode keeps a 1-row header (single viewport, no Static).
@@ -1791,7 +1816,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const inputCursor = inputCursorPosition({
     headerRows: metrics.headerRows,
     messageRows: messageRowsForCursor,
-    activityRows: 1,
+    activityRows: 1 + goalRows,
     errorRows,
     panelRows: 0,
     hintRows: 0,
@@ -1861,7 +1886,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
-    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : inputHint}</Text></Box>
+    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint)}</Text></Box>
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} />
     if (section === 'panel') {
@@ -1939,6 +1964,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         ) : null}
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
+          {showGoalCard ? <GoalStatusCardView lines={goalCardLinesOut} terminal={goalTerminalLinesOut} theme={theme} /> : null}
           {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>

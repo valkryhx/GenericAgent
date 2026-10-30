@@ -425,6 +425,27 @@ class GenericAgentBridge:
         except Exception:
             pass
 
+    def _goal_data_root(self) -> str | None:
+        root = getattr(self.agent, "data_root", None)
+        return str(root) if root else None
+
+    def emit_goal_nudge_if_any(self) -> None:
+        """Passive one-line goal suggestion at session start (phase 5, S3).
+
+        Off by default; when enabled, goal_nudge enforces the cooldown + relevance
+        gate and returns text at most once per cooldown window. Never a dialog.
+        """
+        try:
+            from genericagent.core import goal_nudge
+            text = goal_nudge.evaluate(
+                self._goal_data_root(),
+                has_active_goal=getattr(self.agent, "active_goal", None) is not None,
+            )
+            if text:
+                self.emit({"type": "goal_nudge", "text": text})
+        except Exception:
+            pass
+
     def _run_agent(self) -> None:
         with backend_output_redirect():
             self.agent.run()
@@ -3124,6 +3145,7 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
     ga_paths.ensure_runtime_dirs()
     bridge = GenericAgentBridge(emit=make_stdout_emitter(stdout))
     bridge.emit({"type": "ready", "version": 1})
+    bridge.emit_goal_nudge_if_any()
     for line in stdin:
         line = line.strip()
         if not line:
