@@ -27,6 +27,8 @@ GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"}
 ORIGIN_USER = "user"
 ORIGIN_PROPOSAL_DIRECT = "proposal_direct"
 ORIGIN_PROPOSAL_APPROVED = "proposal_approved"
+# Set when a goal is re-armed on session resume (CC origin "restored").
+ORIGIN_RESTORED = "restored"
 
 
 @dataclass(frozen=True)

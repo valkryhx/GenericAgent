@@ -150,6 +150,42 @@ class MetadataSnapshotTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+class ClearSentinelTests(unittest.TestCase):
+    """CC semantics: user clear / supersede write a met:true sentinel so resume
+    never resurrects a resolved goal."""
+
+    def _agent_with_goal(self, tmp, condition="c"):
+        a = _base_agent(data_root=tmp)
+        a.active_goal = goal_core.ActiveGoal(condition=condition, tokens_at_start=0)
+        captured = []
+        a._record_goal_status = lambda **kw: captured.append(kw)
+        return a, captured
+
+    def test_user_clear_writes_met_true_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, captured = self._agent_with_goal(tmp)
+            a._clear_goal(met=False, reason="cleared by user", outcome="user_cleared")
+            self.assertTrue(captured)
+            last = captured[-1]
+            self.assertTrue(last["met"])       # met:true sentinel
+            self.assertTrue(last["sentinel"])
+            self.assertFalse(last["failed"])
+
+    def test_supersede_writes_met_true_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, captured = self._agent_with_goal(tmp)
+            a._set_goal("new")                  # supersedes the existing goal
+            self.assertTrue(any(k.get("reason") == "superseded" and k.get("met") for k in captured))
+
+    def test_real_met_keeps_met_and_not_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, captured = self._agent_with_goal(tmp)
+            a._clear_goal(met=True, reason="done", iterations=1)
+            last = captured[-1]
+            self.assertTrue(last["met"])
+            self.assertFalse(last["sentinel"])
+
+
 class ActiveGoalLineTests(unittest.TestCase):
     def test_none_and_empty(self):
         from genericagent.core.goal_metadata import active_goal_line

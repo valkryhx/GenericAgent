@@ -1163,7 +1163,7 @@ class GenericAgent:
             self.active_goal = None
             self._record_active_goal()
             self._record_goal_status(
-                met=False, condition=old.condition, reason='superseded',
+                met=True, condition=old.condition, reason='superseded',
                 iterations=old.iterations, sentinel=True,
                 duration_ms=duration_ms, tokens=tokens_spent,
             )
@@ -1213,9 +1213,16 @@ class GenericAgent:
         except Exception as e:
             print(f"[WARN] Failed to unregister goal hook: {e}")
         self._record_active_goal()
+        # CC semantics: an evaluated MET/FAILED transition keeps the real
+        # met/failed flags; a user clear (or supersede) is a *sentinel* that
+        # marks the goal as closed, so the transcript's "latest unresolved
+        # goal_status" (met:false) no longer points at it. Writing met:false
+        # here would make resume think the goal is still pending.
+        real_met = bool(met or failed)
         self._record_goal_status(
-            met=met, failed=failed, condition=g.condition, reason=reason,
-            iterations=iters, duration_ms=duration_ms, tokens=tokens_spent,
+            met=(met if real_met else True), failed=failed, condition=g.condition,
+            reason=reason, iterations=iters, duration_ms=duration_ms,
+            tokens=tokens_spent, sentinel=(not real_met),
         )
         terminal = None
         if met or failed:

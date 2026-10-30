@@ -117,7 +117,12 @@ def main() -> int:
         rec("active goal restored", g is not None, getattr(g, "condition", None))
         if g is not None:
             rec("restored condition matches", g.condition == goal_text)
-            rec("tokens_at_start preserved", int(g.tokens_at_start) >= 0, g.tokens_at_start)
+            # CC re-arms fresh: iterations reset to 0, origin=restored, and the
+            # token anchor is the CURRENT cumulative output tokens.
+            rec("iterations reset to 0 (CC re-arm)", int(g.iterations) == 0, g.iterations)
+            rec("origin is restored", str(g.origin) == "restored", g.origin)
+            rec("tokens_at_start = current cumulative", int(g.tokens_at_start) == first_tokens,
+                f"{g.tokens_at_start} vs {first_tokens}")
         rt = getattr(rest_agent, "hook_runtime", None)
         keys = [e.get("key") for e in rt.list_session_hooks("Stop")] if rt is not None else []
         rec("goal:stop hook re-armed", "goal:stop" in keys, keys)

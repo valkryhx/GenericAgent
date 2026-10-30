@@ -66,10 +66,13 @@ class LoadedSession:
     working_state: dict | None = None
     working_states: dict = field(default_factory=dict)
     identity: SessionIdentity | None = None
-    # Goal state reconstructed from the last ``active_goal`` event (None means
-    # no active goal) and the last terminal ``goal_status`` (met/failed badge).
+    # Goal state reconstructed on load. ``active_goal`` is the last snapshot
+    # event; ``terminal_goal`` the last met/failed badge; ``pending_goal_condition``
+    # is the CC ``yLt`` view: the condition of the most recent goal_status that
+    # is neither met nor failed (None when the latest one is resolved).
     active_goal: dict | None = None
     terminal_goal: dict | None = None
+    pending_goal_condition: str | None = None
 
 
 @dataclass
@@ -983,6 +986,7 @@ def load_v2(path):
     last_message_uuid = ""
     latest_active_goal = None
     terminal_goal = None
+    latest_goal_status = None
     compact_history = None
     rewind_history = None
 
@@ -1065,6 +1069,7 @@ def load_v2(path):
             else:
                 latest_active_goal = None
         elif kind == "goal_status":
+            latest_goal_status = copy.deepcopy(event)
             # Only met/failed (non-sentinel) transitions leave a terminal badge.
             if not event.get("sentinel") and (event.get("met") or event.get("failed")):
                 terminal_goal = {
@@ -1168,7 +1173,29 @@ def load_v2(path):
         identity=_identity_from_events(events),
         active_goal=copy.deepcopy(latest_active_goal),
         terminal_goal=copy.deepcopy(terminal_goal),
+        pending_goal_condition=_pending_goal_condition(latest_goal_status, latest_active_goal),
     )
+
+
+def _pending_goal_condition(latest_goal_status, latest_active_goal):
+    """CC ``yLt(messages)`` equivalent: is a goal still pending on resume?
+
+    Looks at the single most recent ``goal_status`` event. If it is met or
+    failed the goal is resolved (None). Otherwise it is pending and we return
+    its condition. A cleared goal writes a ``met:true`` sentinel so it resolves
+    too (never resurrected). Falls back to the latest ``active_goal`` snapshot
+    when a transcript predates goal_status events.
+    """
+    event = latest_goal_status
+    if isinstance(event, dict):
+        if event.get("met") or event.get("failed"):
+            return None
+        condition = str(event.get("condition") or "").strip()
+        return condition or None
+    if isinstance(latest_active_goal, dict):
+        condition = str(latest_active_goal.get("condition") or "").strip()
+        return condition or None
+    return None
 
 
 def load_session(path):
@@ -1383,44 +1410,73 @@ def restore_agent_session(agent, path):
 
 
 def _restore_goal_state(agent, loaded):
-    """Best-effort goal restore for a resumed session.
+    """Re-arm a pending goal on session resume (CC ``BJn`` port).
 
-    Rebuilds ``agent.active_goal`` from the last ``active_goal`` transcript
-    event and re-registers the ``goal:stop`` Stop hook so the gate works again.
-    A terminal (met/failed) goal leaves a one-shot badge via ``_restore_terminal``
-    without re-arming the hook. Any failure here must never abort the resume.
+    Mirrors Claude Code 2.83 resume behaviour (m1585 ``BJn``):
+
+    * the source is ``loaded.pending_goal_condition`` (CC ``yLt``: the latest
+      goal_status is still unresolved), NOT "restore the old panel verbatim";
+    * a hooks/trust gate runs first -- when hooks are disabled the goal cannot
+      be enforced, so it is NOT restored (CC ``_Lt`` ``hooks_gate``);
+    * on restore the goal is **re-armed fresh**: ``iterations=0``,
+      ``set_at=now``, ``tokens_at_start=current cumulative``, ``origin=restored``.
+
+    A resolved (met/failed) goal leaves a one-shot badge via
+    ``_pending_terminal_goal`` without re-arming the hook. Any failure here must
+    never abort the resume.
     """
     try:
         from genericagent.core import goal as goal_core
     except Exception:
         return
-    payload = getattr(loaded, "active_goal", None)
-    if isinstance(payload, dict) and str(payload.get("condition") or "").strip():
-        try:
-            set_at = payload.get("set_at")
-            goal = goal_core.ActiveGoal(
-                condition=str(payload.get("condition") or ""),
-                iterations=int(payload.get("iterations") or 0),
-                origin=str(payload.get("origin") or goal_core.ORIGIN_USER),
-                tokens_at_start=int(payload.get("tokens_at_start") or 0),
-                last_reason=payload.get("last_reason"),
-                **({"set_at": float(set_at)} if set_at is not None else {}),
-            )
-            agent.active_goal = goal
-            # Reset the metadata diff so the bridge re-pushes the restored card.
-            agent._last_goal_metadata = None
-            try:
-                from genericagent.core import goal_evaluator
-                goal_evaluator.register_goal_hook(agent, goal.condition)
-            except Exception:
-                pass
-        except Exception:
-            return
+
+    condition = str(getattr(loaded, "pending_goal_condition", None) or "").strip()
+    if not condition:
+        # Nothing pending: optionally surface a terminal badge, never re-arm.
+        terminal = getattr(loaded, "terminal_goal", None)
+        if isinstance(terminal, dict) and (terminal.get("met") or terminal.get("failed")):
+            agent._pending_terminal_goal = dict(terminal)
         return
-    # No active goal: optionally surface a terminal badge, never re-arm the hook.
-    terminal = getattr(loaded, "terminal_goal", None)
-    if isinstance(terminal, dict) and (terminal.get("met") or terminal.get("failed")):
-        agent._pending_terminal_goal = dict(terminal)
+
+    # CC hooks/trust gate: without hooks the Stop evaluator cannot run, so a
+    # restored goal would be dead weight. Skip restore (goal is dropped).
+    if hooks_disabled_for_restore():
+        return
+
+    try:
+        current_tokens = _session_output_tokens(agent)
+        goal = goal_core.ActiveGoal(
+            condition=condition,
+            iterations=0,
+            origin=goal_core.ORIGIN_RESTORED,
+            tokens_at_start=current_tokens,
+        )
+        agent.active_goal = goal
+        # Reset the metadata diff so the bridge re-pushes the restored card.
+        agent._last_goal_metadata = None
+        try:
+            from genericagent.core import goal_evaluator
+            goal_evaluator.register_goal_hook(agent, condition)
+        except Exception:
+            pass
+    except Exception:
+        return
+
+
+def hooks_disabled_for_restore(env=None):
+    """True when hooks are globally disabled (CC ``_Lt`` hooks_gate)."""
+    source = os.environ if env is None else env
+    raw = str(source.get("GA_HOOKS_DISABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _session_output_tokens(agent):
+    backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+    value = getattr(backend, "session_output_tokens", None)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def identity_from_environment(env=None):
