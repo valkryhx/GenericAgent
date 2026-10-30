@@ -406,6 +406,10 @@ class GenericAgentBridge:
             hook_runtime_for_agent(agent).set_wake_handler(self._handle_hook_wake)
         except Exception:
             pass
+        try:
+            agent.set_goal_wake_callback(self._handle_goal_wake)
+        except Exception:
+            pass
         # wait_agent(condition="workflow_terminal") resolves a run id through this
         # bridge-owned store; without it a run id is answered by an orphan subagent
         # state that never reaches a terminal status (GA defect A).
@@ -3051,6 +3055,50 @@ class GenericAgentBridge:
 
     def _is_consuming(self) -> bool:
         return self._consume_thread is not None and self._consume_thread.is_alive()
+
+    def _handle_goal_wake(self, prompt: str) -> bool:
+        """Inject a goal auto-wake (2-B check-in / 3 retry) as a new turn.
+
+        Mirrors ``_handle_hook_wake``: respect the session guard and, if the
+        agent is busy or another consumer is active, wait for idle first so
+        the wake never lands inside a live generation.
+        """
+        if getattr(self.agent, "is_running", False) or self._is_consuming():
+            threading.Thread(
+                target=self._submit_goal_wake_when_idle,
+                args=(prompt,),
+                daemon=True,
+                name="ga-goal-wake-wait",
+            ).start()
+            return True
+        return self._submit_goal_wake(prompt)
+
+    def _submit_goal_wake_when_idle(self, prompt: str) -> bool:
+        while getattr(self.agent, "is_running", False) or self._is_consuming():
+            if bool(getattr(self, "_shutdown_requested", False)):
+                return False
+            time.sleep(0.1)
+        return self._submit_goal_wake(prompt)
+
+    def _submit_goal_wake(self, prompt: str) -> bool:
+        if bool(getattr(self, "_shutdown_requested", False)):
+            return False
+        self._task_seq += 1
+        task_id = self._task_seq
+        self.emit({"type": "status", "status": "running", "taskId": task_id})
+        try:
+            display_queue = self.agent.put_task(prompt, source="goal_wake", images=[])
+        except Exception as exc:
+            self.emit({"type": "error", "code": "goal_wake_dropped", "message": str(exc)})
+            self.emit({"type": "status", "status": "idle", "taskId": task_id})
+            return False
+        threading.Thread(
+            target=self._consume_display_queue,
+            args=(task_id, display_queue),
+            daemon=True,
+            name=f"ga-ink-goal-wake-{task_id}",
+        ).start()
+        return True
 
     def _handle_hook_wake(self, request) -> bool:
         """Inject local asyncRewake feedback as a protected follow-up turn.

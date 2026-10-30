@@ -905,6 +905,10 @@ class GenericAgentTUI(App[None]):
         try: agent.inc_out = True
         except Exception: pass
         sess = AgentSession(agent_id=agent_id, name=name or f"agent-{agent_id}", agent=agent)
+        try:
+            agent.set_goal_wake_callback(lambda prompt, _sid=agent_id: self._submit_goal_wake(_sid, prompt))
+        except Exception:
+            pass
         thread = threading.Thread(target=agent.run, name=f"ga-tui-agent-{agent_id}", daemon=True)
         thread.start()
         sess.thread = thread
@@ -1514,6 +1518,46 @@ class GenericAgentTUI(App[None]):
             name=f"ga-tui-consume-{sess.agent_id}-{tid}",
         ).start()
         return tid
+
+    def _submit_goal_wake(self, agent_id, prompt: str) -> bool:
+        """Goal auto-wake (2-B/3): start a fresh turn on this session.
+
+        Runs on the scheduler timer thread, so marshal UI mutations onto the
+        app thread. If the session is busy, decline (the scheduler re-arms on
+        the next turn end).
+        """
+        sess = self.sessions.get(agent_id)
+        if sess is None:
+            return False
+        if sess.status == "running":
+            return False
+        sess.task_seq += 1
+        tid = sess.task_seq
+        sess.current_task_id = tid
+        sess.buffer = ""
+        sess.status = "running"
+        sess.messages.append(ChatMessage("assistant", "", task_id=tid, done=False))
+        try:
+            self.call_from_thread(self._refresh_all)
+        except Exception:
+            pass
+        try:
+            dq = sess.agent.put_task(prompt, source="goal_wake")
+        except Exception:
+            try:
+                self.call_from_thread(self._update_assistant, agent_id,
+                                      "[ERROR] goal wake failed", task_id=tid, done=True, refresh_chrome=True)
+            except Exception:
+                pass
+            return False
+        sess.current_display_queue = dq
+        threading.Thread(
+            target=self._consume_display_queue,
+            args=(agent_id, tid, dq),
+            daemon=True,
+            name=f"ga-tui-goal-wake-{agent_id}-{tid}",
+        ).start()
+        return True
 
     def _consume_display_queue(self, agent_id, task_id, dq):
         buf = ""

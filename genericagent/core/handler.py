@@ -495,6 +495,7 @@ class GenericAgentHandler(BaseHandler):
         # a goal is active so ordinary Stop hooks pay no cost.
         goal_active = getattr(agent, 'active_goal', None) is not None
         goal_defer = False
+        self.last_goal_defer = False
         if goal_active:
             try:
                 from genericagent.core import goal_evaluator
@@ -505,6 +506,7 @@ class GenericAgentHandler(BaseHandler):
             except Exception:
                 goal_defer = False
             if goal_defer:
+                self.last_goal_defer = True
                 data['goal_defer'] = True
                 rec_defer = getattr(agent, '_record_goal_deferred', None)
                 if rec_defer is not None:

@@ -199,6 +199,36 @@ def _manager_for(agent, handler):
     return None
 
 
+def list_in_flight_task_labels(agent, handler=None) -> list:
+    """Human labels for in-flight background sub-agents (2-B check-in copy).
+
+    Returns short ``"<task_name> · <type>"`` strings, never raises. Empty
+    list when there is no manager / session or nothing is in flight.
+    """
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id and handler is not None:
+        session_id = str(getattr(getattr(handler, "parent", None), "session_id", "") or "").strip()
+    if not session_id:
+        return []
+    try:
+        manager = _manager_for(agent, handler)
+        if manager is None:
+            return []
+        states = manager.list_descendants(session_id)
+    except Exception:
+        return []
+    labels = []
+    for s in states:
+        try:
+            if not is_in_flight_agent_state(s):
+                continue
+            name = str(getattr(s, "task_name", "") or getattr(s, "agent_id", "") or "subagent")
+            typ = str(getattr(s, "agent_type", "") or getattr(s, "role", "") or "agent")
+            labels.append(f"{name} · {typ}")
+        except Exception:
+            continue
+    return labels
+
 def has_in_flight_agents(agent, handler=None) -> bool:
     """True when this session has at least one in-flight background sub-agent.
 

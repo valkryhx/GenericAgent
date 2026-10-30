@@ -654,6 +654,9 @@ class GenericAgent:
         self._queued_goal_origin = None
         self._last_goal_metadata = None
         self.last_turn_outcome = None
+        # Goal auto-wake (phase 2-B/3): frontend-injected callback + scheduler.
+        self._goal_wake_callback = None
+        self._goal_wake = None
         self.hook_runtime = None
         # Phase 4: one-keypress approval runtime for model-proposed goals.
         try:
@@ -1192,6 +1195,10 @@ class GenericAgent:
         self._record_active_goal()
         self._record_goal_status(met=False, condition=condition, iterations=0, sentinel=True)
         self._notify_goal_metadata()
+        try:
+            self._cancel_goal_wake("goal_set")
+        except Exception:
+            pass
         goal_telemetry.record(
             goal_telemetry.EVENT_SET, data_root=self._goal_data_root(), origin=origin,
         )
@@ -1209,6 +1216,10 @@ class GenericAgent:
             duration_ms = None
         tokens_spent = max(0, self._goal_token_position() - int(g.tokens_at_start or 0))
         self.active_goal = None
+        try:
+            self._cancel_goal_wake("goal_cleared")
+        except Exception:
+            pass
         try:
             goal_evaluator.unregister_goal_hook(self)
         except Exception as e:
@@ -1545,6 +1556,67 @@ class GenericAgent:
             display_queue.put({'next': full_resp[last_pos:], 'source': source})
         return full_resp, outcome
 
+    # --- goal auto-wake lifecycle (phase 2-B / 3) -------------------------
+    def set_goal_wake_callback(self, callback):
+        """Frontend injects how to start a fresh turn (Receives a prompt str).
+
+        The callback must enqueue a turn on the frontend's own thread and
+        return truthy when the wake was accepted. None disables auto-wake.
+        """
+        self._goal_wake_callback = callback
+        if self._goal_wake is not None:
+            self._goal_wake.wake_callback = callback
+
+    def _ensure_goal_wake(self):
+        """Create the per-agent scheduler lazily, only when the feature is on."""
+        from genericagent.core import goal_wake
+        if not goal_wake.is_enabled():
+            return None
+        if self._goal_wake is None:
+            self._goal_wake = goal_wake.GoalWakeScheduler(
+                self, self._goal_wake_callback,
+                has_in_flight=lambda a: goal_evaluator.list_in_flight_task_labels(a),
+                on_event=self._goal_wake_event,
+            )
+        return self._goal_wake
+
+    def _goal_wake_event(self, event, outcome):
+        try:
+            goal_telemetry.record(event, data_root=self._goal_data_root(), outcome=outcome)
+        except Exception:
+            pass
+
+    def _cancel_goal_wake(self, reason=""):
+        if self._goal_wake is not None:
+            self._goal_wake.cancel(reason)
+            self._goal_wake.reset_streaks()
+
+    def _maybe_arm_goal_wake_after_turn(self, handler, outcome):
+        """After a turn ends: decide whether to schedule a 2-B check-in / 3 retry.
+
+        Off by default (GA_GOAL_WAKE). User aborts and an already-met/cleared
+        goal never re-arm. Any failure is swallowed (fail-closed).
+        """
+        try:
+            from genericagent.core import goal_wake
+            if not goal_wake.is_enabled() or self._goal_wake_callback is None:
+                return
+            if getattr(self, "active_goal", None) is None:
+                return
+            kind = (outcome or {}).get("kind")
+            if kind == "user_abort":
+                return
+            sched = self._ensure_goal_wake()
+            if sched is None:
+                return
+            if getattr(handler, "last_goal_defer", False):
+                sched.arm_checkin()
+                return
+            if kind in ("max_turns", "error"):
+                sched.arm_retry(cause=(outcome or {}).get("cause") or "the last turn ended early")
+        except Exception:
+            pass
+
     def run(self):
         while True:
             task = self.task_queue.get()
@@ -1580,6 +1652,12 @@ class GenericAgent:
             if prompt_hooks.system_text:
                 print(f"[Hook] {prompt_hooks.system_text}")
             self.is_running = True
+            # A new user turn supersedes any pending goal wake timer.
+            try:
+                if source != "goal_wake":
+                    self._cancel_goal_wake("user_message")
+            except Exception:
+                pass
             reset_cancel = getattr(self.llmclient, 'reset_cancel', None)
             if reset_cancel:
                 try: reset_cancel()
@@ -1816,6 +1894,11 @@ class GenericAgent:
             finally:
                 if stop_watcher is not None: stop_watcher()
                 if self.stop_sig: print('User aborted the task.')
+                try:
+                    if not getattr(self, 'is_subagent', False):
+                        self._maybe_arm_goal_wake_after_turn(handler, self.last_turn_outcome)
+                except Exception:
+                    pass
                 self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.cancel()
