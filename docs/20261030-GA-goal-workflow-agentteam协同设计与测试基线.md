@@ -408,3 +408,113 @@ PASS after child finished, goal evaluated (a non-deferred goal_status exists)
 
 - 2026-10-30 v1：建立协同基线。记录 goal×workflow 修复（`9152893`）、goal×agent-team 验证、
   渲染帧 UI 共存测试，并列出"三面板真实组合场景"为下一步重点（§7）。
+
+---
+
+## 11. 三面板真实组合场景：测试结果（v2 追加）
+
+> 本章对应 §7 的落地。用户要求"不仅 UI 要对，实际执行也要正确"，因此做了两层验证：
+> **执行正确性**（§11.1，受控 gate，确定性）+ **纯模型驱动全链**（§11.2）+ **真实 UI 渲染**
+> （§11.3，真实 bridge/模型/Ink）。全部使用 `default/deepseek-v4.1-flash`。
+
+### 11.1 受控 gate e2e（执行正确性，确定性证据）
+
+`tests/real_goal_workflow_team_gate_e2e.py` → **17/17 PASS**（`temp/goal_gate/summary_*.json`）。
+
+做法：真实 bridge + 真实 workflow Runtime（真子 agent）+ 真实 `SubagentManager` team_mode
+子 agent（真子进程），两者都 sleep 30 后写 marker；在**两者都在飞**的瞬间直接调用
+`handler.run_stop_gate()`，再等两者 settle 后再调一次。
+
+关键证据：
+
+```text
+wf_labels_inflight   => ["gate-wf · workflow"]          # workflow 通道在飞
+sub_labels_inflight  => ["teammate1:running/alive"]     # team 子 agent 通道在飞（进 SubagentManager）
+both_inflight        => true                            # 两通道同时 in-flight
+gate_action          => "none"                          # 门禁不 block
+gate_last_goal_defer => true                            # 记为 defer
+goal evaluator 调用   => 0 -> 0（defer 时根本没求值）
+goal_status recorded => reason="deferred"
+--- 两者 settle 后 ---
+inflight_after_settle => false
+gate2_last_goal_defer => false
+evaluator 调用        => 0 -> 1（确实求值了）
+wf_marker_ok / team_marker_ok => true / true
+```
+
+**这直接证实了 §7.4 的核心假设**：`team_mode` 子 agent 与普通子 agent 走同一个
+`SubagentManager.spawn_agent(parent_session_id=主会话)`，注册到同一 registry 根，因此
+`list_descendants(主会话)` 能看到它 → goal 的 defer 判定覆盖 agent-team 成立。
+（此前 `tests/real_goal_2a_defer_e2e.py` 6/6 验证的是普通子 agent；本测试补上了 team_mode。）
+
+### 11.2 纯模型驱动全链（真实 LLM 自主发起两通道）
+
+`tests/real_goal_workflow_team_combo_e2e.py` → **13/13 PASS**（`temp/goal_combo/summary_*.json`）。
+
+真实模型在真实会话里：turn1 用 `task_create`+`spawn_agent(team_mode)` 起一个 sleep 120 的
+team 子 agent；turn2 用 `workflow` 工具（scriptPath）起一个 sleep 30 的 workflow。关键数字：
+
+```text
+team_spawn_turn   => { done: true, steps: 6 }
+team_last_goal_defer => true
+wf_launch_turn    => { done: true, steps: 4 }
+wf_last_goal_defer   => true
+wf_labels         => ["combo-wf · workflow"]
+sub_labels        => ["teammate1:running/alive"]     # workflow 启动后 team 子 agent 仍在飞
+both_inflight     => true                             # 两通道真正并发
+marker_wf / marker_team => 均按目标绝对路径落盘
+goal_met          => true                             # handoff 后非 deferred 求值达成
+```
+
+这证明：**模型自己发起的两个后台通道**，在真实回合里都正常 defer、正常结束、产物正确、
+最终 goal 正确求值。两个 launch 回合分别是 6 步 / 4 步，无空转。
+
+> 踩坑记录：最早一版 combo 用"单回合同时起 workflow+team"且嵌套三层引号写 Python sleep，
+> 模型花 10 步、122 秒仍写错脚本，`done=false`；而且 sleep 30 的 workflow 在该回合结束前
+> 已跑完，观察不到并发窗口。这说明：**组合场景要拿到稳定并发窗口，必须先起"慢"通道再起"快"
+> 通道**，并让脚本路径/引号尽量扁平（用 scriptPath + 正斜杠路径）。这些经验已固化进上面两个
+> 测试文件。
+
+### 11.3 真实 UI 渲染（真实 bridge + 真实模型 + 真实 Ink）
+
+`frontends/ink/ui/scripts/real_ink_goal_workflow_team_combo_e2e.ts` → **10/10 PASS**
+（证据：`temp/goal_combo_ui/data_<run>/frames.txt` + `summary.json`，43MB 级帧转储）。
+
+真实会话里同时存在 goal + running workflow + live team 子 agent，然后依次切换面板，抓帧断言：
+
+| 检查 | 结果 | 真实帧摘录 |
+| --- | --- | --- |
+| goal 卡片真实渲染 | PASS | `◎ Goal active · running …` |
+| workflow 状态栏真实渲染 | PASS | `› ◌ combo-ui-wf  0/0 agents done` |
+| **goal 卡片 + workflow 状态栏同帧共存** | PASS | 同一帧同时含两者 |
+| `/team` overlay 真实渲染 | PASS | `Team session-… · lead team-lead · 1 member(s)` / `Task board` / `[~] #1 write marker_team owner=teammate1` |
+| team overlay 打开时 goal 卡片让位 | PASS | 该帧无 `Goal active` |
+| 关闭 `/team` 后 goal 卡片恢复 | PASS | 再次出现 `Goal active` |
+| `/workflows` overlay 真实渲染 | PASS | `Dynamic workflows` / `› ◌ combo-ui-wf 1 agent` |
+| workflows overlay 打开时 goal 卡片让位 | PASS | 该帧无 `Goal active` |
+| 关闭 `/workflows` 后 goal 卡片恢复 | PASS | 再次出现 `Goal active` |
+| 所有帧不超终端宽度 | PASS | 逐行 `stringWidth < columns` |
+
+这样"三面板"的四类表面（goal 卡片 / workflow 状态栏 / team 面板 / workflow 面板）都在
+**真实 LLM 真实渲染**下被验证，且验证了 overlay 互斥、次要带与 overlay 不重叠、关闭后恢复。
+
+### 11.4 关于"三个面板同时可见"
+
+诚实说明设计边界：按 §4 的设计，**team 面板 / workflow 面板是 overlay，goal 卡片是次要带**，
+因此"三个全屏面板同一帧全部可见"不是目标状态，也做不到（overlay 会占用底栏）。真实可达且
+已验证的目标状态是：
+- **goal 卡片 + workflow 状态栏** 同帧（次要带并存）——已验证；
+- **任一 overlay（team 或 workflow 面板）打开时**，goal/状态栏让位——已验证；
+- 在 overlay 打开期间后台的 workflow/team 仍在真实运行（帧里能看到 `running`/进度）——已验证。
+
+也就是说：**三者同时"存在且活跃"是真实验证过的；三者同时"以三个全屏面板并排显示"不符合
+overlay 设计，也不应追求。** 若未来产品希望 goal 卡片在 overlay 内也保留一行，需要在 overlay
+内部单独设计一个 goal 摘要行，而不是靠底栏并列。
+
+### 11.5 本轮结论
+
+- 执行层：goal × workflow × agent-team 三通道并发时，defer 判定、回合结束、双产物落盘、
+  最终求值全部正确（受控 17/17 + 纯模型 13/13）。
+- 渲染层：goal 卡片 / workflow 状态栏 / team 面板 / workflow 面板四表面在真实会话里都真实
+  出现，显隐/互斥/恢复/宽度全部正确（10/10）。
+- 未发现新的产品缺陷；组合场景运行稳定。
