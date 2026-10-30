@@ -901,6 +901,55 @@ class GenericAgentHandler(BaseHandler):
         yield f"Waiting for your answer ...\n"
         return StepOutcome(result, next_prompt="", should_exit=True)
     
+    def do_propose_goal(self, args, response):
+        """Model-proposed session goal (Stage F phase 4, CC ProposeGoal).
+
+        Proposes a stop-condition goal. By default it shows a one-keypress
+        approval dialog; only when the user's own words already expressed the
+        outcome may the model pass ask_user=false. Non-blocking: never waits for a
+        kickoff, just queues /goal for the next turn boundary.
+        """
+        from genericagent.core import goal_proposal as gp
+
+        agent = self._hook_agent()
+        gate = getattr(agent, '_goal_proposal_gate', None)
+        if gate is not None:
+            reason = gate()
+            if reason:
+                return StepOutcome(
+                    {"status": "error", "reason": "goal_proposal_rejected", "msg": reason},
+                    next_prompt=chr(10),
+                )
+
+        norm = gp.normalize_proposal_condition(args.get("condition"))
+        if not norm.ok:
+            return StepOutcome(
+                {"status": "error", "reason": "invalid_condition", "msg": norm.error},
+                next_prompt=chr(10),
+            )
+
+        runtime = getattr(agent, 'goal_proposal_runtime', None)
+        if runtime is not None and runtime.pending_count() > 0:
+            return StepOutcome(
+                {"status": "error", "reason": "proposal_in_flight",
+                 "msg": "a goal proposal is already awaiting approval; do not propose again"},
+                next_prompt=chr(10),
+            )
+
+        setting = gp.read_model_proposed_goals_setting()
+        ask_user = gp.resolve_ask_user(setting, args.get("ask_user"))
+        apply_proposal = getattr(agent, '_apply_goal_proposal', None)
+        if apply_proposal is None:
+            return StepOutcome(
+                {"status": "error", "reason": "unsupported", "msg": "goal proposals are not supported here"},
+                next_prompt=chr(10),
+            )
+        message = apply_proposal(norm.condition, ask_user=ask_user)
+        return StepOutcome(
+            {"status": "ok", "condition": norm.condition, "askUser": bool(ask_user), "message": message},
+            next_prompt=chr(10),
+        )
+
     def do_web_fetch(self, args, response):
         from genericagent.tools.web_fetch.tool import run_web_fetch
 

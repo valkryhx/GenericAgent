@@ -99,6 +99,7 @@
             "team_mode": {"type": "boolean", "description": "子智能体的团队协作模式（需显式开启）。为 true 时子智能体成为 teammate：保留同级消息（send_message）与共享任务板（task_create/task_get/task_update/task_list/team_status），但仍不能 spawn 或 wait 其他 agent。当多个子智能体需围绕同一目标协作时使用；一次性隔离 worker 不需要开启。", "default": false},
       "verbose": {"type": "boolean", "description": "可选，是否开启子进程 verbose 输出"}}}
   }},
+  {"type": "function", "function": {"name": "propose_goal", "description": "提议一个会话目标条件：在独立求值器确认达成前，agent 会持续朝它工作。默认先给用户弹一键审批；只有用户原话已经表达了这个结果时才可传 ask_user=false 直接设置。非阻塞：在本次回合结束时生效，继续干活、不要等 kickoff。用户拒绝后不要再追问、也不要重复提议。新目标会覆盖旧目标。求值器只依据对话判断，不跑命令、不读文件。", "parameters": {"type": "object", "properties": {"condition": {"type": "string", "description": "停止条件目标，1..500 字符，需一眼可读。"}, "ask_user": {"type": "boolean", "default": true, "description": "先弹审批对话框。仅当用户已明确表达该结果时才传 false。"}}, "required": ["condition"]}}},
   {"type": "function", "function": {
     "name": "list_agents",
     "description": "列出子智能体及其当前状态。启动后或清理前使用。",

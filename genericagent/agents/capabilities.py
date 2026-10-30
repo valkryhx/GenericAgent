@@ -32,6 +32,7 @@ ORCHESTRATION_TOOLS = frozenset(
         "task_update",
         "task_list",
         "team_status",
+        "propose_goal",
     }
 )
 INTERNAL_SENTINEL_TOOLS = frozenset({"no_tool"})

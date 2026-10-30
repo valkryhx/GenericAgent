@@ -417,6 +417,13 @@ class GenericAgentBridge:
                 runtime.set_emit(self.emit)
         except Exception:
             pass
+        # 提案 goal 的一键审批：同样注入 emit，使 propose_goal 能发 goal_proposal_request
+        try:
+            gruntime = getattr(agent, "goal_proposal_runtime", None)
+            if gruntime is not None and hasattr(gruntime, "set_emit"):
+                gruntime.set_emit(self.emit)
+        except Exception:
+            pass
 
     def _run_agent(self) -> None:
         with backend_output_redirect():
@@ -828,6 +835,21 @@ class GenericAgentBridge:
                 )
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
+
+    def goal_proposal_response(self, request_id: str, decision: str) -> None:
+        """UI 对 goal_proposal_request 的应答：approve | reject。"""
+        try:
+            runtime = getattr(self.agent, "goal_proposal_runtime", None)
+            if runtime is None:
+                self.emit({"type": "error", "code": "goal_proposal_response_failed",
+                           "message": "goal_proposal_runtime unavailable"})
+                return
+            ok = bool(runtime.resolve(str(request_id or ""), decision))
+            if not ok:
+                self.emit({"type": "error", "code": "goal_proposal_response_unknown",
+                           "message": f"unknown or settled requestId: {request_id}"})
+        except Exception as exc:
+            self.emit({"type": "error", "code": "goal_proposal_response_failed", "message": str(exc)})
 
     def skill_status(self, search_roots: list[str] | None = None) -> None:
         try:
@@ -3180,6 +3202,11 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             )
         elif cmd_type == "permission_response":
             bridge.permission_response(
+                str(command.get("requestId") or command.get("request_id") or ""),
+                str(command.get("decision") or ""),
+            )
+        elif cmd_type == "goal_proposal_response":
+            bridge.goal_proposal_response(
                 str(command.get("requestId") or command.get("request_id") or ""),
                 str(command.get("decision") or ""),
             )

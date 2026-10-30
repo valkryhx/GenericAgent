@@ -96,6 +96,16 @@ import {
   type ApprovalPanelState,
 } from './approvalPanel.js'
 import {
+  GOAL_PROPOSAL_OPTIONS,
+  enqueueGoalProposal,
+  goalProposalFromEvent,
+  goalProposalOnEnter,
+  goalProposalOnEscape,
+  goalProposalOnSettled,
+  moveGoalProposalSelection,
+  type GoalProposalPanelState,
+} from './goalProposalPanel.js'
+import {
   formatSlashSuggestionLine,
   moveSlashSelection,
   shouldCompleteSlashCommand,
@@ -383,6 +393,26 @@ function ApprovalPanelView({ panel, theme }: { panel: ApprovalPanelState; theme:
   )
 }
 
+function GoalProposalPanelView({ panel, theme }: { panel: GoalProposalPanelState; theme: InkTheme }) {
+  const { current } = panel
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <Text bold color={theme.warning}>建议设定目标</Text>
+      <Text wrap="wrap">{`${current.condition}`}</Text>
+      {GOAL_PROPOSAL_OPTIONS.map((option, index) => {
+        const isSelected = index === panel.selected
+        return (
+          <Text key={option.decision} color={isSelected ? theme.accent : undefined}>
+            {isSelected ? '> ' : '  '}
+            {option.title}
+          </Text>
+        )
+      })}
+      <Text color={theme.muted}>Enter 确认 · Esc 不设定 · Up/Down 选择</Text>
+    </Box>
+  )
+}
+
 function FooterPanelView({ panel, theme }: { panel: FooterPanel; theme: InkTheme }) {
   if (panel.type === 'status') {
     return (
@@ -592,6 +622,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
   const [permissionPanel, setPermissionPanel] = useState<PermissionPanelState | null>(null)
   const [approvalPanel, setApprovalPanel] = useState<ApprovalPanelState | null>(null)
+  const [goalProposalPanel, setGoalProposalPanel] = useState<GoalProposalPanelState | null>(null)
   const [themePanelSelected, setThemePanelSelected] = useState<number | null>(null)
   const [themeName, setThemeName] = useState<InkThemeName>('default')
   const theme = useMemo(() => getInkTheme(themeName), [themeName])
@@ -633,7 +664,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const imagePasteInFlightRef = useRef(false)
   const imagePasteSeqRef = useRef(0)
   const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
-  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || footerPanel || workflowPanel || teamPanel || hooksPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, teamPanel, hooksPanel, skills])
+  const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || goalProposalPanel || themePanelSelected !== null || footerPanel || workflowPanel || teamPanel || hooksPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, teamPanel, hooksPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
   useEffect(() => {
@@ -999,6 +1030,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         setApprovalPanel(panel => approvalPanelOnSettled(panel, event.requestId))
         return
       }
+      if (event.type === 'goal_proposal_request') {
+        setGoalProposalPanel(panel => enqueueGoalProposal(panel, goalProposalFromEvent(event)))
+        return
+      }
+      if (event.type === 'goal_proposal_settled') {
+        setGoalProposalPanel(panel => goalProposalOnSettled(panel, event.requestId))
+        return
+      }
       if (event.type === 'permission_switch_result') {
         if (pendingLocalCommandRef.current) {
           appendLocalCommandOutput(`Permission mode set to ${event.mode}`)
@@ -1358,6 +1397,37 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         modelPanelOpenRef.current = false
         modelPanelPendingRef.current = false
         setModelPanel(null)
+        return
+      }
+    }
+    // 目标提案审批 overlay（与工具审批互斥；任一打开都抢焦点）
+    if (goalProposalPanel) {
+      if (key.escape) {
+        const action = goalProposalOnEscape(goalProposalPanel)
+        bridgeRef.current?.send({
+          type: 'goal_proposal_response',
+          requestId: action.requestId,
+          decision: action.decision,
+        })
+        setGoalProposalPanel(null)
+        return
+      }
+      if (key.upArrow) {
+        setGoalProposalPanel(panel => panel ? { ...panel, selected: moveGoalProposalSelection(panel.selected, -1) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        setGoalProposalPanel(panel => panel ? { ...panel, selected: moveGoalProposalSelection(panel.selected, 1) } : panel)
+        return
+      }
+      if (key.return) {
+        const action = goalProposalOnEnter(goalProposalPanel)
+        bridgeRef.current?.send({
+          type: 'goal_proposal_response',
+          requestId: action.requestId,
+          decision: action.decision,
+        })
+        setGoalProposalPanel(null)
         return
       }
     }
@@ -1795,6 +1865,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} />
     if (section === 'panel') {
+      if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />
       if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} maxServerRows={mcpServerRowCapacity} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />

@@ -73,6 +73,7 @@ from genericagent.core.skills import build_skill_prompt
 from genericagent.core import transcripts as session_transcript
 from genericagent.core import goal as goal_core
 from genericagent.core import goal_evaluator
+from genericagent.core import goal_proposal
 from genericagent.media import image_codec
 try:
     from genericagent.core.context import compact_agent_context, replace_log_with_compact_history
@@ -649,6 +650,12 @@ class GenericAgent:
         self.active_goal = None
         self._queued_goal_origin = None
         self.hook_runtime = None
+        # Phase 4: one-keypress approval runtime for model-proposed goals.
+        try:
+            self.goal_proposal_runtime = goal_proposal.GoalProposalRuntime()
+        except Exception as e:
+            self.goal_proposal_runtime = None
+            print(f"[WARN] Failed to init goal_proposal_runtime: {e}")
         identity = session_transcript.identity_from_environment()
         if identity:
             self.original_cwd = identity.get("original_cwd")
@@ -962,6 +969,12 @@ class GenericAgent:
                 runtime.cancel_all()
             except Exception as e:
                 print(f"[WARN] permission_runtime.cancel_all failed: {e}")
+        gruntime = getattr(self, 'goal_proposal_runtime', None)
+        if gruntime is not None:
+            try:
+                gruntime.cancel_all()
+            except Exception as e:
+                print(f"[WARN] goal_proposal_runtime.cancel_all failed: {e}")
         for target in (getattr(self, 'llmclient', None), getattr(getattr(self, 'llmclient', None), 'backend', None)):
             cancel = getattr(target, 'cancel_current_request', None)
             if cancel:
@@ -1106,6 +1119,62 @@ class GenericAgent:
             )
         except Exception as e:
             print(f"[WARN] Failed to record deferred goal_status: {e}")
+
+    def _goal_proposal_gate(self):
+        """Why a model-proposed goal is rejected right now, or None if allowed.
+
+        Mirrors CC ProposeGoal ``call()`` gate order (m1718:205-283). Only the
+        main session may propose; subagents, plan mode, the feature flag and the
+        ``model_proposed_goals=disabled`` setting all block it.
+        """
+        if getattr(self, 'is_subagent', False):
+            return "propose_goal is only available in the main session, not in a subagent"
+        if not goal_proposal.is_feature_enabled():
+            return "proposed goals are disabled (GA_PROPOSE_GOAL_ENABLED is off)"
+        handler = getattr(self, 'handler', None)
+        in_plan = False
+        try:
+            in_plan = bool(handler is not None and handler._in_plan_mode())
+        except Exception:
+            in_plan = False
+        if in_plan:
+            return "cannot propose a goal while in plan mode; finish the plan first"
+        setting = goal_proposal.read_model_proposed_goals_setting()
+        if setting == goal_proposal.SETTING_DISABLED:
+            return "model-proposed goals are disabled by the model_proposed_goals setting"
+        return None
+
+    def _apply_goal_proposal(self, condition, *, ask_user=True, origin=None):
+        """Apply a validated model proposal. Returns a short user-facing status.
+
+        Direct path (no approval): record the origin then enqueue ``/goal`` on the
+        task queue, exactly like a user typing it (CC defers the same way). Ask
+        path: show the one-keypress dialog and, on approve, queue the same
+        command. Non-blocking either way.
+        """
+        if ask_user:
+            runtime = getattr(self, 'goal_proposal_runtime', None)
+            if runtime is None or not runtime.has_emit():
+                return "goal proposal could not be shown (no approval UI available)"
+            approved = runtime.request_approval(condition)
+            if not approved:
+                # CC: a rejected proposal never notifies the model and must not be
+                # asked about or re-proposed.
+                return "goal proposal was not approved; do not ask about it again or re-propose it"
+            if origin is None:
+                origin = goal_core.ORIGIN_PROPOSAL_APPROVED
+        else:
+            if origin is None:
+                origin = goal_core.ORIGIN_PROPOSAL_DIRECT
+        self._queued_goal_origin = origin
+        try:
+            self.put_task('/goal ' + condition, source='goal_proposal')
+        except Exception as e:
+            self._queued_goal_origin = None
+            return f"failed to queue goal: {e}"
+        if ask_user:
+            return "goal approved; it takes effect when this turn ends. Keep working; do not wait for a kickoff."
+        return "goal set directly; it takes effect when this turn ends. Keep working; do not wait for a kickoff."
 
     def _apply_goal_verdict(self, status):
         """Apply an interpreted goal verdict from the Stop gate.

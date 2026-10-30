@@ -33,7 +33,7 @@ DEFAULT_PERMISSION_MODE = FULL_ACCESS
 # 与 workflow_permissions.ALLOWED_READ_ONLY_STATIC_TOOLS 同源的静态只读白名单。
 # 这些工具即便名字不带 read/list 前缀也应归为读类。
 _STATIC_READ_TOOLS = frozenset(
-    {"file_read", "web_scan", "web_fetch", "no_tool", "ask_user", "load_skill"}
+    {"file_read", "web_scan", "web_fetch", "no_tool", "ask_user", "load_skill", "propose_goal"}
 )
 
 
