@@ -26,7 +26,8 @@ def rec(n,ok,d=""):
     log(("PASS " if ok else "FAIL ")+n+(" - "+str(d) if d else ""))
 os.environ.update({"GA_PROJECT_ROOT":str(TARGET),"GA_DATA_DIR":str(DATA),
   "GA_WORKFLOW_WORKSPACE_ROOT":str(TARGET),"GA_LAUNCH_CWD":str(TARGET),
-  "GA_ORIGINAL_CWD":str(TARGET),"GA_LLM_CONFIG":str(REPO/"llm.yaml")})
+  "GA_ORIGINAL_CWD":str(TARGET),"GA_LLM_CONFIG":str(REPO/"llm.yaml"),
+  "GA_PROPOSE_GOAL_ENABLED":"1"})
 for k in ("GA_PROJECT_KEY","GA_PROJECT_DATA_DIR","GA_SESSION_DATA_DIR","GA_PARENT_SESSION_ID","GA_TASK_ROOT","GA_TEAM_KEY"):
     os.environ.pop(k,None)
 TARGET.mkdir(parents=True, exist_ok=True)

@@ -103,6 +103,7 @@ import {
   goalProposalOnEnter,
   goalProposalOnEscape,
   goalProposalOnSettled,
+  goalProposalRows,
   moveGoalProposalSelection,
   type GoalProposalPanelState,
 } from './goalProposalPanel.js'
@@ -1669,7 +1670,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || goalProposalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
   const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
   const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
@@ -1699,7 +1700,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     () => (hooksPanel ? hooksPanelLines(hooksPanel).slice(0, HOOKS_PANEL_MAX_ROWS) : []),
     [hooksPanel],
   )
-  const panelRows = approvalPanel
+  const panelRows = goalProposalPanel
+    ? goalProposalRows(goalProposalPanel)
+    : approvalPanel
     ? approvalPanelRows(approvalPanel)
     : modelPanel
     ? modelPanelRows(modelPanel)
