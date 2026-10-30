@@ -5,6 +5,9 @@ import {
   formatGoalTokens,
   goalCardLines,
   goalElapsedMs,
+  goalCompactLine,
+  goalSummaryLine,
+  goalStatusLine,
   goalTerminalLines,
   type GoalMetadata,
 } from './goalCard.js'
@@ -51,6 +54,29 @@ test('goalCardLines singular turn and last check', () => {
 
 test('goalCardLines empty without goal', () => {
   assert.deepEqual(goalCardLines(null, 0), [])
+})
+
+test('goalStatusLine and goalSummaryLine share the header line', () => {
+  const lines = goalCardLines(meta(), 1_120_000)
+  assert.equal(goalStatusLine(meta(), 1_120_000), lines[0])
+  assert.equal(goalSummaryLine(meta(), 1_120_000), lines[0])
+})
+
+test('goalSummaryLine is a single line and null without a goal', () => {
+  const summary = goalSummaryLine(meta({ last_reason: 'still going' }), 1_120_000)
+  assert.equal(typeof summary, 'string')
+  assert.equal(summary!.includes(String.fromCharCode(10)), false)
+  assert.match(summary!, /Goal active/)
+  // It must not leak the second (Goal:/Last check) card line.
+  assert.doesNotMatch(summary!, /Last check/)
+  assert.equal(goalSummaryLine(null, 0), null)
+})
+
+test('goalCompactLine prefers active status, falls back to terminal badge', () => {
+  assert.equal(goalCompactLine(meta(), null, 1_120_000), goalStatusLine(meta(), 1_120_000))
+  assert.equal(goalCompactLine(null, { met: true, durationMs: 65_000 }, 0), '✓ Goal met · 1m 5s')
+  assert.equal(goalCompactLine(null, { met: false, failed: true }, 0), '✗ Goal failed')
+  assert.equal(goalCompactLine(null, null, 0), null)
 })
 
 test('goalTerminalLines badge', () => {

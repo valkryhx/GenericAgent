@@ -108,6 +108,22 @@ test('computeLayoutMetrics accounts for running activity and capped panels', () 
   assert.equal(metrics.messageRows, 1)
 })
 
+test('overlay reserves exactly one extra row for the collapsed goal summary', () => {
+  const base = {
+    rows: 24,
+    columns: 80,
+    hasError: false,
+    hasSlashSuggestions: false,
+    hasPanel: true,
+    panelRows: 6,
+    headerRows: 0,
+  }
+  const withoutGoal = computeLayoutMetrics({ ...base, hasActivity: false, goalRows: 0 })
+  const withSummary = computeLayoutMetrics({ ...base, hasActivity: false, goalRows: 1 })
+  assert.equal(withSummary.bottomRows, withoutGoal.bottomRows + 1)
+  assert.equal(withSummary.messageRows, withoutGoal.messageRows - 1)
+})
+
 test('computeLayoutMetrics allows tall panels when the terminal has room', () => {
   const metrics = computeLayoutMetrics({
     rows: 24,

@@ -49,24 +49,60 @@ export function goalElapsedMs(meta: GoalMetadata, nowMs: number): number {
   return Math.max(0, Math.floor(nowMs - setAtMs))
 }
 
-/**
- * Lines for the active goal card. Empty when there is no goal, so the caller
- * simply renders nothing and the layout reserves zero rows.
- */
-export function goalCardLines(meta: GoalMetadata | null, nowMs: number): string[] {
-  if (!meta) return []
+/** The "◎ Goal active · running ..." status line (shared by card and overlay collapse). */
+export function goalStatusLine(meta: GoalMetadata, nowMs: number): string {
   const turns = Math.max(0, Math.floor(meta.iterations || 0))
   const parts = [
     `running ${formatGoalDuration(goalElapsedMs(meta, nowMs))}`,
     `${turns} ${turns === 1 ? 'turn' : 'turns'}`,
     `${formatGoalTokens(meta.tokens_spent)} tokens`,
   ]
-  const line1 = `◎ Goal active · ${parts.join(' · ')}`
-  const goal = condense(meta.condition)
-  let line2 = `Goal: ${goal}`
+  return `◎ Goal active · ${parts.join(' · ')}`
+}
+
+/**
+ * Lines for the active goal card. Empty when there is no goal, so the caller
+ * simply renders nothing and the layout reserves zero rows.
+ */
+export function goalCardLines(meta: GoalMetadata | null, nowMs: number): string[] {
+  if (!meta) return []
+  const line1 = goalStatusLine(meta, nowMs)
+  let line2 = `Goal: ${condense(meta.condition)}`
   const last = condense(meta.last_reason || '')
   if (last) line2 += `  ·  Last check: ${last}`
   return [line1, line2]
+}
+
+/**
+ * One compact line shown while an overlay panel owns the bottom band.
+ *
+ * CC's /goal card is a dialog that shares the single command-result slot with
+ * /workflows and /tasks (m1635:67066 lays an "immediate" command result out as
+ * "bottom"), so opening a panel there simply replaces the goal card. GA's goal
+ * is a passive metadata strip, so rather than drop goal context when a panel
+ * opens we collapse it to this single header line: it keeps "which goal" plus
+ * live stats visible without taking more than one row from the panel.
+ */
+export function goalSummaryLine(meta: GoalMetadata | null, nowMs: number): string | null {
+  if (!meta) return null
+  return goalStatusLine(meta, nowMs)
+}
+
+/**
+ * One compact goal line for surfaces that are NOT the full card: any active
+ * overlay panel, or an open slash-completion popup. Prefers the live status
+ * line while a goal is running, otherwise the one-line terminal badge so that
+ * "goal reached/failed" is still announced even when a panel owns the screen.
+ */
+export function goalCompactLine(
+  meta: GoalMetadata | null,
+  terminal: GoalTerminal | null,
+  nowMs: number,
+): string | null {
+  const active = goalSummaryLine(meta, nowMs)
+  if (active) return active
+  const done = goalTerminalLines(terminal)
+  return done.length > 0 ? done[0] : null
 }
 
 /** A one-line terminal badge shown after a goal is met/failed (sentinel hidden). */

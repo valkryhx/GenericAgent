@@ -36,7 +36,7 @@ import {
   type TeamPanelState,
 } from './teamPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
-import { goalCardLines, goalTerminalLines } from './goalCard.js'
+import { goalCardLines, goalCompactLine, goalTerminalLines } from './goalCard.js'
 import { createInputHistory, nextInput, previousInput, recordInput } from './inputHistory.js'
 import {
   liveTranscriptViewportLines,
@@ -1679,7 +1679,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const goalCardLinesOut = goalCardLines(state.goalMetadata, now)
   const goalTerminalLinesOut = state.status === 'running' || state.status === 'stopping' ? [] : goalTerminalLines(state.goalTerminal)
   const showGoalCard = (goalCardLinesOut.length > 0 || goalTerminalLinesOut.length > 0) && !activePanel && slashItems.length === 0
-  const goalRows = showGoalCard ? goalCardLinesOut.length + goalTerminalLinesOut.length : 0
+  // When a panel (workflow/team/...) or the slash-completion popup owns the
+  // bottom band, the full goal card is hidden. Collapse it to a single line so
+  // a running OR just-reached goal is never lost behind another surface. See
+  // goalCompactLine() for the CC /goal (dialog) comparison.
+  const compactGoalLine = !showGoalCard
+    ? goalCompactLine(state.goalMetadata, goalTerminalLinesOut.length > 0 ? state.goalTerminal : null, now)
+    : null
+  const goalRows = showGoalCard
+    ? goalCardLinesOut.length + goalTerminalLinesOut.length
+    : compactGoalLine ? 1 : 0
   const promptViewport = useMemo(() => inputViewport(input, {
     columns: inputContentColumns(canvasColumns),
     maxRows: 6,
@@ -1970,7 +1979,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
           {showGoalCard ? <GoalStatusCardView lines={goalCardLinesOut} terminal={goalTerminalLinesOut} theme={theme} /> : null}
-          {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
+          {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : compactGoalLine ? <Box paddingX={1}><Text color={compactGoalLine.startsWith('✓') ? theme.success : compactGoalLine.startsWith('✗') ? theme.error : theme.accent} wrap="truncate-end">{compactGoalLine}</Text></Box> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>
       </Box>

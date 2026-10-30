@@ -130,19 +130,49 @@ test('goal+workflow frames never overflow the terminal width', async () => {
   } finally { h.instance.unmount() }
 })
 
-test('team overlay paints and hides the goal card; closing restores it', async () => {
+test('team overlay collapses the goal card to one summary line; closing restores it', async () => {
   const h = mount(onEvent => { onEvent(GOAL()); onEvent(TEAM) })
   try {
     await waitFor(h.stdout, s => s.includes('Task board') && s.includes('worker'))
     const overlay = chrome(h.stdout).at(-1) ?? ''
     assert.match(overlay, /Team root/)
     assert.match(overlay, /Task board/)
-    // The overlay is the active panel: the goal card must not be squeezed in.
-    assert.doesNotMatch(overlay, /Goal active/)
-    // Esc closes the overlay -> goal card returns.
-    h.stdin.send('\u001b')
-    const out = await waitFor(h.stdout, s => s.includes('Goal active'))
-    assert.match(out, /Goal active/)
+    // Overlay owns the bottom band: the full two-line card collapses to the
+    // single header line so goal context is not lost, but the second
+    // (Goal:/Last check) line is not rendered inside the overlay.
+    assert.match(overlay, /◎ Goal active/)
+    assert.doesNotMatch(overlay, /Goal: ship the release/)
+    for (const line of overlay.split(String.fromCharCode(10))) {
+      assert.ok(stringWidth(line) < 100, `line too wide (${stringWidth(line)}): ${JSON.stringify(line)}`)
+    }
+    // Esc closes the overlay -> the full goal card (with the Goal: line) returns.
+    h.stdin.send(String.fromCharCode(27))
+    const out = await waitFor(h.stdout, s => s.includes('Goal: ship the release'))
+    assert.match(out, /◎ Goal active/)
+  } finally { h.instance.unmount() }
+})
+
+test('/workflows overlay collapses the goal card to one summary line; closing restores it', async () => {
+  const WF_RUNS = {
+    type: 'workflow_runs' as const,
+    savedWorkflows: [] as string[],
+    runs: [
+      { runId: 'wf_list1', sessionId: 'session', status: 'running', metadata: { workflowName: 'release-build' } },
+    ],
+  }
+  const h = mount(onEvent => { onEvent(GOAL()); onEvent(WF_RUNS) })
+  try {
+    await waitFor(h.stdout, s => s.includes('Dynamic workflows'))
+    const overlay = chrome(h.stdout).at(-1) ?? ''
+    assert.match(overlay, /Dynamic workflows/)
+    assert.match(overlay, /◎ Goal active/)
+    assert.doesNotMatch(overlay, /Goal: ship the release/)
+    for (const line of overlay.split(String.fromCharCode(10))) {
+      assert.ok(stringWidth(line) < 100, `line too wide (${stringWidth(line)}): ${JSON.stringify(line)}`)
+    }
+    h.stdin.send(String.fromCharCode(27))
+    const out = await waitFor(h.stdout, s => s.includes('Goal: ship the release'))
+    assert.match(out, /◎ Goal active/)
   } finally { h.instance.unmount() }
 })
 
@@ -155,5 +185,34 @@ test('/team request opens the panel even while a goal is active', async () => {
   try {
     await waitFor(h.stdout, s => s.includes('Task board'))
     assert.ok(h.stdout.chunks.map(stripAnsi).join('').includes('Team root'))
+  } finally { h.instance.unmount() }
+})
+
+test('goal stays visible while the slash-completion popup is open', async () => {
+  const h = mount(onEvent => { onEvent(GOAL()) })
+  try {
+    await waitFor(h.stdout, s => s.includes('Goal active'))
+    h.stdin.send('/')
+    // Slash suggestions take over the bottom band; the full card is replaced by
+    // the single summary line so the goal is not lost while typing a command.
+    await waitFor(h.stdout, s => /\/(help|clear|model|workflow)/.test(s) && s.includes('◎ Goal active'))
+    const frame = chrome(h.stdout).at(-1) ?? ''
+    assert.match(frame, /◎ Goal active/)
+    assert.doesNotMatch(frame, /Goal: ship the release/)
+  } finally { h.instance.unmount() }
+})
+
+test('goal reached while the team overlay is open still shows a badge', async () => {
+  const h = mount(onEvent => {
+    onEvent(GOAL())
+    onEvent(TEAM)
+    setTimeout(() => onEvent({ type: 'goal_metadata', goal: null, terminal: { met: true, durationMs: 65_000, iterations: 2, tokens: 900 } }), 120)
+  })
+  try {
+    await waitFor(h.stdout, s => s.includes('Goal met'))
+    const frame = chrome(h.stdout).at(-1) ?? ''
+    assert.match(frame, /✓ Goal met/)
+    assert.match(frame, /Task board/)
+    assert.doesNotMatch(frame, /Goal active/)
   } finally { h.instance.unmount() }
 })
