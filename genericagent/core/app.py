@@ -72,6 +72,7 @@ from genericagent.core.handler import GenericAgentHandler, smart_format, get_glo
 from genericagent.core.skills import build_skill_prompt
 from genericagent.core import transcripts as session_transcript
 from genericagent.core import goal as goal_core
+from genericagent.core import goal_evaluator
 from genericagent.media import image_codec
 try:
     from genericagent.core.context import compact_agent_context, replace_log_with_compact_history
@@ -1063,21 +1064,66 @@ class GenericAgent:
 
     def _set_goal(self, condition, origin=goal_core.ORIGIN_USER):
         self.active_goal = goal_core.ActiveGoal(condition=condition, origin=origin)
+        # Register the Stop evaluator hook (idempotent on key="goal:stop").
+        try:
+            goal_evaluator.register_goal_hook(self, condition)
+        except Exception as e:
+            print(f"[WARN] Failed to register goal hook: {e}")
         self._record_active_goal()
         self._record_goal_status(met=False, condition=condition, iterations=0, sentinel=True)
         return self.active_goal
 
-    def _clear_goal(self, *, met, failed=False, reason=""):
+    def _clear_goal(self, *, met, failed=False, reason="", iterations=None):
         g = getattr(self, 'active_goal', None)
         if g is None:
             return None
+        iters = g.iterations if iterations is None else int(iterations)
         self.active_goal = None
+        try:
+            goal_evaluator.unregister_goal_hook(self)
+        except Exception as e:
+            print(f"[WARN] Failed to unregister goal hook: {e}")
         self._record_active_goal()
         self._record_goal_status(
             met=met, failed=failed, condition=g.condition, reason=reason,
-            iterations=g.iterations,
+            iterations=iters,
         )
         return g
+
+    def _apply_goal_verdict(self, status):
+        """Apply an interpreted goal verdict from the Stop gate.
+
+        - met / failed: clear the goal + hook, write a terminal goal_status.
+        - not_met (ok:false): bump iterations + last_reason, keep goal/hook.
+        - evaluator_error / timeout: do not treat as met; leave goal active and
+          let the turn end (the Stop gate already fails open for those).
+        """
+        g = getattr(self, 'active_goal', None)
+        if g is None or status is None:
+            return
+        if status.error_kind:
+            # Evaluator failed (error/timeout/invalid_output). Never treat as
+            # met; keep the goal active and let the turn end (the Stop gate
+            # already fails open). Record it so the failure is not silent.
+            print(f"[WARN] goal evaluator {status.error_kind}; goal stays active")
+            self._record_goal_status(
+                met=False, condition=g.condition,
+                reason=status.error_kind, iterations=g.iterations,
+            )
+            return
+        if status.met:
+            self._clear_goal(met=True, reason=status.reason, iterations=g.iterations + 1)
+            return
+        if status.failed:
+            self._clear_goal(met=False, failed=True, reason=status.reason, iterations=g.iterations + 1)
+            return
+        # not met: keep working toward it
+        self.active_goal = g.bumped(status.reason)
+        self._record_active_goal()
+        self._record_goal_status(
+            met=False, condition=g.condition, reason=status.reason,
+            iterations=self.active_goal.iterations,
+        )
 
     def _handle_goal_command(self, arg, display_queue):
         cmd = goal_core.parse_goal_command(arg)
@@ -1098,6 +1144,17 @@ class GenericAgent:
         origin = getattr(self, '_queued_goal_origin', None) or goal_core.ORIGIN_USER
         self._queued_goal_origin = None
         g = self._set_goal(cmd.condition, origin=origin)
+        # Kickoff: nudge the model to keep working until the goal is met, on the
+        # next real model input. Skipped when this was called headless in tests.
+        try:
+            self.history.append(
+                '[SYSTEM] A session goal is now active with condition: "%s". '
+                'Continue working toward the condition; the evaluator will block '
+                'turn-end until it holds. It auto-clears once met (do not ask the '
+                'user to clear after success).' % g.condition
+            )
+        except Exception:
+            pass
         display_queue.put({'done': f'Goal set: {g.condition}', 'source': 'system'})
 
     def _manual_compact(self, instructions, display_queue):

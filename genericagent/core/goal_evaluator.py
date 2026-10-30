@@ -1,0 +1,154 @@
+"""Goal evaluator wiring (Stage F, phase 1).
+
+Registers a session-scoped ``Stop`` prompt hook (stage B) whose output is parsed
+strictly against a ``{ok, reason, impossible?}`` schema (stage D). The Stop gate
+(stage A) then blocks the turn end while the goal is unmet, exactly like CC's
+blockable_turn_end goal hook. This module only builds/serializes; it never runs
+the model itself, so it is unit-testable without network access.
+"""
+
+from __future__ import annotations
+
+import json
+
+# Session hook key; idempotent replacement so re-setting a goal never stacks.
+GOAL_STOP_HOOK_KEY = "goal:stop"
+
+# Strict evaluator schema (mirrors stage D's {ok,reason,impossible?} triple).
+GOAL_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "reason"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "impossible": {"type": "boolean"},
+    },
+}
+
+GOAL_EVAL_PROMPT = """You are evaluating a stop-condition goal in GenericAgent. Read the conversation transcript in <hook_input>, then judge whether the goal condition is satisfied.
+
+Your response MUST be a single JSON object matching this schema:
+- {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
+- {"ok": false, "reason": "<quote what is missing or what blocks the condition>"}
+- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>"}
+
+Always include "reason", quoting specific text whenever possible. If the transcript lacks clear evidence, return {"ok": false, "reason": "insufficient evidence in transcript"}. Only use "impossible" when the condition is genuinely unachievable in this session (self-contradictory, depends on an unavailable resource, or all reasonable approaches exhausted and independently confirmed). When in doubt, return {"ok": false} without "impossible". Do not wrap the JSON in prose or code fences.
+
+GOAL CONDITION:
+{condition}"""
+
+DEFAULT_GOAL_TIMEOUT = 120.0
+# Character budget for the serialized transcript handed to the evaluator.
+DEFAULT_TRANSCRIPT_CHAR_BUDGET = 40000
+
+
+def build_goal_prompt(condition: str) -> str:
+    return GOAL_EVAL_PROMPT.replace("{condition}", str(condition or ""))
+
+
+def build_goal_handler_spec(condition: str, *, timeout: float = DEFAULT_GOAL_TIMEOUT) -> dict:
+    """The raw handler dict accepted by ``add_session_hook`` / parse_dynamic_handler."""
+    return {
+        "type": "prompt",
+        "prompt": build_goal_prompt(condition),
+        "outputSchema": GOAL_OUTPUT_SCHEMA,
+        "timeout": float(timeout),
+        # A broken/timeout evaluator must never trap the turn (Stop is in
+        # ON_FAILURE_IGNORED_EVENTS, but be explicit for readability).
+        "onFailure": "continue",
+    }
+
+
+def _message_to_text(message) -> str:
+    if not isinstance(message, dict):
+        return str(message)
+    role = str(message.get("role") or "?")
+    content = message.get("content")
+    if isinstance(content, str):
+        body = content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+                elif block.get("type") == "tool_use":
+                    parts.append("[tool_use %s]" % block.get("name"))
+                elif block.get("type") == "tool_result":
+                    parts.append("[tool_result]")
+            else:
+                parts.append(str(block))
+        body = " ".join(p for p in parts if p)
+    else:
+        body = str(content) if content is not None else ""
+    return "%s: %s" % (role, body)
+
+
+def serialize_transcript(history, *, char_budget: int = DEFAULT_TRANSCRIPT_CHAR_BUDGET) -> str:
+    """Turn a backend history (list of messages) or string list into text.
+
+    Truncates from the front (oldest first) when over budget, prefixing a note
+    so the evaluator knows earlier context was dropped (CC m0459 UYr ~0.5x
+    context budget; here a plain char budget is enough for phase 1).
+    """
+    if not history:
+        return ""
+    if isinstance(history, str):
+        lines = [history]
+    else:
+        lines = [_message_to_text(m) for m in history]
+    text = "\n".join(line for line in lines if line)
+    if len(text) <= char_budget:
+        return text
+    omitted = len(text) - char_budget
+    tail = text[-char_budget:]
+    note = (
+        "[Earlier conversation truncated to fit the evaluator's context window - "
+        "%d characters omitted. Evaluate against the recent transcript; if the "
+        "required evidence may be in the omitted prefix, return "
+        "{\"ok\": false, \"reason\": \"insufficient evidence in transcript\"}.]\n"
+    ) % omitted
+    return note + tail
+
+
+def transcript_from_agent(agent, *, char_budget: int = DEFAULT_TRANSCRIPT_CHAR_BUDGET) -> str:
+    """Best-effort transcript text for the evaluator payload.
+
+    Prefers the backend history (full conversation for the session). Falls back
+    to the app-level ``history`` list of bracketed lines.
+    """
+    history = None
+    backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+    if backend is not None:
+        history = getattr(backend, "history", None)
+    if not history:
+        history = getattr(agent, "history", None)
+    return serialize_transcript(history, char_budget=char_budget)
+
+
+def register_goal_hook(agent, condition: str, *, timeout: float = DEFAULT_GOAL_TIMEOUT):
+    """Install (or replace) the goal Stop hook on the agent's hook runtime."""
+    from genericagent.hooks.runtime import hook_runtime_for_agent
+    runtime = hook_runtime_for_agent(agent)
+    return runtime.add_session_hook(
+        "Stop",
+        build_goal_handler_spec(condition, timeout=timeout),
+        key=GOAL_STOP_HOOK_KEY,
+        emit=getattr(agent, "hook_emit", None),
+    )
+
+
+def unregister_goal_hook(agent) -> bool:
+    from genericagent.hooks.runtime import hook_runtime_for_agent
+    runtime = getattr(agent, "hook_runtime", None)
+    if runtime is None:
+        return False
+    try:
+        return runtime.remove_session_hook(GOAL_STOP_HOOK_KEY)
+    except Exception:
+        return False
+
+
+def goal_payload_extra(agent) -> dict:
+    """Extra Stop payload fields the goal evaluator needs (transcript text)."""
+    return {"goal_transcript": transcript_from_agent(agent)}

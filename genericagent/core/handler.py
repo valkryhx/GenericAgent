@@ -491,6 +491,14 @@ class GenericAgentHandler(BaseHandler):
             'source': 'turn_end',
             'phase': 'turn_end',
         }
+        # Goal evaluator needs the conversation transcript; attach it only when
+        # a goal is active so ordinary Stop hooks pay no cost.
+        if getattr(agent, 'active_goal', None) is not None:
+            try:
+                from genericagent.core import goal_evaluator
+                data['goal_transcript'] = goal_evaluator.transcript_from_agent(agent)
+            except Exception:
+                pass
         # Route through the shared entry point so the Stop gate obeys the same
         # runtime resolution / emit plumbing as every other app-level hook.
         # run_hook_event swallows hook errors and returns a benign aggregate,
@@ -498,6 +506,17 @@ class GenericAgentHandler(BaseHandler):
         from genericagent.hooks.runtime import run_hook_event
         agg = run_hook_event(agent, 'Stop', data, emit=getattr(agent, 'hook_emit', None))
         self.last_hook_aggregate = agg
+        # Goal accounting: interpret the strict {ok,reason,impossible?} verdict
+        # and update active_goal / goal_status. This only records state; the
+        # block/continue/stop action below is still driven by the aggregate.
+        if getattr(agent, 'active_goal', None) is not None:
+            try:
+                from genericagent.core.goal import interpret_verdict
+                apply_verdict = getattr(agent, '_apply_goal_verdict', None)
+                if apply_verdict is not None:
+                    apply_verdict(interpret_verdict(agg))
+            except Exception:
+                pass
         if agg is None:
             return ('none', '', None)
         # preventContinuation wins: stop the turn but surface the reason.

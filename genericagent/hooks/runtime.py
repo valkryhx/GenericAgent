@@ -552,7 +552,13 @@ class HookRuntime:
         # ordering). Each pass stops early on a blocking guard verdict.
         self._run_entries(self.registry.for_event(event), event, payload, payload_dict, aggregate, emit, dynamic=False)
         if not (aggregate.blocked and event in GUARD_EVENTS):
-            dynamic_entries = [e for e in self._session_hooks.values() if e.event == event]
+            # Session-scoped Stop hooks (e.g. goal) only apply to the turn-end
+            # gate, never the app-level user_turn_end fallback. Both phases emit
+            # the same "Stop" event, so without this the goal evaluator would
+            # run twice per turn (and iterations would double-count). Static
+            # Stop hooks such as a beep are unaffected.
+            skip_dynamic = event == "Stop" and payload_dict.get("phase") == "user_turn_end"
+            dynamic_entries = [] if skip_dynamic else [e for e in self._session_hooks.values() if e.event == event]
             if dynamic_entries:
                 self._run_entries(dynamic_entries, event, payload, payload_dict, aggregate, emit, dynamic=True)
         return aggregate
