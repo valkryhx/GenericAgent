@@ -180,6 +180,82 @@ class WorkflowSchedulerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SchedulerConfig(max_concurrent=17)
 
+    def test_prepares_outside_deliverable_parent_under_unrestricted(self):
+        """Default pathPolicy=unrestricted: an absolute deliverable outside the run
+        workspace must pre-create its parent, not fail the job.
+
+        Regression for commit e48dbae era: a workflow launched with an absolute
+        ``outDir`` outside the run workspace (e.g. the user's repo dir) had every
+        parallel agent fail at startup with "path is outside workspace" because
+        ``_prepare_declared_workspace`` used the workspace-only resolver and let
+        ``WorkspacePathError`` bubble into ``_fail_job``.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "run_ws"
+            workspace.mkdir()
+            scheduler, _store, _run = self.make_scheduler(
+                run_kwargs={"metadata": {"workspacePath": str(workspace), "pathPolicy": "unrestricted"}})
+            scheduler.workspace_path = str(workspace)
+            scheduler.args = {"workspacePath": str(workspace)}
+            ext = Path(tmp) / "outside" / "report.md"
+            job = scheduler.register_agent(
+                prompt="write", label="Review", options={"deliverables": [str(ext)]})
+            job.metadata["parallelBatch"] = 4
+
+            scheduler._prepare_declared_workspace(job)  # must not raise
+
+            self.assertTrue(ext.parent.is_dir(), "outside parent should be pre-created")
+            self.assertEqual("queued", job.status, "prepare must not fail the job")
+
+    def test_start_path_does_not_fail_job_for_outside_deliverable(self):
+        """The real start path must launch a writer whose deliverable is outside
+        the workspace under unrestricted policy (the exact online failure)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "run_ws"
+            workspace.mkdir()
+            scheduler, _store, _run = self.make_scheduler(
+                run_kwargs={"metadata": {"workspacePath": str(workspace), "pathPolicy": "unrestricted"}})
+            scheduler.workspace_path = str(workspace)
+            scheduler.args = {"workspacePath": str(workspace)}
+            ext = Path(tmp) / "outside" / "report.md"
+            job = scheduler.register_agent(
+                prompt="write", label="Review", options={"deliverables": [str(ext)]})
+            job.metadata["parallelBatch"] = 4
+
+            # Mirror _start_queued_jobs' try/except around prepare+start.
+            try:
+                scheduler._prepare_declared_workspace(job)
+                scheduler.runner.start(job)
+            except Exception as exc:  # noqa: BLE001
+                scheduler._fail_job(job, str(exc))
+
+            self.assertNotEqual("failed", job.status, job.error)
+
+    def test_workspace_policy_skips_outside_parent_without_failing(self):
+        """pathPolicy=workspace: never create an outside parent, never fail the
+        job; an inside deliverable parent is still pre-created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "run_ws"
+            workspace.mkdir()
+            scheduler, _store, _run = self.make_scheduler(
+                run_kwargs={"metadata": {"workspacePath": str(workspace)}})
+            scheduler.workspace_path = str(workspace)
+            scheduler.args = {"workspacePath": str(workspace)}
+            ext = Path(tmp) / "outside" / "r.md"
+            job = scheduler.register_agent(
+                prompt="w", label="W", options={"deliverables": [str(ext)], "pathPolicy": "workspace"})
+            job.metadata["parallelBatch"] = 4
+
+            scheduler._prepare_declared_workspace(job)  # must not raise
+
+            self.assertFalse(ext.parent.is_dir(), "must not create outside parent under workspace policy")
+            self.assertEqual("queued", job.status)
+            inside = workspace / "sub" / "ok.md"
+            job2 = scheduler.register_agent(
+                prompt="w2", label="W2", options={"deliverables": [str(inside)], "pathPolicy": "workspace"})
+            scheduler._prepare_declared_workspace(job2)
+            self.assertTrue(inside.parent.is_dir(), "inside parent should still be pre-created")
+
     def test_registers_job_with_cache_key_permission_fields_and_journal_event(self):
         scheduler, store, run = self.make_scheduler()
 

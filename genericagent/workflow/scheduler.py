@@ -517,12 +517,26 @@ class AgentScheduler:
 
         ``file_write`` intentionally writes only files. Directory creation is a
         host responsibility so a child does not burn LLM turns guessing mkdir
-        commands, and every created path still passes the workspace guard.
+        commands.
+
+        ``deliverables``/``writeScope`` are advisory (see the authoring skill and
+        ``references/api.md``): they drive attribution, they are NOT a write ACL,
+        and a missing/out-of-workspace entry must never fail the job. The old
+        implementation ran every entry through ``resolve_workspace_child`` and
+        let ``WorkspacePathError`` bubble out of ``_start_queued_jobs``, so under
+        the default ``pathPolicy:"unrestricted"`` a workflow that legitimately
+        wanted to write outside the run workspace (e.g. an absolute ``outDir``)
+        had every agent fail at startup with "path is outside workspace" before
+        the model even ran. Startup is a best-effort convenience: we create the
+        parent when we safely can and silently skip anything we cannot resolve.
         """
         workspace = self.workspace_path or (self.run.metadata or {}).get("workspacePath")
         if not workspace:
             return
         options = job.metadata.get("options") if isinstance(job.metadata, dict) else {}
+        path_policy = "unrestricted"
+        if isinstance(options, dict):
+            path_policy = str(options.get("pathPolicy") or "unrestricted").strip().lower()
         paths: list[str] = []
         if isinstance(options, dict):
             for key in ("writeScope", "deliverables"):
@@ -531,8 +545,20 @@ class AgentScheduler:
                     raw = [raw]
                 paths.extend(str(item) for item in raw if str(item).strip())
         for raw in paths:
-            target = resolve_workspace_child(raw, Path(workspace))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target = resolve_workspace_child(raw, Path(workspace))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                continue
+            except (WorkspacePathError, OSError, ValueError):
+                pass
+            # Outside the workspace. Allowed to proceed (the child's own tools
+            # will create the parent on write) under ``unrestricted``; under the
+            # hard ``workspace`` policy we simply skip it -- never fail the job.
+            if path_policy != "workspace":
+                try:
+                    Path(raw).expanduser().resolve(strict=False).parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
 
     def _apply_implicit_isolation(self, job: WorkflowJob) -> None:
         """Auto-isolate a parallel writer that did not declare ``isolation``.
