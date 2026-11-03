@@ -108,7 +108,8 @@ def main() -> int:
 
         marker_abs = TARGET / "wf_out.txt"
         goal_text = f"目录 {TARGET} 下存在文件 wf_out.txt 且内容包含 WF_OK"
-        r0 = run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r0 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["set_goal"] = r0
         rec("turn1 /goal set an active goal", agent.active_goal is not None,
             getattr(agent.active_goal, "condition", None))

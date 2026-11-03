@@ -82,7 +82,8 @@ def main():
 
         marker_name="wf_out.txt"
         goal_text=f"目录 {TARGET} 下存在文件 {marker_name} 且内容包含 WF_OK"
-        r0=run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r0 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["set_goal"]=r0
         summary["goal_active_after_set"]=agent.active_goal is not None
 

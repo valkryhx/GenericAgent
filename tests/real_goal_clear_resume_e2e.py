@@ -87,7 +87,8 @@ def main() -> int:
         summary["warmup"] = r0
         rec("warmup turn completed", r0["ok"], r0["text"][:100])
 
-        r1 = run_turn(agent, "/goal 必须存在文件 goal_marker.txt 且内容包含 GOAL_OK", 60)
+        _goal = agent._set_goal("必须存在文件 goal_marker.txt 且内容包含 GOAL_OK")
+        r1 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["set_goal"] = r1
         rec("goal set", getattr(agent, "active_goal", None) is not None)
 

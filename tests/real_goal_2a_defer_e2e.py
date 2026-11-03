@@ -125,7 +125,8 @@ def main() -> int:
 
         # ---- turn 1: set goal ----
         goal_text = "主目录下必须存在文件 child_done.txt 且其内容包含 CHILD_OK"
-        r1 = run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r1 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["phases"]["set_goal"] = r1
         log("active_goal after set:", getattr(agent, "active_goal", None))
         rec("turn1 /goal set an active goal", getattr(agent, "active_goal", None) is not None,

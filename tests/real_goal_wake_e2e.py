@@ -132,7 +132,8 @@ def main() -> int:
 
         # ---------- Phase A: default OFF must not schedule a wake ----------
         os.environ.pop("GA_GOAL_WAKE", None)
-        r1 = run_turn(agent, "/goal 主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK", 60)
+        _goal = agent._set_goal("主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK")
+        r1 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["phases"]["A_set_goal"] = r1
         rec("A: /goal set an active goal", getattr(agent, "active_goal", None) is not None)
         before = set(recorder.running_task_ids())
@@ -144,7 +145,7 @@ def main() -> int:
         # ---------- Phase B: retry wake (real new turn) ----------
         os.environ["GA_GOAL_WAKE"] = "1"
         if getattr(agent, "active_goal", None) is None:
-            run_turn(agent, "/goal 主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK", 60)
+            agent._set_goal("主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK")
         before = set(recorder.running_task_ids())
         sched = agent._ensure_goal_wake()
         rec("B: scheduler created when enabled + callback present",
@@ -169,7 +170,7 @@ def main() -> int:
 
         # ---------- Phase C: check-in wake (real new turn) ----------
         if getattr(agent, "active_goal", None) is None:
-            run_turn(agent, "/goal 主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK", 60)
+            agent._set_goal("主目录下必须存在文件 wake_done.txt 且内容包含 WAKE_OK")
         before = set(recorder.running_task_ids())
         sched = agent._ensure_goal_wake()
         armed_c = sched.arm_checkin(delay_ms=1500) if sched else False

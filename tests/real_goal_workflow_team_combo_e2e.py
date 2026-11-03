@@ -120,7 +120,8 @@ def main() -> int:
         mwf = TARGET / "marker_wf.txt"
         mteam = TARGET / "marker_team.txt"
         goal_text = (f"目录 {TARGET} 下同时存在 marker_wf.txt(WF_OK) 与 marker_team.txt(TEAM_OK)")
-        r0 = run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r0 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["set_goal"] = r0
         rec("turn0 /goal set an active goal", agent.active_goal is not None,
             getattr(agent.active_goal, "condition", None))

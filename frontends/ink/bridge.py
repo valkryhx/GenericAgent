@@ -3235,6 +3235,9 @@ class GenericAgentBridge:
             while True:
                 item = display_queue.get()
                 emit_usage_if_changed()
+                if "system" in item:
+                    # Non-terminal system notice emitted mid-turn (e.g. "Goal set").
+                    self.emit({"type": "system", "text": str(item.get("system") or "")})
                 if "next" in item:
                     self.emit({"type": "assistant_delta", "taskId": task_id, "text": str(item.get("next") or "")})
                 if "done" in item:

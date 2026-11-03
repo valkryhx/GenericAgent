@@ -381,6 +381,10 @@ class GenericAgentTUI(App[None]):
                 item = display_queue.get(timeout=0.25)
             except queue.Empty:
                 continue
+            if "system" in item:
+                # Non-terminal system notice mid-turn; keep draining for the
+                # model stream and the eventual 'done'.
+                self.call_from_thread(self._on_system_notice, agent_id, task_id, str(item.get("system") or ""))
             if "next" in item:
                 buffer += str(item.get("next") or "")
                 self.call_from_thread(self._on_stream_update, agent_id, task_id, buffer, False)
@@ -388,6 +392,13 @@ class GenericAgentTUI(App[None]):
                 done_text = str(item.get("done") or buffer)
                 self.call_from_thread(self._on_stream_update, agent_id, task_id, done_text, True)
                 return
+
+    def _on_system_notice(self, agent_id: int, task_id: int, text: str) -> None:
+        """Append a mid-turn system notice (e.g. 'Goal set') without ending the turn."""
+        session = self.sessions.get(agent_id)
+        if not session or session.current_task_id != task_id:
+            return
+        session.messages.append(ChatMessage("system", text, done=True))
 
     def _on_stream_update(self, agent_id: int, task_id: int, text: str, done: bool) -> None:
         session = self.sessions.get(agent_id)

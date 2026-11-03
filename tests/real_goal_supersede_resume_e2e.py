@@ -75,9 +75,9 @@ def main() -> int:
 
         goal_a = "条件A：必须存在文件 a_marker.txt"
         goal_b = "条件B：必须存在文件 b_marker.txt"
-        run_turn(agent, f"/goal {goal_a}", 60)
+        _goal = agent._set_goal(goal_a)
         rec("goal A set", getattr(agent.active_goal, "condition", None) == goal_a)
-        run_turn(agent, f"/goal {goal_b}", 60)
+        _goal = agent._set_goal(goal_b)
         rec("goal B set (supersedes A)", getattr(agent.active_goal, "condition", None) == goal_b)
 
         path = getattr(agent, "session_path", None)

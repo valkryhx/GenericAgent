@@ -106,7 +106,8 @@ def main() -> int:
         goal_text = f"必须存在文件 {marker.name}，且其内容包含 P5_OK"
 
         # 1) set goal
-        r1 = run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r1 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["phases"]["set_goal"] = r1
         rec("active goal set", getattr(agent, "active_goal", None) is not None)
         meta_set = [e for e in recorder.of("goal_metadata") if e.get("goal")]

@@ -97,7 +97,8 @@ def main() -> int:
         #    This is a local slash command: it does NOT run the model, so the goal
         #    stays active until the next evaluated turn -- which we avoid.
         goal_text = "必须存在文件 goal_marker.txt（位于工作目录），内容包含 GOAL_OK"
-        r1 = run_turn(agent, f"/goal {goal_text}", 60)
+        _goal = agent._set_goal(goal_text)
+        r1 = {"ok": _goal is not None, "text": "set via _set_goal"}
         summary["set_goal"] = r1
         rec("goal set on first agent", getattr(agent, "active_goal", None) is not None)
         rec("goal still active before resume", getattr(agent, "active_goal", None) is not None)

@@ -86,7 +86,7 @@ def main():
         threading.Thread(target=agent.run, daemon=True).start()
         bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
         # set goal first (normal turn, not capped)
-        run_turn(agent, "/goal 主目录下必须存在文件 auto_done.txt 且内容包含 AUTO_OK", 60)
+        _goal = agent._set_goal("主目录下必须存在文件 auto_done.txt 且内容包含 AUTO_OK")
         rec("goal set before capping", getattr(agent,"active_goal",None) is not None)
         # now cap max_turns to 1 so the next real turn ends MAX_TURNS_EXCEEDED
         real_loop=appmod.agent_runner_loop

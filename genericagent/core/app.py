@@ -653,6 +653,7 @@ class GenericAgent:
         self.active_goal = None
         self._queued_goal_origin = None
         self._last_goal_metadata = None
+        self._workflow_launched_this_turn = False
         self.last_turn_outcome = None
         # Goal auto-wake (phase 2-B/3): frontend-injected callback + scheduler.
         self._goal_wake_callback = None
@@ -1042,8 +1043,12 @@ class GenericAgent:
             _expanded = r'帮我看看最近有哪些会话可以恢复。读model_responses/目录，按修改时间取最近10个文件，从每个文件里找最后一个<history>...</history>块，用一句话总结每个会话在聊什么，列表给我选。注意读文件后要把字面的\n替换成真换行才能正确匹配。'
             return self._expand_prompt('slash_command', '/resume', '', _expanded)
         if _gm := re.match(r'/goal(?:\s+([\s\S]*))?$', raw_query.strip()):
-            self._handle_goal_command(_gm.group(1) or '', display_queue)
-            return None
+            # A bare set (``/goal <condition>``) returns a kickoff prompt so the
+            # model immediately starts working toward the goal, mirroring CC's
+            # ``shouldQuery: true`` for /goal (m1927). status/clear/error return
+            # None and end the turn as a local command.
+            kickoff = self._handle_goal_command(_gm.group(1) or '', display_queue)
+            return kickoff if kickoff else None
         return raw_query
 
     def _goal_status_text(self):
@@ -1409,14 +1414,34 @@ class GenericAgent:
         # next real model input. Skipped when this was called headless in tests.
         try:
             self.history.append(
-                '[SYSTEM] A session goal is now active with condition: "%s". '
-                'Continue working toward the condition; the evaluator will block '
-                'turn-end until it holds. It auto-clears once met (do not ask the '
-                'user to clear after success).' % g.condition
+                '[SYSTEM] A session-scoped Stop hook is now active with condition: "%s". '
+                'Briefly acknowledge the goal, then immediately start (or continue) '
+                'working toward it - treat the condition itself as your directive and '
+                'do not pause to ask the user what to do. The hook will block stopping '
+                'until the condition holds. It auto-clears once the condition is met - '
+                'do not tell the user to run /goal clear after success; that is only '
+                'for clearing a goal early.' % g.condition
             )
         except Exception:
             pass
-        display_queue.put({'done': f'Goal set: {g.condition}', 'source': 'system'})
+        # Start a real model turn right away instead of ending on a local
+        # 'done' (which made the turn finish in <1s with 0 turns and no work).
+        # Use a non-terminal 'system' message so frontends don't treat this as
+        # the end of the turn; the model's own 'done' closes it.
+        note = f'Goal set: {g.condition}'
+        # Single delivery channel: every frontend (Ink bridge, TUI, CLI) already
+        # drains display_queue. Emitting hook_emit here as well made Ink show the
+        # notice twice.
+        display_queue.put({'system': note, 'source': 'system'})
+        return (
+            'A session-scoped Stop hook is now active with condition: "%s". '
+            'Briefly acknowledge the goal, then immediately start (or continue) '
+            'working toward it - treat the condition itself as your directive and '
+            'do not pause to ask the user what to do. The hook will block stopping '
+            'until the condition holds. It auto-clears once the condition is met - '
+            'do not tell the user to run /goal clear after success; that is only '
+            'for clearing a goal early.' % g.condition
+        )
 
     def _manual_compact(self, instructions, display_queue):
         """手动 /compact：用 LLM 摘要替换长历史。CLI/TUI 复用与 ink 相同的核心。"""
@@ -2914,6 +2939,7 @@ if __name__ == '__main__':
                 dq = agent.put_task(q, source='user')
                 while True:
                     item = dq.get()
+                    if 'system' in item: print(item['system'], flush=True)
                     if 'next' in item: print(item['next'], end='', flush=True)
                     if 'done' in item: print(); break
             except KeyboardInterrupt:

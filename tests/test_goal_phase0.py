@@ -148,17 +148,59 @@ class GoalCommandAppTests(unittest.TestCase):
         return a
 
     def _run(self, agent, arg):
+        """Drive _handle_goal_command and return what the user would see.
+
+        status/clear/error land in the display queue as a terminal ``done``;
+        a set returns a kickoff prompt (which the run loop would feed to the
+        model) and only emits a non-terminal ``system`` 'Goal set' notice.
+        """
         q = []
-        agent._handle_goal_command(arg, _QueueLike(q))
-        return q[-1]['done'] if q else None
+        ret = agent._handle_goal_command(arg, _QueueLike(q))
+        if ret is not None:
+            return ret
+        if q:
+            item = q[-1]
+            return item.get('done') if 'done' in item else item.get('system')
+        return None
 
     def test_set_status_clear_flow(self):
         a = self._agent()
         self.assertEqual(self._run(a, ""), "No goal set.")
-        self.assertEqual(self._run(a, "make it pass"), "Goal set: make it pass")
+        # A set now returns a kickoff prompt (so a real model turn starts),
+        # instead of ending on a local 'done'.
+        set_out = self._run(a, "make it pass")
+        self.assertIn("session-scoped Stop hook is now active", set_out)
+        self.assertIn("make it pass", set_out)
         self.assertIn("Goal active: make it pass (0 turn", self._run(a, ""))
         self.assertEqual(self._run(a, "clear"), "Goal cleared: make it pass")
         self.assertEqual(self._run(a, ""), "No goal set.")
+
+    def test_set_is_non_terminal_and_returns_kickoff(self):
+        a = self._agent()
+        q = []
+        ret = a._handle_goal_command("build the thing", _QueueLike(q))
+        # Kickoff prompt drives a real model turn.
+        self.assertIn("session-scoped Stop hook is now active", ret)
+        # The queue must NOT contain a terminal 'done' (that would end the turn
+        # before the model runs); it carries a non-terminal 'system' notice.
+        self.assertTrue(q)
+        self.assertFalse(any('done' in item for item in q))
+        self.assertIn("Goal set: build the thing", q[-1].get('system'))
+
+    def test_slash_cmd_routes_set_into_a_model_turn(self):
+        # Regression: /goal <condition> used to return None (treated as a local
+        # command -> turn ended instantly with 0 turns). It must now return a
+        # kickoff prompt so run() feeds it to the model; status/clear stay local.
+        a = self._agent()
+        kickoff = a._handle_slash_cmd("/goal ship the release", _QueueLike([]))
+        self.assertIsInstance(kickoff, str)
+        self.assertIn("session-scoped Stop hook is now active", kickoff)
+        self.assertIn("ship the release", kickoff)
+        # status / clear must remain local (None) so they do not spin a turn.
+        self.assertIsNone(a._handle_slash_cmd("/goal", _QueueLike([])))
+        self.assertIsNone(a._handle_slash_cmd("/goal clear", _QueueLike([])))
+        # A too-long condition is an error, also local.
+        self.assertIsNone(a._handle_slash_cmd("/goal " + "y" * 4001, _QueueLike([])))
 
     def test_clear_without_goal(self):
         a = self._agent()
