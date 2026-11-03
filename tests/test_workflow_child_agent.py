@@ -246,8 +246,32 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertIn("workspacePath is the default cwd and artifact root", prompt)
             # A conflicting absolute root in the task text must never win over
             # workspacePath: lock the hardening that prevents stray artifact writes.
-            self.assertIn("pathRoot: treat workspacePath as the only artifact root", prompt)
-            self.assertIn("workspacePath wins", prompt)
+            self.assertIn("workspacePath is the default root", prompt)
+            self.assertIn("must be used exactly as given", prompt)
+            self.assertNotIn("workspacePath wins", prompt)
+            self.assertNotIn("treat workspacePath as the only artifact root", prompt)
+
+    def test_unrestricted_prompt_honors_user_absolute_target(self):
+        runner = NativeGPTChildAgentRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            job = WorkflowJob(
+                job_id="agent_abs_target",
+                prompt="write to C:/some/user/dir/out.md",
+                metadata={
+                    "runId": "wf_test",
+                    "workspacePath": str(workspace),
+                    "permissionProfile": "inherit-current-permissions",
+                },
+            )
+            prompt = runner._build_prompt(job)
+            # Unrestricted must NOT tell the child to rewrite an explicit absolute
+            # user target into a workspace-relative path; it must honor it.
+            self.assertIn("An ABSOLUTE path named by the task", prompt)
+            self.assertIn("must be used exactly as given", prompt)
+            self.assertIn("do not rewrite it to a workspacePath", prompt)
+            self.assertNotIn("workspacePath wins", prompt)
 
     def test_build_handler_workspace_policy_keeps_hard_acl(self):
         runner = NativeGPTChildAgentRunner()
@@ -271,6 +295,8 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertEqual(str(workspace.resolve()), handler.workspace_root)
             self.assertIn("pathPolicy: workspace", prompt)
             self.assertIn("hard-limited to workspacePath", prompt)
+            self.assertIn("treat workspacePath as the only artifact root", prompt)
+            self.assertIn("Any absolute path outside workspacePath is rejected", prompt)
 
     def test_build_handler_rejects_unknown_path_policy(self):
         runner = NativeGPTChildAgentRunner()

@@ -538,6 +538,22 @@ def build_system_prompt_sections(agent=None):
     }
 
 
+def build_main_handler(agent, history, tool_cwd=None):
+    """Construct the interactive main agent's tool handler.
+
+    The main agent is not a workflow child, so it must NOT receive a
+    ``workspace_root``. That argument is the workflow child's hard sandbox: it
+    activates the PathACL and switches ``code_run`` into Python-only
+    workspace-guard mode. Passing ``project_root`` here wrongly confined every
+    file/code tool to the project, so a user-specified absolute path elsewhere
+    was denied (``[PathACL] deny``) and non-Python ``code_run`` was blocked.
+    Without ``workspace_root`` the main agent gets the same default as an
+    unrestricted workflow child: ``tool_cwd`` anchors relative paths while
+    absolute paths may point anywhere the OS allows.
+    """
+    return GenericAgentHandler(agent, history, tool_cwd)
+
+
 def render_system_prompt(sections):
     """Join the sections in ``SYSTEM_PROMPT_SECTION_ORDER`` (the only renderer)."""
 
@@ -1702,7 +1718,16 @@ class GenericAgent:
             if self.peer_hint: sys_prompt += f"\n[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)\n"
             project_root = str(getattr(self, "project_root", None) or paths.PROJECT_ROOT)
             tool_cwd = str(getattr(self, "tool_cwd", None) or project_root)
-            handler = GenericAgentHandler(self, self.history, tool_cwd, workspace_root=project_root)
+            # The main agent is NOT a workflow child. ``workspace_root`` is the
+            # workflow child's hard sandbox (it enables the PathACL and turns
+            # code_run into Python-only workspace-guard mode). Giving it to the
+            # interactive main agent wrongly confined every file/code tool to
+            # project_root, so a user-specified absolute path elsewhere was
+            # denied with ``[PathACL] deny`` and non-Python code_run was blocked.
+            # The main agent uses the same default behavior as an unrestricted
+            # workflow child: tool_cwd anchors relative paths, absolute paths may
+            # point anywhere the OS permits.
+            handler = build_main_handler(self, self.history, tool_cwd)
             handler.hook_runtime = self.hook_runtime
             resumed_state = getattr(self, "_resumed_working_state", None)
             if isinstance(resumed_state, dict):

@@ -12,12 +12,15 @@ private working copy even when path access is unrestricted.
 
 ## Prompt paths
 
-A child's cwd is the run `workspacePath`, so write prompts in workspace-relative
-terms (`demos/out.py`, not `D:\repo\demos\out.py`). Do not hardcode the
-repository root into any `agent()` prompt: the child follows the literal
-absolute path and drops artifacts outside the run workspace. When a child
-genuinely needs an absolute root, use `${args.workspacePath}` -- the runtime
-always injects it.
+A child's cwd is the run `workspacePath`, so ordinary artifacts should be written
+with workspace-relative paths (`demos/out.py`). Do not hardcode the repository
+root into a prompt as an implicit cwd. This is different from honoring an
+explicit **user-requested absolute target directory**: when the user asks for a
+file under a specific absolute path, pass that path through verbatim -- under
+the default `pathPolicy: "unrestricted"` the child writes exactly there even if
+it is outside the run workspace. When a child just needs the workspace root,
+use `${args.workspacePath}` (the runtime always injects it).
+
 
 ## Deliverables are not enforced
 

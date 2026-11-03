@@ -68,10 +68,14 @@ Spawns one child agent. Without `options.schema` it returns the child's final
 text as a string. With `options.schema` it returns the validated structured
 object.
 
-Prompt the child with **workspace-relative** artifact paths. The child runs with
-cwd = the run's `workspacePath`; never embed the repository's absolute root in
-the prompt. If a child truly needs the absolute workspace root, interpolate
-`${args.workspacePath}` (the runtime injects it) rather than hardcoding a path.
+The child runs with cwd = the run's `workspacePath`; use **workspace-relative**
+paths for its own artifacts. Do not hardcode the repository's absolute root in a
+prompt -- a relative path already resolves against `workspacePath`. When a user
+has explicitly asked for an artifact under a specific **absolute** directory,
+pass that absolute path through: the child honors an explicit absolute target
+(default `pathPolicy: "unrestricted"`) even when it is outside the run
+workspace. If you merely need the workspace root itself, interpolate
+`${args.workspacePath}` (the runtime injects it) instead of hardcoding a path.
 
 GA-supported options:
 

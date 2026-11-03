@@ -1574,6 +1574,19 @@ class NativeGPTChildAgentRunner:
             else "workspacePolicy: unrestricted; workspacePath is the default cwd and artifact root, "
             "but file/code tools may access other paths."
         )
+        if path_policy == "workspace":
+            path_root = (
+                "pathRoot: treat workspacePath as the only artifact root and resolve every relative output path "
+                "against it. Any absolute path outside workspacePath is rejected, so write artifacts under "
+                "workspacePath."
+            )
+        else:
+            path_root = (
+                "pathRoot: workspacePath is the default root -- resolve every RELATIVE output path against it. "
+                "An ABSOLUTE path named by the task (for example a user-specified target directory) must be used "
+                "exactly as given, even when it lies outside workspacePath; do not rewrite it to a workspacePath "
+                "relative path. Honor the task's explicit paths over the default root."
+            )
         lines = [
             "You are a workflow child agent. Complete only this assigned job and return a concise result.",
             f"runId: {run_id}",
@@ -1589,9 +1602,7 @@ class NativeGPTChildAgentRunner:
             f"workspacePath: {self._child_cwd(job)}",
             f"pathPolicy: {path_policy}",
             workspace_policy,
-            "pathRoot: treat workspacePath as the only artifact root and resolve every relative output path "
-            "against it. If the task text names a different absolute root, workspacePath wins: write artifacts "
-            "under workspacePath, never the conflicting absolute path quoted in the task.",
+            path_root,
             "toolBoundary: the full connected tool set is available. role/toolProfile are planning hints, not "
             "hard capability limits; choose the safest effective tool for the assigned work.",
             (
