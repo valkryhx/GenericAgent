@@ -53,6 +53,24 @@ def is_feature_enabled() -> bool:
     return _truthy(raw)
 
 
+def filter_tool_schema(schema, *, is_subagent=False, in_plan_mode=False):
+    """Remove ``propose_goal`` unless the feature is actually exposed.
+
+    Mirrors CC ``ProposeGoal.isEnabled()``: when ``tengu_propose_goal`` is off,
+    the tool does **not** appear in the model's tool list at all. Subagents and
+    plan mode likewise never see it. Call-time gating in
+    ``GenericAgent._goal_proposal_gate`` remains as defence in depth.
+    """
+    items = list(schema or [])
+    if is_feature_enabled() and not is_subagent and not in_plan_mode:
+        return items
+    return [
+        item for item in items
+        if ((item.get("function") or {}).get("name") if isinstance(item, dict) else None)
+        != "propose_goal"
+    ]
+
+
 def _user_settings_path() -> Path:
     home = Path(__import__("os").environ.get("USERPROFILE") or __import__("os").environ.get("HOME") or Path.home())
     return home / ".genericagent" / "settings.json"

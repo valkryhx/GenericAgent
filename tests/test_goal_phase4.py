@@ -261,5 +261,40 @@ class CapabilityTests(unittest.TestCase):
         self.assertTrue(prof.allows("propose_goal"))
 
 
+class SchemaVisibilityTests(unittest.TestCase):
+    """CC parity: ``propose_goal`` is absent from the tool list when not enabled."""
+
+    def _schema(self):
+        return [
+            {"type": "function", "function": {"name": "file_read"}},
+            {"type": "function", "function": {"name": "propose_goal"}},
+            {"type": "function", "function": {"name": "ask_user"}},
+        ]
+
+    def _names(self, schema):
+        return [t["function"]["name"] for t in schema]
+
+    def test_hidden_when_feature_disabled(self):
+        with mock.patch.object(gp, "is_feature_enabled", return_value=False):
+            names = self._names(gp.filter_tool_schema(self._schema()))
+        self.assertNotIn("propose_goal", names)
+        self.assertIn("file_read", names)
+
+    def test_shown_when_feature_enabled(self):
+        with mock.patch.object(gp, "is_feature_enabled", return_value=True):
+            names = self._names(gp.filter_tool_schema(self._schema()))
+        self.assertIn("propose_goal", names)
+
+    def test_hidden_for_subagent_even_when_enabled(self):
+        with mock.patch.object(gp, "is_feature_enabled", return_value=True):
+            names = self._names(gp.filter_tool_schema(self._schema(), is_subagent=True))
+        self.assertNotIn("propose_goal", names)
+
+    def test_hidden_in_plan_mode_even_when_enabled(self):
+        with mock.patch.object(gp, "is_feature_enabled", return_value=True):
+            names = self._names(gp.filter_tool_schema(self._schema(), in_plan_mode=True))
+        self.assertNotIn("propose_goal", names)
+
+
 if __name__ == "__main__":
     unittest.main()

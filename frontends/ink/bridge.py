@@ -484,6 +484,7 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "busy", "message": "agent is running"})
             return -1
         raw_text = text
+        model_prefix = ""
         if not images:
             # CC-style opt-in: an explicit multi-agent request only *informs* the
             # main agent that it may author a workflow script with the ``workflow``
@@ -532,11 +533,11 @@ class GenericAgentBridge:
                 if lowered.startswith("/workflow"):
                     text = activation.task_text
                 if text.strip():
-                    text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
+                    model_prefix = workflow_opt_in_reminder(activation)
             elif team_wants and text.strip():
-                text = team_activation_reminder(team) + chr(10) + chr(10) + text
+                model_prefix = team_activation_reminder(team)
             elif activation.action == "requested" and text.strip():
-                text = workflow_opt_in_reminder(activation) + chr(10) + chr(10) + text
+                model_prefix = workflow_opt_in_reminder(activation)
         if not self._auto_compact_if_needed(text):
             return -1
         self._task_seq += 1
@@ -548,7 +549,9 @@ class GenericAgentBridge:
         self.emit({"type": "user", "taskId": task_id, "text": visible_text})
         self.emit({"type": "status", "status": "running", "taskId": task_id})
         try:
-            display_queue = self.agent.put_task(text, source="user", images=images or [])
+            display_queue = self.agent.put_task(
+                text, source="user", images=images or [], model_prefix=model_prefix or None
+            )
         except Exception as exc:
             self.emit({"type": "error", "code": "put_task_failed", "message": str(exc), "taskId": task_id})
             self.emit({"type": "status", "status": "idle", "taskId": task_id})

@@ -1007,9 +1007,20 @@ class GenericAgent:
                 except Exception as e: print(f"[WARN] cancel_current_request failed: {e}")
         if self.handler is not None: self.handler.cancel()
             
-    def put_task(self, query, source="user", images=None):
+    def put_task(self, query, source="user", images=None, model_prefix=None):
+        """Queue one task.
+
+        ``model_prefix`` is model-facing context (e.g. the dynamic-workflow
+        opt-in reminder). It is prepended *after* slash-command handling so a
+        leading ``/goal ...`` (or any other slash command) is still parsed as a
+        command; the reminder only reaches the model together with the command's
+        kickoff/output, and never touches the transcript-visible text.
+        """
         display_queue = queue.Queue()
-        self.task_queue.put({"query": query, "source": source, "images": images or [], "output": display_queue})
+        self.task_queue.put({
+            "query": query, "source": source, "images": images or [],
+            "output": display_queue, "model_prefix": model_prefix or "",
+        })
         return display_queue
 
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
@@ -1041,8 +1052,30 @@ class GenericAgent:
             print(f"[WARN] UserPromptExpansion hooks failed: {e}")
         return text
 
+    def _prepare_model_query(self, raw_query, model_prefix, display_queue):
+        """Resolve one task into the text the model should see.
+
+        Slash commands are dispatched on the *unmodified* query; ``model_prefix``
+        (e.g. the dynamic-workflow opt-in reminder) is model-facing context and
+        is prepended only *after* command handling. Prepending before dispatch
+        would hide a leading ``/goal`` (or ``/compact``, ``/resume`` ...) from the
+        command parser — the exact bug behind "/goal + workflow" silently doing
+        nothing. Returns ``None`` when the command ended the turn locally.
+        """
+        handled = self._handle_slash_cmd(raw_query, display_queue)
+        if handled is None:
+            return None
+        if model_prefix and handled.strip():
+            return model_prefix + chr(10) + chr(10) + handled
+        return handled
+
     def _handle_slash_cmd(self, raw_query, display_queue):
-        if not raw_query.startswith('/'): return raw_query
+        # A pasted/typed command can arrive with leading whitespace (the Ink composer
+        # does not strip it). Dispatch on the stripped form so "/goal ..." is still
+        # recognized; the body branches below already use raw_query.strip().
+        if not str(raw_query or "").strip().startswith('/'):
+            return raw_query
+        raw_query = str(raw_query).strip()
         if _sm := re.match(r'/session\.(\w+)=(.*)', raw_query.strip()):
             k, v = _sm.group(1), _sm.group(2)
             vfile = os.path.join(str(paths.TEMP_DIR), v)
@@ -1662,7 +1695,8 @@ class GenericAgent:
         while True:
             task = self.task_queue.get()
             raw_query, source, images, display_queue = task["query"], task["source"], task.get("images") or [], task["output"]
-            raw_query = self._handle_slash_cmd(raw_query, display_queue)
+            model_prefix = str(task.get("model_prefix") or "")
+            raw_query = self._prepare_model_query(raw_query, model_prefix, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
             # UserPromptSubmit is a user-turn boundary, not an internal LLM turn.
@@ -1852,6 +1886,23 @@ class GenericAgent:
                 if profile is None
                 else filter_tool_schema_for_capabilities(TOOLS_SCHEMA, profile)
             )
+            # CC parity: hide ``propose_goal`` entirely when the feature is off
+            # (or in a subagent / plan mode), instead of advertising it and then
+            # rejecting the call. ``do_propose_goal`` keeps its gate regardless.
+            try:
+                from genericagent.core import goal_proposal as _goal_proposal
+                _in_plan = False
+                try:
+                    _in_plan = bool(handler is not None and handler._in_plan_mode())
+                except Exception:
+                    _in_plan = False
+                effective_tools_schema = _goal_proposal.filter_tool_schema(
+                    effective_tools_schema,
+                    is_subagent=bool(getattr(self, 'is_subagent', False)),
+                    in_plan_mode=_in_plan,
+                )
+            except Exception:
+                pass
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query,
                                 handler, effective_tools_schema, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)
