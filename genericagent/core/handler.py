@@ -404,6 +404,7 @@ class GenericAgentHandler(BaseHandler):
         # ask 档阻塞审批 runtime（permission_request/response）；None = 无 UI 时 ask→deny。
         self.permission_runtime = None
         self.hook_runtime = None
+        self.tool_event_callback = None
         self.last_hook_aggregate = None
         # Per-user-turn budget for the Stop gate (goal / stop-guard hook).
         self._stop_gate_count = 0
@@ -551,6 +552,61 @@ class GenericAgentHandler(BaseHandler):
             return ('continue', agg.reason or 'Continue working toward the goal.', agg)
         return ('none', '', agg)
 
+    def _tool_event_id(self, response, index):
+        try:
+            calls = getattr(response, 'tool_calls', None) or []
+            i = int(index)
+            if 0 <= i < len(calls):
+                tid = getattr(calls[i], 'id', None)
+                if tid:
+                    return str(tid)
+        except Exception:
+            pass
+        return f"tool_{getattr(self, 'current_turn', 0)}_{index}"
+
+    def _emit_tool_event(self, phase, tool_name, tool_use_id, args=None,
+                         outcome=None, duration_ms=None, error=None):
+        cb = getattr(self, 'tool_event_callback', None)
+        if cb is None:
+            return
+        if str(tool_name or '') == 'no_tool':
+            return
+        data = getattr(outcome, 'data', outcome) if outcome is not None else None
+        status = 'success'
+        if error is not None:
+            status = 'error'
+        elif isinstance(data, dict) and data.get('status'):
+            status = str(data.get('status'))
+        try:
+            if isinstance(data, (dict, list)):
+                content = json.dumps(data, ensure_ascii=False, default=json_default)
+            elif data is None:
+                content = ''
+            else:
+                content = str(data)
+        except Exception:
+            content = str(data)
+        payload = {
+            'phase': phase,
+            'toolName': str(tool_name or ''),
+            'toolUseId': str(tool_use_id or ''),
+            'turn': getattr(self, 'current_turn', None),
+            'agentId': getattr(getattr(self, 'parent', None), 'agent_id', None),
+        }
+        if phase == 'start':
+            payload['input'] = {
+                k: v for k, v in dict(args or {}).items()
+                if not str(k).startswith('_')
+            }
+        else:
+            payload['status'] = status
+            payload['content'] = content
+            payload['durationMs'] = int(duration_ms or 0)
+        try:
+            cb(payload)
+        except Exception:
+            pass
+
     def dispatch(self, tool_name, args, response, index=0, tool_num=1):
         """Execute one tool and its post-hook life cycle.
 
@@ -559,10 +615,15 @@ class GenericAgentHandler(BaseHandler):
         returned outcome so a hook observation can never replace the tool's
         authoritative result unless it explicitly supplies ``updatedOutput``.
         """
+        tool_use_id = self._tool_event_id(response, index)
+        started_at = time.monotonic()
+        self._emit_tool_event('start', tool_name, tool_use_id, args=args)
         outcome = None
         try:
             outcome = yield from self._dispatch_impl(tool_name, args, response, index=index, tool_num=tool_num)
         except Exception as exc:
+            self._emit_tool_event('end', tool_name, tool_use_id, error=exc,
+                                  duration_ms=(time.monotonic() - started_at) * 1000)
             self._run_tool_hook('PostToolUseFailure', tool_name, args or {}, response, error=exc)
             raise
         data = getattr(outcome, 'data', outcome)
@@ -586,6 +647,8 @@ class GenericAgentHandler(BaseHandler):
                          + context + chr(10) + '</hook_context>')
                 outcome.next_prompt = (outcome.next_prompt or '') + extra
             self._hook_pre_context = None
+        self._emit_tool_event('end', tool_name, tool_use_id, outcome=outcome,
+                              duration_ms=(time.monotonic() - started_at) * 1000)
         return outcome
 
     def _dispatch_impl(self, tool_name, args, response, index=0, tool_num=1):

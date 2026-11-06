@@ -3422,6 +3422,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
         elif cmd_type == "workflow_stop":
             bridge.workflow_stop(str(command.get("runId") or command.get("run_id") or ""), reason=str(command.get("reason") or ""))
         elif cmd_type == "shutdown":
+            try:
+                bridge.agent.request_shutdown()
+            except Exception:
+                pass
             bridge.stop()
             try:
                 with backend_output_redirect():
@@ -3433,6 +3437,10 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             return 0
         else:
             bridge.emit({"type": "error", "code": "unknown_command", "message": str(cmd_type)})
+    try:
+        bridge.agent.request_shutdown()
+    except Exception:
+        pass
     return 0
 
 

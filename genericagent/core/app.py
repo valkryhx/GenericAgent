@@ -622,7 +622,7 @@ def build_permission_mode_hint(mode):
     return ""
 
 class GenericAgent:
-    def __init__(self):
+    def __init__(self, workspace_root=None):
         os.makedirs(str(paths.TEMP_DIR), exist_ok=True)
         # Slice D3：进程内首次构造 agent 时 GC 自产图片缓存（best-effort）
         _record_startup_phase('agent_image_gc_started')
@@ -638,6 +638,8 @@ class GenericAgent:
         self.history = []; self.handler = None;
         self.task_queue = queue.Queue()
         self.is_running = False; self.stop_sig = False
+        self._shutdown_requested = False
+        self.tool_event_callback = None
         self.llm_no = 0;  self.inc_out = False; self.verbose = True
         self.peer_hint = True
         self.is_subagent = False
@@ -682,6 +684,19 @@ class GenericAgent:
             self.goal_proposal_runtime = None
             print(f"[WARN] Failed to init goal_proposal_runtime: {e}")
         identity = session_transcript.identity_from_environment()
+        if workspace_root:
+            ws = os.path.abspath(os.path.expanduser(str(workspace_root)))
+            if not os.path.isdir(ws):
+                raise ValueError(f"workspace_invalid: not a directory: {ws}")
+            roots = paths.project_roots(project=ws)
+            identity = {
+                "original_cwd": os.getcwd(),
+                "project_root": str(roots.project_root),
+                "launch_cwd": os.getcwd(),
+                "project_key": roots.project_key,
+                "data_root": str(roots.data_root),
+                "layout": "project-v1",
+            }
         if identity:
             self.original_cwd = identity.get("original_cwd")
             self.project_root = identity.get("project_root")
@@ -1006,7 +1021,29 @@ class GenericAgent:
                 try: cancel()
                 except Exception as e: print(f"[WARN] cancel_current_request failed: {e}")
         if self.handler is not None: self.handler.cancel()
-            
+
+    def request_shutdown(self):
+        """Ask ``run()`` to exit after the current turn.
+
+        The run loop blocks on ``task_queue.get()`` with no timeout, so a
+        sentinel item is the only portable way to wake it.  Safe to call from
+        any thread; ``abort()`` is best-effort because the loop may be idle.
+        """
+        self._shutdown_requested = True
+        try:
+            self.abort()
+        except Exception:
+            pass
+        try:
+            self.task_queue.put({
+                "__shutdown__": True,
+                "query": "",
+                "source": "shutdown",
+                "output": queue.Queue(),
+            })
+        except Exception:
+            pass
+
     def put_task(self, query, source="user", images=None, model_prefix=None):
         """Queue one task.
 
@@ -1694,6 +1731,9 @@ class GenericAgent:
     def run(self):
         while True:
             task = self.task_queue.get()
+            if isinstance(task, dict) and task.get("__shutdown__"):
+                self.task_queue.task_done()
+                break
             raw_query, source, images, display_queue = task["query"], task["source"], task.get("images") or [], task["output"]
             model_prefix = str(task.get("model_prefix") or "")
             raw_query = self._prepare_model_query(raw_query, model_prefix, display_queue)
@@ -1763,6 +1803,7 @@ class GenericAgent:
             # point anywhere the OS permits.
             handler = build_main_handler(self, self.history, tool_cwd)
             handler.hook_runtime = self.hook_runtime
+            handler.tool_event_callback = getattr(self, 'tool_event_callback', None)
             resumed_state = getattr(self, "_resumed_working_state", None)
             if isinstance(resumed_state, dict):
                 restored_working = resumed_state.get("handler_working")

@@ -156,6 +156,7 @@ class FakeAgent:
         self.is_running = False
         self.aborted = False
         self.prompts = []
+        self.model_prefixes = []
         self.queues = []
         self.history = []
         self.handler = object()
@@ -176,8 +177,9 @@ class FakeAgent:
         self.permission_mode = normalize_permission_mode(mode)
         return self.permission_mode
 
-    def put_task(self, text, source="user", images=None):
+    def put_task(self, text, source="user", images=None, model_prefix=None):
         self.prompts.append((text, source, list(images or [])))
+        self.model_prefixes.append(model_prefix or "")
         self.history.append(f"[USER]: {text}")
         self.llmclient.backend.history.append({"role": "user", "content": text})
         dq = queue.Queue()
@@ -462,7 +464,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge.wait_for_idle(timeout=1)
 
         self.assertEqual(1, task_id)
-        submitted = agent.prompts[0][0]
+        submitted = (agent.prompts[0][0] or "") + chr(10) + (agent.model_prefixes[0] or "")
         self.assertIn("WORKFLOW OPT-IN", submitted)
         self.assertIn("workflow-authoring", submitted)
         self.assertIn("用 workflow 帮我并行调研 A、B、C，然后综合验证", submitted)
@@ -481,7 +483,7 @@ class InkBridgeTest(unittest.TestCase):
         agent.queues[0].put({"done": "ok"})
         bridge.wait_for_idle(timeout=1)
 
-        submitted = agent.prompts[0][0]
+        submitted = (agent.prompts[0][0] or "") + chr(10) + (agent.model_prefixes[0] or "")
         self.assertIn("WORKFLOW OPT-IN", submitted)
         self.assertIn("workflow-authoring", submitted)
         self.assertNotIn("TEAM ORCHESTRATION OPT-IN", submitted)
@@ -497,7 +499,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge.wait_for_idle(timeout=1)
 
         self.assertEqual(1, task_id)
-        submitted = agent.prompts[0][0]
+        submitted = (agent.prompts[0][0] or "") + chr(10) + (agent.model_prefixes[0] or "")
         self.assertIn("TEAM ORCHESTRATION OPT-IN", submitted)
         self.assertIn("spawn_agent(team_mode=true)", submitted)
         # The model-facing reminder must not leak into the user transcript.
@@ -513,7 +515,7 @@ class InkBridgeTest(unittest.TestCase):
         agent.queues[0].put({"done": "ok"})
         bridge.wait_for_idle(timeout=1)
 
-        submitted = agent.prompts[0][0]
+        submitted = (agent.prompts[0][0] or "") + chr(10) + (agent.model_prefixes[0] or "")
         self.assertIn("WORKFLOW OPT-IN", submitted)
         self.assertNotIn("TEAM ORCHESTRATION OPT-IN", submitted)
 
@@ -533,7 +535,7 @@ class InkBridgeTest(unittest.TestCase):
         bridge.submit("生成一份报告")
         agent.queues[0].put({"done": "ok"})
         bridge.wait_for_idle(timeout=1)
-        self.assertIn("TEAM ORCHESTRATION OPT-IN", agent.prompts[0][0])
+        self.assertIn("TEAM ORCHESTRATION OPT-IN", agent.model_prefixes[0] or "")
 
         self.assertEqual(0, bridge.submit("/team off"))
 
@@ -705,7 +707,7 @@ class InkBridgeTest(unittest.TestCase):
                     self.handler.subagent_manager.registry.update(entry.agent_path, run_id="run_bridge_resume")
                     self.handler.subagent_manager.registry.mark_closed(entry.agent_path, previous_status="completed", closed_status="shutdown")
 
-                def put_task(self, text, source="user", images=None):
+                def put_task(self, text, source="user", images=None, model_prefix=None):
                     self.prompts.append((text, source, list(images or [])))
                     dq = queue.Queue()
                     outcome = exhaust(
@@ -777,7 +779,7 @@ class InkBridgeTest(unittest.TestCase):
                         sleep=lambda _: None,
                     )
 
-                def put_task(self, text, source="user", images=None):
+                def put_task(self, text, source="user", images=None, model_prefix=None):
                     self.prompts.append((text, source, list(images or [])))
                     dq = queue.Queue()
                     attached = exhaust(

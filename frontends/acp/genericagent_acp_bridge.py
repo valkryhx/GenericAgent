@@ -11,7 +11,9 @@ if _ROOT not in sys.path:
 # and its submodules may print() during init.  We capture the raw binary stdout
 # for ACP JSON-RPC, then redirect the text-mode stdout to stderr so any stray
 # prints from the app/LLM core don't pollute the ACP channel.
-if sys.platform == "win32":
+if os.environ.get("GA_ACP_NO_FD_REDIRECT"):
+    _acp_stdout = sys.stdout.buffer
+elif sys.platform == "win32":
     import msvcrt
     _stdout_fd = os.dup(sys.__stdout__.fileno())
     msvcrt.setmode(_stdout_fd, os.O_BINARY)
@@ -39,7 +41,8 @@ class _StdoutToStderrRouter(io.TextIOBase):
         return len(s) if s else 0
     def flush(self): sys.stderr.flush()
 
-sys.stdout = _StdoutToStderrRouter()
+if not os.environ.get("GA_ACP_NO_FD_REDIRECT"):
+    sys.stdout = _StdoutToStderrRouter()
 
 import argparse
 import queue
@@ -50,6 +53,35 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from genericagent.core.app import GeneraticAgent
+from genericagent.core.redaction import redact_sensitive_text
+
+
+_ACP_TOOL_KIND = {
+    "file_read": "read",
+    "file_write": "edit",
+    "file_patch": "edit",
+    "code_run": "execute",
+    "web_scan": "fetch",
+    "web_execute_js": "fetch",
+    "web_fetch": "fetch",
+}
+
+
+def acp_tool_kind(name: str) -> str:
+    raw = str(name or "")
+    base = raw.split("__")[-1]
+    return _ACP_TOOL_KIND.get(raw) or _ACP_TOOL_KIND.get(base) or "other"
+
+
+def bounded_text(value: Any, limit: int = 8000) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            value = str(value)
+    return redact_sensitive_text(value)[:limit]
 
 
 JSONRPC_VERSION = "2.0"
@@ -138,11 +170,12 @@ class SessionState:
 
 
 class GenericAgentAcpBridge:
-    def __init__(self, llm_no: int = 0):
+    def __init__(self, llm_no: Optional[int] = None):
         self.llm_no = llm_no
         self._json_out = _acp_stdout
         self._write_lock = threading.Lock()
         self._sessions: Dict[str, SessionState] = {}
+        self._pending_permissions: Dict[str, tuple] = {}
         self._shutdown = False
 
     def write_message(self, msg: Dict[str, Any]) -> None:
@@ -157,9 +190,10 @@ class GenericAgentAcpBridge:
         except Exception as e:
             eprint(f"[ACP-BRIDGE] WRITE FAILED: {type(e).__name__}: {e}")
 
-    def new_agent(self) -> GeneraticAgent:
-        agent = GeneraticAgent()
-        agent.next_llm(self.llm_no)
+    def new_agent(self, cwd: Optional[str] = None) -> GeneraticAgent:
+        agent = GeneraticAgent(workspace_root=cwd) if cwd else GeneraticAgent()
+        if self.llm_no is not None:
+            agent.next_llm(self.llm_no)
         agent.verbose = True
         agent.inc_out = True
         threading.Thread(target=agent.run, daemon=True).start()
@@ -196,20 +230,142 @@ class GenericAgentAcpBridge:
             return
         if not os.path.isabs(cwd):
             cwd = os.path.abspath(cwd)
+        if not os.path.isdir(cwd):
+            self.write_message(jsonrpc_error(-32602, f"cwd is not a directory: {cwd}", req_id))
+            return
         session_id = f"ga_{uuid.uuid4().hex}"
-        agent = self.new_agent()
+        try:
+            agent = self.new_agent(cwd)
+        except Exception as exc:
+            self.write_message(jsonrpc_error(-32603, f"failed to start agent: {type(exc).__name__}: {exc}", req_id))
+            return
         session = SessionState(session_id=session_id, cwd=cwd, agent=agent)
         self._sessions[session_id] = session
+        self._bind_session_callbacks(session)
+        current_mode = str(getattr(agent, 'permission_mode', 'full_access') or 'full_access')
         self.write_message(
             jsonrpc_result(
                 req_id,
                 {
                     "sessionId": session_id,
-                    "modes": None,
+                    "modes": {
+                        "currentModeId": current_mode,
+                        "availableModes": [
+                            {"id": "read_only", "name": "Read only"},
+                            {"id": "ask", "name": "Ask"},
+                            {"id": "full_access", "name": "Full access"},
+                        ],
+                    },
                     "configOptions": None,
                 },
             )
         )
+
+    def _bind_session_callbacks(self, session: SessionState) -> None:
+        runtime = getattr(session.agent, 'permission_runtime', None)
+        if runtime is not None and hasattr(runtime, 'set_emit'):
+            runtime.set_emit(lambda ev, s=session: self._emit_permission(s, ev))
+        try:
+            session.agent.tool_event_callback = lambda ev, s=session: self._on_tool_event(s, ev)
+        except Exception:
+            pass
+
+    def _emit_permission(self, session: SessionState, event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict) or event.get("type") != "permission_request":
+            return
+        ga_request_id = str(event.get("requestId") or "")
+        if not ga_request_id:
+            return
+        jsonrpc_id = f"perm_{uuid.uuid4().hex}"
+        self._pending_permissions[jsonrpc_id] = (session.session_id, ga_request_id)
+        tool_use_id = str(event.get("toolUseId") or ga_request_id)
+        try:
+            self.write_message({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": jsonrpc_id,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": session.session_id,
+                    "toolCall": {
+                        "toolCallId": tool_use_id,
+                        "title": str(event.get("toolName") or "tool"),
+                        "kind": acp_tool_kind(str(event.get("toolName") or "")),
+                        "status": "pending",
+                        "rawInput": {"preview": bounded_text(event.get("argsPreview"), 4000)},
+                    },
+                    "options": [
+                        {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
+                    ],
+                },
+            })
+        except Exception:
+            self._pending_permissions.pop(jsonrpc_id, None)
+            runtime = getattr(session.agent, 'permission_runtime', None)
+            if runtime is not None:
+                runtime.resolve(ga_request_id, "deny")
+
+    def _handle_permission_response(self, msg: Dict[str, Any]) -> bool:
+        jsonrpc_id = str(msg.get("id") or "")
+        entry = self._pending_permissions.pop(jsonrpc_id, None)
+        if entry is None:
+            return False
+        session_id, ga_request_id = entry
+        session = self._sessions.get(session_id)
+        if session is None:
+            return True
+        decision = "deny"
+        result = msg.get("result")
+        if isinstance(result, dict):
+            outcome = result.get("outcome")
+            if isinstance(outcome, dict) and outcome.get("outcome") == "selected":
+                option_id = str(outcome.get("optionId") or "")
+                if option_id.startswith("allow"):
+                    decision = "accept"
+        runtime = getattr(session.agent, 'permission_runtime', None)
+        if runtime is not None:
+            runtime.resolve(ga_request_id, decision)
+        return True
+
+    def _on_tool_event(self, session: SessionState, event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        phase = event.get("phase")
+        tool_use_id = str(event.get("toolUseId") or "")
+        if not tool_use_id:
+            return
+        if phase == "start":
+            update = {
+                "sessionUpdate": "tool_call",
+                "toolCallId": tool_use_id,
+                "title": str(event.get("toolName") or "tool"),
+                "kind": acp_tool_kind(str(event.get("toolName") or "")),
+                "status": "in_progress",
+                "rawInput": {"preview": bounded_text(event.get("input"), 4000)},
+            }
+        elif phase == "end":
+            status = str(event.get("status") or "success").lower()
+            failed = status in {
+                "error", "failed", "failure", "timeout", "cancelled",
+                "approval_required",
+            }
+            update = {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_use_id,
+                "status": "failed" if failed else "completed",
+            }
+            text = bounded_text(event.get("content"), 8000)
+            if text:
+                update["content"] = [{
+                    "type": "content",
+                    "content": {"type": "text", "text": text},
+                }]
+        else:
+            return
+        try:
+            self.write_message(make_session_update(session.session_id, update))
+        except Exception:
+            pass
 
     def handle_session_prompt(self, req_id: Any, params: Dict[str, Any]) -> None:
         session_id = params.get("sessionId")
@@ -315,6 +471,9 @@ class GenericAgentAcpBridge:
         session = self._sessions.get(session_id)
         if session is None:
             return
+        for jsonrpc_id, (sid, _) in list(self._pending_permissions.items()):
+            if sid == session_id:
+                self._pending_permissions.pop(jsonrpc_id, None)
         if session.current_prompt_id is not None:
             session.agent.abort()
 
@@ -324,6 +483,8 @@ class GenericAgentAcpBridge:
         params = msg.get("params") or {}
 
         try:
+            if method is None and self._handle_permission_response(msg):
+                return
             if method == "initialize":
                 self.handle_initialize(req_id, params)
             elif method == "session/new":
@@ -336,7 +497,27 @@ class GenericAgentAcpBridge:
                 self.write_message(jsonrpc_error(-32601, "session/load not supported", req_id))
             elif method == "session/list":
                 self.write_message(jsonrpc_error(-32601, "session/list not supported", req_id))
+            elif method == "session/set_mode":
+                session = self._sessions.get(params.get("sessionId"))
+                if session is None:
+                    self.write_message(jsonrpc_error(-32602, "unknown sessionId", req_id))
+                else:
+                    applied = session.agent.set_permission_mode(str(params.get("modeId") or ""))
+                    self.write_message(jsonrpc_result(req_id, {"modeId": applied}))
             elif method == "session/close":
+                session_id = params.get("sessionId")
+                session = self._sessions.pop(session_id, None)
+                if session is not None:
+                    for jsonrpc_id, (sid, _) in list(self._pending_permissions.items()):
+                        if sid == session_id:
+                            self._pending_permissions.pop(jsonrpc_id, None)
+                    try:
+                        session.agent.request_shutdown()
+                    except Exception:
+                        try:
+                            session.agent.abort()
+                        except Exception:
+                            pass
                 self.write_message(jsonrpc_result(req_id, {}))
             elif method is None:
                 if req_id is not None:
@@ -361,12 +542,18 @@ class GenericAgentAcpBridge:
             self.handle_message(msg)
             if self._shutdown:
                 break
+        for session in list(self._sessions.values()):
+            try:
+                session.agent.request_shutdown()
+            except Exception:
+                pass
+        self._sessions.clear()
         eprint("[GenericAgent ACP] bridge stopped")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="GenericAgent ACP bridge over stdio")
-    parser.add_argument("--llm-no", type=int, default=0, help="LLM index for GenericAgent")
+    parser.add_argument("--llm-no", type=int, default=None, help="LLM index for GenericAgent; omit to use active_profile")
     args = parser.parse_args()
     bridge = GenericAgentAcpBridge(llm_no=args.llm_no)
     bridge.serve()
