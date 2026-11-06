@@ -97,23 +97,71 @@ _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
 STREAM_FLUSH_CHARS = 16
 
 
-def _extract_image_paths(text):
+MAX_AUTO_IMAGE_PATHS = max(0, int(os.environ.get("GA_IMAGE_AUTO_PATHS_LIMIT", "8")))
+
+_FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_non_path_regions(text):
+    """去掉代码块 / 行内代码 / URL，避免把正文里的路径当附件。"""
+    text = _FENCE_RE.sub(" ", text or "")
+    text = _INLINE_CODE_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return text
+
+
+def _auto_paths_disabled():
+    return str(os.environ.get("GA_IMAGE_AUTO_PATHS", "1") or "").strip().lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _extract_image_paths_report(text):
+    """返回 (paths, dropped)。dropped 为超过 MAX_AUTO_IMAGE_PATHS 被丢弃的数量。"""
+    if _auto_paths_disabled():
+        return [], 0
+    text = _strip_non_path_regions(text)
     paths = []
+
     def add_path(p):
         path = p if os.path.isabs(p) else os.path.join(script_dir, p)
         if os.path.isfile(path) and path not in paths:
             paths.append(path)
 
-    for raw in re.findall(r'"([^"]+\.(?:png|jpe?g|webp|gif|bmp))"|\'([^\']+\.(?:png|jpe?g|webp|gif|bmp))\'', text or '', re.I):
-        p = next((x for x in raw if x), '')
-        if p: add_path(p)
+    # 1) 引号包裹的路径
+    quoted_re = (
+        r'"([^"]+\.(?:png|jpe?g|webp|gif|bmp))"'
+        r"|'([^']+\.(?:png|jpe?g|webp|gif|bmp))'"
+    )
+    for raw in re.findall(quoted_re, text, re.I):
+        p = next((x for x in raw if x), "")
+        if p:
+            add_path(p)
 
-    for m in re.finditer(r'(?:[A-Za-z]:[\\/]|/)[^\r\n"\']+?\.(?:png|jpe?g|webp|gif|bmp)', text or '', re.I):
+    # 2) 绝对路径
+    for m in re.finditer(
+        r'(?:[A-Za-z]:[\\/]|/)[^\r\n"\']+?\.(?:png|jpe?g|webp|gif|bmp)', text, re.I
+    ):
         add_path(m.group(0).strip())
 
-    for m in re.finditer(r'\S+\.(?:png|jpe?g|webp|gif|bmp)', text or '', re.I):
+    # 3) 裸 token；跳过 key=value / scheme: / 调用括号里的片段
+    for m in re.finditer(r"(?<![\w=:(\[])\S+\.(?:png|jpe?g|webp|gif|bmp)", text, re.I):
         add_path(m.group(0).strip())
-    return paths
+
+    dropped = 0
+    if MAX_AUTO_IMAGE_PATHS and len(paths) > MAX_AUTO_IMAGE_PATHS:
+        dropped = len(paths) - MAX_AUTO_IMAGE_PATHS
+        paths = paths[:MAX_AUTO_IMAGE_PATHS]
+    return paths, dropped
+
+
+def _extract_image_paths(text):
+    return _extract_image_paths_report(text)[0]
 
 
 def _image_block(path):
@@ -137,9 +185,18 @@ def resolve_reasoning_effort_for_model(current, supported, default):
     return supported[0] if supported else None
 
 
-def _build_user_content_with_images(text, images=None):
-    extra = _extract_image_paths(text)
-    return image_codec.build_user_content_with_images(text, images=images, extra_paths=extra)
+def _build_user_content_with_images(text, images=None, failures=None):
+    extra, dropped = _extract_image_paths_report(text)
+    if dropped:
+        # 截断提示单独一行、[image] 前缀，避免模型当指令（设计稿 O3 坑 8）
+        text = (
+            (text or "").rstrip()
+            + "\n\n[image] 其余 " + str(dropped) + " 个路径未自动附图（上限 "
+            + str(MAX_AUTO_IMAGE_PATHS) + "），如需请单独粘贴"
+        )
+    return image_codec.build_user_content_with_images(
+        text, images=images, extra_paths=extra, failures=failures
+    )
 
 
 def supports_image_input(llmclient):
@@ -1842,7 +1899,20 @@ class GenericAgent:
             self.llmclient.log_path = self.log_path
             transcript_history_before = transcript_delta_anchor(self)
             can_image = supports_image_input(self.llmclient)
-            initial_content = _build_user_content_with_images(raw_query, images) if can_image else None
+            _image_failures = []
+            initial_content = (
+                _build_user_content_with_images(raw_query, images, failures=_image_failures)
+                if can_image
+                else None
+            )
+            for _f in _image_failures:
+                try:
+                    display_queue.put({
+                        "system": "[image] 图片附件读取失败: " + _f["path"] + ": " + _f["error"] + "\n",
+                        "source": "system",
+                    })
+                except Exception:
+                    pass
             if (images or _extract_image_paths(raw_query)) and not can_image:
                 # 门控关闭：不把 image block 发给 API（避免 400「不支持 image」）。
                 # 附件 path 若不在文本里（常见 [Image #N] 占位），补进 query 供工具/OCR，并给用户友好提示。

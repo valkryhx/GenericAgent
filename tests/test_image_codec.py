@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
@@ -149,9 +150,101 @@ class NormalizeAndBuildContentTest(unittest.TestCase):
 
         self.assertIsNotNone(content)
         self.assertEqual(content[0]["type"], "text")
-        self.assertEqual(content[0]["text"], "看图")
+        # O2: text keeps the original prompt and appends a source/size note.
+        self.assertTrue(content[0]["text"].startswith("看图"))
+        self.assertIn("[image] source:", content[0]["text"])
         self.assertEqual(content[1]["type"], "image")
         self.assertEqual(base64.b64decode(content[1]["source"]["data"]), _TINY_PNG)
+
+
+class DisplayNoteAndResizeTest(unittest.TestCase):
+    """O2/O4：尺寸说明、原图尺寸、面积上限、说明开关、失败收集。"""
+
+    def setUp(self):
+        ic.clear_encode_cache()
+
+    def _make_image(self, width, height, suffix=".png"):
+        from PIL import Image
+
+        img = Image.new("RGB", (width, height), (30, 60, 90))
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            img.save(f, format="PNG" if suffix == ".png" else "JPEG")
+            return Path(f.name)
+
+    def _pillow_available(self):
+        try:
+            import PIL  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def test_display_note_for_large_image_has_multiply_hint(self):
+        if not self._pillow_available():
+            self.skipTest("Pillow not installed")
+        path = self._make_image(3024, 1964)
+        try:
+            enc = ic.encode_image_for_prompt(str(path))
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertTrue(enc.resized)
+        self.assertEqual((enc.orig_width, enc.orig_height), (3024, 1964))
+        self.assertEqual(max(enc.width, enc.height), ic.MAX_DIMENSION)
+        note = ic.display_note(enc)
+        self.assertIn("[image]", note)
+        self.assertIn("original 3024x1964", note)
+        self.assertIn("multiply coordinates by", note)
+
+    def test_small_image_note_has_no_multiply_hint(self):
+        if not self._pillow_available():
+            self.skipTest("Pillow not installed")
+        path = self._make_image(400, 300)
+        try:
+            enc = ic.encode_image_for_prompt(str(path))
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertFalse(enc.resized)
+        note = ic.display_note(enc)
+        self.assertIn("original 400x300", note)
+        self.assertNotIn("multiply coordinates by", note)
+
+    def test_area_cap_resizes_wide_strip(self):
+        if not self._pillow_available():
+            self.skipTest("Pillow not installed")
+        path = self._make_image(4000, 500)
+        try:
+            enc = ic.encode_image_for_prompt(str(path))
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertTrue(enc.resized)
+        self.assertLessEqual(enc.width * enc.height, ic.MAX_IMAGE_AREA)
+        self.assertLessEqual(max(enc.width, enc.height), ic.MAX_DIMENSION)
+
+    def test_notes_can_be_disabled_via_env(self):
+        if not self._pillow_available():
+            self.skipTest("Pillow not installed")
+        path = self._make_image(400, 300)
+        old = os.environ.get("GA_IMAGE_NOTES")
+        try:
+            os.environ["GA_IMAGE_NOTES"] = "0"
+            content = ic.build_user_content_with_images("看图", images=[str(path)])
+        finally:
+            if old is None:
+                os.environ.pop("GA_IMAGE_NOTES", None)
+            else:
+                os.environ["GA_IMAGE_NOTES"] = old
+            path.unlink(missing_ok=True)
+        self.assertNotIn("[image]", content[0]["text"])
+
+    def test_failures_collected_for_bad_path(self):
+        failures = []
+        content = ic.build_user_content_with_images(
+            "看图", images=[str(REPO_ROOT / "no_such_image_xyz.png")], failures=failures
+        )
+        self.assertIsNotNone(content)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("no_such_image_xyz.png", failures[0]["path"])
+        self.assertTrue(failures[0]["error"])
+
 
 
 if __name__ == "__main__":

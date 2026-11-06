@@ -45,8 +45,15 @@ if (-not $SkipNode) {
 }
 
 Write-Host "[2/6] Installing GenericAgent wheel..."
-& $PythonExe -m pip install --upgrade --force-reinstall $WheelPath
-if ($LASTEXITCODE -ne 0) { throw "pip install failed." }
+# Install with --no-deps so this command never pulls or upgrades dependencies.
+# Dependencies are declared with >= lower bounds in the wheel; a separate
+# "pip install" WITHOUT --upgrade installs only what is missing and leaves
+# already-satisfied packages untouched (no needless download/upgrade).
+& $PythonExe -m pip install --force-reinstall --no-deps $WheelPath
+if ($LASTEXITCODE -ne 0) { throw "pip install (wheel) failed." }
+Write-Host "Resolving runtime dependencies (only missing/unsatisfied are installed)..."
+& $PythonExe -m pip install $WheelPath
+if ($LASTEXITCODE -ne 0) { throw "dependency resolution failed." }
 
 Write-Host "[3/6] Installing Ink UI npm dependencies..."
 # Resolve from the installed ga_cli package, not a bare `import frontends`:

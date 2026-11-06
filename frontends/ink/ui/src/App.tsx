@@ -8,6 +8,7 @@ import { createPasteStore } from './paste.js'
 import { createImageAttachmentStore } from './imageAttachments.js'
 import type { SkillStatus } from './protocol.js'
 import { handleInput, applyClipboardImagePaste } from './inputController.js'
+import { readClipboardText } from './clipboardText.js'
 import {
   WORKFLOW_PANEL_MAX_ROWS,
   workflowListPanelFromRuns,
@@ -658,6 +659,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [completedTurnActivity, setCompletedTurnActivity] = useState<CompletedTurnActivity | null>(null)
   const [lastActivitySeconds, setLastActivitySeconds] = useState(0)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
+  const [notice, setNotice] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const bridgeRef = useRef<BridgeClient | null>(null)
   const activeTurnStartedAtRef = useRef<number | null>(null)
@@ -682,6 +684,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const imagePasteInFlightRef = useRef(false)
   const imagePasteSeqRef = useRef(0)
   const inputSnapshotRef = useRef({ value: '', cursorOffset: 0 })
+  /** 剪贴板文本回退：记录本次插入的文本与时刻，用于 150ms 内丢弃终端重复投递的同一段 paste。 */
+  const clipboardFallbackRef = useRef<{ text: string; at: number } | null>(null)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const slashItems = useMemo(() => selector || mcpPanel || modelPanel || permissionPanel || approvalPanel || goalProposalPanel || themePanelSelected !== null || footerPanel || workflowPanel || teamPanel || hooksPanel ? [] : slashSuggestions(input, skills), [input, selector, mcpPanel, modelPanel, permissionPanel, approvalPanel, themePanelSelected, footerPanel, workflowPanel, teamPanel, hooksPanel, skills])
   const skillNames = useMemo(() => new Set(skills.map(skill => skill.name)), [skills])
 
@@ -737,7 +742,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     appendLocalCommandOutput(dismissedLocalCommandOutput(commandText))
   }
 
+  const showNotice = (message: string) => {
+    setNotice(message)
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+    noticeTimerRef.current = setTimeout(() => {
+      setNotice(null)
+      noticeTimerRef.current = null
+    }, 2000)
+  }
+
   const applyInputDecision = (decision: ReturnType<typeof handleInput>) => {
+    if (decision.notice) showNotice(decision.notice)
     if (decision.pendingImagePaste) {
       // 异步剪贴板：立刻返回，不阻塞 stdin；完成后把 [Image #N] 插到当前光标处。
       // 多次连按：in-flight 时忽略，避免并行 PowerShell 抢剪贴板。
@@ -746,10 +761,33 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       const seq = ++imagePasteSeqRef.current
       const baseValue = inputSnapshotRef.current.value
       const baseOffset = inputSnapshotRef.current.cursorOffset
+      const policy = decision.imagePastePolicy ?? 'image-only'
       void applyClipboardImagePaste(baseValue, baseOffset, imageStore)
-        .then((pasted) => {
+        .then(async (pasted) => {
           if (seq !== imagePasteSeqRef.current) return
-          if (!pasted.ok) return
+          if (!pasted.ok) {
+            // 剪贴板无图：Ctrl+V 语义允许回退成文本；Alt+V 只贴图，给一行提示。
+            if (pasted.reason === 'no-image') {
+              if (policy === 'image-then-text') {
+                const text = readClipboardText()
+                if (text) {
+                  const current = inputSnapshotRef.current
+                  const at = current.cursorOffset
+                  const next = current.value.slice(0, at) + text + current.value.slice(at)
+                  setInput(next)
+                  setCursorOffset(at + text.length)
+                  inputSnapshotRef.current = { value: next, cursorOffset: at + text.length }
+                  clipboardFallbackRef.current = { text, at: Date.now() }
+                }
+              }
+              return
+            }
+            if (pasted.reason === 'too-small') {
+              showNotice('[image] 剪贴板里的图片太小，未插入')
+              return
+            }
+            return
+          }
           const current = inputSnapshotRef.current
           // await 期间输入未变：直接用捕获结果
           if (current.value === baseValue) {
@@ -882,6 +920,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   useEffect(() => {
     permissionPanelOpenRef.current = permissionPanel !== null
   }, [permissionPanel])
+
+  useEffect(() => () => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+  }, [])
 
   useEffect(() => {
     stdout.write(enterMainScreenTerminalSequenceForMode(mouseMode))
@@ -1630,6 +1672,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       setCursorOffset(result.value.length)
       return
     }
+    // 剪贴板回退去重：终端若同时把同一段文本以 bracketed paste 送进来，会在 150ms 内
+    // 再插入一次。这里丢弃与「刚回退插入的文本」相同（或互为包含）的那次 paste。
+    const fallback = clipboardFallbackRef.current
+    if (fallback && rawInput && Date.now() - fallback.at <= 150) {
+      const pasted = rawInput.replace(/\r\n/g, '\n')
+      if (pasted === fallback.text || fallback.text.includes(pasted) || pasted.includes(fallback.text)) {
+        clipboardFallbackRef.current = null
+        return
+      }
+    }
     // 用同步快照而非 React state：同一 tick 内二次 stdin 不能再读到已提交的 `/stop`。
     const snapshot = inputSnapshotRef.current
     const decision = handleInput(
@@ -1900,7 +1952,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
-    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint)}</Text></Box>
+    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint))}</Text></Box>
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} />
     if (section === 'panel') {

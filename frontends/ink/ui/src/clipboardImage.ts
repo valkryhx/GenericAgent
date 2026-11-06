@@ -20,9 +20,11 @@ export const MIN_CLIPBOARD_IMAGE_DIMENSION = 8
 /** 真实 PNG 截图几乎不会小于该体积；自测 1×1 常约 70–120B */
 export const MIN_CLIPBOARD_IMAGE_BYTES = 200
 
+export type ClipboardPasteFailureReason = 'no-image' | 'too-small' | 'timeout' | 'tool-missing'
+
 export type ClipboardImageResult =
   | { ok: true; path: string; width?: number; height?: number }
-  | { ok: false; error: string }
+  | { ok: false; error: string; reason: ClipboardPasteFailureReason }
 
 export function resolveGaImageRoot(): string {
   if (process.env.GA_IMAGE_TEMP) return process.env.GA_IMAGE_TEMP
@@ -78,16 +80,16 @@ function removeQuiet(path: string): void {
  * 校验落盘文件是否像「可用截图」。过小/1×1 直接拒，避免 Grok 400。
  */
 export function validateCapturedImageFile(path: string): ClipboardImageResult {
-  if (!existsSync(path)) return { ok: false, error: 'clipboard image save produced no file' }
+  if (!existsSync(path)) return { ok: false, error: 'clipboard image save produced no file', reason: 'tool-missing' }
   let size = 0
   try {
     size = statSync(path).size
   } catch {
-    return { ok: false, error: 'clipboard image unreadable' }
+    return { ok: false, error: 'clipboard image unreadable', reason: 'tool-missing' }
   }
   if (size <= 0) {
     removeQuiet(path)
-    return { ok: false, error: 'clipboard image empty' }
+    return { ok: false, error: 'clipboard image empty', reason: 'no-image' }
   }
   const dims = readPngDimensions(path)
   if (dims) {
@@ -96,6 +98,7 @@ export function validateCapturedImageFile(path: string): ClipboardImageResult {
       return {
         ok: false,
         error: `clipboard image too small: ${dims.width}x${dims.height} (min ${MIN_CLIPBOARD_IMAGE_DIMENSION}px)`,
+        reason: 'too-small',
       }
     }
     // 过小体积的「合法」PNG 多半是脏数据/占位，真实截图通常更大
@@ -104,6 +107,7 @@ export function validateCapturedImageFile(path: string): ClipboardImageResult {
       return {
         ok: false,
         error: `clipboard image too tiny (${size} bytes, ${dims.width}x${dims.height}); copy a real screenshot`,
+        reason: 'too-small',
       }
     }
     return { ok: true, path, width: dims.width, height: dims.height }
@@ -111,7 +115,7 @@ export function validateCapturedImageFile(path: string): ClipboardImageResult {
   // 非 PNG（少见）：只做体积门槛
   if (size < MIN_CLIPBOARD_IMAGE_BYTES) {
     removeQuiet(path)
-    return { ok: false, error: `clipboard image too tiny (${size} bytes)` }
+    return { ok: false, error: `clipboard image too tiny (${size} bytes)`, reason: 'too-small' }
   }
   return { ok: true, path }
 }
@@ -177,28 +181,28 @@ function interpretWindowsClipboardResult(
 ): ClipboardImageResult {
   if (r.error) {
     removeQuiet(outPath)
-    return { ok: false, error: r.error.message }
+    return { ok: false, error: r.error.message, reason: 'tool-missing' }
   }
   if (r.status === 0) {
     const line = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || ''
     const pathPart = line.includes('|') ? line.split('|')[0] : line
     const candidate =
       pathPart && existsSync(pathPart) ? pathPart : existsSync(outPath) ? outPath : ''
-    if (!candidate) return { ok: false, error: 'clipboard image save produced no file' }
+    if (!candidate) return { ok: false, error: 'clipboard image save produced no file', reason: 'tool-missing' }
     return validateCapturedImageFile(candidate)
   }
   if (r.status === 2) {
     removeQuiet(outPath)
-    return { ok: false, error: 'no image in clipboard' }
+    return { ok: false, error: 'no image in clipboard', reason: 'no-image' }
   }
   if (r.status === 4) {
     removeQuiet(outPath)
     const err = (r.stderr || '').toString().trim()
-    return { ok: false, error: err || 'clipboard image too small (min 8px)' }
+    return { ok: false, error: err || 'clipboard image too small (min 8px)', reason: 'too-small' }
   }
   removeQuiet(outPath)
   const err = (r.stderr || r.stdout || 'powershell clipboard failed').toString().trim()
-  return { ok: false, error: err || `powershell clipboard failed (exit ${r.status})` }
+  return { ok: false, error: err || `powershell clipboard failed (exit ${r.status})`, reason: 'tool-missing' }
 }
 
 /**
@@ -238,7 +242,7 @@ function captureClipboardImageWindowsAsync(): Promise<ClipboardImageResult> {
         /* ignore */
       }
       removeQuiet(outPath)
-      finish({ ok: false, error: 'clipboard capture timed out' })
+      finish({ ok: false, error: 'clipboard capture timed out', reason: 'timeout' })
     }, 12000)
     child.stdout?.setEncoding('utf-8')
     child.stderr?.setEncoding('utf-8')
@@ -281,7 +285,7 @@ function captureClipboardImageUnixSync(): ClipboardImageResult {
     }
   }
   removeQuiet(outPath)
-  return { ok: false, error: 'no image in clipboard' }
+  return { ok: false, error: 'no image in clipboard', reason: 'no-image' }
 }
 
 function captureClipboardImageUnixAsync(): Promise<ClipboardImageResult> {

@@ -28,6 +28,8 @@ CHARS_PER_TOKEN_FALLBACK = 4.0
 
 # 单张图片块的固定 token 估算。base64 数据长度动辄数十万字符，绝不能按字符折算，
 # 否则单张图就把估算撑爆。对齐 Claude Code 对 image/document 块固定计数的做法。
+# 前提：image_codec.MAX_DIMENSION 已收敛到 1568（O4），单图视觉 token 大致稳定在这个量级；
+# 若把长边上限调回 2048，估算偏低的幅度会变大，应同步调高。
 IMAGE_BLOCK_TOKENS = 1500
 
 

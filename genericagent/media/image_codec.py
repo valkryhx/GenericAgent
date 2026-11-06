@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import mimetypes
 import os
 import struct
@@ -11,7 +12,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-MAX_DIMENSION = 2048
+# 长边预算：默认 1568（对齐 Claude Code 输入链路 m0396:205-206），
+# 可用 GA_IMAGE_MAX_DIMENSION 覆盖；夹紧到 512..2048（2048 留给明确要求更大的 provider）。
+MAX_DIMENSION = max(512, min(2048, int(os.environ.get("GA_IMAGE_MAX_DIMENSION", "1568"))))
+# 面积上限：比只卡长边更贴近 token 预算（4000x500 长条图长边没超但面积很大）。
+MAX_IMAGE_AREA = MAX_DIMENSION * MAX_DIMENSION
 # 部分 provider（Grok 等）拒绝宽或高 < 8 的图；发送前统一卡死，避免 400。
 MIN_DIMENSION = 8
 MAX_BASE64_CHARS = 5_000_000
@@ -36,6 +41,8 @@ class EncodedImage:
     source_path: str
     sha1: str
     resized: bool
+    orig_width: int = 0
+    orig_height: int = 0
 
 
 _encode_cache: OrderedDict[tuple[str, int, int], EncodedImage] = OrderedDict()
@@ -119,11 +126,15 @@ def _try_pillow_resize(data: bytes, media_type: str) -> Optional[tuple[bytes, st
     except Exception as e:
         raise ImageCodecError(f"decode failed: {e}") from e
 
-    w, h = img.size
+    ow, oh = img.size
+    w, h = ow, oh
     resized = False
-    if w > MAX_DIMENSION or h > MAX_DIMENSION:
-        img.thumbnail((MAX_DIMENSION, MAX_DIMENSION))
-        w, h = img.size
+    if w > MAX_DIMENSION or h > MAX_DIMENSION or (w * h) > MAX_IMAGE_AREA:
+        scale = min(1.0, MAX_DIMENSION / float(max(w, h)), math.sqrt(MAX_IMAGE_AREA / float(w * h)))
+        nw = max(1, int(w * scale))
+        nh = max(1, int(h * scale))
+        img = img.resize((nw, nh))
+        w, h = nw, nh
         resized = True
 
     out_type = media_type
@@ -157,7 +168,7 @@ def _try_pillow_resize(data: bytes, media_type: str) -> Optional[tuple[bytes, st
         raw = buf.getvalue()
         b64_len = (len(raw) + 2) // 3 * 4
         if b64_len <= MAX_BASE64_CHARS:
-            return raw, out_type, w, h, resized
+            return raw, out_type, w, h, resized, ow, oh
         # shrink further
         nw = max(1, int(w * 0.7))
         nh = max(1, int(h * 0.7))
@@ -201,16 +212,21 @@ def encode_image_for_prompt(path: str) -> EncodedImage:
     elif media_type == "image/jpeg":
         width, height = _jpeg_size(data)
 
+    # 原始尺寸：缩放前从文件头读出（0,0 表示未知），供尺寸/坐标说明使用。
+    orig_width, orig_height = width, height
     needs_resize = (
         media_type == "image/bmp"
         or (width and height and (width > MAX_DIMENSION or height > MAX_DIMENSION))
+        or (width and height and (width * height) > MAX_IMAGE_AREA)
         or (len(base64.b64encode(data)) > MAX_BASE64_CHARS)
     )
 
     if needs_resize or media_type == "application/octet-stream":
         pillow_out = _try_pillow_resize(data, media_type if media_type.startswith("image/") else "image/png")
         if pillow_out is not None:
-            data, media_type, width, height, resized = pillow_out
+            data, media_type, width, height, resized, ow, oh = pillow_out
+            if ow > 0 and oh > 0:
+                orig_width, orig_height = ow, oh
         elif media_type == "application/octet-stream" or not media_type.startswith("image/"):
             raise ImageCodecError(f"unsupported or undecodable image: {path}")
         elif len(base64.b64encode(data)) > MAX_BASE64_CHARS:
@@ -230,7 +246,9 @@ def encode_image_for_prompt(path: str) -> EncodedImage:
         # 未知尺寸时再试 pillow 读一次；仍未知则按 0 处理并在下方拒绝
         pillow_out = _try_pillow_resize(data, media_type if media_type.startswith("image/") else "image/png")
         if pillow_out is not None:
-            data, media_type, width, height, resized = pillow_out
+            data, media_type, width, height, resized, ow, oh = pillow_out
+            if ow > 0 and oh > 0:
+                orig_width, orig_height = ow, oh
             data_b64 = base64.b64encode(data).decode("ascii")
 
     if width > 0 and height > 0 and (width < MIN_DIMENSION or height < MIN_DIMENSION):
@@ -249,6 +267,8 @@ def encode_image_for_prompt(path: str) -> EncodedImage:
         source_path=path,
         sha1=sha1,
         resized=resized,
+        orig_width=orig_width or width,
+        orig_height=orig_height or height,
     )
     return _cache_put(cache_key, enc)
 
@@ -297,40 +317,81 @@ def normalize_image_attachments(images: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _notes_enabled() -> bool:
+    return str(os.environ.get("GA_IMAGE_NOTES", "") or "").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def display_note(enc: EncodedImage) -> str:
+    """Size/coordinate note (aligned with CC Lee). Only when resized or has source path."""
+    if not enc.resized and not enc.source_path:
+        return ""
+    parts: list[str] = []
+    if enc.source_path:
+        parts.append(f"source: {enc.source_path}")
+    ow = enc.orig_width or enc.width
+    oh = enc.orig_height or enc.height
+    parts.append(f"original {ow}x{oh}")
+    if enc.resized and enc.width > 0 and ow > 0:
+        scale = ow / float(enc.width)
+        parts.append(f"displayed at {enc.width}x{enc.height}, multiply coordinates by {scale:.2f}")
+    return "[image] " + ", ".join(parts)
+
+
 def build_user_content_with_images(
     text: str,
     images: Any = None,
     *,
     extra_paths: Optional[list[str]] = None,
+    failures: Optional[list[dict[str, str]]] = None,
 ) -> Optional[list[dict[str, Any]]]:
-    """拼 Claude-style multimodal user content；无有效图返回 None。"""
+    """拼 Claude-style multimodal user content；无有效图且无失败返回 None。"""
     atts = normalize_image_attachments(images)
     seen: set[str] = set()
     paths: list[str] = []
+    missing: list[str] = []
     for a in atts:
         p = a["path"]
-        if p not in seen and os.path.isfile(p):
-            seen.add(p)
+        if p in seen:
+            continue
+        seen.add(p)
+        if os.path.isfile(p):
             paths.append(p)
+        else:
+            # 显式附件缺失也要让用户看见（自动扫描的 extra_paths 已在 _extract 里按 isfile 过滤）
+            missing.append(p)
+            if failures is not None:
+                failures.append({"path": p, "error": "file not found"})
     for p in extra_paths or []:
         ap = os.path.abspath(os.path.expanduser(str(p)))
         if ap not in seen and os.path.isfile(ap):
             seen.add(ap)
             paths.append(ap)
 
-    if not paths:
+    if not paths and not missing:
         return None
 
     content: list[dict[str, Any]] = [{"type": "text", "text": text or ""}]
+    for p in missing:
+        content[0]["text"] += f"\n[图片附件读取失败: {p}: file not found]"
+
     any_ok = False
+    notes: list[str] = []
+    notes_on = _notes_enabled()
     for path in paths:
         try:
             enc = encode_image_for_prompt(path)
             content.append(build_image_block(enc))
             any_ok = True
+            if notes_on:
+                _note = display_note(enc)
+                if _note:
+                    notes.append(_note)
         except Exception as e:
             content[0]["text"] += f"\n[图片附件读取失败: {path}: {e}]"
-    if not any_ok and len(content) == 1:
-        # 仅错误文本也返回，让模型/用户看到失败原因
-        return content
+            if failures is not None:
+                failures.append({"path": path, "error": str(e)})
+    if notes:
+        content[0]["text"] = (content[0]["text"] or "").rstrip() + chr(10) + chr(10) + chr(10).join(notes)
     return content
+
+

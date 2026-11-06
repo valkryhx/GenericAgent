@@ -3,6 +3,22 @@ import assert from 'node:assert/strict'
 import { createPasteStore } from './paste.js'
 import { createImageAttachmentStore } from './imageAttachments.js'
 import { handleInput } from './inputController.js'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomBytes } from 'node:crypto'
+
+const imgRoot = join(tmpdir(), `ga-ic-img-${randomBytes(4).toString('hex')}`)
+mkdirSync(imgRoot, { recursive: true })
+const IMG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGM8YWTEgA0wYRUdtBIA76YBPGvKGPUAAAAASUVORK5CYII=',
+  'base64',
+)
+function mkImg(name: string): string {
+  const p = join(imgRoot, name)
+  writeFileSync(p, IMG_BYTES)
+  return p
+}
 
 test('handleInput submits expanded text when idle', () => {
   const store = createPasteStore()
@@ -485,7 +501,7 @@ test('handleInput turns Ctrl+C into shutdown and exit', () => {
 test('handleInput attaches image path paste as [Image #N] and submits images', () => {
   const store = createPasteStore()
   const images = createImageAttachmentStore()
-  const path = String.raw`D:\shots\demo.png`
+  const path = mkImg('demo.png')
   const pasted = handleInput('', path, {}, 'idle', store, new Set(), undefined, images)
   assert.equal(pasted.value, '[Image #1]')
   const submitted = handleInput(pasted.value, '', { return: true }, 'idle', store, new Set(), undefined, images)
@@ -502,9 +518,10 @@ test('handleInput attaches image path paste as [Image #N] and submits images', (
 test('handleInput joins split wechat image path paste without mid-filename replace', () => {
   const store = createPasteStore()
   const images = createImageAttachmentStore()
-  const head = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2`
-  const tail = String.raw`048_89.jpg 这图是什么`
-  const full = String.raw`d:\git_codes\GenericAgent\截图\微信图片_20260720144105_2048_89.jpg`
+  const full = mkImg('微信图片_20260720144105_2048_89.jpg')
+  const cut = full.indexOf('_2048_89.jpg')
+  const head = full.slice(0, cut + 2)
+  const tail = full.slice(cut + 2) + ' 这图是什么'
 
   const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
   assert.equal(first.value, head)
@@ -514,7 +531,6 @@ test('handleInput joins split wechat image path paste without mid-filename repla
   assert.equal(second.value, '[Image #1] 这图是什么')
   assert.equal(images.byId.get(1)?.path, full)
   assert.ok(!second.value.includes('048_89'))
-  assert.ok(!second.value.includes(String.raw`微信图片_20260720144105_2`))
 
   const submitted = handleInput(second.value, '', { return: true }, 'idle', store, new Set(), second.value.length, images)
   assert.equal(submitted.command?.type, 'submit')
@@ -529,7 +545,7 @@ test('handleInput joins split wechat image path paste without mid-filename repla
 test('handleInput attaches spaced screenshot path in one paste', () => {
   const store = createPasteStore()
   const images = createImageAttachmentStore()
-  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const path = mkImg('屏幕截图 2026-07-15 124017.png')
   const pasted = handleInput('', `${path} 这图是什么`, {}, 'idle', store, new Set(), 0, images)
   assert.equal(pasted.value, '[Image #1] 这图是什么')
   assert.equal(images.byId.get(1)?.path, path)
@@ -547,7 +563,7 @@ test('handleInput attaches spaced screenshot path in one paste', () => {
 test('handleInput PowerShell & quoted spaced path becomes clean [Image #N]', () => {
   const store = createPasteStore()
   const images = createImageAttachmentStore()
-  const path = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const path = mkImg('屏幕截图 2026-07-15 124017.png')
   const raw = `& '${path}'`
   const pasted = handleInput('', raw, {}, 'idle', store, new Set(), 0, images)
   assert.equal(pasted.value, '[Image #1]')
@@ -559,9 +575,10 @@ test('handleInput PowerShell & quoted spaced path becomes clean [Image #N]', () 
 test('handleInput joins spaced screenshot path split after space', () => {
   const store = createPasteStore()
   const images = createImageAttachmentStore()
-  const head = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 `
-  const tail = String.raw`2026-07-15 124017.png 看看`
-  const full = String.raw`d:\git_codes\GenericAgent\截图\屏幕截图 2026-07-15 124017.png`
+  const full = mkImg('屏幕截图 2026-07-15 124017.png')
+  const cut = full.lastIndexOf(' ')
+  const head = full.slice(0, cut + 1)
+  const tail = full.slice(cut + 1) + ' 看看'
   const first = handleInput('', head, {}, 'idle', store, new Set(), 0, images)
   const second = handleInput(first.value, tail, {}, 'idle', store, new Set(), first.value.length, images)
   assert.equal(second.value, '[Image #1] 看看')
@@ -636,4 +653,43 @@ test('handleInput forwards /team on|off to the bridge as a submit', () => {
 
   assert.deepEqual(handleInput('/team on', '', { return: true }, 'idle', store), { value: '', command: { type: 'submit', text: '/team on' } })
   assert.deepEqual(handleInput('/team off', '', { return: true }, 'idle', store), { value: '', command: { type: 'submit', text: '/team off' } })
+})
+
+test('imagePastePolicy distinguishes ctrl+v (image-then-text) from alt/ctrl+alt (image-only)', async () => {
+  const { imagePastePolicy } = await import('./inputController.js')
+  assert.equal(imagePastePolicy({ ctrl: true }, 'v'), 'image-then-text')
+  assert.equal(imagePastePolicy({ ctrl: true, sequence: '\x16' }, 'v'), 'image-then-text')
+  assert.equal(imagePastePolicy({ alt: true }, 'v'), 'image-only')
+  assert.equal(imagePastePolicy({ meta: true }, 'v'), 'image-only')
+  assert.equal(imagePastePolicy({ ctrl: true, alt: true }, 'v'), 'image-only')
+  assert.equal(imagePastePolicy({}, 'v'), null)
+  assert.equal(imagePastePolicy({ ctrl: true }, 'c'), null)
+})
+
+test('handleInput pending image paste carries policy', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const ctrl = handleInput('hi', 'v', { ctrl: true }, 'idle', store, new Set(), 2, images)
+  assert.equal(ctrl.pendingImagePaste, true)
+  assert.equal(ctrl.imagePastePolicy, 'image-then-text')
+  const alt = handleInput('hi', 'v', { alt: true }, 'idle', store, new Set(), 2, images)
+  assert.equal(alt.pendingImagePaste, true)
+  assert.equal(alt.imagePastePolicy, 'image-only')
+})
+
+test('handleInput does not attach a non-existent image path (O7), keeps text + notice', () => {
+  const store = createPasteStore()
+  const images = createImageAttachmentStore()
+  const missing = String.raw`D:\nope_does_not_exist_zz\gone.png`
+  const decision = handleInput('', missing, {}, 'idle', store, new Set(), 0, images)
+  assert.equal(images.byId.size, 0)
+  assert.ok(decision.value.includes('gone.png'))
+  assert.ok(decision.notice && decision.notice.includes('找不到文件'))
+})
+
+test('isUsableImagePath rejects missing file and accepts real file', async () => {
+  const { isUsableImagePath } = await import('./inputController.js')
+  assert.equal(isUsableImagePath(String.raw`D:\nope_zz\gone.png`), false)
+  const real = mkImg('usable-check.png')
+  assert.equal(isUsableImagePath(real), true)
 })

@@ -12,7 +12,8 @@ import {
   extractImagePathCandidates,
   replaceImagePathsInText,
 } from './imagePathDetect.js'
-import { captureClipboardImage, captureClipboardImageAsync } from './clipboardImage.js'
+import { statSync } from 'node:fs'
+import { captureClipboardImage, captureClipboardImageAsync, type ClipboardPasteFailureReason } from './clipboardImage.js'
 
 export type InputKey = {
   ctrl?: boolean
@@ -42,6 +43,10 @@ export type InputDecision = {
   action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills'; includeLegacy?: boolean }
   /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
   pendingImagePaste?: boolean
+  /** 本次贴图快捷键的语义：只贴图 / 先贴图再回退文本。 */
+  imagePastePolicy?: ImagePastePolicy
+  /** 一次性界面提示（如路径不存在），App 侧短暂显示。 */
+  notice?: string
   exit?: boolean
 }
 
@@ -205,28 +210,36 @@ function insertImagePlaceholdersAtCursor(
   paths: string[],
   imageStore: ImageAttachmentStore,
   source: 'clipboard' | 'path' = 'path',
-): { value: string; cursorOffset: number } {
+): { value: string; cursorOffset: number; rejected: string[] } {
   let nextValue = value
   let nextOffset = cursorOffset
+  const rejected: string[] = []
   for (const path of paths) {
+    // 路径来源需存在性校验；剪贴板捕获的临时图已由 capture 侧校验过。
+    if (source === 'path' && !isUsableImagePath(path)) {
+      rejected.push(path)
+      continue
+    }
     const att = attachImage(imageStore, path, source)
     const piece = (nextOffset > 0 && !/\s$/.test(nextValue.slice(0, nextOffset)) ? ' ' : '') + att.placeholder
     nextValue = nextValue.slice(0, nextOffset) + piece + nextValue.slice(nextOffset)
     nextOffset += piece.length
   }
-  return { value: nextValue, cursorOffset: nextOffset }
+  return { value: nextValue, cursorOffset: nextOffset, rejected }
 }
 
+export type ImagePastePolicy = 'image-only' | 'image-then-text'
+
 /**
- * 是否「主动贴图」快捷键。
+ * 解析贴图快捷键的语义（对齐 CC/Codex 的快捷键分工，见设计稿 O9）。
  *
- * - Ctrl+V：Codex 绑定；但 Windows 终端常拦截，应用可能收不到
- * - Alt+V / Meta+V：Claude Code 在 Windows 的默认 imagePaste（规避系统 Ctrl+V）
- * - Ctrl+Alt+V：Codex 在 WSL/拦截场景的备用
+ * - Ctrl+V：先贴图，失败回退为文本（macOS/Linux 主路径）
+ * - Alt+V / Meta+V：只贴图（Claude Code 在 Windows 的默认 imagePaste）
+ * - Ctrl+Alt+V：只贴图（WSL/终端拦截场景的备用）
  *
  * 解析后 rawInput 对 Ctrl+V 常为 'v'（\x16 已映射），Alt+V 为 'v' 且 meta/alt。
  */
-export function isImagePasteShortcut(key: InputKey, rawInput: string): boolean {
+export function imagePastePolicy(key: InputKey, rawInput: string): ImagePastePolicy | null {
   const seq = key.sequence ?? ''
   const isVChar =
     rawInput === 'v' ||
@@ -235,18 +248,30 @@ export function isImagePasteShortcut(key: InputKey, rawInput: string): boolean {
     seq === '\x16' ||
     seq === 'v' ||
     seq === 'V'
-  if (!isVChar) return false
+  if (!isVChar) return null
 
   const alt = Boolean(key.alt || key.meta)
   const ctrl = Boolean(key.ctrl)
 
-  // Alt+V or Meta+V (CC Windows default)
-  if (alt && !ctrl) return true
-  // Ctrl+V (Codex primary; may not reach app on Win)
-  if (ctrl && !alt) return true
-  // Ctrl+Alt+V (Codex secondary)
-  if (ctrl && alt) return true
-  return false
+  if (alt && ctrl) return 'image-only' // Ctrl+Alt+V
+  if (alt) return 'image-only' // Alt+V / Meta+V
+  if (ctrl) return 'image-then-text' // Ctrl+V
+  return null
+}
+
+/** 兼容旧名：是否「主动贴图」快捷键（任一策略命中即为 true）。 */
+export function isImagePasteShortcut(key: InputKey, rawInput: string): boolean {
+  return imagePastePolicy(key, rawInput) !== null
+}
+
+/** 前端只校验「存在 + 是文件 + 非空」，格式/尺寸仍由后端 image_codec 负责。 */
+export function isUsableImagePath(p: string): boolean {
+  try {
+    const st = statSync(p)
+    return st.isFile() && st.size > 0
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -256,10 +281,10 @@ export function tryPasteClipboardImage(
   value: string,
   cursorOffset: number,
   imageStore: ImageAttachmentStore,
-): { value: string; cursorOffset: number; ok: boolean; error?: string } {
+): { value: string; cursorOffset: number; ok: boolean; error?: string; reason?: ClipboardPasteFailureReason } {
   const cap = captureClipboardImage()
   if (!cap.ok) {
-    return { value, cursorOffset, ok: false, error: cap.error }
+    return { value, cursorOffset, ok: false, error: cap.error, reason: cap.reason }
   }
   const inserted = insertImagePlaceholdersAtCursor(value, cursorOffset, [cap.path], imageStore, 'clipboard')
   return { ...inserted, ok: true }
@@ -270,10 +295,10 @@ export async function applyClipboardImagePaste(
   value: string,
   cursorOffset: number,
   imageStore: ImageAttachmentStore,
-): Promise<{ value: string; cursorOffset: number; ok: boolean; error?: string }> {
+): Promise<{ value: string; cursorOffset: number; ok: boolean; error?: string; reason?: ClipboardPasteFailureReason }> {
   const cap = await captureClipboardImageAsync()
   if (!cap.ok) {
-    return { value, cursorOffset, ok: false, error: cap.error }
+    return { value, cursorOffset, ok: false, error: cap.error, reason: cap.reason }
   }
   const inserted = insertImagePlaceholdersAtCursor(value, cursorOffset, [cap.path], imageStore, 'clipboard')
   return { ...inserted, ok: true }
@@ -302,8 +327,9 @@ export function handleInput(
   }
   // 剪贴板贴图：Ctrl+V / Alt+V / Ctrl+Alt+V（见 isImagePasteShortcut）
   // UI 侧异步捕获（不 spawnSync），这里只声明 pending，避免卡死 Ink 事件循环与光标重绘。
-  if (imageStore && isImagePasteShortcut(key, rawInput)) {
-    return decision(value, offset, { pendingImagePaste: true })
+  const pastePolicy = imagePastePolicy(key, rawInput)
+  if (imageStore && pastePolicy) {
+    return decision(value, offset, { pendingImagePaste: true, imagePastePolicy: pastePolicy })
   }
   if (key.escape) {
     return status === 'running' || status === 'stopping'
@@ -356,6 +382,7 @@ export function handleInput(
       const replacements: Array<{ path: string; placeholder: string }> = []
       for (const p of candidates) {
         if (!expanded.includes(p)) continue
+        if (!isUsableImagePath(p)) continue
         const existing = [...imageStore.byId.values()].find(a => a.path === p)
         if (existing) {
           replacements.push({ path: p, placeholder: existing.placeholder })
@@ -387,7 +414,7 @@ export function handleInput(
     // 粘贴：绝对图片路径 → 芯片；分片粘贴时尝试与光标前文本拼成完整绝对路径
     if (imageStore) {
       const completed = completeAbsoluteImagePathAtCursor(value, offset, rawInput)
-      if (completed) {
+      if (completed && isUsableImagePath(completed.path)) {
         const before = value.slice(0, completed.start)
         const after = value.slice(offset)
         // rawInput 可能比路径尾部长（路径后还有说明文字）
@@ -406,13 +433,27 @@ export function handleInput(
       const onlyPath = asImageFilePath(rawInput)
       if (onlyPath) {
         const inserted = insertImagePlaceholdersAtCursor(value, offset, [onlyPath], imageStore, 'path')
+        if (inserted.rejected.length > 0) {
+          const plain = insertFoldedTextAtCursor(value, offset, rawInput, pasteStore)
+          return decision(plain.value, plain.cursorOffset, {
+            notice: `[image] 找不到文件：${onlyPath}`,
+          })
+        }
         return decision(inserted.value, inserted.cursorOffset)
       }
       const paths = extractImagePathCandidates(rawInput)
       if (paths.length > 0 && paths.join('\n').length >= rawInput.trim().length * 0.5) {
         // 整段粘贴以路径为主：先插入路径芯片，再附加剩余非路径文本
+        const usable = paths.filter(isUsableImagePath)
+        const rejected = paths.filter(p => !isUsableImagePath(p))
+        if (usable.length === 0) {
+          const plain = insertFoldedTextAtCursor(value, offset, rawInput, pasteStore)
+          return decision(plain.value, plain.cursorOffset, {
+            notice: rejected.length ? `[image] 找不到文件：${rejected[0]}` : undefined,
+          })
+        }
         let rest = rawInput
-        const absPaths = [...paths].sort((a, b) => b.length - a.length)
+        const absPaths = [...usable].sort((a, b) => b.length - a.length)
         const replacements = absPaths.map(p => {
           const att = attachImage(imageStore, p, 'path')
           return { path: p, placeholder: att.placeholder }
@@ -420,7 +461,9 @@ export function handleInput(
         rest = replaceImagePathsInText(rest, replacements)
         const inserted = insertLiteralTextAtCursor(value, offset, rest)
         // 若 rest 仍是纯 placeholder 串，cursor 已在末尾
-        return decision(inserted.value, inserted.cursorOffset)
+        return decision(inserted.value, inserted.cursorOffset, {
+          notice: rejected.length ? `[image] 找不到文件：${rejected[0]}` : undefined,
+        })
       }
     }
     const inserted = insertFoldedTextAtCursor(value, offset, rawInput, pasteStore)
