@@ -1487,6 +1487,79 @@ test('App resets the viewport and remounts Static when ctrl+o toggles tool expan
   }
 })
 
+test('App shows a clickable Jump to bottom pill once scrolled away from the tail', async () => {
+  // The pill is the only way back for a mouse user: End works, but nobody knows
+  // it exists. It must appear only when scrolled up, and clicking it must return
+  // to the tail. Claude Code does the same (319 `m2064` `dd`).
+  process.env.GA_INK_FULLSCREEN = 'on'
+  delete process.env.GA_INK_MOUSE
+  const timers: NodeJS.Timeout[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => {
+      onEvent({ type: 'ready', version: 1 })
+      for (let index = 1; index <= 40; index += 1) {
+        onEvent({ type: 'user', taskId: index, text: `问题 ${index}` })
+        onEvent({ type: 'assistant_done', taskId: index, text: `回答 ${index} ${'内容'.repeat(12)}` })
+      }
+    }, 0))
+    return { send() {}, stop() { timers.forEach(timer => clearTimeout(timer)) } }
+  }
+  const stdout = new CaptureWriteStream()
+  stdout.columns = 100
+  stdout.rows = 40
+  const stderr = new CaptureWriteStream()
+  stderr.columns = 100
+  stderr.rows = 40
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    // Pinned to the tail: no pill.
+    const atBottom = await waitForFrame(stdout, frame => frame.includes('回答 40'))
+    assert.doesNotMatch(atBottom, /Jump to bottom/, 'no pill while pinned to the tail')
+
+    // Scroll up: the pill appears.
+    for (let notch = 0; notch < 5; notch += 1) {
+      stdin.send('\u001B[<64;20;20M')
+      await delay(30)
+    }
+    const scrolled = await waitForFrame(stdout, frame => /Jump to bottom/.test(frame))
+    assert.match(scrolled, /Jump to bottom/, 'pill appears once the view leaves the tail')
+
+    // Click the pill: SGR left press inside its box. It is centred on the last
+    // viewport row, so aim at the middle column of that row.
+    const pillRow = scrolled.split('\n').findIndex(line => /Jump to bottom/.test(line))
+    assert.ok(pillRow >= 0, 'pill occupies a visible row')
+    const clickColumn = Math.floor(stdout.columns / 2)
+    stdin.send(`\u001B[<0;${clickColumn};${pillRow + 1}M`)
+    await delay(120)
+    stdin.send(`\u001B[<0;${clickColumn};${pillRow + 1}m`)
+    await delay(200)
+
+    const backAtTail = await waitForFrame(stdout, frame => frame.includes('回答 40') && !/Jump to bottom/.test(frame))
+    assert.match(backAtTail, /回答 40/, 'clicking the pill returns to the live tail')
+    assert.doesNotMatch(backAtTail, /Jump to bottom/, 'pill disappears once back at the tail')
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+    delete process.env.GA_INK_FULLSCREEN
+  }
+})
+
 test('App help documents the /goal command', () => {
   assert.match(helpText(), /\/goal \[condition\] - set a stop-condition goal/)
   assert.match(helpText(), /\/goal clear - remove the current goal/)

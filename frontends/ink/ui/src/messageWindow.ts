@@ -3,6 +3,7 @@ import { formatAssistantText, STDOUT_BODY_END, STDOUT_BODY_PREFIX } from './mess
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
 import { GLYPHS, RESULT_PREFIX, normalizeEmoji } from './glyphs.js'
+import { isStepHeaderLine } from './jumpToBottomPill.js'
 import { terminalSegments, terminalTextWidth } from './terminalText.js'
 
 export type TranscriptPart = MarkdownPart & {
@@ -355,11 +356,11 @@ function isOrphanClosingFence(line: string): boolean {
 function isStepBoundary(line: string): boolean {
   // Only a real runtime step header may end a stdout block. Matching generic
   // "Summary:" or "Step ..." text would misclassify legitimate command output.
-  const trimmed = line.trim()
-  return /^\*\*LLM Running \(Step \d+\) \.\.\.\*\*$/.test(trimmed)
-    || /^\*\*Step \d+ \.\.\.\*\*$/.test(trimmed)
-    || /^LLM Running \(Step \d+\) \.\.\.$/.test(trimmed)
-    || /^Step \d+ \.\.\.$/.test(trimmed)
+  //
+  // The pattern lives in `jumpToBottomPill.ts` because the "jump to bottom" pill
+  // counts these same markers; two copies would drift and the pill would disagree
+  // with the renderer about what a step looks like.
+  return isStepHeaderLine(line)
 }
 
 function appendAssistantBodyRows(

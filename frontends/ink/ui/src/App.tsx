@@ -170,6 +170,7 @@ import {
   type SelectionSpan,
 } from './transcriptSelection.js'
 import { writeClipboardTextAsync } from './clipboardText.js'
+import { countNewMessages, hitTestJumpToBottom, jumpToBottomPlacement, jumpToBottomText, type PillPlacement } from './jumpToBottomPill.js'
 import {
   preserveTranscriptScrollOnContentChange,
   scrollOffsetForHistoryReplacement,
@@ -511,7 +512,7 @@ function WorkflowPanelView({ lines, theme }: { lines: string[]; theme: InkTheme 
   )
 }
 
-function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.', totalRows, scrollOffset, selection: selectionSpansForRows, theme }: {
+function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.', totalRows, scrollOffset, selection: selectionSpansForRows, jumpToBottom, theme }: {
   height: number
   columns: number
   lines: TranscriptLine[]
@@ -522,6 +523,12 @@ function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.',
   scrollOffset: number
   /** Per-row highlight spans from `selectionSpans`, aligned with `lines`. */
   selection?: Array<SelectionSpan | undefined>
+  /**
+   * The floating "Jump to bottom" pill. `null` while the view is already pinned to
+   * the tail, which is the normal state — the pill only exists to get the user back
+   * after they scrolled away.
+   */
+  jumpToBottom?: { placement: PillPlacement } | null
   theme: InkTheme
 }) {
   void totalRows
@@ -529,14 +536,42 @@ function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.',
   // No scrollbar column. The thumb read as a dark stripe on the right edge and
   // needed a draggable target that only existed to work around not having wheel
   // paging. Wheel paging plus an in-app highlight cover both jobs now.
+  //
+  // The pill is painted by *replacing the last viewport row*, not by absolute
+  // positioning: ink 5.2.1 has no `left/bottom` and no `onClick` on Box (Claude
+  // Code ships a fork that does). Overlaying the bottom row gives the same visual
+  // — a floating box that costs no extra line — and clicking is handled by the
+  // app's own mouse path via `hitTestJumpToBottom`.
+  const contentColumns = Math.max(1, columns - TRANSCRIPT_LEFT_GUTTER - 1)
+  const pillRow = height - 1
+  const pill = jumpToBottom?.placement ?? null
+  const rows: React.ReactNode[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!
+    if (pill && index === pillRow) {
+      // The enclosing Box already supplies the left gutter via `paddingLeft`, so
+      // `pill.left` is measured from the content edge and must NOT have the gutter
+      // added again — doing so pushed the row one column over and made Ink
+      // truncate it with a trailing ellipsis.
+      const padLeft = ' '.repeat(pill.left)
+      const padRight = ' '.repeat(Math.max(0, contentColumns - pill.left - pill.width))
+      rows.push(
+        <Text key={`pill-${line.id}`} wrap="truncate-end">
+          {padLeft}
+          <Text color={theme.userText} backgroundColor={theme.userBackground}>{` ${pill.text} `}</Text>
+          {padRight}
+        </Text>,
+      )
+      continue
+    }
+    rows.push(<TranscriptLineView key={line.id} line={line} highlight={selectionSpansForRows?.[index]} />)
+  }
   return (
     <Box flexDirection="row" height={height} width={columns} overflow="hidden">
       <Box flexDirection="column" paddingLeft={TRANSCRIPT_LEFT_GUTTER} paddingRight={1} height={height} width={columns} overflow="hidden">
         {ready
           ? <Text color={theme.muted}>{readyLabel}</Text>
-          : lines.map((line, index) => (
-            <TranscriptLineView key={line.id} line={line} highlight={selectionSpansForRows?.[index]} />
-          ))}
+          : rows}
       </Box>
     </Box>
   )
@@ -1357,6 +1392,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         clearSelection()
         return
       }
+      // "Jump to bottom" pill takes the click instead of starting a selection —
+      // but only when the pill is actually on screen, which is the only time the
+      // user could have aimed at it.
+      const pill = jumpToBottomRef.current
+      if (pill && hitTestJumpToBottom(pill.placement, metrics.messageRows - 1, point.row, point.col)) {
+        setTranscriptScrollOffset(0)
+        clearSelection()
+        return
+      }
       setSelection({ anchor: point, focus: point })
       return
     }
@@ -2027,6 +2071,37 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const visibleTranscript = useMemo(() => (
     visibleTranscriptLines(transcriptRows, { maxRows: metrics.messageRows, scrollOffset: effectiveTranscriptScrollOffset })
   ), [transcriptRows, metrics.messageRows, effectiveTranscriptScrollOffset])
+  // "Jump to bottom" pill. Shown only once the view has left the tail: while
+  // pinned, the newest row is already on screen and the pill would just be a
+  // floating box over live output.
+  //
+  // The count is in *messages*, not wrapped rows. Counting `totalRows` deltas was
+  // wrong by roughly 4x: one turn renders as 4+ rows (a 问答 pair, plus any tool
+  // lines), so "3 new messages" showed up as "12". Claude Code counts assistant
+  // *segments* (`m2064` `$C`: walk the messages, skip progress and empty
+  // assistant parts, and increment only at the start of a run of assistant
+  // messages), which is the unit a user means by "messages".
+  const scrollPillAnchorRef = useRef<number | null>(null)
+  if (visibleTranscript.scrollOffset <= 0) {
+    scrollPillAnchorRef.current = null
+  } else if (scrollPillAnchorRef.current === null) {
+    scrollPillAnchorRef.current = state.messages.length
+  }
+  const newMessagesWhileScrolledUp = scrollPillAnchorRef.current === null
+    ? 0
+    : countNewMessages(state.messages, scrollPillAnchorRef.current)
+  const jumpToBottom = useMemo(() => {
+    if (!fullscreen || visibleTranscript.scrollOffset <= 0) return null
+    const contentColumns = Math.max(1, metrics.canvasColumns - TRANSCRIPT_LEFT_GUTTER - 1)
+    const text = jumpToBottomText({
+      count: newMessagesWhileScrolledUp,
+      availableColumns: Math.max(0, contentColumns - 2),
+      clickable: mouseMode !== 'off',
+    })
+    return { text, placement: jumpToBottomPlacement(text, contentColumns) }
+  }, [fullscreen, visibleTranscript.scrollOffset, newMessagesWhileScrolledUp, metrics.canvasColumns, mouseMode])
+  const jumpToBottomRef = useRef(jumpToBottom)
+  jumpToBottomRef.current = jumpToBottom
   // Plain text of each visible row, in the same order and count as the rendered
   // lines. Selection and copy work on this, so the highlight can never drift from
   // what is actually on screen.
@@ -2159,6 +2234,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
           totalRows={visibleTranscript.totalRows}
           scrollOffset={visibleTranscript.scrollOffset}
           selection={selectionRowSpans}
+          jumpToBottom={jumpToBottom}
           theme={theme}
         />
       )
