@@ -1,6 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatCompletedStatus, formatElapsed, formatRunningStatus, formatTokenCount, pickRunningVerb, RUNNING_VERBS, shouldShowActivityStatus } from './activityStatus.js'
+import {
+  completedStatusSegments,
+  formatCompletedStatus,
+  formatElapsed,
+  formatRunningStatus,
+  formatTokenCount,
+  pickRunningVerb,
+  runningStatusSegments,
+  RUNNING_VERBS,
+  shouldShowActivityStatus,
+} from './activityStatus.js'
 
 test('formatElapsed renders seconds and minutes', () => {
   assert.equal(formatElapsed(0), '0s')
@@ -76,4 +86,63 @@ test('shouldShowActivityStatus keeps final token usage visible after returning i
 test('pickRunningVerb picks deterministically from the verb list', () => {
   assert.equal(pickRunningVerb(() => 0), RUNNING_VERBS[0])
   assert.equal(pickRunningVerb(() => 0.999), RUNNING_VERBS[RUNNING_VERBS.length - 1])
+})
+
+test('runningStatusSegments joins into the same text as formatRunningStatus', () => {
+  // The segment API is the rendering path; the string API is kept for callers and
+  // tests. They must never drift apart.
+  const usage = { inputTokens: 1200, outputTokens: 17500, totalTokens: 18700 }
+  assert.equal(
+    runningStatusSegments(40, 'Hyperspacing', usage).map(segment => segment.text).join(''),
+    formatRunningStatus(40, 'Hyperspacing', usage),
+  )
+  assert.equal(
+    runningStatusSegments(40).map(segment => segment.text).join(''),
+    formatRunningStatus(40),
+  )
+})
+
+test('runningStatusSegments marks only the token usage for emphasis', () => {
+  const segments = runningStatusSegments(40, 'Hyperspacing', {
+    inputTokens: 1200,
+    outputTokens: 17500,
+    totalTokens: 18700,
+  })
+  const emphasised = segments.filter(segment => segment.emphasis)
+  assert.equal(emphasised.length, 1)
+  assert.equal(emphasised[0]!.text, '↑1.2k ↓17.5k Σ18.7k')
+  // The elapsed label and the wrapping parens stay normal weight.
+  assert.ok(segments.some(segment => !segment.emphasis && segment.text.startsWith('✻')))
+})
+
+test('runningStatusSegments emphasises cache reads when present', () => {
+  const segments = runningStatusSegments(40, 'Hyperspacing', {
+    inputTokens: 100,
+    outputTokens: 20,
+    totalTokens: 120,
+    cacheReadTokens: 70,
+  })
+  const emphasised = segments.filter(segment => segment.emphasis).map(segment => segment.text)
+  assert.deepEqual(emphasised, ['↑100 ↓20 Σ120 cache 70'])
+})
+
+test('runningStatusSegments emits no emphasis segment without usage', () => {
+  const segments = runningStatusSegments(40, 'Hyperspacing', null)
+  assert.equal(segments.some(segment => segment.emphasis), false)
+  assert.equal(segments.map(segment => segment.text).join(''), '✻ Hyperspacing (40s)')
+})
+
+test('completedStatusSegments keeps the trailing separator and emphasises only usage', () => {
+  const completedAt = new Date(2026, 9, 5, 13, 41, 0)
+  const segments = completedStatusSegments(131, completedAt, {
+    inputTokens: 12000,
+    outputTokens: 1000,
+    totalTokens: 13000,
+  })
+  assert.equal(
+    segments.map(segment => segment.text).join(''),
+    formatCompletedStatus(131, completedAt, { inputTokens: 12000, outputTokens: 1000, totalTokens: 13000 }),
+  )
+  const emphasised = segments.filter(segment => segment.emphasis).map(segment => segment.text)
+  assert.deepEqual(emphasised, ['↑12k ↓1k Σ13k'])
 })

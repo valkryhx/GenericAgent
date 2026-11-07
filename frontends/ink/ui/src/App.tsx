@@ -128,7 +128,7 @@ import {
   renderInputLine,
   type InputViewport,
 } from './promptChrome.js'
-import { formatCompletedStatus, formatRunningStatus, pickRunningVerb, shouldShowActivityStatus } from './activityStatus.js'
+import { completedStatusSegments, pickRunningVerb, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
@@ -628,12 +628,22 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
 type CompletedTurnActivity = { durationSeconds: number; completedAt: number }
 
 function ActivityView({ seconds, label, tokenUsage, completedTurn, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; completedTurn: CompletedTurnActivity | null; theme: InkTheme }) {
-  const statusText = completedTurn
-    ? formatCompletedStatus(completedTurn.durationSeconds, new Date(completedTurn.completedAt), tokenUsage)
-    : formatRunningStatus(seconds, label, tokenUsage)
+  // Token counts are the numbers people actually read off this line, so they are
+  // rendered bold while the surrounding prose stays normal weight. Bolding the
+  // whole line (the easy version) makes "Worked for 2m 11s • Oct 5 at 13:41" and
+  // the counts blur into one another.
+  const segments = completedTurn
+    ? completedStatusSegments(completedTurn.durationSeconds, new Date(completedTurn.completedAt), tokenUsage)
+    : runningStatusSegments(seconds, label, tokenUsage)
   return (
     <Box paddingX={1}>
-      <Text color={completedTurn ? theme.muted : theme.warning}>{statusText}</Text>
+      <Text color={completedTurn ? theme.muted : theme.warning} wrap="truncate-end">
+        {segments.map((segment, index) => (
+          <Text key={index} bold={segment.emphasis} color={segment.emphasis ? theme.accent : undefined}>
+            {segment.text}
+          </Text>
+        ))}
+      </Text>
     </Box>
   )
 }
