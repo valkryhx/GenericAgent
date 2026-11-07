@@ -163,13 +163,14 @@ import {
   displayColumnEnd,
   isEmptySelection,
   normalizeSelection,
+  partitionByDisplayColumns,
   selectedText,
   selectionSpans,
-  sliceByDisplayColumn,
   type SelectionPoint,
   type SelectionSpan,
 } from './transcriptSelection.js'
 import { writeClipboardTextAsync } from './clipboardText.js'
+import { decideInterrupt, interruptConfirmHint } from './interruptConfirm.js'
 import { countNewMessages, hitTestJumpToBottom, jumpToBottomPlacement, jumpToBottomText, type PillPlacement } from './jumpToBottomPill.js'
 import {
   preserveTranscriptScrollOnContentChange,
@@ -251,12 +252,13 @@ function TranscriptLineView({ line, highlight }: { line: TranscriptLine; highlig
       painted.push(segment)
       continue
     }
-    // Split this segment into [before][selected][after] by display column.
+    // Split this segment into [before][selected][after] in ONE pass. Three
+    // separate slices would duplicate any CJK character straddling a boundary,
+    // widening the row as the cursor moved and shifting the truncation point —
+    // the "text jitters left/right while dragging" report.
     const localFrom = Math.max(0, highlight.from - segmentStart)
     const localTo = Math.min(segmentWidth, highlight.to - segmentStart)
-    const before = sliceByDisplayColumn(segment.text, 0, localFrom)
-    const selected = sliceByDisplayColumn(segment.text, localFrom, localTo)
-    const after = sliceByDisplayColumn(segment.text, localTo, Number.MAX_SAFE_INTEGER)
+    const { before, selected, after } = partitionByDisplayColumns(segment.text, localFrom, localTo)
     if (before) painted.push({ ...segment, text: before })
     if (selected) painted.push({ ...segment, text: selected, inverse: true })
     if (after) painted.push({ ...segment, text: after })
@@ -786,6 +788,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [selection, setSelection] = useState<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
   const selectionRef = useRef<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
   selectionRef.current = selection
+  /** 第一次 Ctrl+C 的时间戳；窗口内再来一次才真退出。 */
+  const interruptArmedAtRef = useRef<number | null>(null)
   const bridgeRef = useRef<BridgeClient | null>(null)
   const activeTurnStartedAtRef = useRef<number | null>(null)
   const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
@@ -1392,8 +1396,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
 
   const handleMouseEvent = (event: NonNullable<ReturnType<typeof parseMouseEvent>>) => {
     if (event.kind === 'wheel') return
-    const contentColumns = transcriptContentColumns(terminalCanvasColumns(terminalSize.columns))
-    const rows = visibleTranscriptTextRef.current
     const point = selectionPointFromMouse(event.x, event.y)
 
     if (event.kind === 'press') {
@@ -1423,24 +1425,32 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       return
     }
     // release
+    const payload = copyCurrentSelection()
+    if (payload === null) setSelection(null)
+  }
+
+  /**
+   * 把当前选区写进剪贴板，返回复制到的文本（没有可用选区时返回 null）。
+   *
+   * 拖拽松开和 Ctrl+C 共用这一条路径：两处各自实现迟早会出现「拖拽复制的
+   * 内容」和「Ctrl+C 复制的内容」不一致——比如一个按显示列裁、一个按字符数裁。
+   */
+  const copyCurrentSelection = (): string | null => {
     const current = selectionRef.current
-    if (!current) return
+    if (!current) return null
+    const rows = visibleTranscriptTextRef.current
+    const contentColumns = transcriptContentColumns(terminalCanvasColumns(terminalSizeRef.current.columns))
     const range = normalizeSelection(current.anchor, current.focus, rows, contentColumns)
-    if (isEmptySelection(range)) {
-      setSelection(null)
-      return
-    }
+    if (isEmptySelection(range)) return null
     const payload = selectedText(range, rows, contentColumns)
-    if (payload.length === 0) {
-      setSelection(null)
-      return
-    }
+    if (payload.length === 0) return null
     // Keep the highlight on screen so the user can see what was copied; it is
     // cleared by the next wheel notch, key press or new press.
     writeClipboardTextAsync(payload, stdout, ok => {
       if (ok) showNotice(`已复制 ${payload.split('\n').length} 行到剪贴板`)
       else showNotice('复制失败：剪贴板不可用')
     })
+    return payload
   }
 
   const handleTerminalInput = (rawInput: string, key: InputKey) => {
@@ -1481,6 +1491,26 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       return
     }
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
+      // Ctrl+C has two meanings, matching Claude Code 319:
+      //   - with a selection → copy it (m2124:8688 swallows the event with
+      //     `return !0`, so `app:interrupt` never fires);
+      //   - without one      → interrupt, but ask for confirmation first (`m1072`
+      //     pending state + "press ctrl+c again to exit").
+      const decision = decideInterrupt({
+        hasSelection: Boolean(selectionRef.current),
+        armedAt: interruptArmedAtRef.current,
+        now: Date.now(),
+      })
+      if (decision.kind === 'copy-selection') {
+        copyCurrentSelection()
+        return
+      }
+      if (decision.kind === 'arm') {
+        interruptArmedAtRef.current = Date.now()
+        showNotice(interruptConfirmHint())
+        return
+      }
+      interruptArmedAtRef.current = null
       bridgeRef.current?.send({ type: 'shutdown' })
       exitCleanly()
       return

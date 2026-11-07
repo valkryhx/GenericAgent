@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import React from 'react'
 import { render } from 'ink'
 import { App } from './App.js'
+import { inkRenderOptions } from './inkRenderOptions.js'
 import { createCursorParkStdout } from './stdoutCursorPark.js'
 import { ReflowTerminal, countVisibleRows } from './resizeReflowModel.js'
 import { resetViewportSequence } from './terminalCleanup.js'
@@ -163,6 +164,7 @@ test('App: terminal width change must not duplicate the live frame (resize reflo
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,

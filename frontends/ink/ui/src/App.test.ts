@@ -5,6 +5,7 @@ import React from 'react'
 import { render } from 'ink'
 import stringWidth from 'string-width'
 import { App, helpText } from './App.js'
+import { inkRenderOptions } from './inkRenderOptions.js'
 import { createCursorParkStdout } from './stdoutCursorPark.js'
 import type { BridgeClient } from './bridgeClient.js'
 import type { BridgeCommand, BridgeEvent } from './protocol.js'
@@ -158,6 +159,7 @@ test('App default inline mode does not paint a GenericAgent status header above 
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -238,6 +240,7 @@ test('App renders no scrollbar column and uses the full message width', async ()
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -271,6 +274,7 @@ test('App reflows long input when the terminal is resized', async () => {
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -322,6 +326,7 @@ test('App keeps input chrome fixed while long mixed-width output streams', async
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -408,6 +413,7 @@ test('App appends a resumed history replacement into static terminal scrollback'
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -463,6 +469,7 @@ test('App replays a restored history replacement when the visible row count stay
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -502,6 +509,7 @@ test('App parks the native terminal cursor on the visible input caret for IME', 
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -543,6 +551,7 @@ test('App does not draw a second cursor marker in slash suggestions', async () =
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -599,6 +608,7 @@ test('App starts MCP status monitoring on bridge ready and shows progress beneat
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -650,6 +660,7 @@ test('App /mcp panel renders the sixth configured server when terminal space all
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -700,6 +711,7 @@ test('App hides the native input cursor while the model selection panel is open'
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -774,6 +786,7 @@ test('App opens the model-specific reasoning panel and submits the selected effo
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -822,6 +835,7 @@ test('App restores the renderer cursor before redrawing after parking the input 
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -881,6 +895,7 @@ test('App does not enter the alternate screen before the first Ink frame is writ
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -926,6 +941,7 @@ test('App clears the inline live input block before exiting on Ctrl+C', async ()
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -936,6 +952,15 @@ test('App clears the inline live input block before exiting on Ctrl+C', async ()
     await waitForFrame(stdout, frame => frame.includes('>'))
     stdin.send('你好')
     await waitForFrame(stdout, frame => frame.includes('你好'))
+    // Ctrl+C is now a two-step exit (CC 319 parity). The first press only asks
+    // for confirmation; the cleanup sequence tested below runs on the second.
+    stdin.send('\u0003')
+    await delay(50)
+    assert.equal(
+      sentCommands.some(command => (command as { type?: string } | null)?.type === 'shutdown'),
+      false,
+      'the first Ctrl+C must not shut the bridge down',
+    )
     stdin.send('\u0003')
     await delay(50)
 
@@ -984,6 +1009,7 @@ test('App writes completed transcript to static terminal scrollback instead of t
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1019,6 +1045,7 @@ test('App places the keyboard hint directly below the input frame', async () => 
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1045,6 +1072,7 @@ test('App keeps temporary status text above the input frame', async () => {
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1075,6 +1103,7 @@ test('App places slash suggestions below the input frame', async () => {
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1118,6 +1147,7 @@ test('App sticks composer near static history without a full-height empty live s
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1178,6 +1208,7 @@ test('App keeps the input composer visible when the tall help panel opens', asyn
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1230,6 +1261,7 @@ test("App shows a Codex-style completion summary only after each turn ends", asy
     bridgeScript: "bridge.py",
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1297,6 +1329,7 @@ test('App clears the previous completion summary and token usage after /new', as
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1360,6 +1393,7 @@ test('App hides the previous workflow status after /new', async () => {
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1418,6 +1452,7 @@ test('App skips raw-mode setup when stdin is not an interactive TTY', async () =
     bridgeScript: 'bridge.py',
     startBridgeClient: readyBridge,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1457,6 +1492,7 @@ test('App resets the viewport and remounts Static when ctrl+o toggles tool expan
     startBridgeClient,
     cursorPark,
   }), {
+    ...inkRenderOptions,
     stdout: cursorPark.stdout,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1520,6 +1556,7 @@ test('App shows a clickable Jump to bottom pill once scrolled away from the tail
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -1600,6 +1637,7 @@ test('App wheel scrolling pages the transcript, not the composer history', async
     bridgeScript: 'bridge.py',
     startBridgeClient,
   }), {
+    ...inkRenderOptions,
     stdout: stdout as unknown as NodeJS.WriteStream,
     stderr: stderr as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
