@@ -1,6 +1,9 @@
 temp/
 tmp/
 
+# 探针脚本的原始抓包（日志 / 二进制字节流），随时可删；脚本本身入库
+tests/probes/captures/
+
 # /resume 列表缓存（listing_cache.py；按 (mtime, size) 失效，可随时删）
 .listing_cache.json
 

@@ -42,6 +42,20 @@ export const GLYPHS = {
   box: { topLeft: '\u256D', topRight: '\u256E', bottomLeft: '\u2570', bottomRight: '\u256F' },
   /** Rule / divider. CC `Bx` = `\u2500`. */
   rule: '\u2500',
+  /** Markdown table frame (light box drawing). */
+  table: {
+    topLeft: '\u250C',
+    topRight: '\u2510',
+    bottomLeft: '\u2514',
+    bottomRight: '\u2518',
+    horizontal: '\u2500',
+    vertical: '\u2502',
+    cross: '\u253C',
+    teeDown: '\u252C',
+    teeUp: '\u2534',
+    teeRight: '\u251C',
+    teeLeft: '\u2524',
+  },
 } as const
 
 export type Glyphs = typeof GLYPHS

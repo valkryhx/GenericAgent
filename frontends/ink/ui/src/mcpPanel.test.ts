@@ -93,7 +93,7 @@ test('mcp server list can display every configured server when the viewport allo
   assert.equal(mcpPanelRows(panel), 10)
 })
 
-test('mcp startup status rows show per-server startup progress and final tool totals', () => {
+test('mcp startup status rows are always a single row (composer must not move)', () => {
   const pendingRows = mcpStartupStatusRows({
     loading: true,
     servers: [
@@ -110,8 +110,13 @@ test('mcp startup status rows show per-server startup progress and final tool to
   // Startup must not read as a gate: the first turn is answerable while
   // servers are still connecting.
   assert.match(pendingRows[0] ?? '', /you can type now/)
-  assert.match(pendingRows.join('\n'), /◌ context7.*connecting/)
-  assert.match(pendingRows.join('\n'), /tavily.*pending/)
+  // Pending servers are named inline, NOT as extra rows. A per-server list made the
+  // banner shrink by N rows when loading finished, which shoved the composer up by N
+  // rows right after startup — visible as the picture jumping once. In fullscreen the
+  // composer must never move, so the row count is fixed at one.
+  assert.equal(pendingRows.length, 1, 'loading banner must be exactly one row')
+  assert.match(pendingRows[0] ?? '', /context7/)
+  assert.match(pendingRows[0] ?? '', /tavily/)
 
   const readyRows = mcpStartupStatusRows({
     loading: false,
@@ -123,6 +128,8 @@ test('mcp startup status rows show per-server startup progress and final tool to
   })
   assert.equal(readyRows.length, 1)
   assert.match(readyRows[0] ?? '', /MCP ready.*1 server.*8 tools/)
+  // Same height before and after loading: the transition cannot move the composer.
+  assert.equal(pendingRows.length, readyRows.length)
 })
 
 test('mcpPanelRows requests enough height for five servers and selected details', () => {

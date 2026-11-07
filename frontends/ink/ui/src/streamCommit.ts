@@ -85,11 +85,56 @@ export function findFenceSafeOverflowCount(lines: string[], maxTail: number): nu
       // `● code_run` in Static and an orphan ```text JSON block in live, which
       // the formatter can no longer recognize as a tool call (the first-turn
       // large-output occlusion regression).
-      if (fenceOpenState(head) === 0 && !endsWithToolHeader(head) && !endsWithStdoutMarker(head)) return overflow
+      //
+      // Also never cut inside a GFM table: `marked` only emits a `table` token for
+      // a header row followed by its `| --- |` delimiter row. Splitting between
+      // the two (or anywhere in the body) leaves every segment as a plain
+      // paragraph, so the table renders as raw pipes — the "table not rendered"
+      // symptom. The head ends cleanly only when it neither opens nor owes a table.
+      if (
+        fenceOpenState(head) === 0
+        && !endsWithToolHeader(head)
+        && !endsWithStdoutMarker(head)
+        && !splitsTable(head, lines)
+      ) return overflow
     }
     overflow -= 1
   }
   return 0
+}
+
+/**
+ * True when committing `head` would leave a GFM table split across the two
+ * segments.
+ *
+ * `marked` only emits a `table` token when a header row is followed by its
+ * `| --- |` delimiter row (plus optional body rows). A split anywhere inside that
+ * run leaves both halves as plain paragraphs, so every row renders as raw pipes —
+ * the "table not rendered" symptom.
+ *
+ * Rule: a cut is unsafe when the last table row lands in the head and the very
+ * next line is still a table row. The table has ended when the next line is blank
+ * or not a pipe row, and cutting there is safe.
+ */
+function splitsTable(head: string[], all: string[]): boolean {
+  const last = lastNonEmptyIndex(head)
+  if (last < 0) return false
+  if (!isTableRow(head[last]!)) return false
+  const next = all[head.length]
+  return next !== undefined && isTableRow(next)
+}
+
+function lastNonEmptyIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]!.trim().length > 0) return i
+  }
+  return -1
+}
+
+/** A pipe-table row: trimmed line begins with `|` and contains another `|`. */
+function isTableRow(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.indexOf('|', 1) > 0
 }
 
 /** True when the last non-empty line is a GA tool invocation header. */

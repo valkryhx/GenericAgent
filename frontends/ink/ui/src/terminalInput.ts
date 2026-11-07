@@ -7,6 +7,8 @@ const nonTextKeyNames = new Set([
   'right',
   'pagedown',
   'pageup',
+  'end',
+  'home',
   'return',
   'escape',
   'tab',
@@ -36,6 +38,7 @@ export function parseTerminalInput(input: string): { rawInput: string; key: Inpu
     rightArrow: parsed.name === 'right',
     pageDown: parsed.name === 'pagedown',
     pageUp: parsed.name === 'pageup',
+    end: parsed.name === 'end',
     return: parsed.name === 'return',
     escape: parsed.name === 'escape',
     tab: parsed.name === 'tab',
@@ -69,6 +72,14 @@ function parseTerminalKey(input: string): ParsedTerminalKey {
   else if (input === '\x1b[5~') key.name = 'pageup'
   else if (input === '\x1b[6~') key.name = 'pagedown'
   else if (input === '\x1b[3~') key.name = 'delete'
+  // End: terminals spell it several ways (xterm CSI F, rxvt CSI 4~, SS3 OF,
+  // and the modified forms with a codepoint prefix). All mean "jump to bottom".
+  else if (input === '\x1b[F' || input === '\x1b[4~' || input === '\x1bOF') key.name = 'end'
+  else if (/^\x1b\[[14];[25]F$/.test(input) || /^\x1b\[[14];[25]~$/.test(input)) {
+    key.name = 'end'
+    key.ctrl = input.includes(';5')
+    key.shift = input.includes(';2')
+  } else if (input === '\x1b[1~' || input === '\x1b[H' || input === '\x1bOH') key.name = 'home'
   else if (input.length === 1 && input <= '\x1a') {
     key.name = String.fromCharCode(input.charCodeAt(0) + 'a'.charCodeAt(0) - 1)
     key.ctrl = true

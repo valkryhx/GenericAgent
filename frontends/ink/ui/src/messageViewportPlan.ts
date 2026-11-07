@@ -41,6 +41,10 @@ export function planMessageViewport(input: {
   if (!input.hasStaticMessages) {
     return { kind: 'ready', height: 1 }
   }
-  // Idle with scrollback history: no empty live spacer — stick composer to Static tail.
-  return { kind: 'none' }
+  // Idle with scrollback history. Keep ONE row instead of collapsing to zero:
+  // a `live/1` -> `none/0` transition at turn end shrinks the whole frame by one
+  // row, which on a full terminal reads as the picture jumping up one line every
+  // turn. One row is enough to hold the height steady without the large empty gap
+  // that the old "always messageRows" overfix produced.
+  return { kind: 'live', height: 1 }
 }

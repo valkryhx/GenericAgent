@@ -44,6 +44,7 @@ import {
   transcriptLines,
   transcriptLinesWithChannel,
   type TranscriptLine,
+  type TranscriptPart,
   visibleTranscriptLines,
   wrapTranscriptLines,
 } from './messageWindow.js'
@@ -157,7 +158,18 @@ import { inputCursorPosition } from './terminalCursor.js'
 import type { CursorParkController } from './stdoutCursorPark.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
-import { parseMouseEvent, parseMouseWheel, resolveMouseCaptureMode } from './mouseWheel.js'
+import { parseMouseEvent, parseMouseWheel, resolveFullscreenMode, resolveMouseCaptureMode } from './mouseWheel.js'
+import {
+  displayColumnEnd,
+  isEmptySelection,
+  normalizeSelection,
+  selectedText,
+  selectionSpans,
+  sliceByDisplayColumn,
+  type SelectionPoint,
+  type SelectionSpan,
+} from './transcriptSelection.js'
+import { writeClipboardTextAsync } from './clipboardText.js'
 import {
   preserveTranscriptScrollOnContentChange,
   scrollOffsetForHistoryReplacement,
@@ -165,12 +177,6 @@ import {
   transcriptScrollStep,
   transcriptWheelStep,
 } from './transcriptScroll.js'
-import {
-  scrollOffsetForScrollbarClick,
-  shouldHandleScrollbarDrag,
-  transcriptScrollbar,
-  transcriptScrollbarCells,
-} from './transcriptScrollbar.js'
 import { splitStaticAndActiveMessages } from './messagePartition.js'
 import { planMessageViewport } from './messageViewportPlan.js'
 
@@ -182,6 +188,15 @@ type Props = {
 }
 
 const STDIN_RESUME_GAP_MS = 5000
+
+/**
+ * Columns reserved on the left of the transcript content area.
+ *
+ * Must match the `paddingLeft` on the viewport box, otherwise the highlight is
+ * shifted by however many columns differ — a one-column offset reads as the
+ * cursor sitting between two characters.
+ */
+const TRANSCRIPT_LEFT_GUTTER = 1
 
 function isResumeSuccessNotice(text: string): boolean {
   return /已恢复\s+\d+\s+轮/.test(text)
@@ -196,29 +211,77 @@ function resumeSuccessStatusText(text: string): string {
   return source ? `恢复完成：${rounds} 轮历史 · ${source}` : `恢复完成：${rounds} 轮历史`
 }
 
-function TranscriptLineView({ line }: { line: TranscriptLine }) {
-  if (line.parts?.length) {
+/**
+ * Paint one transcript row, optionally with a selection highlight.
+ *
+ * The highlight has to be applied *inside* the existing styled parts, not by
+ * slicing `line.text`: rows carry per-segment colour (a tool result is grey, a
+ * diff line is tinted), and rebuilding the row from plain text would drop all of
+ * it. So walk the parts, carry a running display column, and split a part at the
+ * highlight edges when the span cuts through it.
+ */
+function TranscriptLineView({ line, highlight }: { line: TranscriptLine; highlight?: SelectionSpan }) {
+  const wrapProps = {
+    color: line.color,
+    backgroundColor: line.backgroundColor,
+    wrap: 'truncate-end' as const,
+  }
+  const segments: Array<{ text: string; part?: TranscriptPart; inverse?: boolean }> = line.parts?.length
+    ? line.parts.map(part => ({ text: part.text, part }))
+    : [{ text: line.text }]
+  if (!highlight) {
     return (
-      <Text color={line.color} backgroundColor={line.backgroundColor} wrap="truncate-end">
-        {line.parts.map((part, index) => (
-          <Text
-            key={index}
-            color={part.color ?? line.color}
-            backgroundColor={part.backgroundColor ?? line.backgroundColor}
-            bold={part.bold}
-            italic={part.italic}
-            underline={part.underline}
-            dimColor={part.dimColor}
-          >
-            {part.text}
-          </Text>
+      <Text {...wrapProps}>
+        {segments.map((segment, index) => (
+          <StyledSegment key={index} segment={segment} />
         ))}
       </Text>
     )
   }
+
+  let column = 0
+  const painted: Array<{ text: string; part?: TranscriptPart; inverse?: boolean }> = []
+  for (const segment of segments) {
+    const segmentWidth = displayColumnEnd(segment.text)
+    const segmentStart = column
+    const segmentEnd = column + segmentWidth
+    column = segmentEnd
+    if (segmentEnd <= highlight.from || segmentStart >= highlight.to) {
+      painted.push(segment)
+      continue
+    }
+    // Split this segment into [before][selected][after] by display column.
+    const localFrom = Math.max(0, highlight.from - segmentStart)
+    const localTo = Math.min(segmentWidth, highlight.to - segmentStart)
+    const before = sliceByDisplayColumn(segment.text, 0, localFrom)
+    const selected = sliceByDisplayColumn(segment.text, localFrom, localTo)
+    const after = sliceByDisplayColumn(segment.text, localTo, Number.MAX_SAFE_INTEGER)
+    if (before) painted.push({ ...segment, text: before })
+    if (selected) painted.push({ ...segment, text: selected, inverse: true })
+    if (after) painted.push({ ...segment, text: after })
+  }
   return (
-    <Text color={line.color} backgroundColor={line.backgroundColor} wrap="truncate-end">
-      {line.text}
+    <Text {...wrapProps}>
+      {painted.map((segment, index) => (
+        <StyledSegment key={index} segment={segment} />
+      ))}
+    </Text>
+  )
+}
+
+function StyledSegment({ segment }: { segment: { text: string; part?: TranscriptPart; inverse?: boolean } }) {
+  const part = segment.part
+  return (
+    <Text
+      color={part?.color}
+      backgroundColor={part?.backgroundColor}
+      bold={part?.bold}
+      italic={part?.italic}
+      underline={part?.underline}
+      dimColor={part?.dimColor}
+      inverse={segment.inverse}
+    >
+      {segment.text}
     </Text>
   )
 }
@@ -301,9 +364,11 @@ function McpPanelView({ panel, theme, maxServerRows }: { panel: McpPanelState; t
   )
 }
 
-function McpStartupStatusView({ rows, loading, theme }: { rows: string[]; loading: boolean; theme: InkTheme }) {
+function McpStartupStatusView({ rows, loading, theme, height }: { rows: string[]; loading: boolean; theme: InkTheme; height?: number }) {
+  // `height` pins the band even when `rows` is empty: the row is reserved from the
+  // first frame so the arrival of the MCP banner cannot push the composer up.
   return (
-    <Box flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={1} height={height} flexShrink={0} overflow="hidden">
       {rows.map((row, index) => (
         <Text key={`${index}:${row}`} color={index === 0 && loading ? theme.warning : theme.muted} wrap="truncate-end">{row}</Text>
       ))}
@@ -446,32 +511,33 @@ function WorkflowPanelView({ lines, theme }: { lines: string[]; theme: InkTheme 
   )
 }
 
-function MessageViewport({ height, columns, lines, ready, totalRows, scrollOffset, theme, showScrollbar = true }: {
+function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.', totalRows, scrollOffset, selection: selectionSpansForRows, theme }: {
   height: number
   columns: number
   lines: TranscriptLine[]
   ready: boolean
+  /** Text painted in the ready row. A single space keeps the row without the cue. */
+  readyLabel?: string
   totalRows: number
   scrollOffset: number
+  /** Per-row highlight spans from `selectionSpans`, aligned with `lines`. */
+  selection?: Array<SelectionSpan | undefined>
   theme: InkTheme
-  showScrollbar?: boolean
 }) {
-  const scrollbar = transcriptScrollbar({ totalRows, viewportRows: height, scrollOffset })
-  const scrollbarColumns = showScrollbar ? transcriptScrollbarColumns(columns) : 0
-  const messageColumns = Math.max(1, columns - scrollbarColumns)
-  const scrollbarCells = transcriptScrollbarCells({ totalRows, viewportRows: height, scrollOffset })
+  void totalRows
+  void scrollOffset
+  // No scrollbar column. The thumb read as a dark stripe on the right edge and
+  // needed a draggable target that only existed to work around not having wheel
+  // paging. Wheel paging plus an in-app highlight cover both jobs now.
   return (
     <Box flexDirection="row" height={height} width={columns} overflow="hidden">
-      <Box flexDirection="column" paddingLeft={1} paddingRight={1} height={height} width={messageColumns} overflow="hidden">
-        {ready ? <Text color={theme.muted}>Ready.</Text> : lines.map(line => <TranscriptLineView key={line.id} line={line} />)}
+      <Box flexDirection="column" paddingLeft={TRANSCRIPT_LEFT_GUTTER} paddingRight={1} height={height} width={columns} overflow="hidden">
+        {ready
+          ? <Text color={theme.muted}>{readyLabel}</Text>
+          : lines.map((line, index) => (
+            <TranscriptLineView key={line.id} line={line} highlight={selectionSpansForRows?.[index]} />
+          ))}
       </Box>
-      {scrollbarColumns > 0 ? (
-        <Box width={scrollbarColumns} height={height} overflow="hidden">
-          <Text wrap="truncate-end">{scrollbarCells.map((cell, index) => (
-            <Text key={index} color={cell.active ? theme.scrollbar : theme.muted}>{cell.text}{index < scrollbarCells.length - 1 ? '\n' : ''}</Text>
-          ))}</Text>
-        </Box>
-      ) : null}
     </Box>
   )
 }
@@ -646,6 +712,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [themeName, setThemeName] = useState<InkThemeName>('default')
   const theme = useMemo(() => getInkTheme(themeName), [themeName])
   const mouseMode = useMemo(() => resolveMouseCaptureMode(), [])
+  // Layout vs mouse capture are separate decisions.
+  // - `fullscreen`: alternate screen + pinned root height. What keeps the composer
+  //   from sliding down as output grows.
+  // - `mouseMode`: how much pointer traffic GA claims. Any capture mode takes
+  //   native click-drag selection away from the terminal, so the default is `off`.
+  const fullscreen = useMemo(() => resolveFullscreenMode(), [])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
   const [workflowPanel, setWorkflowPanel] = useState<WorkflowPanelState | null>(null)
   const [teamPanel, setTeamPanel] = useState<TeamPanelState | null>(null)
@@ -661,6 +733,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [notice, setNotice] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  /**
+   * In-app selection. `anchor` is where the press landed, `focus` follows the
+   * drag. Kept as two points rather than a normalized range so dragging back
+   * past the anchor reverses correctly.
+   */
+  const [selection, setSelection] = useState<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
+  const selectionRef = useRef<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
+  selectionRef.current = selection
   const bridgeRef = useRef<BridgeClient | null>(null)
   const activeTurnStartedAtRef = useRef<number | null>(null)
   const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
@@ -677,7 +757,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   /** 同一 stop 周期内 /stop 回显只写一次（防双 Enter / 重入导致 Static 双份）。 */
   const stopTranscriptEchoedRef = useRef(false)
   const pendingHistoryReplacementScrollRef = useRef(false)
-  const scrollbarDragRef = useRef(false)
   const lastStdinAtRef = useRef(Date.now())
   const pasteStore = useMemo(() => createPasteStore(), [])
   const imageStore = useMemo(() => createImageAttachmentStore(), [])
@@ -725,10 +804,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     const liveViewportGeometry = liveViewportGeometryRef.current
     // unpark 后光标恒在帧底（= rows 行、cursorRow 取 rows），与旧「未 park」分支一致。
     const inlineCleanupGeometry = { rows: liveViewportGeometry.rows, cursorRow: liveViewportGeometry.rows }
-    if (mouseMode !== 'full') {
+    if (!fullscreen) {
       stdout.write(clearInlineLiveViewportSequence(inlineCleanupGeometry))
     }
-    cleanupTerminalForExit(stdout, mouseMode)
+    cleanupTerminalForExit(stdout, mouseMode, fullscreen)
   }
 
   const exitCleanly = () => {
@@ -926,12 +1005,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }, [])
 
   useEffect(() => {
-    stdout.write(enterMainScreenTerminalSequenceForMode(mouseMode))
+    stdout.write(enterMainScreenTerminalSequenceForMode(mouseMode, fullscreen))
     setTerminalReady(true)
     return () => {
       cleanupTerminalOnce()
     }
-  }, [mouseMode, stdout])
+  }, [fullscreen, mouseMode, stdout])
 
   useEffect(() => {
     const syncTerminalSize = () => {
@@ -1128,7 +1207,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         // drops its old relative scroll offset; full mode keeps its existing
         // bottom-anchor effect below.
         resetTranscriptViewport()
-        if (mouseMode !== 'full') setTranscriptScrollOffset(0)
+        if (!fullscreen) setTranscriptScrollOffset(0)
         pendingHistoryReplacementScrollRef.current = true
         // 重挂 <Static> 的代数由 reducer 在同一个 action 里 +1，与 messages 落在同一次
         // commit；这里若再单独 bump，会先按「追加尾部」写一次、再全量重印 → 尾部重复
@@ -1245,49 +1324,106 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     }
   }, [bridgeScript, python, startBridgeClient])
 
+  const clearSelection = () => {
+    if (selectionRef.current) setSelection(null)
+  }
+
+  /**
+   * Translate a mouse report into a selection point.
+   *
+   * SGR reports are 1-based; row 0 of the viewport sits below the header row, and
+   * column 0 of the content area sits after the 1-column left gutter. Clamping
+   * happens in `normalizeSelection`, so out-of-area drags simply stick to the
+   * nearest edge instead of throwing the selection away.
+   */
+  const selectionPointFromMouse = (x: number, y: number): SelectionPoint => {
+    const canvasColumns = terminalCanvasColumns(terminalSize.columns)
+    const contentColumns = transcriptContentColumns(canvasColumns)
+    return {
+      row: y - 1 - metrics.headerRows,
+      col: x - 1 - TRANSCRIPT_LEFT_GUTTER,
+    }
+  }
+
+  const handleMouseEvent = (event: NonNullable<ReturnType<typeof parseMouseEvent>>) => {
+    if (event.kind === 'wheel') return
+    const contentColumns = transcriptContentColumns(terminalCanvasColumns(terminalSize.columns))
+    const rows = visibleTranscriptTextRef.current
+    const point = selectionPointFromMouse(event.x, event.y)
+
+    if (event.kind === 'press') {
+      // Middle/right click: never selects. Left button only (SGR button 0).
+      if (event.button !== 0) {
+        clearSelection()
+        return
+      }
+      setSelection({ anchor: point, focus: point })
+      return
+    }
+    if (event.kind === 'drag') {
+      const current = selectionRef.current
+      if (!current) return
+      // Motion reports for non-held buttons do not reach us (1002h only reports
+      // motion while a button is down), so any drag here extends the selection.
+      setSelection({ anchor: current.anchor, focus: point })
+      return
+    }
+    // release
+    const current = selectionRef.current
+    if (!current) return
+    const range = normalizeSelection(current.anchor, current.focus, rows, contentColumns)
+    if (isEmptySelection(range)) {
+      setSelection(null)
+      return
+    }
+    const payload = selectedText(range, rows, contentColumns)
+    if (payload.length === 0) {
+      setSelection(null)
+      return
+    }
+    // Keep the highlight on screen so the user can see what was copied; it is
+    // cleared by the next wheel notch, key press or new press.
+    writeClipboardTextAsync(payload, stdout, ok => {
+      if (ok) showNotice(`已复制 ${payload.split('\n').length} 行到剪贴板`)
+      else showNotice('复制失败：剪贴板不可用')
+    })
+  }
+
   const handleTerminalInput = (rawInput: string, key: InputKey) => {
-    if (mouseMode === 'full') {
+    // Wheel works in every fullscreen mode; button/drag events only exist in `full`.
+    if (fullscreen) {
       const mouseInput = key.sequence ?? rawInput
       const wheel = parseMouseWheel(mouseInput)
       if (wheel) {
         const { totalRows, viewportRows } = transcriptRowsRef.current
         const delta = transcriptWheelStep()
         setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, wheel === 'up' ? delta : -delta, totalRows, viewportRows))
+        // Scrolling moves the rows under a fixed screen position, so any existing
+        // highlight would then point at different text. Drop it.
+        clearSelection()
         return
       }
       const mouseEvent = parseMouseEvent(mouseInput)
       if (mouseEvent) {
-        if (mouseEvent.kind === 'release') {
-          scrollbarDragRef.current = false
-          return
-        }
-        if (mouseEvent.kind === 'wheel') {
-          return
-        }
-        const { totalRows, viewportRows } = transcriptRowsRef.current
-        if (shouldHandleScrollbarDrag({
-          kind: mouseEvent.kind,
-          x: mouseEvent.x,
-          columns: terminalCanvasColumns(terminalSize.columns),
-          dragging: scrollbarDragRef.current,
-        })) {
-          const offset = scrollOffsetForScrollbarClick({ totalRows, viewportRows, y: mouseEvent.y, viewportTop: 2 })
-          if (offset !== null) {
-            scrollbarDragRef.current = true
-            setTranscriptScrollOffset(offset)
-          }
-        }
+        handleMouseEvent(mouseEvent)
         return
       }
     }
-    if (mouseMode === 'full' && key.pageUp) {
+    if (fullscreen && key.pageUp) {
       const { totalRows, viewportRows } = transcriptRowsRef.current
       setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, transcriptScrollStep(viewportRows), totalRows, viewportRows))
       return
     }
-    if (mouseMode === 'full' && key.pageDown) {
+    if (fullscreen && key.pageDown) {
       const { totalRows, viewportRows } = transcriptRowsRef.current
       setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, -transcriptScrollStep(viewportRows), totalRows, viewportRows))
+      return
+    }
+    // Jump to bottom (Claude Code parity). The alternate screen has no terminal
+    // scrollback, so after paging up there must be a one-key way back to the live
+    // tail: bare End, Ctrl+End, or Shift+End (terminals spell these differently).
+    if (fullscreen && key.end) {
+      setTranscriptScrollOffset(0)
       return
     }
     if (key.ctrl && (rawInput === 'c' || rawInput === '\u0003')) {
@@ -1308,6 +1444,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (key.escape && state.goalNudge && (state.status === 'idle') && input.trim() === '') {
       dispatch({ type: 'goal_nudge', text: '' })
       return
+    }
+    // Any keypress drops a finished selection highlight. It is a copy result, not
+    // a mode: holding it on screen while the user types would leave inverted text
+    // scattered through the transcript. Escape with a selection present is
+    // consumed here so it clears the highlight instead of also cancelling work.
+    if (selectionRef.current && (key.escape || rawInput.length > 0 || key.return || key.backspace || key.delete)) {
+      clearSelection()
+      if (key.escape) return
     }
     if (footerPanel) {
       if (key.escape) {
@@ -1725,6 +1869,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || goalProposalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
   const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
   const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
+  // Reserve the MCP banner row from the very first frame, even before any status
+  // arrives — but only in fullscreen mode. The banner shows up ~4s into startup
+  // (background discovery); if it claimed its row only then, the bottom chrome would
+  // grow by one row and push the composer up mid-session. In fullscreen the composer
+  // must never move, so the row is permanently reserved.
+  //
+  // Inline mode keeps the old behaviour: there the composer already moves with
+  // output, and a reserved blank row would just be a permanent empty line.
+  const mcpBannerReserved = fullscreen && !activePanel && slashItems.length === 0
+  const mcpBannerRows = mcpBannerReserved ? Math.max(1, mcpStartupRows.length) : mcpStartupRows.length
   const workflowStatusBar = useMemo(() => workflowStatusBarFromState(state), [state])
   const showWorkflowStatusBar = Boolean(workflowStatusBar) && !activePanel && slashItems.length === 0
   const workflowStatusRows = workflowStatusBar ? workflowStatusBarRows(workflowStatusBar) : []
@@ -1783,8 +1937,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       ? hooksPanelRows.length
     : footerPanel
       ? footerPanelRows(footerPanel)
-    : showMcpStartupStatus
-      ? mcpStartupRows.length
+    : showMcpStartupStatus || mcpBannerReserved
+      ? mcpBannerRows
     : slashItems.length > 0
       ? visibleSlashSuggestions(slashItems, slashSelected).items.length + 1
       : 0
@@ -1793,7 +1947,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     columns,
     hasActivity,
     hasError: Boolean(state.error),
-    hasPanel: Boolean(activePanel) || showMcpStartupStatus,
+    hasPanel: Boolean(activePanel) || showMcpStartupStatus || mcpBannerReserved,
     hasSlashSuggestions: slashItems.length > 0,
     inputRows,
     panelRows,
@@ -1801,7 +1955,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // Inline scrollback: no title/status header. A live "GenericAgent running"
     // band sits after <Static> and looks jammed into the middle of output.
     // Full mouse mode keeps a 1-row header (single viewport, no Static).
-    headerRows: mouseMode === 'full' ? 1 : 0,
+    headerRows: fullscreen ? 1 : 0,
   })
   const mcpServerRowCapacity = mcpPanel
     ? Math.max(1, Math.min(
@@ -1815,7 +1969,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   ), [keepLatestTaskActive, state.messages])
 
   const staticTranscript = useMemo(() => (
-    mouseMode === 'full'
+    fullscreen
       ? { rows: [], channel: null }
       : (() => {
           const rendered = transcriptLinesWithChannel(messagePartition.staticMessages, { expandedTools, theme })
@@ -1824,17 +1978,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
             channel: rendered.channel,
           }
         })()
-  ), [expandedTools, messagePartition.staticMessages, metrics.canvasColumns, mouseMode, theme])
+  ), [expandedTools, messagePartition.staticMessages, metrics.canvasColumns, fullscreen, theme])
   const staticTranscriptRows = staticTranscript.rows
   const activeTranscriptRows = useMemo(() => (
-    mouseMode === 'full'
+    fullscreen
       ? []
       : wrapTranscriptLines(transcriptLinesWithChannel(messagePartition.activeMessages, {
           expandedTools,
           theme,
           initialChannel: staticTranscript.channel,
         }).lines, transcriptContentColumns(metrics.canvasColumns))
-  ), [expandedTools, messagePartition.activeMessages, metrics.canvasColumns, mouseMode, staticTranscript.channel, theme])
+  ), [expandedTools, messagePartition.activeMessages, metrics.canvasColumns, fullscreen, staticTranscript.channel, theme])
   const inlineMessageViewportPlan = useMemo(() => (
     planMessageViewport({
       hasStaticMessages: staticTranscriptRows.length > 0,
@@ -1850,7 +2004,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const inlineMessageRows = inlineMessageViewportPlan.kind === 'none'
     ? 0
     : inlineMessageViewportPlan.height
-  const messageRowsForCursor = mouseMode === 'full' ? metrics.messageRows : inlineMessageRows
+  const messageRowsForCursor = fullscreen ? metrics.messageRows : inlineMessageRows
   const liveTranscriptRows = useMemo(() => (
     inlineMessageViewportPlan.kind === 'live'
       ? liveTranscriptViewportLines(activeTranscriptRows, inlineMessageViewportPlan.height)
@@ -1861,7 +2015,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
   ), [state.messages, expandedTools, metrics.canvasColumns, theme])
   const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
-  const historyReplacementScrollOffset = mouseMode === 'full' && pendingHistoryReplacementScrollRef.current
+  const historyReplacementScrollOffset = fullscreen && pendingHistoryReplacementScrollRef.current
     ? scrollOffsetForHistoryReplacement(transcriptRows.length, metrics.messageRows)
     : null
   const effectiveTranscriptScrollOffset = historyReplacementScrollOffset ?? preserveTranscriptScrollOnContentChange(
@@ -1873,7 +2027,29 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const visibleTranscript = useMemo(() => (
     visibleTranscriptLines(transcriptRows, { maxRows: metrics.messageRows, scrollOffset: effectiveTranscriptScrollOffset })
   ), [transcriptRows, metrics.messageRows, effectiveTranscriptScrollOffset])
-  transcriptRowsRef.current = mouseMode === 'full'
+  // Plain text of each visible row, in the same order and count as the rendered
+  // lines. Selection and copy work on this, so the highlight can never drift from
+  // what is actually on screen.
+  const visibleTranscriptText = useMemo(
+    () => visibleTranscript.lines.map(line => line.text),
+    [visibleTranscript],
+  )
+  const visibleTranscriptTextRef = useRef<string[]>(visibleTranscriptText)
+  visibleTranscriptTextRef.current = visibleTranscriptText
+  const selectionRange = useMemo(() => (
+    selection
+      ? normalizeSelection(
+          selection.anchor,
+          selection.focus,
+          visibleTranscriptText,
+          transcriptContentColumns(metrics.canvasColumns),
+        )
+      : null
+  ), [selection, visibleTranscriptText, metrics.canvasColumns])
+  const selectionRowSpans = useMemo(() => (
+    selectionSpans(selectionRange, visibleTranscriptText, transcriptContentColumns(metrics.canvasColumns))
+  ), [selectionRange, visibleTranscriptText, metrics.canvasColumns])
+  transcriptRowsRef.current = fullscreen
     ? { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
     : { totalRows: activeTranscriptRows.length, viewportRows: Math.max(1, inlineMessageRows) }
   // Slash/panel render *below* the input (Codex popup under composer), so they
@@ -1892,7 +2068,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     inputCursorLine: promptViewport.cursorLine,
     inputCursorColumn: promptViewport.cursorColumn,
   })
-  const liveViewportRows = mouseMode === 'full' ? metrics.rows : metrics.headerRows + messageRowsForCursor + metrics.bottomRows
+  const liveViewportRows = fullscreen ? metrics.rows : metrics.headerRows + messageRowsForCursor + metrics.bottomRows
   liveViewportGeometryRef.current = {
     rows: liveViewportRows,
     cursorRow: Math.min(inputCursor.row, Math.max(0, liveViewportRows - 1)),
@@ -1922,7 +2098,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }, [activePanel, cursorPark, inputCursor.column, inputCursor.row, liveViewportRows, state.status, terminalReady])
 
   useEffect(() => {
-    if (mouseMode !== 'full') {
+    if (!fullscreen) {
       pendingHistoryReplacementScrollRef.current = false
       return
     }
@@ -1932,7 +2108,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }, [historyReplacementScrollOffset, metrics.messageRows, mouseMode, visibleTranscript.totalRows])
 
   useEffect(() => {
-    if (mouseMode !== 'full') return
+    if (!fullscreen) return
     if (transcriptScrollOffset !== visibleTranscript.scrollOffset) {
       setTranscriptScrollOffset(visibleTranscript.scrollOffset)
     }
@@ -1947,14 +2123,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     hasError: Boolean(state.error),
     hasPanel: Boolean(activePanel),
     hasSlashSuggestions: slashItems.length > 0,
-    hasMcpStatus: showMcpStartupStatus,
+    hasMcpStatus: showMcpStartupStatus || mcpBannerReserved,
     hasAboveInputStatus: footerPanel?.type === 'status',
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
     if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint))}</Text></Box>
     if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
-    if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} />
+    if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} height={panelRows > 0 ? panelRows : undefined} />
     if (section === 'panel') {
       if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />
       if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
@@ -1972,15 +2148,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     return slashItems.length > 0 ? <SlashSuggestionsView key={section} suggestions={slashItems} selected={slashSelected} theme={theme} /> : null
   }
   const renderMessageViewport = () => {
-    if (mouseMode === 'full') {
+    if (fullscreen) {
       return (
         <MessageViewport
           height={metrics.messageRows}
           columns={metrics.canvasColumns}
           lines={visibleTranscript.lines}
-          ready={visibleTranscript.totalRows === 0}
+          ready={false}
+          readyLabel=" "
           totalRows={visibleTranscript.totalRows}
           scrollOffset={visibleTranscript.scrollOffset}
+          selection={selectionRowSpans}
           theme={theme}
         />
       )
@@ -1996,7 +2174,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
           totalRows={0}
           scrollOffset={0}
           theme={theme}
-          showScrollbar={false}
         />
       )
     }
@@ -2009,14 +2186,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         totalRows={activeTranscriptRows.length}
         scrollOffset={0}
         theme={theme}
-        showScrollbar={false}
       />
     )
   }
   if (!terminalReady) return null
   return (
     <>
-      {mouseMode === 'full' ? null : (
+      {fullscreen ? null : (
         <Static key={String(state.staticGeneration) + ':' + staticTranscriptGeneration} items={staticTranscriptRows}>
           {line => <TranscriptLineView key={line.id} line={line} />}
         </Static>

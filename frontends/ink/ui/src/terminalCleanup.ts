@@ -1,5 +1,11 @@
 import os from 'node:os'
-import { mouseTrackingOff, mouseTrackingOn, type MouseCaptureMode } from './mouseWheel.js'
+import {
+  alternateScrollOff,
+  alternateScrollOn,
+  mouseTrackingOff,
+  mouseTrackingOn,
+  type MouseCaptureMode,
+} from './mouseWheel.js'
 
 const showCursor = '\u001B[?25h'
 const enterAlternateScreen = '\u001B[?1049h\u001B[2J\u001B[H'
@@ -57,16 +63,35 @@ export function resetViewportSequence(): string {
   return `${ESC_SEQ}[2J${ESC_SEQ}[3J${ESC_SEQ}[H`
 }
 
-export function enterMainScreenTerminalSequenceForMode(mode: MouseCaptureMode = 'off'): string {
-  return mode === 'full' ? `${enterAlternateScreen}${mouseTrackingOn(mode)}` : enterMainScreenTerminalSequence
+export function enterMainScreenTerminalSequenceForMode(
+  mode: MouseCaptureMode = 'off',
+  fullscreen = false,
+): string {
+  // Alternate screen is a LAYOUT decision; mouse tracking is a capture decision.
+  // Keeping them separate lets GA pin the composer (fullscreen) without taking the
+  // pointer away from the terminal (tracking off ⇒ native select/copy still works).
+  const altScreen = fullscreen ? enterAlternateScreen : enterMainScreenTerminalSequence
+  // With tracking on, GA owns the wheel. Disable the terminal's "alternate scroll"
+  // translation so a notch can never arrive as an arrow key behind our back; with
+  // tracking off, leave 1007 alone and let the terminal keep its native behaviour.
+  const altScroll = fullscreen && mode === 'off' ? '' : alternateScrollOff()
+  return `${altScreen}${mouseTrackingOn(mode)}${altScroll}`
 }
 
-export function exitTerminalCleanupSequenceForMode(mode: MouseCaptureMode = 'off'): string {
-  return `${mouseTrackingOff()}\u001B[0m${showCursor}\r\u001B[2K${mode === 'full' ? exitAlternateScreen : ''}`
+export function exitTerminalCleanupSequenceForMode(
+  mode: MouseCaptureMode = 'off',
+  fullscreen = false,
+): string {
+  const restoreAltScroll = fullscreen && mode !== 'off' ? alternateScrollOn() : ''
+  return `${mouseTrackingOff()}\u001B[0m${showCursor}\r\u001B[2K${restoreAltScroll}${fullscreen ? exitAlternateScreen : ''}`
 }
 
-export function cleanupTerminalForExit(stdout: Pick<NodeJS.WriteStream, 'write'>, mode: MouseCaptureMode = 'off'): void {
-  stdout.write(exitTerminalCleanupSequenceForMode(mode))
+export function cleanupTerminalForExit(
+  stdout: Pick<NodeJS.WriteStream, 'write'>,
+  mode: MouseCaptureMode = 'off',
+  fullscreen = false,
+): void {
+  stdout.write(exitTerminalCleanupSequenceForMode(mode, fullscreen))
 }
 
 export function reassertMouseTracking(stdout: Pick<NodeJS.WriteStream, 'write'>, mode: MouseCaptureMode = 'off'): void {

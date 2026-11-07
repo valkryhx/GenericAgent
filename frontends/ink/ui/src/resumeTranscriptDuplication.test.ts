@@ -89,6 +89,11 @@ function renderHarness(onBridge: (emit: (event: BridgeEvent) => void) => void): 
   stdout: CaptureWriteStream
   unmount: () => void
 } {
+  // This suite reproduces an ink <Static> duplication bug, which only exists in
+  // inline mode (main screen, history appended to terminal scrollback). The shipped
+  // default is now fullscreen (CC 319 parity), where <Static> is not used at all,
+  // so pin the mode instead of relying on the default.
+  process.env.GA_INK_FULLSCREEN = 'off'
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()
   const stdin = new FakeReadStream()

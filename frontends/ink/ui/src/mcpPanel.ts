@@ -33,16 +33,26 @@ export function mcpStartupStatusRows(status: McpStartupStatus): string[] {
   // first turn without waiting for every server (measured: first token 160ms
   // after ready, MCP ready ~7s later). Say so, otherwise the warning-coloured
   // banner reads as "GA is still booting, do not type".
+  //
+  // ALWAYS exactly one row — never one row per server. The per-server list made
+  // the banner shrink by N rows the moment loading finished, which moved the
+  // composer up by N rows right after startup. In fullscreen mode the whole point
+  // is that the composer never moves, so the pending server names go inline into
+  // the summary instead. `/mcp` is where the per-server breakdown belongs.
+  //
+  // Order matters: pending names sit right after the header so a narrow terminal
+  // truncates the trailing hint instead of the server names.
+  const pending = status.servers.filter(server => server.status !== 'connected' && server.status !== 'failed')
+  const pendingLabel = pending.length > 0
+    ? ` · ${pending.slice(0, 3).map(server => `${server.name} ${mcpStatusIcon(server.status)}`).join(' ')}`
+      + (pending.length > 3 ? ` +${pending.length - 3}` : '')
+    : ''
   const summary = status.loading
-    ? `MCP connecting in the background · ${connected}/${status.servers.length} connected · ${totalTools} tools · you can type now`
+    ? `MCP connecting in the background${pendingLabel} · ${connected}/${status.servers.length} connected · ${totalTools} tools · you can type now`
     : failed > 0
       ? `MCP ready with failures · ${status.servers.length} servers · ${totalTools} tools · ${failed} failed`
       : `MCP ready · ${status.servers.length} servers · ${totalTools} tools`
-  if (!status.loading) return [summary]
-  return [
-    summary,
-    ...status.servers.map(server => `${mcpStatusIcon(server.status)} ${server.name} · ${server.status}${server.status === 'connected' ? ` · ${server.tool_count} tools` : ''}`),
-  ]
+  return [summary]
 }
 
 export function loadingMcpPanel(): McpPanelState {

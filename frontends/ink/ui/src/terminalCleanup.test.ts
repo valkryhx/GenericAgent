@@ -5,6 +5,7 @@ import {
   enterMainScreenTerminalSequence,
   enterMainScreenTerminalSequenceForMode,
   exitTerminalCleanupSequence,
+  exitTerminalCleanupSequenceForMode,
   reassertMouseTracking,
   resetViewportSequence,
 } from './terminalCleanup.js'
@@ -39,14 +40,39 @@ test('reassertMouseTracking is a no-op by default', () => {
   assert.doesNotMatch(chunks.join(''), /\u001B\[2J/)
 })
 
-test('full mouse mode keeps the legacy alternate screen and mouse capture path', () => {
-  const sequence = enterMainScreenTerminalSequenceForMode('full')
+test('fullscreen and mouse capture are independent switches', () => {
+  // Alternate screen = layout; the 1000-series modes = pointer capture.
+  const fullscreenFull = enterMainScreenTerminalSequenceForMode('full', true)
+  assert.match(fullscreenFull, /\u001B\[\?1049h/)
+  assert.match(fullscreenFull, /\u001B\[\?1000h/)
+  assert.match(fullscreenFull, /\u001B\[\?1002h/)
+  assert.match(fullscreenFull, /\u001B\[\?1006h/)
+  // 1003h (bare any-motion) is never requested: it would report every cell the
+  // pointer crosses. 1002h already covers motion while a button is held.
+  assert.doesNotMatch(fullscreenFull, /\u001B\[\?1003h/)
+  // Capturing the mouse means GA owns the wheel, so the terminal's
+  // "alternate scroll" translation (which turns notches into arrow keys) is
+  // turned off explicitly.
+  assert.match(fullscreenFull, /\u001B\[\?1007l/)
 
-  assert.match(sequence, /\u001B\[\?1049h/)
-  assert.match(sequence, /\u001B\[\?1000h/)
-  assert.match(sequence, /\u001B\[\?1002h/)
-  assert.match(sequence, /\u001B\[\?1003h/)
-  assert.match(sequence, /\u001B\[\?1006h/)
+  // Capture off: nothing in the 1000-series is emitted, so the terminal keeps
+  // click-drag selection — and 1007 is left alone so its own scrolling works.
+  const shipped = enterMainScreenTerminalSequenceForMode('off', true)
+  assert.match(shipped, /\u001B\[\?1049h/)
+  assert.doesNotMatch(shipped, /\u001B\[\?100[0-9]h/)
+  assert.doesNotMatch(shipped, /\u001B\[\?1007l/)
+
+  // Inline layout with capture off: no alternate screen either.
+  const inline = enterMainScreenTerminalSequenceForMode('off', false)
+  assert.doesNotMatch(inline, /\u001B\[\?1049h/)
+  assert.doesNotMatch(inline, /\u001B\[\?100[0-9]h/)
+
+  // Exit sequence must leave the alternate screen only when we entered it, and
+  // must restore 1007 when we turned it off.
+  assert.match(exitTerminalCleanupSequenceForMode('off', true), /\u001B\[\?1049l/)
+  assert.doesNotMatch(exitTerminalCleanupSequenceForMode('off', false), /\u001B\[\?1049l/)
+  assert.match(exitTerminalCleanupSequenceForMode('full', true), /\u001B\[\?1007h/)
+  assert.doesNotMatch(exitTerminalCleanupSequenceForMode('off', true), /\u001B\[\?1007h/)
 
   const chunks: string[] = []
   reassertMouseTracking({ write: chunk => {

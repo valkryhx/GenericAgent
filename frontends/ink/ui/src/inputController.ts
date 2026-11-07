@@ -31,6 +31,8 @@ export type InputKey = {
   rightArrow?: boolean
   pageUp?: boolean
   pageDown?: boolean
+  /** End key (bare / Ctrl+End / Shift+End). Used for jump-to-bottom in full mode. */
+  end?: boolean
   sequence?: string
 }
 

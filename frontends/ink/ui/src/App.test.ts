@@ -146,7 +146,10 @@ function emptyLiveGapAboveChrome(frame: string): number {
 test('App default inline mode does not paint a GenericAgent status header above the transcript', async () => {
   // Status belongs in the bottom activity chrome; a live header after <Static>
   // looks like "GenericAgent running" jammed into the middle of output.
-  delete process.env.GA_INK_MOUSE
+  // Inline-mode behaviour: pin the layout explicitly. The shipped default is the
+  // alternate screen (CC 319 parity), where this branch is not taken at all. Note
+  // this is the LAYOUT switch — GA_INK_MOUSE only controls mouse capture.
+  process.env.GA_INK_FULLSCREEN = 'off'
   const stdout = new CaptureWriteStream()
   const stderr = new CaptureWriteStream()
   const stdin = new FakeReadStream()
@@ -205,9 +208,11 @@ test('App soft-wraps long input without writing into the physical final column',
   }
 })
 
-test('App renders one continuous safe-canvas scrollbar cell per message viewport row', async () => {
-  const previousMouseMode = process.env.GA_INK_MOUSE
-  process.env.GA_INK_MOUSE = 'full'
+test('App renders no scrollbar column and uses the full message width', async () => {
+  // The scrollbar thumb was removed: it read as a dark stripe on the right edge and
+  // only worked with mouse capture on, which is what stole click-drag selection.
+  process.env.GA_INK_FULLSCREEN = 'on'
+  delete process.env.GA_INK_MOUSE
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -241,20 +246,16 @@ test('App renders one continuous safe-canvas scrollbar cell per message viewport
   })
 
   try {
-    const frame = await waitForFrame(stdout, value => value.includes('▐') && value.includes('回答 12'))
-    const messageRows = frame.split('\n').slice(1, 18)
+    const frame = await waitForFrame(stdout, value => value.includes('回答 12'))
+    const allRows = frame.split('\n')
 
-    assert.equal(messageRows.length, 17)
-    assert.equal(messageRows.every(line => /▐$/.test(line)), true)
-    assert.equal(frame.split('\n').every(line => stringWidth(line) < stdout.columns), true)
+    assert.equal(allRows.some(line => line.includes('▐')), false, 'no scrollbar cells')
+    assert.equal(allRows.some(line => line.includes('▌')), false, 'no scrollbar cells')
+    assert.equal(allRows.every(line => stringWidth(line) < stdout.columns), true)
   } finally {
     instance.unmount()
     timers.forEach(timer => clearTimeout(timer))
-    if (previousMouseMode === undefined) {
-      delete process.env.GA_INK_MOUSE
-    } else {
-      process.env.GA_INK_MOUSE = previousMouseMode
-    }
+    delete process.env.GA_INK_FULLSCREEN
   }
 })
 
@@ -607,7 +608,9 @@ test('App starts MCP status monitoring on bridge ready and shows progress beneat
   try {
     const output = await waitForOutput(stdout, value => value.includes('MCP connecting in the background') && value.includes('context7'))
     assert.match(output, /MCP connecting in the background/)
-    assert.match(output, /context7.*pending/)
+    // Pending server names are inline in the single summary row (not a per-server
+    // list): a list shrank by N rows when loading finished and moved the composer.
+    assert.match(output, /context7/)
     const frame = stdout.chunks.map(stripAnsi).filter(chunk => chunk.includes('context7')).at(-1) ?? ''
     assert.ok(frame.indexOf('Enter send') < frame.indexOf('context7'), 'MCP progress should render below the input composer')
   } finally {
@@ -852,6 +855,10 @@ test('App restores the renderer cursor before redrawing after parking the input 
 })
 
 test('App does not enter the alternate screen before the first Ink frame is written', async () => {
+  // Inline-mode behaviour: pin the layout explicitly. The shipped default is the
+  // alternate screen (CC 319 parity), where this branch is not taken at all. Note
+  // this is the LAYOUT switch — GA_INK_MOUSE only controls mouse capture.
+  process.env.GA_INK_FULLSCREEN = 'off'
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -893,6 +900,10 @@ test('App does not enter the alternate screen before the first Ink frame is writ
 })
 
 test('App clears the inline live input block before exiting on Ctrl+C', async () => {
+  // Inline-mode behaviour: pin the layout explicitly. The shipped default is the
+  // alternate screen (CC 319 parity), where this branch is not taken at all. Note
+  // this is the LAYOUT switch — GA_INK_MOUSE only controls mouse capture.
+  process.env.GA_INK_FULLSCREEN = 'off'
   const sentCommands: unknown[] = []
   const startBridgeClient = (
     _python: string,
@@ -941,6 +952,10 @@ test('App clears the inline live input block before exiting on Ctrl+C', async ()
 })
 
 test('App writes completed transcript to static terminal scrollback instead of the live viewport', async () => {
+  // Inline-mode behaviour: pin the layout explicitly. The shipped default is the
+  // alternate screen (CC 319 parity), where this branch is not taken at all. Note
+  // this is the LAYOUT switch — GA_INK_MOUSE only controls mouse capture.
+  process.env.GA_INK_FULLSCREEN = 'off'
   const timers: NodeJS.Timeout[] = []
   const startBridgeClient = (
     _python: string,
@@ -1475,4 +1490,98 @@ test('App resets the viewport and remounts Static when ctrl+o toggles tool expan
 test('App help documents the /goal command', () => {
   assert.match(helpText(), /\/goal \[condition\] - set a stop-condition goal/)
   assert.match(helpText(), /\/goal clear - remove the current goal/)
+})
+
+test('App wheel scrolling pages the transcript, not the composer history', async () => {
+  // Regression for the reported symptom: "the wheel scrolls my input box history
+  // instead of the agent output". Root cause is DECSET 1007 — in the alternate
+  // screen the terminal turns wheel notches into up/down arrow keys, so a
+  // capture-off build receives `key.upArrow` and pages composer history. The fix
+  // is to capture the mouse (default `full`) so real wheel reports arrive.
+  process.env.GA_INK_FULLSCREEN = 'on'
+  delete process.env.GA_INK_MOUSE
+  const timers: NodeJS.Timeout[] = []
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    timers.push(setTimeout(() => {
+      onEvent({ type: 'ready', version: 1 })
+      for (let index = 1; index <= 40; index += 1) {
+        onEvent({ type: 'user', taskId: index, text: `问题 ${index}` })
+        onEvent({ type: 'assistant_done', taskId: index, text: `回答 ${index} ${'内容'.repeat(12)}` })
+      }
+    }, 0))
+    return { send() {}, stop() { timers.forEach(timer => clearTimeout(timer)) } }
+  }
+  const stdout = new CaptureWriteStream()
+  stdout.columns = 100
+  stdout.rows = 40
+  const stderr = new CaptureWriteStream()
+  stderr.columns = 100
+  stderr.rows = 40
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    debug: true,
+  })
+
+  try {
+    const atBottom = await waitForFrame(stdout, frame => frame.includes('回答 40'))
+    assert.match(atBottom, /回答 40/, 'tail of the transcript is visible at rest')
+
+    // SGR wheel-up reports (button 64). Five notches at 3 rows each = 15 rows up.
+    for (let notch = 0; notch < 5; notch += 1) {
+      stdin.send('\u001B[<64;20;20M')
+      await delay(30)
+    }
+    const scrolled = await waitForFrame(stdout, frame => !frame.includes('回答 40'))
+    assert.doesNotMatch(scrolled, /回答 40/, 'wheel must move the transcript away from the tail')
+    assert.match(scrolled, /回答 (2[0-9]|3[0-9])/, 'wheel must reveal earlier transcript rows')
+
+    // The composer must still be empty: an arrow-key-driven build would have
+    // recalled the last prompt into it.
+    assert.doesNotMatch(scrolled, /问题 40/, 'wheel must not recall composer history')
+
+    // End returns to the live tail.
+    stdin.send('\u001B[F')
+    const backAtBottom = await waitForFrame(stdout, frame => frame.includes('回答 40'))
+    assert.match(backAtBottom, /回答 40/, 'End jumps back to the tail')
+
+    // Left press, drag down, release: GA must copy the covered text itself,
+    // because taking the pointer means the terminal no longer does selection.
+    //
+    // Pin the clipboard path to OSC 52. On a local win32 run the platform tool
+    // (`powershell Set-Clipboard`) is tried first and succeeds, which would touch
+    // the developer's real clipboard and emit no escape sequence at all. The
+    // remote path is the deterministic one to assert on, and it exercises the
+    // same selection → payload wiring.
+    process.env.GA_CLIPBOARD_REMOTE = '1'
+    stdin.send('\u001B[<0;3;12M')
+    await delay(60)
+    stdin.send('\u001B[<32;12;14M')
+    await delay(60)
+    stdin.send('\u001B[<0;12;14m')
+    await delay(400)
+    delete process.env.GA_CLIPBOARD_REMOTE
+
+    const raw = stdout.chunks.join('')
+    const osc = /\u001B\]52;c;([A-Za-z0-9+/=]+)\u0007/.exec(raw)
+    assert.ok(osc, 'a completed drag must write the selection to the clipboard via OSC 52')
+    const copied = Buffer.from(osc[1]!, 'base64').toString('utf-8')
+    assert.ok(copied.length > 0, 'copied payload must not be empty')
+    assert.doesNotMatch(copied, /\u0000/)
+  } finally {
+    instance.unmount()
+    timers.forEach(timer => clearTimeout(timer))
+    delete process.env.GA_INK_FULLSCREEN
+  }
 })

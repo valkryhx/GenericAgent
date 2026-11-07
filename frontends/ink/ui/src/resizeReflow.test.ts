@@ -138,6 +138,10 @@ test('reflow model: relative erase after a reflow misses the reflowed top rows (
 })
 
 test('App: terminal width change must not duplicate the live frame (resize reflow)', async () => {
+  // Inline-mode regression (ink <Static> + relative eraseLines vs terminal reflow).
+  // Pin the mode: the shipped default is now fullscreen (CC 319 parity), where the
+  // <Static> path is not used and this scenario cannot occur.
+  process.env.GA_INK_FULLSCREEN = 'off'
   let emit: ((event: BridgeEvent) => void) | null = null
   const startBridgeClient = (
     _python: string,

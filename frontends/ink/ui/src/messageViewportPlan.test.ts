@@ -2,12 +2,32 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { planMessageViewport } from './messageViewportPlan.js'
 
-test('planMessageViewport sticks composer to static history when live is empty (no full-height spacer)', () => {
+test('planMessageViewport keeps one steady row when live is empty (no full-height spacer)', () => {
   // Codex content-desired: idle + Static → no tall empty live slot between history and composer.
+  // One row, not zero: `live/1` -> `none/0` at turn end shrinks the whole frame by a row,
+  // which on a full terminal reads as the picture jumping up one line at every turn end.
   assert.deepEqual(
     planMessageViewport({ hasStaticMessages: true, liveLineCount: 0, messageRows: 18 }),
-    { kind: 'none' },
+    { kind: 'live', height: 1 },
   )
+})
+
+test('planMessageViewport keeps frame height steady across the turn boundary', () => {
+  // The composer row must not move when a turn ends: `keepLivePlaceholder` is on while
+  // running and off once idle. Both states must plan the same viewport height.
+  const heightOf = (plan: ReturnType<typeof planMessageViewport>) => (plan.kind === 'none' ? 0 : plan.height)
+  const runningWithHistory = planMessageViewport({
+    hasStaticMessages: true,
+    liveLineCount: 0,
+    messageRows: 18,
+    keepLivePlaceholder: true,
+  })
+  const idleWithHistory = planMessageViewport({
+    hasStaticMessages: true,
+    liveLineCount: 0,
+    messageRows: 18,
+  })
+  assert.equal(heightOf(idleWithHistory), heightOf(runningWithHistory))
 })
 
 test('planMessageViewport shows a compact ready row before any transcript exists', () => {

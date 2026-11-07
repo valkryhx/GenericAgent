@@ -1,4 +1,5 @@
 import { marked, type Token } from 'marked'
+import stringWidth from 'string-width'
 import type { InkTheme } from './theme.js'
 import { GLYPHS } from './glyphs.js'
 
@@ -74,6 +75,9 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
         pushLine(lines, [{ text: marker }, ...parts])
       })
       return
+    case 'table':
+      appendTable(lines, token, theme)
+      return
     case 'space':
       return
     default:
@@ -83,8 +87,93 @@ function appendToken(lines: MarkdownLine[], token: Token, style: Partial<Markdow
   }
 }
 
-function flatListItemTokens(tokens: Token[]): Token[] {
-  if (tokens.length === 1 && tokens[0]?.type === 'text' && 'tokens' in tokens[0] && Array.isArray(tokens[0].tokens)) {
+/**
+ * Render a GFM table as box-drawing rows.
+ *
+ * `marked` emits a `table` token for `| a | b |` blocks, but this renderer had no
+ * `table` case, so the token fell through to `default` and the raw source — pipe
+ * characters and the `---` delimiter row — was printed verbatim. That is the
+ * "| separated table not rendered" symptom.
+ *
+ * Columns are padded with `stringWidth`, not `String.length`, so CJK cells line up:
+ * a Han character is two terminal columns wide but one JS code unit.
+ *
+ * Wide tables are not truncated. The transcript wraps long lines, so a clipped
+ * border would look broken; letting the terminal wrap keeps the data readable.
+ * (A `maxWidth` clamp would need an ellipsis policy per cell and a decision about
+ * which column absorbs the loss — out of scope for the fix.)
+ */
+function appendTable(lines: MarkdownLine[], token: Token, theme?: InkTheme): void {
+  const table = token as Token & {
+    header?: Array<{ tokens?: Token[]; text?: string }>
+    rows?: Array<Array<{ tokens?: Token[]; text?: string }>>
+    align?: Array<'left' | 'center' | 'right' | null>
+  }
+  const headerCells = table.header ?? []
+  const bodyRows = table.rows ?? []
+  if (headerCells.length === 0) return
+
+  const aligns = table.align ?? []
+  const cellParts = (cell: { tokens?: Token[]; text?: string } | undefined): MarkdownPart[] => {
+    if (!cell) return []
+    const tokens = cell.tokens ?? []
+    if (tokens.length > 0) return inlineParts(tokens, {}, theme)
+    return [{ text: cell.text ?? '' }]
+  }
+  const cellText = (cell: { tokens?: Token[]; text?: string } | undefined): string => (
+    cellParts(cell).map(part => part.text).join('').replace(/\n/g, ' ')
+  )
+
+  const columns = headerCells.length
+  const widths = new Array<number>(columns).fill(1)
+  const measure = (cells: Array<{ tokens?: Token[]; text?: string } | undefined>) => {
+    for (let index = 0; index < columns; index += 1) {
+      widths[index] = Math.max(widths[index]!, stringWidth(cellText(cells[index])))
+    }
+  }
+  measure(headerCells)
+  bodyRows.forEach(row => measure(row))
+
+  const pad = (text: string, index: number): string => {
+    const target = widths[index]!
+    const missing = Math.max(0, target - stringWidth(text))
+    const align = aligns[index] ?? null
+    if (align === 'right') return ' '.repeat(missing) + text
+    if (align === 'center') {
+      const left = Math.floor(missing / 2)
+      return ' '.repeat(left) + text + ' '.repeat(missing - left)
+    }
+    return text + ' '.repeat(missing)
+  }
+  const rule = (left: string, mid: string, right: string): string => (
+    left + widths.map(width => GLYPHS.table.horizontal.repeat(width + 2)).join(mid) + right
+  )
+  const renderRow = (cells: Array<{ tokens?: Token[]; text?: string } | undefined>, bold: boolean) => {
+    const parts: MarkdownPart[] = [{ text: GLYPHS.table.vertical, color: theme?.muted }]
+    for (let index = 0; index < columns; index += 1) {
+      parts.push({ text: ' ' })
+      const inner = cellParts(cells[index])
+      const innerText = inner.map(part => part.text).join('').replace(/\n/g, ' ')
+      const missing = Math.max(0, widths[index]! - stringWidth(innerText))
+      const align = aligns[index] ?? null
+      const padLeft = align === 'right' ? missing : align === 'center' ? Math.floor(missing / 2) : 0
+      const padRight = missing - padLeft
+      if (padLeft > 0) parts.push({ text: ' '.repeat(padLeft) })
+      if (inner.length > 0) parts.push(...inner.map(part => ({ ...part, bold: bold || part.bold })))
+      if (padRight > 0) parts.push({ text: ' '.repeat(padRight) })
+      parts.push({ text: ' ' }, { text: GLYPHS.table.vertical, color: theme?.muted })
+    }
+    pushLine(lines, parts)
+  }
+
+  pushLine(lines, [{ text: rule(GLYPHS.table.topLeft, GLYPHS.table.teeDown, GLYPHS.table.topRight), color: theme?.muted }])
+  renderRow(headerCells, true)
+  pushLine(lines, [{ text: rule(GLYPHS.table.teeRight, GLYPHS.table.cross, GLYPHS.table.teeLeft), color: theme?.muted }])
+  bodyRows.forEach(row => renderRow(row, false))
+  pushLine(lines, [{ text: rule(GLYPHS.table.bottomLeft, GLYPHS.table.teeUp, GLYPHS.table.bottomRight), color: theme?.muted }])
+}
+
+function flatListItemTokens(tokens: Token[]): Token[] {  if (tokens.length === 1 && tokens[0]?.type === 'text' && 'tokens' in tokens[0] && Array.isArray(tokens[0].tokens)) {
     return tokens[0].tokens as Token[]
   }
   if (tokens.length === 1 && tokens[0]?.type === 'paragraph' && 'tokens' in tokens[0] && Array.isArray(tokens[0].tokens)) {
