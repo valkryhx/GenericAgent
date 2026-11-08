@@ -30,9 +30,13 @@ class SubagentCapabilityProfileTest(unittest.TestCase):
         self.assertTrue(profile.allows("no_tool"))
 
     def test_child_profile_removes_orchestration_tools_by_default(self):
+        # ``available_tools`` is the process's real schema; the profile can only grant
+        # from what exists. ``role_tools`` no longer narrows anything (a child gets the
+        # full surface minus orchestration), so passing it here must not matter.
         profile = build_subagent_capability_profile(
             is_subagent=True,
             role_tools=["file_read", "code_run", "spawn_agent"],
+            available_tools=["file_read", "code_run", "spawn_agent"],
         )
 
         self.assertFalse(profile.allow_delegation)
@@ -111,7 +115,7 @@ class SubagentCapabilityProfileTest(unittest.TestCase):
         self.assertFalse(root.team_mode)
 
     def test_unknown_tools_are_denied(self):
-        profile = build_subagent_capability_profile(is_subagent=True, role_tools=["file_read"])
+        profile = build_subagent_capability_profile(is_subagent=True, available_tools=["file_read"])
 
         self.assertFalse(profile.allows("made_up_tool"))
         self.assertFalse(profile.allows(""))
@@ -123,7 +127,11 @@ class SubagentCapabilityProfileTest(unittest.TestCase):
             {"type": "function", "function": {"name": "spawn_agent"}},
             {"type": "function", "function": {"name": "close_agent"}},
         ]
-        profile = build_subagent_capability_profile(is_subagent=True, role_tools=["file_read"])
+        # Orchestration tools are subtracted for a child, so the filter keeps only
+        # file_read here -- which is what proves it filtered without mutating.
+        profile = build_subagent_capability_profile(
+            is_subagent=True, available_tools=["file_read", "spawn_agent", "close_agent"]
+        )
 
         filtered = filter_tool_schema_for_capabilities(schema, profile)
 

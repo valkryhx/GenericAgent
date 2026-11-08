@@ -92,23 +92,34 @@ def build_subagent_capability_profile(
     available_tools: Iterable[str] | None = None,
     denied_tools: Iterable[str] | None = None,
 ) -> SubagentCapabilityProfile:
-    """Build a closed-world capability set.
+    """Build the tool surface for a child process.
 
-    ``available_tools`` should be the names in the concrete schema for this
-    process.  A generic child gets every known non-orchestration tool from that
-    schema; a role with ``role_tools`` gets only its explicit list.  Unknown
-    names are never implicitly granted.
+    ``available_tools`` should be the names in the concrete schema for this process.
+    A child gets every one of them except the orchestration tools (unless delegation is
+    explicitly allowed); ``denied_tools`` can subtract further.
+
+    ``role_tools`` is accepted for signature compatibility and is deliberately ignored.
+    It used to be a whitelist, which made an unconstrained spawn get nothing -- see the
+    comment below for why that is the wrong default. A role narrows *what the agent is
+    told to do* through its system prompt, not *what it is able to do*; a boundary that
+    the caller has to re-state on every spawn is one the caller will eventually forget.
     """
     available = {_normalize_tool_name(item) for item in (available_tools or ()) if _normalize_tool_name(item)}
-    role = None if role_tools is None else {
-        _normalize_tool_name(item) for item in role_tools if _normalize_tool_name(item)
-    }
     denied = {_normalize_tool_name(item) for item in (denied_tools or ()) if _normalize_tool_name(item)}
-
-    if role is None:
-        allowed = set(available)
-    else:
-        allowed = set(role)
+    # A subagent's default surface is everything the process has, minus orchestration.
+    #
+    # It used to be a whitelist built from ``role_tools``, which meant any spawn that did
+    # not name tools got none. That is backwards from how the surface is actually chosen:
+    # the interesting question is "which of my tools may this child use", and the answer
+    # for an unconstrained spawn is "all of them". Four research subagents came back
+    # blocked because their parent passed a role whose ``tools`` was empty, and an empty
+    # list is what every builtin role and every role file that omits ``tools`` produces.
+    #
+    # ``role_tools`` is therefore no longer a whitelist. A caller that genuinely wants to
+    # narrow the surface uses ``denied_tools`` (or the permission profile), which can only
+    # ever subtract -- so a model that forgets to pass anything cannot accidentally strip
+    # the child's ability to work. Capability is opt-out, never opt-in.
+    allowed = set(available) if available else set()
     if is_subagent and not allow_delegation:
         allowed.difference_update(ORCHESTRATION_TOOLS)
         if team_mode:

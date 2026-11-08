@@ -342,7 +342,14 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["reason"], "already_claimed")
             self.assertFalse((Path(td) / "temp" / "duplicate_worker" / "state.json").exists())
 
-    def test_team_mode_spawn_rejects_read_only_role_with_write_intent(self):
+    def test_team_mode_spawn_of_a_builtin_role_can_write(self):
+        """A role is a prompt, not a sandbox: choosing "explore" must not block a write.
+
+        The old behaviour rejected a team spawn whose task text looked like it needed a
+        write while the role was read-only -- a regex guessing intent from prose. Since
+        children now get the full non-orchestration surface by default, a role cannot
+        make the child incapable of the task, so there is nothing to reject.
+        """
         with tempfile.TemporaryDirectory() as td:
             handler = self.make_handler(
                 td,
@@ -365,11 +372,10 @@ class GaSubagentToolsTest(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(outcome.data["status"], "error")
-            self.assertEqual(outcome.data["reason"], "team_role_capability_mismatch")
-            self.assertEqual(store.get_task(task["id"])["status"], "pending")
-            self.assertIsNone(store.get_task(task["id"])["owner"])
-            self.assertFalse((Path(td) / "temp" / "explore_writer" / "state.json").exists())
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertTrue((Path(td) / "temp" / "explore_writer" / "state.json").exists())
+            # The task is claimed by the new teammate, not left pending for a rejection.
+            self.assertEqual(store.get_task(task["id"])["owner"], "/root/explore_writer")
 
     def test_team_mode_spawn_rejects_an_unmatched_implicit_task(self):
         with tempfile.TemporaryDirectory() as td:
@@ -417,7 +423,8 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "started")
             self.assertEqual(store.get_task(task["id"])["owner"], "/root/explore_python_api")
 
-    def test_team_mode_spawn_rejects_read_only_python_script_execution(self):
+    def test_team_mode_spawn_of_a_builtin_role_can_execute(self):
+        """Same rule for execution: "explore" no longer means "cannot run a script"."""
         with tempfile.TemporaryDirectory() as td:
             handler = self.make_handler(
                 td,
@@ -440,9 +447,8 @@ class GaSubagentToolsTest(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(outcome.data["status"], "error")
-            self.assertEqual(outcome.data["reason"], "team_role_capability_mismatch")
-            self.assertFalse((Path(td) / "temp" / "explore_runner" / "state.json").exists())
+            self.assertEqual(outcome.data["status"], "started")
+            self.assertTrue((Path(td) / "temp" / "explore_runner" / "state.json").exists())
 
     def test_team_mode_spawn_allows_read_only_role_for_pure_research(self):
         with tempfile.TemporaryDirectory() as td:

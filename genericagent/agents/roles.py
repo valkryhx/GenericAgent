@@ -8,7 +8,6 @@ from genericagent.agents.agent_path import AgentPath
 from genericagent.agents.permissions import normalize_permission_metadata
 from genericagent.workflow.permissions import READ_ONLY
 
-
 _ROLE_OPTION_KEYS = (
     "allowed_tools",
     "denied_tools",
@@ -39,11 +38,19 @@ class SubagentRole:
 # ships general/explore/review/planner, each with a capability note in the tool
 # description ("prefer a read-only agent for review, audit or exploration").
 #
-# GA used to ship none, so the model had to hand-build the boundary out of
-# ``permission_profile`` + ``allowed_tools`` on every spawn -- or, more often,
-# spawn a full-access child for work that should have been read-only. These
-# entries are all read-only; anything that must write stays a generic spawn or a
-# project role under ``.ga/subagents``.
+# These entries are *prompts*, not sandboxes. They set what the child is told to do and
+# how to report, and deliberately do NOT set ``permission_profile`` or ``tools``.
+#
+# Why: a role that also hard-codes a read-only profile makes the harness enforce a
+# boundary the caller did not ask for and cannot see. A spawn whose task turns out to
+# need one write then fails at the tool call, with the fix ("pick a different role")
+# only discoverable by reading the host's source. Worse, an empty ``tools`` list used to
+# mean "no tools at all", so choosing any of these roles silently stripped the child's
+# ability to research -- four subagents reported exactly that and could not do their job.
+#
+# The boundary that does matter -- a child may not orchestrate other agents -- is
+# enforced by ``capabilities.ORCHESTRATION_TOOLS`` and applies to every child equally.
+# Anything stricter is a decision for the caller, expressed per spawn.
 BUILTIN_ROLES: tuple[SubagentRole, ...] = (
     SubagentRole(
         name="explore",
@@ -54,10 +61,10 @@ BUILTIN_ROLES: tuple[SubagentRole, ...] = (
         ),
         system_prompt=(
             "Explore the assigned area and report precise findings: exact paths with line references, "
-            "the interfaces that matter, and the constraints a later agent must respect. Do not modify "
-            "anything, and do not propose a redesign."
+            "the interfaces that matter, and the constraints a later agent must respect. Prefer "
+            "reading over changing; if a change is genuinely required to answer the question, say so "
+            "in your report instead of making it."
         ),
-        permission_profile=READ_ONLY,
         source_path="builtin:explore",
     ),
     SubagentRole(
@@ -66,9 +73,8 @@ BUILTIN_ROLES: tuple[SubagentRole, ...] = (
         when_to_use="Turning gathered context into an executable plan before any edit begins.",
         system_prompt=(
             "Produce an implementation plan: ordered, actionable steps that each name the file, the "
-            "change and the check, plus risks and open questions. Do not modify files."
+            "change and the check, plus risks and open questions. Report the plan; do not carry it out."
         ),
-        permission_profile=READ_ONLY,
         source_path="builtin:plan",
     ),
     SubagentRole(
@@ -78,9 +84,8 @@ BUILTIN_ROLES: tuple[SubagentRole, ...] = (
         system_prompt=(
             "Review independently and report findings first, ordered by severity with file:line "
             "references, then open questions and residual risks. Report only actionable findings; "
-            "do not modify files."
+            "leave the fix to the agent that owns the change."
         ),
-        permission_profile=READ_ONLY,
         source_path="builtin:review",
     ),
 )
@@ -128,16 +133,23 @@ class SubagentRoleRegistry:
 
 
 def role_capability_note(role) -> str:
-    """One short capability note per role, derived from its own boundary.
+    """One short capability note per role, derived from its CURRENT boundary.
 
-    Step-Code derives its subagent guidance from the agent catalog so the tool
-    description cannot drift from what the agents can actually do. The note is
-    read from ``permission_profile`` rather than a hand-written label for the
-    same reason.
+    Built-in roles no longer pin a permission profile, so most report nothing and get
+    the default surface. A role that DOES declare a narrower profile still reports it
+    here, which is the point: the note is derived from the boundary rather than written
+    by hand, so the catalog cannot claim a restriction the runtime does not apply.
+
+    Returns an empty string when the role adds no restriction, so
+    :func:`format_role_catalog` can omit the parenthetical entirely instead of claiming
+    a capability the role never had.
     """
-
     profile = str(getattr(role, "permission_profile", "") or "").strip().lower()
-    return "read-only" if profile == READ_ONLY else "can write"
+    if not profile:
+        return ""
+    if profile == READ_ONLY:
+        return "read-only"
+    return "can write"
 
 
 def format_role_catalog(roles, *, language: str = "en") -> str:
@@ -156,9 +168,11 @@ def format_role_catalog(roles, *, language: str = "en") -> str:
             continue
         note = role_capability_note(role)
         detail = str(getattr(role, "description", "") or "").strip()
-        if detail:
+        if note and detail:
             note = f"{note} — {detail}"
-        entries.append(f"{name} ({note})")
+        elif detail:
+            note = detail
+        entries.append(f"{name} ({note})" if note else name)
     if not entries:
         return ""
     if language == "zh":

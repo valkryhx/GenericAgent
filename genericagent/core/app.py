@@ -413,14 +413,17 @@ def normalize_display_assistant_text(full_resp: str) -> str:
 
 
 def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
-    """Publish the role catalog, with capability notes, on ``spawn_agent``.
+    """Publish the role catalog, with its descriptions, on ``spawn_agent``.
 
-    Listing bare names is not enough: the choice happens before any catalog is
-    shown, so a caller that sees only ``explore, plan, review`` has no way to know
-    which of them may write. Step-Code solves this by deriving the tool
-    description from the agent catalog itself
-    (``step-subagent-agents.ts::formatBuiltinAgentGuidance``); the notes here come
-    from each role's own ``permission_profile`` for the same reason.
+    Listing bare names is not enough: the choice happens before any catalog is shown,
+    so a caller that sees only ``explore, plan, review`` has no way to know what each
+    one is for. The notes are derived from the roles themselves rather than written by
+    hand, so the catalog cannot describe a boundary the runtime does not apply.
+
+    Note what this text deliberately does NOT say: that a role restricts tool access.
+    Roles shape the child's prompt; the tool surface is decided by
+    ``capabilities.build_subagent_capability_profile`` (everything but orchestration,
+    minus anything the caller explicitly denies) and is the same for every child.
     """
 
     from genericagent.agents.roles import SubagentRoleRegistry, format_role_catalog
@@ -446,15 +449,17 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
             agent_type["description"] = (
                 f"可选的预配置角色名；当前可用值：{configured}。{catalog}"
                 "只能使用此列表中的精确名称，也可省略以启动通用子智能体；该字段不是自由标签。"
-                "审查 / 审计 / 探索类工作优先用只读角色，只有通用子智能体或声明了写权限的项目角色才能改文件。"
+                "角色只决定子智能体收到的提示词（做什么、怎么汇报），不改变它能用哪些工具："
+                "除 agent 编排工具外，子智能体默认拿到与主会话相同的工具。"
             )
         else:
             agent_type["description"] = (
                 f"Optional preconfigured role name. Available values: {configured}. {catalog} "
                 "Use one exact listed value, or omit this field to spawn a generic subagent; "
-                "this is not a free-form label. Prefer a read-only role for review, audit or "
-                "exploration work; only a generic spawn (or a project role that declares write "
-                "access) can modify files."
+                "this is not a free-form label. A role shapes the prompt the child receives "
+                "(what to do and how to report); it does not change which tools the child "
+                "gets. Every child gets the same tools as the main session except the "
+                "agent-orchestration ones."
             )
         return
 

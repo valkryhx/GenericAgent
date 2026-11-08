@@ -40,6 +40,13 @@ _SUBAGENT_WORKSPACE_MUTATION_TOOLS = {
 
 
 def _resolve_subagent_isolation(requested_isolation, permission_profile, parent_permission_mode, permission_options):
+    """Keep a requested worktree isolation only when the child could actually use it.
+
+    Worktree isolation separates a child's *git* changes. A child that cannot write has
+    no changes to separate, so creating one is pure cost -- a full checkout plus a branch
+    nobody will merge. That is a resource question, not a capability one: the profile is
+    still enforced at dispatch either way.
+    """
     if str(requested_isolation or "").strip().lower() != "worktree":
         return requested_isolation, None
 
@@ -1728,18 +1735,12 @@ class GenericAgentHandler(BaseHandler):
                 )
 
             candidate = resolution["task"]
-            mismatch = self._team_role_capability_mismatch(
-                role,
-                permission_profile,
-                message,
-                candidate,
-            )
-            if mismatch is not None:
-                yield f"[Status] Team spawn rejected: {mismatch['msg']}\n"
-                return StepOutcome(
-                    {"status": "error", "success": False, **mismatch},
-                    next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0),
-                )
+            # No capability-vs-intent pre-check here anymore. It used to reject a spawn
+            # whose task text "looked like" it needed a write while the chosen role was
+            # read-only -- a regex guessing intent from prose. With children now getting
+            # the full non-orchestration surface by default, a role no longer restricts
+            # what the child can do, so there is nothing to mismatch: the child simply
+            # does the work.
 
             claim = resolution["store"].claim_task(candidate["id"], owner_path, start=True)
             if not isinstance(claim, dict) or not claim.get("success"):
@@ -1949,55 +1950,6 @@ class GenericAgentHandler(BaseHandler):
             if token in hay:
                 score += 1
         return score
-
-    @staticmethod
-    def _team_role_capability_mismatch(role, permission_profile, message, task):
-        profile = str(permission_profile or "").strip().lower()
-        if profile not in {"read_only", "verify"}:
-            return None
-        text = " ".join([
-            str(task.get("subject") or ""),
-            str(task.get("description") or ""),
-            str(message or ""),
-        ])
-
-        def positive_intent(pattern):
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                prefix = text[max(0, match.start() - 16):match.start()].casefold()
-                if any(neg in prefix for neg in ("不要", "禁止", "不得", "勿", "无需", "not ", "without ")):
-                    continue
-                return True
-            return False
-
-        # Avoid treating the noun "Python" (for example, "research the Python
-        # API") as an execution request. Only match verbs that actually ask a
-        # worker to run a command/script/test.
-        write_intent = positive_intent(
-            r"file_write|file_patch|\b(?:write|create|save|output)\b"
-            r"(?:\s+(?:a|an|the|this|that))?\s+"
-            r"(?:file|report|artifact|document|markdown|html|docx|pdf|output)\b|"
-            r"写入|写文件|落盘|保存|输出到|创建文件"
-        )
-        execute_intent = positive_intent(
-            r"code_run|\bsubprocess\b|"
-            r"\b(?:run|execute)\b(?:\s+(?:a|an|the))?\s+"
-            r"(?:command|script|program|python|tests?|pytest|node)\b|"
-            r"\b(?:run|execute)\b[^\n]{0,24}\b(?:command|script|program|python|tests?)\b|"
-            r"(?:运行|执行|跑)\s*(?:python|脚本|命令|代码|测试)"
-        )
-        if not write_intent and not (profile == "read_only" and execute_intent):
-            return None
-        role_name = str(getattr(role, "name", "") or "generic")
-        capability = "write files" if write_intent else "execute commands"
-        return {
-            "reason": "team_role_capability_mismatch",
-            "role": role_name,
-            "permission_profile": profile,
-            "msg": (
-                f"{role_name} is {profile} and cannot {capability}. "
-                "Omit agent_type or choose a write/execute-capable role for this task."
-            ),
-        }
 
     @staticmethod
     def _subagent_error_result(exc):

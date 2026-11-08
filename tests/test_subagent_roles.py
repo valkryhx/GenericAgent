@@ -108,11 +108,13 @@ class SubagentRolesTest(unittest.TestCase):
             self.assertTrue(message.rstrip().endswith("Find relevant tests."))
 
     def test_builtin_roles_exist_without_any_configuration(self):
-        """A fresh install must have the read-only defaults pi/Step-Code ship.
+        """A fresh install ships the explore/plan/review prompts pi and Step-Code ship.
 
-        GA shipped no roles at all, so the model had to hand-build the boundary
-        out of permission_profile + allowed_tools on every spawn -- or, more
-        often, spawn a full-access child for read-only work.
+        They are prompts, not sandboxes: no permission_profile and no tools list, because
+        a role that hard-codes a read-only boundary makes the harness enforce something
+        the caller never asked for and cannot see. The only hard rule for every child --
+        no orchestrating other agents -- lives in capabilities.ORCHESTRATION_TOOLS and
+        needs no role.
         """
         with tempfile.TemporaryDirectory() as td:
             registry = SubagentRoleRegistry(td)
@@ -123,7 +125,8 @@ class SubagentRolesTest(unittest.TestCase):
             for name in names:
                 with self.subTest(role=name):
                     role = registry.get(name)
-                    self.assertEqual("read_only", role.permission_profile)
+                    self.assertIsNone(role.permission_profile)
+                    self.assertEqual((), role.tools)
                     self.assertTrue(role.system_prompt)
                     self.assertTrue(role.when_to_use)
 
@@ -144,14 +147,20 @@ class SubagentRolesTest(unittest.TestCase):
             self.assertIn("plan", names)
             self.assertIn("review", names)
 
-    def test_role_catalog_annotates_each_role_with_its_capability(self):
-        """Listing bare names is not enough: the caller picks before seeing a catalog."""
+    def test_role_catalog_lists_each_role_with_its_description(self):
+        """A role that restricts nothing must not be labelled as if it did.
+
+        The catalog is derived from each role's own boundary. Built-in roles declare no
+        permission profile, so the honest rendering is the name plus its description --
+        claiming "read-only" would describe a restriction the runtime no longer applies.
+        """
 
         catalog = format_role_catalog(BUILTIN_ROLES)
 
-        self.assertIn("explore (read-only", catalog)
-        self.assertIn("plan (read-only", catalog)
-        self.assertIn("review (read-only", catalog)
+        for name in ("explore", "plan", "review"):
+            with self.subTest(role=name):
+                self.assertIn(name, catalog)
+        self.assertNotIn("read-only", catalog)
 
     def test_role_catalog_marks_a_writable_project_role_as_writable(self):
         """A description must never hide the capability note."""
