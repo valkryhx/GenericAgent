@@ -90,6 +90,12 @@ git stash pop
 
 完整方法论见 `docs/20261108-GA-subagent链路真实证据核验手册.md` §11。
 
+**状态判定类的 bug 先读** `docs/20261108-GA-Ink与subagent四轮修复总览.md`：
+2026-11-08 一天内同一个形状复发了三次（输入框选区无地址、`sourceStatus` 被当工作结论、
+team roster 过滤掉已结束成员），共同点是**消费方按自己的假设重新推导，而不是问唯一
+权威来源**。该文档还记了三个"测试自己在骗人"的坑（累积 stdout 字符流 /
+stripAnsi 后切帧 / 正则批量改同名键），写 UI 断言前必读。
+
 ### Ink UI 测试：优先「无截图」的程序化手段
 
 Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
