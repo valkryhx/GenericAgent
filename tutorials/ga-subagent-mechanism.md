@@ -2,7 +2,7 @@
 
 > 配套图：[`ga-subagent-diagram.html`](./ga-subagent-diagram.html) —— 可交互，支持明暗主题与动效
 >
-> 代码版本：`cd44ea0`
+> 代码版本：`07fd03e`（图中箭头指向 `cd44ea0` 的具体行号，已逐条复核在该版本上仍然有效）
 
 ---
 
