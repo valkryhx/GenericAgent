@@ -53,17 +53,51 @@ export type AgentRecordLike = {
 const COMPLETED_STATUSES = new Set(['succeeded', 'completed'])
 
 /**
+ * Process-lifecycle statuses. They describe how a child's process ended, never whether
+ * its work succeeded.
+ *
+ * `sourceStatus` is `process_status` on process records (`process.py:_record_from_state`
+ * binds `source_status=state.process_status`), so it holds one of these. It must never be
+ * read as a work verdict: `waiting_reply` is what a *finished, healthy* child looks like
+ * while its process waits for the next message, and it is in no success vocabulary.
+ *
+ * The trap is that `source_status` means something else for *workflow* records
+ * (`workflow.py:263` binds the run status there), where it genuinely is a work verdict.
+ * One field with two meanings cannot be trusted for either engine, so the verdict is read
+ * from fields that are unambiguous: `metadata.completionStatus`, then `turnStatus`.
+ */
+const PROCESS_LIFECYCLE_STATUSES = new Set([
+  'alive',
+  'exited',
+  'shutdown',
+  'killed',
+  'waiting_reply',
+  'not_found',
+  'starting',
+  'stopping',
+])
+
+/**
  * Turn a bridge record into an announcement, or `null` when there is nothing to say.
  *
  * Non-terminal records are silent on purpose: a child that is merely running would
  * otherwise announce itself on every snapshot, training the user to ignore the line that
  * is supposed to be noticeable.
  *
- * Success is decided from the work status (`sourceStatus`, then `completionStatus` in the
- * metadata), never from the process status alone. The bridge projects `killed` before
- * `completed` (`core/control/process.py:_project_status`), so trusting `status` marks a
- * finished child as failed -- which is exactly what happened to a real session's
- * `probe_mid`: MID_ONE, MID_TWO and MID_DONE in its output file, announced in red.
+ * Success is decided from the *work* status, which is `metadata.completionStatus` or
+ * `metadata.turnStatus` -- never from `sourceStatus`, and never from the projected
+ * `status` alone.
+ *
+ * `sourceStatus` is `process_status` for process records (`process.py` binds
+ * `source_status=state.process_status`): `waiting_reply`, `exited`, `shutdown`, `killed`.
+ * None of those is in any success vocabulary, so reading it as the work verdict announces
+ * every finished child as failed. That happened twice: first with `killed`, then with
+ * `waiting_reply` for three children that had all completed. See
+ * `subagentWorkVerdict.test.ts` for the real captured record.
+ *
+ * For *workflow* records `sourceStatus` really does hold the run status
+ * (`workflow.py:263`), so the same field means two different things. Asking the
+ * unambiguous fields covers both engines without knowing which one produced the record.
  */
 export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | null {
   const status = String(record.status || '').toLowerCase()
@@ -72,12 +106,34 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
   if (!executionId) return null
 
   const meta = record.metadata || {}
-  const workStatus = String(
-    record.sourceStatus ||
-      (typeof meta.completionStatus === 'string' && meta.completionStatus) ||
+  const metaCompletion = String(
+    (typeof meta.completionStatus === 'string' && meta.completionStatus) ||
       (typeof meta.completion_status === 'string' && meta.completion_status) ||
       '',
   ).toLowerCase()
+  const turnStatus = String(
+    (typeof meta.turnStatus === 'string' && meta.turnStatus) ||
+      (typeof meta.turn_status === 'string' && meta.turn_status) ||
+      '',
+  ).toLowerCase()
+  const sourceStatus = String(record.sourceStatus || '').toLowerCase()
+
+  // The work verdict, most authoritative first:
+  //   1. `metadata.completionStatus` -- the raw work verdict, when the bridge sends it
+  //   2. `metadata.turnStatus`       -- the turn's own end state
+  //   3. `sourceStatus`              -- ONLY when it is not a process lifecycle word. For
+  //      workflow records this really is the run status (`workflow.py:263`); for process
+  //      records it is `process_status`, whose vocabulary never contains a work verdict.
+  //   4. `status`                    -- the projection, which is itself a work projection
+  //      on both engines (`_project_status`, `_run_status`).
+  //
+  // One chain, one check. The lifecycle filter is load-bearing rather than defensive: drop
+  // it and `waiting_reply` becomes the verdict and a finished child reads as a failure.
+  // That is the bug, and the mutation check proves this line is what stops it.
+  const workStatus = metaCompletion
+    || turnStatus
+    || (sourceStatus && !PROCESS_LIFECYCLE_STATUSES.has(sourceStatus) ? sourceStatus : '')
+    || status
 
   const fromMeta =
     (typeof meta.taskName === 'string' && meta.taskName) ||
@@ -88,12 +144,11 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
     : ''
   const name = String(fromMeta || fromPath || executionId)
 
-  // Did the work succeed? The work status is authoritative when present. Without one the
-  // projected status is all there is, and a bare `killed` then really does mean the child
-  // was cut off rather than finished.
-  const ok = workStatus
-    ? COMPLETED_STATUSES.has(workStatus)
-    : COMPLETED_STATUSES.has(status)
+  // The verdict has to be a positive success word: `failed`, `errored`, `killed`,
+  // `interrupted` and anything unexpected fall through to "not ok". There is deliberately
+  // no separate failure list -- success words cover every other outcome, so a second list
+  // would be unreachable.
+  const ok = COMPLETED_STATUSES.has(workStatus)
   const word = ok ? 'completed' : status === 'degraded' ? 'degraded' : 'failed'
   const detail =
     typeof meta.summary === 'string' && meta.summary.trim()
