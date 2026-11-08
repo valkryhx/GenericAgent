@@ -126,6 +126,7 @@ import {
   inputLeftPaddingColumns,
   inputViewport,
   renderInputLine,
+  type InputLinePart,
   type InputViewport,
 } from './promptChrome.js'
 import { completedStatusSegments, pickRunningVerb, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
@@ -162,14 +163,22 @@ import { parseTerminalInput } from './terminalInput.js'
 import { parseMouseEvent, parseMouseWheel, resolveFullscreenMode, resolveMouseCaptureMode } from './mouseWheel.js'
 import {
   displayColumnEnd,
-  isEmptySelection,
-  normalizeSelection,
   partitionByDisplayColumns,
-  selectedText,
-  selectionSpans,
-  type SelectionPoint,
   type SelectionSpan,
 } from './transcriptSelection.js'
+import {
+  buildFramePlan,
+} from './framePlan.js'
+import {
+  framePointFromMouse,
+  frameSelectionSpans,
+  isEmptyFrameSelection,
+  normalizeFrameSelection,
+  selectedFrameText,
+  type FramePoint,
+  type FrameRow,
+  type FrameSelectionRange,
+} from './frameSelection.js'
 import { writeClipboardTextAsync } from './clipboardText.js'
 import { decideInterrupt, interruptConfirmHint } from './interruptConfirm.js'
 import { countNewMessages, hitTestJumpToBottom, jumpToBottomPlacement, jumpToBottomText, type PillPlacement } from './jumpToBottomPill.js'
@@ -580,15 +589,54 @@ function MessageViewport({ height, columns, lines, ready, readyLabel = 'Ready.',
   )
 }
 
-function BottomChrome({ children, columns, height }: { children: React.ReactNode; columns: number; height: number }) {
-  return (
+/**
+ * Split a plain string into highlighted / non-highlighted parts.
+ *
+ * One `partitionByDisplayColumns` pass, not three overlapping slices: a CJK character
+ * straddling a boundary would otherwise be emitted by both neighbours, the row would grow,
+ * and `wrap="truncate-end"` would slide the truncation point — the visible "text jitters
+ * while dragging" bug.
+ */
+function splitForHighlight(text: string, span: SelectionSpan): InputLinePart[] {
+  const { before, selected, after } = partitionByDisplayColumns(text, span.from, span.to)
+  return [
+    ...(before ? [{ text: before }] : []),
+    ...(selected ? [{ text: selected, inverse: true }] : []),
+    ...(after ? [{ text: after }] : []),
+  ]
+}
+
+/** Narrow every part to `[from, to)` display columns, keeping each part's own styling. */
+function applyHighlight(parts: InputLinePart[], span: SelectionSpan): InputLinePart[] {
+  const out: InputLinePart[] = []
+  let column = 0
+  for (const part of parts) {
+    const width = displayColumnEnd(part.text)
+    const start = column
+    column += width
+    if (column <= span.from || start >= span.to) {
+      out.push(part)
+      continue
+    }
+    const localFrom = Math.max(0, span.from - start)
+    const localTo = Math.min(width, span.to - start)
+    const { before, selected, after } = partitionByDisplayColumns(part.text, localFrom, localTo)
+    if (before) out.push({ ...part, text: before })
+    // The caret's own inverse block stays inverse; the highlight simply keeps it dark.
+    if (selected) out.push({ ...part, text: selected, inverse: true })
+    if (after) out.push({ ...part, text: after })
+  }
+  return out
+}
+
+function BottomChrome({ children, columns, height }: { children: React.ReactNode; columns: number; height: number }) {  return (
     <Box flexDirection="column" flexShrink={0} width={columns} height={height} overflow="hidden">
       {children}
     </Box>
   )
 }
 
-function InputView({ viewport, showCursor, columns, theme }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme }) {  const lines = viewport.lines
+function InputView({ viewport, showCursor, columns, theme, selection }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme; selection?: Array<SelectionSpan | undefined> }) {  const lines = viewport.lines
   const contentColumns = inputContentColumns(columns)
   return (
     <Box
@@ -606,23 +654,53 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
       paddingLeft={inputLeftPaddingColumns}
       overflow="hidden"
     >
-      {lines.map((line, index) => (
-        <Box key={index} width="100%" overflow="hidden">
-          <Text color={theme.accent} wrap="truncate-end">{line.gutter}</Text>
-          {/*
-            文本默认 muted，仅 caret 的 inverse 块用 accent。
-            旧实现父级 Text color=accent 会让 inverse 继承 cyan 前景/背景，
-            在 spawnSync 卡帧或多次贴图重绘时看起来像「蓝绿条」。
-          */}
-          <Text color={theme.muted} wrap="truncate-end">
-            {renderInputLine(fixedInputLine(line.text, contentColumns), showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1).map((part, partIndex) => (
-              part.inverse
-                ? <Text key={partIndex} color={theme.accent} inverse>{part.text}</Text>
-                : <Text key={partIndex}>{part.text}</Text>
-            ))}
-          </Text>
-        </Box>
-      ))}
+      {lines.map((line, index) => {
+        const fixed = fixedInputLine(line.text, contentColumns)
+        // The selection span indexes the *painted* row, which is the gutter plus the
+        // text (that is what the frame model stores, and what `selectedFrameText` reads
+        // back). The row is painted as two separate <Text> nodes, so a span crossing the
+        // boundary has to be cut into a gutter part and a text part -- and each part must
+        // be one partition, never three overlapping slices, or a wide character would be
+        // duplicated and the row would grow while dragging.
+        const span = selection?.[index]
+        const gutterWidth = displayColumnEnd(line.gutter)
+        const gutterSpan = span
+          ? { from: Math.max(0, Math.min(span.from, gutterWidth)), to: Math.max(0, Math.min(span.to, gutterWidth)) }
+          : null
+        const textSpan = span
+          ? { from: Math.max(0, span.from - gutterWidth), to: Math.max(0, span.to - gutterWidth) }
+          : null
+        const gutterParts = gutterSpan && gutterSpan.to > gutterSpan.from
+          ? splitForHighlight(line.gutter, gutterSpan)
+          : [{ text: line.gutter }]
+        const lineParts = renderInputLine(fixed, showCursor && line.cursorColumn !== undefined, line.cursorColumn === undefined ? undefined : line.cursorColumn + 1)
+        const painted = textSpan && textSpan.to > textSpan.from
+          ? applyHighlight(lineParts, textSpan)
+          : lineParts
+        return (
+          <Box key={index} width="100%" overflow="hidden">
+            <Text color={theme.accent} wrap="truncate-end">
+              {gutterParts.map((part, partIndex) => (
+                part.inverse
+                  ? <Text key={partIndex} inverse>{part.text}</Text>
+                  : <Text key={partIndex}>{part.text}</Text>
+              ))}
+            </Text>
+            {/*
+              文本默认 muted，仅 caret 的 inverse 块用 accent。
+              旧实现父级 Text color=accent 会让 inverse 继承 cyan 前景/背景，
+              在 spawnSync 卡帧或多次贴图重绘时看起来像「蓝绿条」。
+            */}
+            <Text color={theme.muted} wrap="truncate-end">
+              {painted.map((part, partIndex) => (
+                part.inverse
+                  ? <Text key={partIndex} color={theme.accent} inverse>{part.text}</Text>
+                  : <Text key={partIndex}>{part.text}</Text>
+              ))}
+            </Text>
+          </Box>
+        )
+      })}
     </Box>
   )
 }
@@ -798,13 +876,21 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [notice, setNotice] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   /**
-   * In-app selection. `anchor` is where the press landed, `focus` follows the
-   * drag. Kept as two points rather than a normalized range so dragging back
-   * past the anchor reverses correctly.
+   * In-app selection, in *frame* coordinates: `row` is an absolute screen row and
+   * `col` an absolute canvas column, so one drag can run from the transcript into the
+   * composer (Claude Code's model: `onSelectionStart`/`onSelectionDrag` receive screen
+   * coordinates and the text comes from the rendered frame). `anchor` is where the press
+   * landed, `focus` follows the drag; keeping both unnormalized lets a drag back past
+   * the anchor reverse direction.
    */
-  const [selection, setSelection] = useState<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
-  const selectionRef = useRef<{ anchor: SelectionPoint; focus: SelectionPoint } | null>(null)
+  const [selection, setSelection] = useState<{ anchor: FramePoint; focus: FramePoint } | null>(null)
+  const selectionRef = useRef<{ anchor: FramePoint; focus: FramePoint } | null>(null)
   selectionRef.current = selection
+  /**
+   * 最新一帧的行模型。拖拽松开与 Ctrl+C 都在事件回调里读它——回调闭包会过期，
+   * ref 不会。
+   */
+  const frameRowsRef = useRef<FrameRow[]>([])
   /** 第一次 Ctrl+C 的时间戳；窗口内再来一次才真退出。 */
   const interruptArmedAtRef = useRef<number | null>(null)
   const bridgeRef = useRef<BridgeClient | null>(null)
@@ -1441,19 +1527,16 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   /**
    * Translate a mouse report into a selection point.
    *
-   * SGR reports are 1-based; row 0 of the viewport sits below the header row, and
-   * column 0 of the content area sits after the 1-column left gutter. Clamping
-   * happens in `normalizeSelection`, so out-of-area drags simply stick to the
+   * SGR reports are 1-based and already absolute screen coordinates; nothing is
+   * subtracted here. The header offset and the left gutter belong to the *rows*
+   * (`framePlan` puts them there), because the transcript and the composer have
+   * different gutters — folding one of them into the point is what used to make a drag
+   * inside the composer resolve to the last transcript row.
+   *
+   * Clamping happens in `normalizeFrameSelection`, so an out-of-area drag sticks to the
    * nearest edge instead of throwing the selection away.
    */
-  const selectionPointFromMouse = (x: number, y: number): SelectionPoint => {
-    const canvasColumns = terminalCanvasColumns(terminalSize.columns)
-    const contentColumns = transcriptContentColumns(canvasColumns)
-    return {
-      row: y - 1 - metrics.headerRows,
-      col: x - 1 - TRANSCRIPT_LEFT_GUTTER,
-    }
-  }
+  const selectionPointFromMouse = (x: number, y: number): FramePoint => framePointFromMouse(x, y)
 
   const handleMouseEvent = (event: NonNullable<ReturnType<typeof parseMouseEvent>>) => {
     if (event.kind === 'wheel') return
@@ -1467,9 +1550,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       // "Jump to bottom" pill takes the click instead of starting a selection —
       // but only when the pill is actually on screen, which is the only time the
-      // user could have aimed at it.
+      // user could have aimed at it. The pill's geometry is in transcript-viewport
+      // coordinates; `point` is a frame row, so subtract the rows painted above the
+      // viewport (and the transcript's own gutter) before hit-testing.
       const pill = jumpToBottomRef.current
-      if (pill && hitTestJumpToBottom(pill.placement, metrics.messageRows - 1, point.row, point.col)) {
+      const viewportRow = point.row - metrics.headerRows
+      const viewportCol = point.col - TRANSCRIPT_LEFT_GUTTER
+      if (pill && hitTestJumpToBottom(pill.placement, metrics.messageRows - 1, viewportRow, viewportCol)) {
         setTranscriptScrollOffset(0)
         clearSelection()
         return
@@ -1495,15 +1582,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
    *
    * 拖拽松开和 Ctrl+C 共用这一条路径：两处各自实现迟早会出现「拖拽复制的
    * 内容」和「Ctrl+C 复制的内容」不一致——比如一个按显示列裁、一个按字符数裁。
+   *
+   * 读取的是**整帧**行文本（transcript + 底栏 + composer + 提示），不是 transcript
+   * 视口：Claude Code 的选区就是屏幕级坐标、从渲染后的帧里取字（`m0701`），所以
+   * 一次拖拽可以横跨两个区域。
    */
   const copyCurrentSelection = (): string | null => {
     const current = selectionRef.current
     if (!current) return null
-    const rows = visibleTranscriptTextRef.current
-    const contentColumns = transcriptContentColumns(terminalCanvasColumns(terminalSizeRef.current.columns))
-    const range = normalizeSelection(current.anchor, current.focus, rows, contentColumns)
-    if (isEmptySelection(range)) return null
-    const payload = selectedText(range, rows, contentColumns)
+    const frame = frameRowsRef.current
+    const range = normalizeFrameSelection(current.anchor, current.focus, frame)
+    if (isEmptyFrameSelection(range)) return null
+    const payload = selectedFrameText(range, frame)
     if (payload.length === 0) return null
     // Keep the highlight on screen so the user can see what was copied; it is
     // cleared by the next wheel notch, key press or new press.
@@ -2205,27 +2295,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const jumpToBottomRef = useRef(jumpToBottom)
   jumpToBottomRef.current = jumpToBottom
   // Plain text of each visible row, in the same order and count as the rendered
-  // lines. Selection and copy work on this, so the highlight can never drift from
-  // what is actually on screen.
+  // lines. The frame model is assembled from this, so the highlight can never
+  // drift from what is actually on screen.
   const visibleTranscriptText = useMemo(
     () => visibleTranscript.lines.map(line => line.text),
     [visibleTranscript],
   )
-  const visibleTranscriptTextRef = useRef<string[]>(visibleTranscriptText)
-  visibleTranscriptTextRef.current = visibleTranscriptText
-  const selectionRange = useMemo(() => (
-    selection
-      ? normalizeSelection(
-          selection.anchor,
-          selection.focus,
-          visibleTranscriptText,
-          transcriptContentColumns(metrics.canvasColumns),
-        )
-      : null
-  ), [selection, visibleTranscriptText, metrics.canvasColumns])
-  const selectionRowSpans = useMemo(() => (
-    selectionSpans(selectionRange, visibleTranscriptText, transcriptContentColumns(metrics.canvasColumns))
-  ), [selectionRange, visibleTranscriptText, metrics.canvasColumns])
   transcriptRowsRef.current = fullscreen
     ? { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
     : { totalRows: activeTranscriptRows.length, viewportRows: Math.max(1, inlineMessageRows) }
@@ -2250,6 +2325,70 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     rows: liveViewportRows,
     cursorRow: Math.min(inputCursor.row, Math.max(0, liveViewportRows - 1)),
   }
+
+  /**
+   * 整帧行模型：选区的唯一依据。
+   *
+   * composer 的行号**不在这里重算**，而是取 `inputCursor` 同一份锚点——caret 每帧都由
+   * 它摆放，也就是用户肉眼验过的那一个几何量。用 header/band 常量自己推一遍，会让本
+   * 模块「按自己的算式正确」，哪怕绘制出来的布局已经不一致——那正是本仓库踩过的假通过
+   * 形状（探针复算产品公式）。
+   *
+   * band（goal 卡 / 活动行 / 子代理通知）只填空白占位：它的**行数**由锚点决定
+   * （transcript 底 → composer 顶之间的所有行），所以 band 里到底画了什么文字不影响
+   * composer 的地址。transcript 的行号是精确的（它是紧接 header 的固定高度视口）。
+   */
+  const frameRows = useMemo(() => {
+    const composerRow = Math.max(0, inputCursor.row - promptViewport.cursorLine)
+    const composerLines = promptViewport.lines.map(line => ({ gutter: line.gutter, text: line.text }))
+    return buildFramePlan({
+      canvasColumns: metrics.canvasColumns,
+      rows: liveViewportRows,
+      headerRows: metrics.headerRows,
+      header: metrics.headerRows > 0 ? `GenericAgent   ${state.status}` : null,
+      transcriptRows: metrics.messageRows,
+      transcriptLines: visibleTranscriptText,
+      composerRow,
+      composerLines,
+    })
+  }, [
+    inputCursor.row,
+    liveViewportRows,
+    metrics.canvasColumns,
+    metrics.headerRows,
+    metrics.messageRows,
+    promptViewport.cursorLine,
+    promptViewport.lines,
+    state.status,
+    visibleTranscriptText,
+  ])
+  frameRowsRef.current = frameRows
+
+  /**
+   * 选区在整帧上的归一化范围。
+   *
+   * `frameSelectionSpans` 返回与**整帧**等长的稀疏数组，索引即绝对屏幕行号；
+   * transcript 与 composer 各自按自己的偏移去取，两边看到的是同一份选区，
+   * 不会出现「transcript 高亮了、输入框没高亮」。
+   */
+  const selectionRange = useMemo<FrameSelectionRange | null>(() => (
+    selection ? normalizeFrameSelection(selection.anchor, selection.focus, frameRows) : null
+  ), [selection, frameRows])
+  const frameRowSpans = useMemo(
+    () => frameSelectionSpans(selectionRange, frameRows),
+    [selectionRange, frameRows],
+  )
+  // The transcript viewport starts under the header, and its rows are the first
+  // `messageRows` entries of the frame.
+  const selectionRowSpans = useMemo(
+    () => frameRowSpans.slice(metrics.headerRows, metrics.headerRows + metrics.messageRows),
+    [frameRowSpans, metrics.headerRows, metrics.messageRows],
+  )
+  // The composer's own slice: absolute rows -> the `InputView` line indexes it paints.
+  const composerSelectionSpans = useMemo(() => {
+    const start = Math.max(0, inputCursor.row - promptViewport.cursorLine)
+    return frameRowSpans.slice(start, start + promptViewport.lines.length)
+  }, [frameRowSpans, inputCursor.row, promptViewport.cursorLine, promptViewport.lines.length])
 
   // NOTE: Phase-3 raw ANSI insert_history sequences must NOT be written while Ink owns
   // stdout. Doing so (DECSTBM + RI) races Ink redraws and produces duplicated headers /
@@ -2329,7 +2468,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // The caret is drawn whatever the turn status is: while a turn runs the composer
     // still accepts text (that text is queued), so hiding the caret removed the only
     // visual answer to "can I type right now?".
-    if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={true} columns={metrics.canvasColumns} theme={theme} />
+    if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={true} columns={metrics.canvasColumns} theme={theme} selection={composerSelectionSpans} />
     if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} height={panelRows > 0 ? panelRows : undefined} />
     if (section === 'panel') {
       if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />
