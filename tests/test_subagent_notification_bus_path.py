@@ -232,5 +232,58 @@ class ChildMirrorsIntoTheParentBusTest(unittest.TestCase):
         )
 
 
+class ParentInboxUsesTheSameHandedDownDirTest(unittest.TestCase):
+    """The inbox had the identical wrong guess as the event mirror.
+
+    Same expression (``dirname(task_dir)/subagents``), same consequence: on the product
+    layout it wrote ``<bus>/tasks/subagents/inbox.jsonl``, an inbox the parent never
+    reads. Fixing only the event mirror would have left half the problem in place.
+    """
+
+    def test_the_inbox_lands_in_the_handed_down_bus(self):
+        from genericagent.agents.state import parent_inbox_path_for_task_dir
+
+        # The manager is the parent process: it passes bus_dir explicitly rather than
+        # relying on the child-only environment hand-down.
+        got = parent_inbox_path_for_task_dir("C:/bus/tasks/kid", bus_dir="C:/bus")
+
+        self.assertEqual(Path("C:/bus/inbox.jsonl"), Path(got))
+
+    def test_the_manager_writes_to_its_own_bus_not_the_task_root(self):
+        """End to end through the manager: no second inbox under <bus>/tasks."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SubagentManager(
+                project_root="D:/proj",
+                project_state_root=tmp,
+                project_data_dir=tmp + "/projects/k",
+                parent_session_id="s1",
+            )
+            task_dir = manager.task_root / "kid"
+            task_dir.mkdir(parents=True, exist_ok=True)
+
+            manager._append_parent_inbox(task_dir, {"type": "turn_completed"})
+
+            self.assertTrue((Path(manager.subagents_state_dir) / "inbox.jsonl").exists())
+            self.assertFalse(
+                (Path(manager.task_root) / "subagents" / "inbox.jsonl").exists(),
+                "manager wrote into the orphan inbox under the task root",
+            )
+
+    def test_without_either_hint_the_legacy_guess_is_kept(self):
+        from genericagent.agents.state import parent_inbox_path_for_task_dir
+
+        env = {k: v for k, v in os.environ.items() if k != "GA_SUBAGENTS_STATE_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            got = parent_inbox_path_for_task_dir(os.path.join("D:", os.sep, "x", "temp", "kid"))
+
+        self.assertEqual(
+            Path(os.path.join("D:", os.sep, "x", "temp", "subagents", "inbox.jsonl")),
+            Path(got),
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

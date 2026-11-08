@@ -644,7 +644,7 @@ class SubagentManager:
             "agent_type": failed.get("agent_type"),
         }
         append_jsonl_event(Path(task_dir) / "events.jsonl", event)
-        append_parent_inbox_event(task_dir, event)
+        self._append_parent_inbox(task_dir, event)
         bus_event = self.event_bus.append_event(
             "agent_error",
             agent_path=failed.get("agent_path"),
@@ -1024,7 +1024,7 @@ class SubagentManager:
                     "agent_type": agent_type,
                 }
                 append_jsonl_event(task_dir / "events.jsonl", event)
-                append_parent_inbox_event(task_dir, event)
+                self._append_parent_inbox(task_dir, event)
                 bus_event = self.event_bus.append_event(
                     "agent_error",
                     agent_path=state.get("agent_path"),
@@ -1165,7 +1165,7 @@ class SubagentManager:
                 "agent_type": agent_type,
             }
             append_jsonl_event(task_dir / "events.jsonl", event)
-            append_parent_inbox_event(task_dir, event)
+            self._append_parent_inbox(task_dir, event)
             bus_event = self.event_bus.append_event(
                 "agent_error",
                 agent_path=state.get("agent_path"),
@@ -1212,7 +1212,7 @@ class SubagentManager:
             "agent_type": agent_type,
         }
         append_jsonl_event(task_dir / "events.jsonl", event)
-        append_parent_inbox_event(task_dir, event)
+        self._append_parent_inbox(task_dir, event)
         bus_event = self.event_bus.append_event(
             "agent_started",
             agent_path=state.get("agent_path"),
@@ -1568,7 +1568,7 @@ class SubagentManager:
             "resume_context_event_count": resume_context.get("source_event_count"),
         }
         append_jsonl_event(task_dir / "events.jsonl", local_event)
-        append_parent_inbox_event(task_dir, local_event)
+        self._append_parent_inbox(task_dir, local_event)
         bus_event = self.event_bus.append_event(
             "agent_resumed",
             agent_path=previous.agent_path,
@@ -2161,7 +2161,7 @@ class SubagentManager:
                 "reason": reason,
             },
         )
-        append_parent_inbox_event(
+        self._append_parent_inbox(
             task_dir,
             {
                 "type": "agent_closed",
@@ -2213,7 +2213,7 @@ class SubagentManager:
         if reclaimed:
             try:
                 listing = ", ".join("#%s %r" % (row.get("id"), row.get("subject")) for row in reclaimed)
-                append_parent_inbox_event(task_dir, {
+                self._append_parent_inbox(task_dir, {
                     "type": "task_reclaimed",
                     "task_name": previous.task_name,
                     "agent_path": previous.agent_path,
@@ -2283,7 +2283,7 @@ class SubagentManager:
             "digest": digest,
         }
         self.receipt_ledger.record_send(message_id, to="/root", digest=digest)
-        append_parent_inbox_event(task_dir, event)
+        self._append_parent_inbox(task_dir, event)
         append_jsonl_event(task_dir / "events.jsonl", event)
         return {"recipient": "/root", "task_name": task_name, "author": author, "message_id": message_id, "lead_message": True}
 
@@ -2362,7 +2362,7 @@ class SubagentManager:
         )
         task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
-        append_parent_inbox_event(task_dir, frame)
+        self._append_parent_inbox(task_dir, frame)
         append_jsonl_event(task_dir / "events.jsonl", frame)
         self._notify_idle_subscriber(task_name, frame)
         return frame
@@ -2788,6 +2788,16 @@ class SubagentManager:
             return path.stat().st_size
         except FileNotFoundError:
             return 0
+
+    def _append_parent_inbox(self, task_dir, event):
+        """Append to the parent's inbox, in the parent's own bus directory.
+
+        The module-level helper guesses ``dirname(task_dir)/subagents`` when it has no
+        hint, which on the product layout is ``<bus>/tasks/subagents`` -- a second inbox
+        nobody reads (same wrong guess as the child's event mirror). This manager owns
+        the real directory, so it hands it over instead of letting the helper guess.
+        """
+        append_parent_inbox_event(task_dir, event, bus_dir=self.subagents_state_dir)
 
     def _parent_inbox_path(self):
         return self.subagents_state_dir / "inbox.jsonl"

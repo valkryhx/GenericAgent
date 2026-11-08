@@ -160,11 +160,29 @@ def append_jsonl_event(path, event):
         f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def parent_inbox_path_for_task_dir(task_dir):
+def parent_inbox_path_for_task_dir(task_dir, bus_dir=None):
+    """The parent's inbox for a child task dir.
+
+    ``dirname(task_dir)/subagents/inbox.jsonl`` is the same wrong guess that put the
+    child's event mirror in an orphan bus: on the product layout the task dir is
+    ``<bus>/tasks/<name>``, so the guess resolves to ``<bus>/tasks/subagents`` while the
+    parent reads ``<bus>``.
+
+    Resolution order:
+      1. ``bus_dir`` -- what the manager passes. The manager is the *parent* process, so
+         its own environment carries no child hand-down; it knows the directory directly.
+      2. ``GA_SUBAGENTS_STATE_DIR`` -- what a spawned child gets from its spawner.
+      3. the historical guess, for a caller with neither (unit tests, legacy callers).
+    """
+    if bus_dir:
+        return Path(bus_dir) / "inbox.jsonl"
+    explicit = str(os.environ.get("GA_SUBAGENTS_STATE_DIR") or "").strip()
+    if explicit:
+        return Path(explicit) / "inbox.jsonl"
     return Path(task_dir).parent / "subagents" / "inbox.jsonl"
 
 
-def append_parent_inbox_event(task_dir, event):
+def append_parent_inbox_event(task_dir, event, bus_dir=None):
     row = dict(event)
     task_name = row.get("task_name") or Path(task_dir).name
     row.setdefault("type", "subagent_update")
@@ -173,7 +191,7 @@ def append_parent_inbox_event(task_dir, event):
     row.setdefault("task_name", task_name)
     row.setdefault("agent_path", f"/root/{task_name}")
     row.setdefault("task_dir", str(task_dir))
-    append_jsonl_event(parent_inbox_path_for_task_dir(task_dir), row)
+    append_jsonl_event(parent_inbox_path_for_task_dir(task_dir, bus_dir=bus_dir), row)
 
 
 def sha256_file(path):
