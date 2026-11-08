@@ -12,7 +12,7 @@ from genericagent.agents.artifacts import SubagentArtifactStore
 from genericagent.agents.event_bus import SubagentEventBus
 from genericagent.agents.mailbox import QUEUE_ONLY, TRIGGER_TURN, SubagentMailbox
 from genericagent.agents.permissions import INHERIT_CURRENT_PERMISSIONS, normalize_permission_metadata
-from genericagent.agents.registry import SubagentRegistry, _default_process_identity
+from genericagent.agents.registry import TERMINAL_PROCESS_STATUSES, SubagentRegistry, _default_process_identity
 from genericagent.agents.submissions import SubagentSubmissionLog
 from genericagent.agents.transcript import SubagentTranscriptStore
 from genericagent.agents.state import append_jsonl_event, append_parent_inbox_event, atomic_write_json, now_iso, read_json_or_none, sha256_file
@@ -1291,6 +1291,64 @@ class SubagentManager:
             target, message, author=author, trigger_turn=False, other_recipients=other_recipients, submission_id=submission_id
         )
 
+    def _reject_dead_mailbox(self, agent_path, task_name):
+        """Refuse to queue a message no live agent will ever read.
+
+        ``send_message`` and ``followup_task`` are addressed by name, and a name can outlive
+        its agent: ``close_agent`` keeps the task dir and registry row (deliberately -- they
+        are the evidence of what it did), and a later ``spawn_agent`` of the same name gets
+        ``a_1`` instead. So ``send_message("a")`` looked up nothing, created ``temp/a`` if it
+        was missing, appended to that closed agent's mailbox, and reported success. Nobody
+        was left to consume it.
+
+        Liveness is judged from the *durable* signals only -- the registry row's ``closed``
+        status and the recorded ``process_status`` -- because those are written by the agent
+        itself and survive a restart. Deliberately not probed here: a live ``pid``. A pid
+        that is not running is not proof of death (pids are recycled, and a row may be
+        mid-spawn), and treating it as proof would refuse deliveries to agents that are
+        merely between turns. Refusing a valid delivery is a worse failure than the stale
+        row this guards against, so the rule stays "reject only what is provably dead".
+        """
+        try:
+            row = self.registry.get(agent_path)
+        except FileNotFoundError:
+            row = None
+        except Exception:
+            # A registry that cannot answer must not block delivery.
+            return
+
+        if row is not None:
+            if getattr(row, "status", None) == "closed":
+                raise ValueError(self._dead_mailbox_message(agent_path, task_name, closed=True))
+            status = str(getattr(row, "process_status", None) or "").strip().lower()
+            if status in TERMINAL_PROCESS_STATUSES:
+                raise ValueError(self._dead_mailbox_message(agent_path, task_name, closed=True))
+            return
+
+        # No registry row. A state file may still exist (CLI-created or pre-registry runs),
+        # and a directory that was never registered is treated the same way.
+        raw = read_json_or_none(self.task_root / task_name / "state.json") or {}
+        if not raw:
+            raise ValueError(self._dead_mailbox_message(agent_path, task_name, closed=False))
+        status = str(raw.get("process_status") or "").strip().lower()
+        if status in TERMINAL_PROCESS_STATUSES:
+            raise ValueError(self._dead_mailbox_message(agent_path, task_name, closed=True))
+
+    @staticmethod
+    def _dead_mailbox_message(agent_path, task_name, *, closed):
+        if closed:
+            return (
+                f"agent `{agent_path}` has exited; a message queued there would never be read. "
+                f"Use resume_agent(target={task_name!r}) to continue the same agent, "
+                f"followup_task if it is still running, or spawn_agent with a new task_name. "
+                f"list_agents(include_closed=True) shows what exists."
+            )
+        return (
+            f"no agent named `{agent_path}` exists, so this message would be queued where "
+            f"nothing can read it. Call spawn_agent with task_name={task_name!r} first, or "
+            f"list_agents to see the live ones."
+        )
+
     def followup_task(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
         if self._is_lead_target(target):
             return self._queue_lead_message(message, author=author, trigger_turn=True)
@@ -2231,6 +2289,13 @@ class SubagentManager:
     def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)
         primary_path = f"/root/{task_name}"
+        # Refuse before creating anything: a message to a name that no live agent owns used to
+        # mkdir the directory, enqueue the row and return {"status": "queued"}. If that name was
+        # a closed agent (or never existed), no process is left to read the mailbox, so the row
+        # was never consumed while the sender got a success receipt -- the message silently
+        # vanished. Naming the way out matters as much as the refusal: a bare "not found" makes
+        # the model retry the same name.
+        self._reject_dead_mailbox(primary_path, task_name)
         extra_paths = self._resolve_other_recipients(other_recipients, exclude=primary_path) if _fanout else []
         task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)

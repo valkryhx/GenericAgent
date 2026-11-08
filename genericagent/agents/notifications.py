@@ -61,17 +61,54 @@ def prefix_system_notification(text):
 
 
 def build_subagent_notifications_prompt(root_dir):
+    """Render pending notifications and advance the cursor.
+
+    Kept for callers that render into the system prompt at user-turn start,
+    where the text is committed in the same breath. Newer call sites should use
+    :func:`peek_subagent_notifications_prompt` so a failure between render and
+    delivery does not lose the notices.
+    """
+    text, ack_upto = peek_subagent_notifications_prompt(root_dir)
+    if text:
+        _ack(root_dir, ack_upto)
+    return text
+
+
+def peek_subagent_notifications_prompt(root_dir):
+    """Render pending notifications *without* advancing the cursor.
+
+    Returns ``(text, ack_upto)``. ``ack_upto`` is the highest ``event_seq``
+    covered by ``text``; call :func:`ack_subagent_notifications` with it once
+    the text has actually been committed to the model's conversation. Until
+    then the same notices come back on the next call, which is the point:
+    duplicating a notification costs one redundant model call, dropping one
+    means the main agent never learns the task finished.
+    """
     bus = SubagentEventBus(Path(root_dir) / "temp" / "subagents")
-    notifications = bus.consume_notifications()
+    notifications = bus.peek_notifications()
     if not notifications:
-        return ""
+        return "", None
     # One drain of background results; cap a single result at 4000 and the whole
     # drain at 16000, exactly like CC m0300 (xB / eTo).
     blocks = apply_result_budget(["\n".join(_render_task_notification(event)) for event in notifications])
     lines = ["", "[GA_SUBAGENT_NOTIFICATIONS]", ANTI_SPOOF_PREAMBLE.rstrip("\n"), ""]
     lines.extend(blocks)
     lines.extend(["[/GA_SUBAGENT_NOTIFICATIONS]", ""])
-    return "\n".join(lines)
+    return "\n".join(lines), int(notifications[-1].get("event_seq") or 0)
+
+
+def ack_subagent_notifications(root_dir, upto_event_seq):
+    """Advance the notification cursor after the text was delivered."""
+    _ack(root_dir, upto_event_seq)
+
+
+def _ack(root_dir, upto_event_seq):
+    try:
+        bus = SubagentEventBus(Path(root_dir) / "temp" / "subagents")
+        bus.ack_notifications(upto_event_seq)
+    except Exception:
+        # Never let bookkeeping break the turn; the notices simply come back.
+        pass
 
 
 def apply_result_budget(blocks):

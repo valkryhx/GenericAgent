@@ -1445,6 +1445,20 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "demo"
             task_dir.mkdir(parents=True)
+            # A mailbox is only meaningful for an agent that can still read it; send_message
+            # refuses a name no live agent owns (that is the dead-mailbox guard).
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "demo",
+                    "agent_path": "/root/demo",
+                    "pid": 4242,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                },
+            )
             manager = SubagentManager(root_dir=td)
 
             manager.send_message("demo", "queued only", author="/root")
@@ -1959,6 +1973,11 @@ class MulticastMessageTest(unittest.TestCase):
             popen=lambda *_, **__: FakeProcess(),
             python_executable="python-test",
             sleep=lambda _: None,
+            # The fake pids do not correspond to real processes, so without this the
+            # registry reaps these rows as stale on the next spawn and send_message
+            # correctly refuses to queue into a dead mailbox. These tests are about
+            # multicast behaviour among *live* agents.
+            process_exists=lambda _pid: True,
         )
 
     def _rows(self, td, name):
@@ -2036,6 +2055,112 @@ class MulticastMessageTest(unittest.TestCase):
             for name in ("a", "b"):
                 row = next(row for row in self._rows(td, name) if row["content"] == "go")
                 self.assertTrue(row["trigger_turn"], f"{name} got the multicast without being woken")
+
+
+class DeadMailboxGuardTest(unittest.TestCase):
+    """A message must never be queued where no process can read it.
+
+    ``close_agent`` deliberately keeps the task dir and registry row (they are the
+    evidence of what the agent did), and a later spawn of the same name gets ``a_1``
+    rather than reusing ``a``. So ``send_message("a")`` used to find nothing, create
+    ``temp/a`` if missing, append to that closed agent's mailbox and return
+    ``{"status": "queued"}`` -- a success receipt for a message nobody would read.
+    """
+
+    def _manager(self, td, *, process_exists=lambda _pid: True):
+        class FakeProcess:
+            next_pid = 9300
+
+            def __init__(self):
+                self.pid = FakeProcess.next_pid
+                FakeProcess.next_pid += 1
+
+        return SubagentManager(
+            root_dir=td,
+            popen=lambda *_, **__: FakeProcess(),
+            python_executable="python-test",
+            sleep=lambda _: None,
+            process_exists=process_exists,
+        )
+
+    def _mailbox(self, td, name):
+        from genericagent.agents.mailbox import SubagentMailbox
+
+        return SubagentMailbox(Path(td) / "temp" / name / "mailbox.jsonl")._read_rows()
+
+    def test_a_closed_agent_is_refused_and_named_alternatives_are_offered(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "first job")
+            manager.close_agent("a")
+
+            with self.assertRaises(ValueError) as ctx:
+                manager.send_message("a", "too late", author="/root")
+
+            message = str(ctx.exception)
+            self.assertIn("resume_agent", message)
+            self.assertIn("/root/a", message)
+
+    def test_a_refused_send_writes_no_mailbox_row(self):
+        """The refusal must happen before the enqueue, not after it."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "first job")
+            manager.close_agent("a")
+            before = len(self._mailbox(td, "a"))
+
+            with self.assertRaises(ValueError):
+                manager.send_message("a", "too late", author="/root")
+
+            self.assertEqual(len(self._mailbox(td, "a")), before)
+
+    def test_sending_to_a_name_that_never_existed_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+
+            with self.assertRaises(ValueError) as ctx:
+                manager.send_message("ghost", "hello", author="/root")
+
+            self.assertIn("spawn_agent", str(ctx.exception))
+            self.assertFalse((Path(td) / "temp" / "ghost" / "mailbox.jsonl").exists())
+
+    def test_a_live_agent_still_receives_the_message(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "job")
+
+            manager.send_message("a", "still works", author="/root")
+
+            self.assertIn("still works", [row["content"] for row in self._mailbox(td, "a")])
+
+    def test_a_child_that_reported_a_terminal_status_is_refused(self):
+        """process_status is written by the child itself, so it outranks a live pid."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            manager.spawn_agent("a", "job")
+            task_dir = Path(td) / "temp" / "a"
+            state = read_json_or_none(task_dir / "state.json") or {}
+            state["process_status"] = "exited"
+            state["turn_status"] = "completed"
+            atomic_write_json(task_dir / "state.json", state)
+            manager.register_agent("a", state, task_dir)
+
+            with self.assertRaises(ValueError):
+                manager.send_message("a", "after exit", author="/root")
+
+    def test_an_unanswerable_liveness_probe_does_not_block_delivery(self):
+        """'Cannot tell' means alive, matching every other liveness check here."""
+
+        def broken(_pid):
+            raise OSError("probe unavailable")
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td, process_exists=broken)
+            manager.spawn_agent("a", "job")
+
+            manager.send_message("a", "delivered anyway", author="/root")
+
+            self.assertIn("delivered anyway", [row["content"] for row in self._mailbox(td, "a")])
 
 
 class TeamModeSpawnTest(unittest.TestCase):
@@ -2460,6 +2585,23 @@ class LeadMessageRoutingTest(unittest.TestCase):
     def test_a_normal_peer_still_uses_the_mailbox(self):
         with tempfile.TemporaryDirectory() as td:
             manager = self._teammate(td)
+            # The peer must exist and be alive; a message to a name no live agent owns is
+            # refused (nobody would read that mailbox).
+            peer_dir = Path(td) / "temp" / "agent_2"
+            peer_dir.mkdir(parents=True)
+            atomic_write_json(
+                peer_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "agent_2",
+                    "agent_path": "/root/agent_2",
+                    "pid": 4244,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                },
+            )
+            manager.process_exists = lambda _pid: True
 
             row = manager.send_message("agent_2", "sync", author="/root/agent_1")
 

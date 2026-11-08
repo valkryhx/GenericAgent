@@ -55,7 +55,23 @@ class GaSubagentToolsTest(unittest.TestCase):
 
     def test_send_message_from_a_teammate_is_attributed_to_it(self):
         with tempfile.TemporaryDirectory() as td:
-            handler = self.make_handler(td, self_agent_path="/root/agent_1")
+            # The peer has to exist and be alive: a message to a name no live agent owns is
+            # refused now, because nobody would ever read that mailbox.
+            task_dir = Path(td) / "temp" / "agent_2"
+            task_dir.mkdir(parents=True)
+            atomic_write_json(
+                task_dir / "state.json",
+                {
+                    "schema_version": 1,
+                    "task_name": "agent_2",
+                    "agent_path": "/root/agent_2",
+                    "pid": 4243,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                },
+            )
+            handler = self.make_handler(td, self_agent_path="/root/agent_1", process_exists=lambda _pid: True)
 
             exhaust(handler.do_send_message(
                 {"target": "agent_2", "message": "sync"}, response=None

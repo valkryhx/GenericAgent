@@ -201,12 +201,68 @@ def _run_parallel_tools(handler, response, batch, tool_num, verbose):
     # the outcome tuples; the strings above stream straight through.
     return [(index, tool_call, outcomes.get(index)) for index, tool_call in batch]
 
+def _main_agent_project_root(handler):
+    """Project root used for the notification stream, or ``None`` for a child.
+
+    Only the interactive main agent consumes subagent notifications. A subagent
+    or workflow child must not drain its siblings' results: it has its own
+    ``task_dir``, and a workflow child's parent is a synthetic namespace that
+    carries one too. Either marker means "not the owner of this stream".
+    """
+    parent = getattr(handler, "parent", None)
+    if parent is None:
+        return None
+    if getattr(parent, "task_dir", None):
+        return None
+    if getattr(parent, "is_subagent", False):
+        return None
+    root = getattr(parent, "project_root", None)
+    # No fallback to paths.PROJECT_ROOT on purpose: the interactive main agent always
+    # carries project_root (core/app.py sets it during init), while a test stub or a
+    # handler built without one should not silently read the real repository's stream.
+    # A host that omits it keeps the old turn-start-only delivery instead.
+    return str(root) if root else None
+
+
+def _peek_pending_notifications(handler):
+    """Render pending subagent notifications without consuming them."""
+    root = _main_agent_project_root(handler)
+    if not root:
+        return "", None
+    try:
+        from genericagent.agents.notifications import peek_subagent_notifications_prompt
+
+        return peek_subagent_notifications_prompt(root)
+    except Exception:
+        # A notification is never a reason to abort the turn; it will be
+        # retried at the next fold point because nothing was acked.
+        return "", None
+
+
+def _ack_pending_notifications(handler, ack_upto):
+    """Advance the cursor once the injected text reached the model."""
+    root = _main_agent_project_root(handler)
+    if not root or not ack_upto:
+        return
+    try:
+        from genericagent.agents.notifications import ack_subagent_notifications
+
+        ack_subagent_notifications(root, ack_upto)
+    except Exception:
+        pass
+
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=40, verbose=True, initial_user_content=None):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": initial_user_content if initial_user_content is not None else user_input}
     ]
     turn = 0;  handler.max_turns = max_turns
+    # Set when a fold point injects notifications into the message that the
+    # *next* chat() will read. The cursor only advances after that chat()
+    # returns, so a failure there replays the same notices instead of losing
+    # them.
+    pending_notification_ack = None
     while turn < handler.max_turns:
         turn += 1; turnstr = f'LLM Running (Step {turn}) ...'
         if handler.parent.task_dir: turnstr = f'Step {turn} ...'
@@ -221,6 +277,13 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             response = exhaust(response_gen)
             cleaned = _clean_content(response.content)
             if cleaned: yield cleaned + '\n'
+        # The messages handed to this chat() -- including any notification text a
+        # previous fold point prepended -- have now been read by the model, so the
+        # cursor can move. Acking before the call would drop the notices whenever
+        # the call fails.
+        if pending_notification_ack:
+            _ack_pending_notifications(handler, pending_notification_ack)
+            pending_notification_ack = None
         # Keep the committed model message separate from the display stream.
         # CC 303's Stop payload uses the last assistant transcript message's
         # text (m0459 Spe -> g_(messages) -> Io(content).trim()), not rendered
@@ -303,6 +366,16 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         if post_batch.context_text:
             next_prompt += (chr(10) * 2 + '<hook_context>' + chr(10)
                             + post_batch.context_text + chr(10) + '</hook_context>')
+        # Fold point: this turn's tools have all finished and the next chat() is
+        # about to run, so this is where a background subagent's completion
+        # should become visible. Consuming it only at user-turn start (the old
+        # behaviour) meant a child that finished mid-task stayed invisible until
+        # the user typed again. Prepended, not appended: CC delivers the queued
+        # notice ahead of the turn's continuation instruction.
+        notif_text, notif_ack = _peek_pending_notifications(handler)
+        if notif_text:
+            next_prompt = notif_text + chr(10) + next_prompt
+            pending_notification_ack = notif_ack
         messages = [{"role": "user", "content": next_prompt, "tool_results": tool_results}]   # just new message, history is kept in *Session
     if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}

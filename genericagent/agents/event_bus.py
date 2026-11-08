@@ -84,12 +84,51 @@ class SubagentEventBus:
             events.append(event)
         return events
 
-    def consume_notifications(self):
+    def peek_notifications(self):
+        """Return notifications past the cursor without advancing it.
+
+        Pure read, so a caller that fails to deliver the text can retry and see
+        the same events again. ``consume_notifications`` used to read-and-advance
+        in one step, which meant an exception between the read and handing the
+        text to the model silently dropped those notices for good.
+        """
         cursor = read_json_or_none(self.notification_cursor_path) or {}
         last_seq = int(cursor.get("last_event_seq") or 0)
-        notifications = [event for event in self._read_jsonl(self.notifications_path) if int(event.get("event_seq") or 0) > last_seq]
+        return [
+            event
+            for event in self._read_jsonl(self.notifications_path)
+            if int(event.get("event_seq") or 0) > last_seq
+        ]
+
+    def ack_notifications(self, upto_event_seq):
+        """Advance the notification cursor to ``upto_event_seq``.
+
+        Only ever moves forward: a late ack from an older batch must not rewind
+        the cursor and resurrect notices that were already delivered. Call this
+        after the text has actually been committed to the conversation.
+        """
+        try:
+            upto = int(upto_event_seq or 0)
+        except (TypeError, ValueError):
+            return
+        if upto <= 0:
+            return
+        cursor = read_json_or_none(self.notification_cursor_path) or {}
+        last_seq = int(cursor.get("last_event_seq") or 0)
+        if upto <= last_seq:
+            return
+        atomic_write_json(self.notification_cursor_path, {"last_event_seq": upto})
+
+    def consume_notifications(self):
+        """Read past the cursor and advance it (the pre-peek/ack behaviour).
+
+        Kept so existing callers and tests keep working; new code should prefer
+        ``peek_notifications`` + ``ack_notifications`` so a delivery failure is
+        retryable instead of losing the notices.
+        """
+        notifications = self.peek_notifications()
         if notifications:
-            atomic_write_json(self.notification_cursor_path, {"last_event_seq": int(notifications[-1].get("event_seq") or 0)})
+            self.ack_notifications(int(notifications[-1].get("event_seq") or 0))
         return notifications
 
     def next_event_seq(self):

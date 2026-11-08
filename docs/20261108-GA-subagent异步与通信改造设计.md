@@ -455,16 +455,14 @@ GA 已有 `run_id`（`AgentState.run_id`），天然可做钉住的 key。
 | 步 | 内容 | 优先级 | 状态 |
 | --- | --- | --- | --- |
 | 0 | **实时通道改默认 + 修管道名冲突 + 修线程泄漏** | P0 | ✅ **已完成**（§8） |
-| 1 | `notification_queue.py` + `event_bus` peek/ack，保留旧 API | P0 | ⬜ 待做 |
-| 2 | `loop.py` fold 点注入 + 延迟 ack | P0 | ⬜ 待做 |
-| 3 | `send_message` 投递前校验 alive | P0 | ⬜ 待做 |
+| 1 | `event_bus` peek/ack + `notifications` peek 变体，保留旧 API | P0 | ✅ **已完成**（§9.1） |
+| 2 | `loop.py` fold 点注入 + 延迟 ack | P0 | ✅ **已完成**（§9.2） |
+| 3 | `send_message` 投递前校验目标活着 | P0 | ✅ **已完成**（§9.3） |
 | 4 | ~~`_wait_for_change` file 模式改 stat 等待~~ | — | ❌ 不需要（步 0 已用 realtime 解决） |
 | 5 | `name_pins.py` 钉住 | P1 | ⬜ 待做 |
 | 6 | `notify_when_idle` | P2 | ⬜ 待做 |
 | 7 | spawner stop-pending 守卫 | P2 | ⬜ 待做 |
-| 8 | 回归 | — | `test_subagent_*` 全部 + `test_agent_loop_*` 全绿 |
-
-**步 1-3 是核心**，做完用户看到的现象就该消失。
+| 8 | 回归 | — | ✅ 全量 2241 例 OK（skipped=4） |
 
 ### 3.1 关键测试用例（写成真的集成测试，不是 mock）
 
@@ -660,3 +658,129 @@ agent 自然结束但没被 close 的情况，那在真实使用中确实存在�
 - 我改错过一次 `_accept_loop` 的 ack/注册顺序，被现有测试抓住（`test_a_stalled_subscriber`
   从 0/10 变成 2/10 失败），已改回并加注释。
 - 我一度把"线程累积到几千个"当成生产泄漏，实际是探针脚本在单进程里连跑所致，已在 §8.3 更正。
+
+---
+
+## 9. 步 1-3 实施结果（2026-11-08）
+
+全量 2241 例 OK（skipped=4）。本节记录实现与实测中**与原设计的偏离**，因为
+偏离处比设计本身更值得留档。
+
+### 9.1 步 1：peek / ack（`event_bus.py`、`notifications.py`）
+
+没有新建 `notification_queue.py`。原因：游标逻辑本来就只在
+`event_bus.consume_notifications` 里，为一个函数开新模块只会多一层转发。改为在
+`SubagentEventBus` 上加两个方法，原方法变成它们的组合：
+
+| 方法 | 语义 |
+| --- | --- |
+| `peek_notifications()` | 读游标之后的通知，**不动游标** |
+| `ack_notifications(seq)` | 推进游标，**只进不退** |
+| `consume_notifications()` | 保留，内部改为 peek + ack |
+
+`ack_notifications` 的"只进不退"是必要的：一个迟到的旧批次 ack 若能把游标拨回去，
+已经被模型看过的通知会重新出现。实现上直接比较 `upto <= last_seq` 就返回。
+
+`notifications.py` 同样保留旧签名，新增 peek 变体：
+
+```python
+build_subagent_notifications_prompt(root) -> str          # 旧：内部自己 ack
+peek_subagent_notifications_prompt(root) -> (str, ack)    # 新：不 ack
+ack_subagent_notifications(root, ack)                     # 新：确认后 ack
+```
+
+### 9.2 步 2：fold 点注入（`core/loop.py`）
+
+注入点在 `turn_end_callback` 之后、`messages = [...]` 之前，与设计一致。
+通知作为 `next_prompt` 的**前缀**（CC 是 queued_command 紧贴 tool_result，先于本轮继续指令）。
+
+ack 的时机：**下一轮 `chat()` 返回之后**。这一条被测试钉住了
+（`test_a_failed_chat_does_not_lose_the_notice`：第二轮 chat 抛异常，断言通知仍在）。
+
+**与原设计的两处偏离：**
+
+1. **没有回退到 `paths.PROJECT_ROOT`。** 原设计写的是
+   `peek_subagent_notifications_prompt(project_root)`，没讨论 `project_root` 缺省时怎么办。
+   我一度加了回退，随即撤销：`tests/test_agent_loop_parallel_tools.py` 的 handler 桩
+   没有 `project_root`，回退会让每个 loop 测试去读写真实仓库的通知流——测试互相污染，
+   而且"读哪棵树"变成隐式行为。现在只认显式的 `parent.project_root`；主 agent 由
+   `core/app.py:759` 在 init 时设置，正常路径不受影响。缺失时保持旧行为（只在用户 turn 开头消费）。
+
+2. **判定"是不是主 agent"用三重条件**，不只是 `task_dir`：
+
+   ```python
+   if parent.task_dir: return None          # 子 agent
+   if parent.is_subagent: return None       # 显式标记
+   if not parent.project_root: return None  # 无根，保持旧行为
+   ```
+
+   设计只写了 `task_dir`。但 `workflow/child_agent.py:1039` 的 handler parent 是
+   `SimpleNamespace`，它带的 task_dir 是子 cwd，而带 `is_subagent=True` 的那个变体
+   （`:1065`）才有明确标记。只查 task_dir 在 hook 变体上仍成立，但不查
+   `is_subagent` 会漏掉将来某个不带 task_dir 的子 agent 变体——多一条判断比将来
+   静默吸走父进程的通知便宜。
+
+### 9.3 步 3：死信箱校验（`manager.py:_reject_dead_mailbox`）
+
+在原设计的"校验 registry 是否活着"上收窄了一层，**判据只用持久化信号**：
+
+```
+registry 有行 → status=="closed" 或 process_status 属于终态 → 拒绝
+registry 无行 → 读 state.json；process_status 终态 → 拒绝；文件都没有 → 拒绝
+其他情况（包括探针抛异常）→ 放行
+```
+
+**没有用 `process_exists(pid)` 判定。** 这是我实现后立刻被 7 个既有测试纠正的地方：
+测试用假 pid 起 agent，探针一律返回 False，于是所有"给活着的 agent 发消息"的用例
+全部失败。更根本的理由是——pid 不存在**不是**死亡证明（pid 会被回收，行可能正处在
+spawn 过程中），把"探针说没有"当成死亡会拒绝合法的投递。拒绝一次有效投递比放过一条
+陈旧记录更糟。`process_status` 是子进程自己写的、跨重启仍在，才是可证伪的信号。
+
+错误信息必须给出下一步（设计要求），实现为两条不同的消息：
+
+- 已关闭 → 提示 `resume_agent` / `followup_task` / `spawn_agent(新名字)` / `list_agents(include_closed=True)`
+- 从未存在 → 提示先 `spawn_agent`，或 `list_agents` 看现有的
+
+拒绝发生在 `task_dir.mkdir()` **之前**，所以不会留下空目录，也不会写 `mailbox.jsonl`、
+不会写 receipt、不会返回成功回执（测试
+`test_a_refused_send_writes_no_mailbox_row` 钉住这条）。
+
+### 9.4 测试改动（这些不是"顺手"，是必须）
+
+| 文件 | 改动 | 为什么必须 |
+| --- | --- | --- |
+| `test_subagent_manager.py` | `MulticastMessageTest._manager` 加 `process_exists=lambda _pid: True` | 假 pid 不对应真进程，registry 会在下次 spawn 时把这些行当陈旧行清成 `closed`，于是死信箱守卫正确地拒绝了投递。这些用例测的是多方投递，前提是 agent 活着 |
+| `test_subagent_manager.py` | `test_send_message_queues...` / `test_a_normal_peer_still_uses_the_mailbox` 补 `state.json` | 原来直接对一个空目录发消息——那正是要拦的场景 |
+| `test_ga_subagent_tools.py` | 同上，补 peer 的 `state.json` + `process_exists` | 同上 |
+| `test_mcp_runtime.py` | `test_generic_agent_abort_...` 等待上限 5s → 20s | 见下 |
+
+### 9.5 顺带查出的一个真问题：MCP fixture 超时
+
+全量跑出现 2 个失败，其中 `test_mcp_runtime.McpRuntimeTest.test_generic_agent_abort_during_mcp_call_does_not_fail_server`
+是**稳定失败**（单跑 5/5 失败），不是 flake。
+
+探针实测（`tests/probes/python/_probe_mcp_fixture_latency.py`）冷启动到
+MCP 工具体被调用：
+
+```
+run 0: 7.98s
+run 1: 7.58s
+run 2: 7.81s
+```
+
+而测试只等 **5 秒**。所以它单跑必挂、整模块跑常过——前者冷进程，后者前面的用例
+已经把 `fastmcp` 的导入链路预热过。上限改为 20s，并在注释里写明测量值。
+
+另一个失败 `test_runtime_observes_external_cancel_of_running_workflow` 是既有 flake：
+干净 HEAD 上 2/8 失败，带我的改动 1/5，属同一频率，与本轮无关。
+
+### 9.6 新增测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_subagent_notifications.py` | +6 | peek 不推进游标；ack 只进不退；旧 API 行为不变；peek 返回本批 ack；ack 后清空；空批返回 `("", None)` |
+| `test_subagent_notification_fold_point.py`（新文件） | 5 | 中途产生 → 下一轮 chat 见到（第 1 轮见不到）；ack 后不重复；**chat 抛异常则不丢**；子 agent 不吸父流；无 project_root 保持旧行为 |
+| `test_subagent_manager.py::DeadMailboxGuardTest` | 6 | 已关闭拒绝且给出 `resume_agent`；拒绝时不写邮箱行；从未存在拒绝且提示 `spawn_agent`；活的照常送达；子进程自报终态即拒绝；探针抛异常不误拒 |
+
+fold 点测试用真实 `agent_runner_loop` + 真实 `SubagentEventBus`（不是 mock 通知），
+只替换 LLM client 与 handler——断言的是"模型看到的 messages"，正是用户可见现象本身。

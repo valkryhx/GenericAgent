@@ -866,7 +866,13 @@ class McpRuntimeTest(unittest.TestCase):
 
             worker = threading.Thread(target=run_dispatch, daemon=True)
             worker.start()
-            deadline = time.monotonic() + 5
+            # Measured on this machine: a cold stdio MCP handshake (spawn interpreter,
+            # import fastmcp, initialize, list_tools, call_tool) reaches the tool body in
+            # 7.6-8.0s. The old 5s budget therefore failed whenever this test ran first in
+            # a process -- i.e. alone -- while passing inside the module run, where an
+            # earlier test had already warmed the import. 20s keeps the test honest (it
+            # still fails if the fixture never starts) without encoding a cold-start race.
+            deadline = time.monotonic() + 20
             while not call_marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(call_marker.exists(), "MCP tool fixture did not start")
