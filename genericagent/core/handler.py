@@ -1783,7 +1783,7 @@ class GenericAgentHandler(BaseHandler):
                 agent_type=agent_type,
                 role_source_path=role_source_path,
                 background=bool(args.get("background", True)),
-                ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "file",
+                ipc_mode=args.get("ipc_mode") or args.get("ipcMode") or "socket",
                 isolation=isolation,
                 submission_id=args.get("submission_id") or args.get("submissionId"),
             )

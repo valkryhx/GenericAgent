@@ -340,8 +340,16 @@ class SubagentManager:
             return AgentPath.root()
 
     def _env_realtime_channel_factory(self):
-        """Realtime IPC stays opt-in; without it the durable file bus remains the transport."""
-        if os.environ.get("GA_SUBAGENT_REALTIME_IPC") != "1":
+        """Realtime IPC is on by default; GA_SUBAGENT_REALTIME_IPC=0 opts out.
+
+        It used to be opt-in because the channel had no subscribers and every
+        caller fell back to the file bus anyway. That is no longer true: the
+        child subscribes (``resolve_child_subscription``), and the measured
+        wake-up latency on Windows named pipes is ~0.25s against a 30s poll
+        interval. Leaving it off by default made ``wait_agent`` a blind sleep,
+        so the default is now the fast path and file stays the fallback.
+        """
+        if os.environ.get("GA_SUBAGENT_REALTIME_IPC", "1") == "0":
             return None
 
         def factory(run_id, task_name):
@@ -396,6 +404,20 @@ class SubagentManager:
             channel.close()
         except Exception:
             pass
+
+    def close_realtime_channels(self):
+        """Close every resident channel this manager still owns.
+
+        A channel's accept loop lives on its own daemon thread. `close_agent`
+        releases the channel for that one agent, but an agent that simply runs to
+        completion and is never closed leaves its channel — and its thread —
+        behind. With realtime as the default transport that leak is reachable on
+        every spawn, so the owner needs a way to drop all of them at once: call
+        this when the manager itself is done. Closing is idempotent, so calling
+        it for an agent that was already closed is harmless.
+        """
+        for agent_path in list(self._realtime_channels):
+            self._close_realtime_channel(agent_path)
 
     def _child_popen_kwargs(self, worktree_path, stdout, stderr, agent_path):
         """Launch kwargs for a child genericagent.core.app process.
@@ -831,7 +853,7 @@ class SubagentManager:
         agent_type=None,
         role_source_path=None,
         background=True,
-        ipc_mode="file",
+        ipc_mode="socket",
         isolation=None,
         worktree_path=None,
         submission_id=None,
@@ -859,7 +881,7 @@ class SubagentManager:
         capability_profile = "delegating" if allow_delegation else ("team" if team_mode else "isolated")
         fork_mode, history_to_write = self._select_fork_history(fork_turns, fork_history)
         context_mode = "isolated" if fork_mode == "none" else "explicit_fork"
-        requested_ipc_mode = str(ipc_mode or "file").strip().lower() or "file"
+        requested_ipc_mode = str(ipc_mode or "socket").strip().lower() or "socket"
         ipc_mode = requested_ipc_mode
         effective_ipc_mode = "file"
         ipc_fallback_reason = None

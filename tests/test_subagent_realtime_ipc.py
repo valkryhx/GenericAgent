@@ -58,6 +58,30 @@ class SubagentRealtimeChannelTest(unittest.TestCase):
                 self.assertTrue(str(address).endswith(".sock"))
                 self.assertIn("run_000001", str(address))
 
+    def test_channel_addresses_do_not_collide_across_roots(self):
+        """Two managers rooted at different projects must not share a pipe name.
+
+        Windows named pipes are one global namespace, and every manager numbers
+        its runs from run_000001. An address built from run_id alone therefore
+        made the second project's channel fail to bind and silently fall back to
+        the file transport — which is the degradation the channel exists to
+        avoid. The name carries a digest of the channel directory to prevent it.
+        """
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            addr_a = default_channel_address(Path(first) / "channels", "run_000001")
+            addr_b = default_channel_address(Path(second) / "channels", "run_000001")
+
+            self.assertNotEqual(str(addr_a), str(addr_b))
+
+    def test_channel_address_is_stable_for_the_same_root(self):
+        """The digest must come from the directory, not the process, so a
+        restart of the same project reuses the same name."""
+        with tempfile.TemporaryDirectory() as td:
+            first = default_channel_address(Path(td) / "channels", "run_000007")
+            second = default_channel_address(Path(td) / "channels", "run_000007")
+
+            self.assertEqual(str(first), str(second))
+
     def test_publish_delivers_event_to_connected_client_in_realtime(self):
         with tempfile.TemporaryDirectory() as td:
             channel = SubagentRealtimeChannel(default_channel_address(Path(td), "run_pub"), authkey=b"ga-test")
@@ -789,15 +813,21 @@ class ChannelSlowSubscriberTest(unittest.TestCase):
 
     def test_close_joins_the_sender_threads(self):
         with tempfile.TemporaryDirectory() as td:
+            # Count only the threads this channel owns. An assertion over every
+            # "ga-subagent-realtime" thread in the process also sees channels left
+            # behind by other tests that spawn agents without closing them, which
+            # says nothing about whether this close() joined its own threads.
+            before = set(threading.enumerate())
             channel = self._channel(td, "run_b1_close", queue_size=4)
+            own = set(threading.enumerate()) - before
             self._subscribe(channel)
             for seq in range(200):
                 channel.publish(self._event(seq))
 
             channel.close()
 
-            lingering = [t for t in threading.enumerate() if "ga-subagent-realtime" in t.name and t.is_alive()]
-            self.assertEqual(lingering, [], f"threads left running after close: {[t.name for t in lingering]}")
+            lingering = [t.name for t in own if t.is_alive()]
+            self.assertEqual(lingering, [], f"threads left running after close: {lingering}")
 
 
 class ChannelUpstreamSignalTest(unittest.TestCase):
@@ -900,7 +930,16 @@ class ChildEventSignalsTheParentTest(unittest.TestCase):
     AUTHKEY = b"b3c" * 10 + b"aa"
 
     def test_worker_loop_signals_the_parent_when_it_appends_an_event(self):
+        from genericagent.core import app as ga_app
         from genericagent.core.app import run_task_worker_loop
+
+        # _REALTIME_SUBSCRIBER is process-wide so _subagent_event has one choke
+        # point. That also means a subscriber left behind by an earlier test in
+        # this file is still installed when this one runs, and _signal_parent()
+        # would talk to a closed channel. Reset on both sides so the test sees
+        # only the subscription it creates.
+        ga_app._set_realtime_subscriber(None)
+        self.addCleanup(ga_app._set_realtime_subscriber, None)
 
         with tempfile.TemporaryDirectory() as td:
             channel = SubagentRealtimeChannel(
@@ -929,11 +968,14 @@ class ChildEventSignalsTheParentTest(unittest.TestCase):
             woke = []
 
             def watch():
-                while len(woke) < 1:
+                deadline = time.monotonic() + 3.0
+                # A real child subscribes before it can append anything, so wait for
+                # the subscription instead of reading "no subscriber yet" as "done".
+                while channel.subscriber_count < 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                while len(woke) < 1 and time.monotonic() < deadline:
                     if channel.wait_for_signal(0.1):
                         woke.append(True)
-                    elif len(woke) == 0 and not channel.subscriber_count:
-                        break
 
             watcher = threading.Thread(target=watch, daemon=True)
             watcher.start()

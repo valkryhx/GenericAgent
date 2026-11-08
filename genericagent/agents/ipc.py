@@ -11,8 +11,13 @@ def normalize_ipc_metadata(ipc_mode=None, *, channel_factory=None):
     Realtime modes only become effective when ``channel_factory`` can open a
     resident channel; otherwise the durable file event bus stays the transport.
     The returned ``channel`` entry is a live object and must not be persisted.
+
+    The default is ``socket``: the child subscribes and the parent wakes on a
+    signal instead of sleeping out a poll interval, so the fast path is the one
+    you get without asking. ``file`` remains available as an explicit choice and
+    as the universal fallback whenever a channel cannot be opened.
     """
-    requested = str(ipc_mode or "file").strip().lower() or "file"
+    requested = str(ipc_mode or "socket").strip().lower() or "socket"
     if requested == "file":
         return {
             "ipc_mode": "file",

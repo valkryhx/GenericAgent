@@ -888,38 +888,43 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
 
     def test_spawn_agent_records_role_metadata_and_background_defaults(self):
         with tempfile.TemporaryDirectory() as td:
-            manager = SubagentManager(
-                root_dir=td,
-                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 4321})(),
-                python_executable="python-test",
-            )
+            # Realtime IPC is the default transport now, so asserting the file
+            # fallback here requires opting out explicitly. This test is about
+            # role metadata and the background default, not about which transport
+            # wins; the transport itself is covered in test_subagent_ipc.py.
+            with patch.dict(os.environ, {"GA_SUBAGENT_REALTIME_IPC": "0"}):
+                manager = SubagentManager(
+                    root_dir=td,
+                    popen=lambda *_, **__: type("FakeProcess", (), {"pid": 4321})(),
+                    python_executable="python-test",
+                )
 
-            handle = manager.spawn_agent(
-                "researcher",
-                "role wrapped prompt",
-                agent_type="researcher",
-                role_source_path=str(Path(td) / ".ga" / "subagents" / "researcher.json"),
-                background=False,
-                ipc_mode="socket",
-            )
+                handle = manager.spawn_agent(
+                    "researcher",
+                    "role wrapped prompt",
+                    agent_type="researcher",
+                    role_source_path=str(Path(td) / ".ga" / "subagents" / "researcher.json"),
+                    background=False,
+                    ipc_mode="socket",
+                )
 
-            self.assertEqual(handle.agent_type, "researcher")
-            self.assertFalse(handle.background)
-            self.assertEqual(handle.ipc_mode, "socket")
-            self.assertEqual(handle.effective_ipc_mode, "file")
-            state = json.loads((Path(handle.task_dir) / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["agent_type"], "researcher")
-            self.assertTrue(state["role_source_path"].endswith("researcher.json"))
-            self.assertFalse(state["background"])
-            self.assertEqual(state["ipc_mode"], "socket")
-            self.assertEqual(state["effective_ipc_mode"], "file")
-            self.assertIn("durable file event bus", state["ipc_fallback_reason"])
-            registry = json.loads((Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8"))
-            entry = registry["agents"]["/root/researcher"]
-            self.assertEqual(entry["agent_type"], "researcher")
-            self.assertFalse(entry["background"])
-            self.assertEqual(entry["ipc_mode"], "socket")
-            self.assertEqual(entry["effective_ipc_mode"], "file")
+                self.assertEqual(handle.agent_type, "researcher")
+                self.assertFalse(handle.background)
+                self.assertEqual(handle.ipc_mode, "socket")
+                self.assertEqual(handle.effective_ipc_mode, "file")
+                state = json.loads((Path(handle.task_dir) / "state.json").read_text(encoding="utf-8"))
+                self.assertEqual(state["agent_type"], "researcher")
+                self.assertTrue(state["role_source_path"].endswith("researcher.json"))
+                self.assertFalse(state["background"])
+                self.assertEqual(state["ipc_mode"], "socket")
+                self.assertEqual(state["effective_ipc_mode"], "file")
+                self.assertIn("durable file event bus", state["ipc_fallback_reason"])
+                registry = json.loads((Path(td) / "temp" / "subagents" / "registry.json").read_text(encoding="utf-8"))
+                entry = registry["agents"]["/root/researcher"]
+                self.assertEqual(entry["agent_type"], "researcher")
+                self.assertFalse(entry["background"])
+                self.assertEqual(entry["ipc_mode"], "socket")
+                self.assertEqual(entry["effective_ipc_mode"], "file")
 
     def test_spawn_agent_enables_realtime_ipc_channel_and_publishes_bus_events(self):
         with tempfile.TemporaryDirectory() as td:
@@ -980,6 +985,57 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
 
             self.assertTrue(channel.closed)
             self.assertIn("agent_closed", [event["type"] for event in channel.published])
+
+    def test_close_realtime_channels_releases_agents_that_were_never_closed(self):
+        """An agent that runs to completion without close_agent still owns a channel.
+
+        The channel's accept loop is a daemon thread, so a long-lived process
+        leaks one per finished-but-not-closed agent. With realtime as the default
+        transport that path is reachable on every spawn, so the manager needs a
+        way to release them all when it is done.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            created = []
+
+            class FakeChannel:
+                def __init__(self):
+                    self.closed = False
+
+                def start(self):
+                    return self
+
+                def endpoint(self):
+                    return {"status": "listening", "address": r"\\.\pipe\ga_subagent_x", "family": "AF_PIPE", "subscriber_count": 0}
+
+                def publish(self, event):
+                    return 1
+
+                def close(self):
+                    self.closed = True
+
+            def factory(_run_id, _task_name):
+                channel = FakeChannel()
+                created.append(channel)
+                return channel
+
+            manager = SubagentManager(
+                root_dir=td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 4242})(),
+                python_executable="python-test",
+                process_exists=lambda _pid: False,
+                sleep=lambda _: None,
+                realtime_channel_factory=factory,
+            )
+
+            manager.spawn_agent("worker_a", "do a thing")
+            manager.spawn_agent("worker_b", "do another thing")
+            self.assertEqual(len(created), 2)
+            self.assertEqual([c.closed for c in created], [False, False])
+
+            manager.close_realtime_channels()
+
+            self.assertEqual([c.closed for c in created], [True, True])
+            self.assertEqual(manager._realtime_channels, {})
 
     def test_spawn_agent_writes_input_state_and_registry_without_putting_prompt_on_command_line(self):
         with tempfile.TemporaryDirectory() as td:

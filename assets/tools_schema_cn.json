@@ -403,8 +403,8 @@
           },
           "ipc_mode": {
             "type": "string",
-            "description": "IPC 模式。'file' 是 durable 默认值。'socket'/'pipe'/'event_server' 会请求常驻实时通道推送已持久化事件；仅当 GA_SUBAGENT_REALTIME_IPC=1 且通道成功打开时才生效，否则仍以 durable file event bus 为传输，并在 ipc_fallback_reason 说明原因",
-            "default": "file"
+            "description": "IPC 模式。默认 'socket'：常驻实时通道，子智能体会订阅，父进程收到信号即醒，不用睡完一个轮询间隔。传 'file' 可强制走 durable file event bus。任何实时模式若打不开通道（或 GA_SUBAGENT_REALTIME_IPC=0）都会降级到 file bus，并在 ipc_fallback_reason 说明原因",
+            "default": "socket"
           },
           "llm_no": {
             "type": "integer",

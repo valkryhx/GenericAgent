@@ -62,11 +62,31 @@ def remove_channel_authkey(task_dir):
         return False
 
 
+def _root_tag(base_dir):
+    """Stable short digest of the channel directory.
+
+    Windows pipe names live in one global namespace, so a name built only from
+    ``run_id`` collides between two managers whose registries are rooted at
+    different projects — every manager numbers its runs from ``run_000001``.
+    The second one to start would fail to bind and silently fall back to the
+    file transport, which is exactly the degradation this channel exists to
+    avoid. Deriving the tag from the resolved directory keeps names unique per
+    project while staying stable across restarts of the same project.
+    """
+    import hashlib
+
+    try:
+        resolved = str(Path(base_dir).resolve())
+    except OSError:
+        resolved = str(base_dir)
+    return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:10]
+
+
 def default_channel_address(base_dir, run_id):
     """Return a platform-appropriate realtime channel address for a subagent run."""
     safe_run_id = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in str(run_id or "run"))
     if _is_windows():
-        return rf"\\.\pipe\ga_subagent_{safe_run_id}"
+        return rf"\\.\pipe\ga_subagent_{_root_tag(base_dir)}_{safe_run_id}"
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     # The authkey proves a peer knows the secret; it says nothing about who may reach the
@@ -615,8 +635,15 @@ class SubagentRealtimeChannel:
                 except Exception:
                     pass
                 break
-            # The ack goes out on the sink's own thread, in front of the queue, so a client that
-            # connects and never reads cannot stall the accept loop either.
+            # The ack must be queued before the sink is visible to publish(), so the
+            # first thing the client reads is always the ack. Reversing these two let
+            # publish() slip a real event between the append and the offer, and the
+            # client's connect-time recv() would then consume that event as its ack,
+            # losing it. No signal race is introduced by this order: the ack is sent
+            # by the sink's own thread, which starts after the append, so a client
+            # cannot signal before the sink is registered. Putting the ack in front
+            # also keeps a client that connects and never reads from stalling the
+            # accept loop.
             sink = _SubscriberSink(conn, queue_size=self.queue_size)
             sink.offer({"type": SUBSCRIBED_ACK, "address": self.address})
             with self._lock:

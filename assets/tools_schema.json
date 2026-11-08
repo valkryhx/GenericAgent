@@ -403,8 +403,8 @@
           },
           "ipc_mode": {
             "type": "string",
-            "description": "IPC mode. 'file' is the durable default. 'socket'/'pipe'/'event_server' request a resident realtime channel that pushes already-persisted events; it only becomes effective when GA_SUBAGENT_REALTIME_IPC=1 opens the channel, otherwise the durable file event bus stays the transport and ipc_fallback_reason explains why",
-            "default": "file"
+            "description": "IPC mode. 'socket' is the default: a resident realtime channel the child subscribes to, so the parent wakes on a signal instead of sleeping out a poll interval. Set 'file' to force the durable file event bus as the transport. Any realtime mode that cannot open a channel (or with GA_SUBAGENT_REALTIME_IPC=0) falls back to the file bus and ipc_fallback_reason explains why",
+            "default": "socket"
           },
           "llm_no": {
             "type": "integer",
