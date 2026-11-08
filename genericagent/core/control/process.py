@@ -210,6 +210,12 @@ class ProcessSubagentAdapter:
             "permissionOptions": copy.deepcopy(state.permission_options or {}),
             "agentType": state.agent_type,
             "ipcMode": state.ipc_mode,
+            # The work verdict, carried separately from the process status. `source_status`
+            # holds how the *process* ended, which is not the same question: a child whose
+            # process was force-reclaimed can still have completed its work. Consumers that
+            # only see `status` cannot tell those apart, so hand them the raw verdict.
+            "completionStatus": state.completion_status,
+            "turnStatus": state.turn_status,
         }
         if state.worktree_summary is not None:
             metadata["worktreeSummary"] = copy.deepcopy(state.worktree_summary)
@@ -223,12 +229,33 @@ class ProcessSubagentAdapter:
 
     @staticmethod
     def _project_status(state) -> str:
-        if state.process_status == "killed":
-            return "killed"
+        """Project a live child onto the UI status vocabulary.
+
+        Two questions, in this order:
+
+          1. Did the *work* finish, and how? (`completion_status`, then `turn_status`)
+          2. How was the *process* reclaimed? (only if the work never got a verdict)
+
+        The order matters. `close_agent` waits `grace_s` for the child to exit and then
+        calls `terminate_process()`, so a child that finishes its work and takes slightly
+        longer to exit ends up with `process_status == "killed"`. Checking that first
+        reported finished work as a failure -- a real session showed a child whose output
+        file held all three expected results announced in red, purely because it made one
+        more tool call than its siblings and lost the shutdown race.
+        """
+        completion = str(getattr(state, "completion_status", "") or "").lower()
+        if completion == "completed":
+            return "succeeded"
+        if completion == "failed":
+            return "failed"
         if state.turn_status == "completed":
             return "succeeded"
         if state.turn_status in {"errored", "failed"}:
             return "failed"
+        if state.process_status == "killed":
+            # No verdict on the work, and the process was force-terminated: the child
+            # really was cut off.
+            return "killed"
         if state.turn_status == "interrupted":
             return "interrupted"
         if state.process_status in {"shutdown", "exited"}:
