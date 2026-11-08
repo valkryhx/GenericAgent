@@ -15,6 +15,11 @@ export type TeamMember = {
   agentId: string
   name?: string | null
   status?: string | null
+  /** The state before the row was closed (`completed` / `errored` / `interrupted`).
+   *  A finished member reads as `closed`, so this is what says how it ended. */
+  previousStatus?: string | null
+  /** Why the row was closed (`shutdown` / `killed` / `released` / `stale` / ...). */
+  closedStatus?: string | null
   parentPath?: string | null
   runId?: string | null
   role?: string | null

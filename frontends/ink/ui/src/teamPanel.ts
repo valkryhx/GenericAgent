@@ -33,13 +33,29 @@ export function teamPanelFromRoster(event: {
   }
 }
 
-const MEMBER_GLYPH: Record<string, string> = {
+/**
+ * Member glyphs, keyed by the *verdict* (see `teamMemberVerdict`), not by the raw registry
+ * status.
+ *
+ * A finished member's registry row says `closed`, which is a lifecycle word: it says the
+ * process was reclaimed, not whether the work succeeded. Rendering `closed` as a dot made
+ * three finished teammates look like three dead ends. The verdict carries the answer, so
+ * the glyph table is keyed on that instead.
+ */
+const VERDICT_GLYPH: Record<string, string> = {
   running: '\u25cf',
   idle: '\u25cb',
-  closed: '\u00b7',
+  completed: '\u2713',
+  succeeded: '\u2713',
   failed: '\u2717',
+  errored: '\u2717',
+  interrupted: '\u2717',
   evicted: '\u00d7',
+  released: '\u00b7',
 }
+
+/** The single glyph shown when the verdict is not recognised (see below). */
+export const UNKNOWN_MEMBER_GLYPH = '?'
 
 const TASK_GLYPH: Record<string, string> = {
   completed: '[x]',
@@ -47,8 +63,47 @@ const TASK_GLYPH: Record<string, string> = {
   pending: '[ ]',
 }
 
-export function teamMemberGlyph(status: string | null | undefined): string {
-  return MEMBER_GLYPH[String(status || '').toLowerCase()] ?? '\u25cb'
+/** Close reasons that mean the member failed before producing any work. */
+const FAILED_CLOSE_STATUSES = new Set(['worktree_error', 'killed'])
+
+/** The terminal work states a closed row can hand back through `previousStatus`. */
+const WORK_VERDICTS = new Set(['completed', 'errored', 'interrupted', 'failed', 'cancelled', 'canceled'])
+
+export type TeamMemberFields = Pick<TeamMember, 'status' | 'previousStatus' | 'closedStatus'>
+
+/**
+ * How a member ended, as opposed to whether its row is still open.
+ *
+ * `status === 'closed'` on every finished member, whatever it actually did, so the raw
+ * status cannot be shown as the verdict. The registry keeps the pre-close state in
+ * `previousStatus` -- that is the work verdict (`completed` / `errored` / `interrupted`).
+ * For a live member the status *is* the verdict, because nothing has been concluded yet.
+ *
+ * A row closed *before* it ever ran has no work verdict at all (`previousStatus` is
+ * `starting`). Then `closedStatus` is the only thing that knows anything: a
+ * `worktree_error` means the member never got off the ground, which is a failure and must
+ * not be dressed up as unknown -- nor as success.
+ */
+export function teamMemberVerdict(member: TeamMemberFields): string {
+  const status = String(member.status || '').toLowerCase()
+  const previous = String(member.previousStatus || '').toLowerCase()
+  const closed = String(member.closedStatus || '').toLowerCase()
+  if (status !== 'closed') return status
+  if (WORK_VERDICTS.has(previous)) return previous
+  if (FAILED_CLOSE_STATUSES.has(closed)) return 'failed'
+  return previous || status
+}
+
+/**
+ * The glyph for a member.
+ *
+ * An unrecognised verdict renders as `?` rather than a hollow circle. Falling back to a
+ * plausible-looking glyph is how a member that finished silently reads as idle -- the
+ * panel would be confidently wrong instead of visibly unsure. This is the same rule the
+ * subagent announcements follow: never let an unknown word impersonate a known one.
+ */
+export function teamMemberGlyph(member: TeamMemberFields): string {
+  return VERDICT_GLYPH[teamMemberVerdict(member)] ?? UNKNOWN_MEMBER_GLYPH
 }
 
 export function teamTaskGlyph(status: string | null | undefined): string {
@@ -72,10 +127,13 @@ export function teamPanelLines(state: TeamPanelState): string[] {
   state.members.forEach((member, index) => {
     const marker = index === state.selected ? '\u25b8' : ' '
     const name = padEnd(String(member.name || member.agentId || ''), width)
-    const status = padEnd(String(member.status || ''), 8)
+    // The verdict, not the lifecycle word: every finished member's row says `closed`,
+    // which tells the user nothing about whether the work succeeded.
+    const verdict = teamMemberVerdict(member)
+    const status = padEnd(verdict, 12)
     const owned = Number(member.taskCount || 0)
     const current = member.currentTask ? ` \u2192 ${member.currentTask}` : ''
-    lines.push(`${marker} ${teamMemberGlyph(member.status)} ${name} ${status} ${owned} task(s)${current}`)
+    lines.push(`${marker} ${teamMemberGlyph(member)} ${name} ${status} ${owned} task(s)${current}`)
   })
   lines.push('')
   lines.push('Task board')

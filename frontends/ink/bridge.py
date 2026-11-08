@@ -1485,6 +1485,10 @@ class GenericAgentBridge:
                     "agentId": agent_id,
                     "name": member.get("name"),
                     "status": member.get("status"),
+                    # Carried so the panel can say how a finished member ended. A closed
+                    # row's `status` is just "closed"; these two hold the verdict.
+                    "previousStatus": member.get("previousStatus"),
+                    "closedStatus": member.get("closedStatus"),
                     "parentPath": member.get("parentPath"),
                     "runId": member.get("runId"),
                     "role": "lead" if agent_id == lead_id else "teammate",

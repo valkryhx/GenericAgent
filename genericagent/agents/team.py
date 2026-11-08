@@ -61,10 +61,23 @@ class SubagentTeam:
             raise ValueError("agent name %r is reserved" % name)
         return name
 
-    def members(self, include_closed=False):
+    def members(self, include_closed=True):
         return self.registry.list_agents(include_closed=include_closed)
 
-    def view(self, include_closed=False):
+    def view(self, include_closed=True):
+        """Describe the team, including members that have already finished.
+
+        ``include_closed`` defaults to True because the roster is a *report*, not a
+        work queue. Callers that need "who is still alive" ask the registry directly with
+        ``include_closed=False``; the panel that answers "how did my team do" must keep
+        showing children after they end. Defaulting to False made the team look empty at
+        the exact moment the user opens it to read the results: `manager.close_agent`
+        marks every finished child ``status=closed``, so a finished session had zero
+        visible members. Measured on real data: 11 of 11 registry entries were closed.
+
+        How each member ended travels with it (`previousStatus` / `closedStatus`), so a
+        closed row is still readable as "completed" rather than "not running".
+        """
         members = []
         for entry in self.members(include_closed=include_closed):
             members.append(
@@ -72,6 +85,16 @@ class SubagentTeam:
                     "agentId": str(entry.agent_path),
                     "name": entry.task_name,
                     "status": entry.status,
+                    # The registry records the pre-close state and why it was closed. Without
+                    # these, a finished member is indistinguishable from one that was never
+                    # started: both would read as `closed`.
+                    #
+                    # `getattr` rather than attribute access so a duck-typed stand-in (tests
+                    # pass plain objects; anything reading a registry written by an older
+                    # build) still works. The roster is a report -- losing one field must not
+                    # turn the whole panel into an error.
+                    "previousStatus": getattr(entry, "previous_status", None),
+                    "closedStatus": getattr(entry, "closed_status", None),
                     "parentPath": str(entry.parent_path) if entry.parent_path else None,
                     "runId": entry.run_id,
                 }

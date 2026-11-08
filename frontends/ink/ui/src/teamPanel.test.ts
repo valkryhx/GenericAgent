@@ -60,9 +60,11 @@ test('empty roster renders placeholders', () => {
 })
 
 test('glyphs fall back to the neutral marker', () => {
-  assert.equal(teamMemberGlyph('running'), '\u25cf')
-  assert.equal(teamMemberGlyph('nonsense'), '\u25cb')
-  assert.equal(teamMemberGlyph(undefined), '\u25cb')
+  assert.equal(teamMemberGlyph({ status: 'running' }), '\u25cf')
+  // Unknown states are visibly unknown now, rather than a plausible-looking hollow circle:
+  // a hollow circle reads as "idle", which is the wrong answer for anything unrecognised.
+  assert.equal(teamMemberGlyph({ status: 'nonsense' }), '?')
+  assert.equal(teamMemberGlyph({ status: undefined }), '?')
   assert.equal(teamTaskGlyph('in_progress'), '[~]')
   assert.equal(teamTaskGlyph('nonsense'), '[ ]')
 })

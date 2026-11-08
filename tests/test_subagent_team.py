@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 from genericagent.core.loop import exhaust  # noqa: E402
 from genericagent.core.handler import GenericAgentHandler  # noqa: E402
 from genericagent.agents.manager import SubagentManager, normalize_task_name  # noqa: E402
+from genericagent.agents.registry import SubagentRegistry  # noqa: E402
 from genericagent.agents.team import (  # noqa: E402
     LEAD_AGENT_NAME,
     SubagentTeam,
@@ -76,6 +77,67 @@ class SubagentTeamTest(unittest.TestCase):
         self.assertEqual(view["leadAgentId"], "/root")
         self.assertEqual([m["name"] for m in view["members"]], ["alpha", "beta"])
         self.assertEqual(view["memberCount"], 2)
+
+
+class TeamRosterLivenessTest(unittest.TestCase):
+    """The roster must keep showing members after they finish.
+
+    A finished teammate is closed by `manager.close_agent`, which writes
+    `status="closed"` through `registry.mark_closed`. `list_agents(include_closed=False)`
+    filters exactly those rows, so a roster read with the default argument returns nothing
+    for any session that has completed -- and `/team` is opened precisely to look at a
+    finished team.
+
+    Measured before the fix on real data (7 registry files, 11 entries): every row was
+    `status=closed`, so `view()` showed 0 members for every finished session.
+    """
+
+    def _team(self, root: Path) -> tuple[SubagentRegistry, SubagentTeam]:
+        registry = SubagentRegistry(root)
+        for name in ("alpha", "bravo", "charlie"):
+            task_dir = root / name
+            task_dir.mkdir(parents=True, exist_ok=True)
+            registry.create_child("/root", name, task_dir, task_dir / "state.json")
+        return registry, SubagentTeam(registry, "/root", team_name="session-test")
+
+    def test_finished_members_stay_in_the_roster(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry, team = self._team(Path(tmp))
+            self.assertEqual(team.view()["memberCount"], 3, "three live teammates")
+
+            for name in ("alpha", "bravo", "charlie"):
+                registry.mark_closed(f"/root/{name}", previous_status="completed", closed_status="shutdown")
+
+            view = team.view()
+            self.assertEqual(
+                view["memberCount"],
+                3,
+                "finished members vanished from the roster the moment they completed",
+            )
+            self.assertEqual({m["name"] for m in view["members"]}, {"alpha", "bravo", "charlie"})
+
+    def test_closed_members_carry_the_verdict_that_ended_them(self):
+        # `status` is "closed" for every finished member, so without these two fields a
+        # member whose work completed and one that errored are indistinguishable.
+        with tempfile.TemporaryDirectory() as tmp:
+            registry, team = self._team(Path(tmp))
+            registry.mark_closed("/root/alpha", previous_status="completed", closed_status="shutdown")
+            registry.mark_closed("/root/bravo", previous_status="errored", closed_status="killed")
+            registry.mark_closed("/root/charlie", previous_status="interrupted", closed_status="shutdown")
+
+            by_name = {m["name"]: m for m in team.view()["members"]}
+            self.assertEqual(by_name["alpha"]["previousStatus"], "completed")
+            self.assertEqual(by_name["bravo"]["previousStatus"], "errored")
+            self.assertEqual(by_name["charlie"]["previousStatus"], "interrupted")
+            self.assertEqual(by_name["bravo"]["closedStatus"], "killed")
+
+    def test_a_duck_typed_entry_without_the_new_fields_still_renders(self):
+        # The roster is a report: one missing field must not turn the whole panel into an
+        # error. `_Entry` here deliberately lacks previous_status/closed_status.
+        team = SubagentTeam(_FakeRegistry([_Entry("/root/alpha", "alpha", status="closed")]), "/root")
+        view = team.view()
+        self.assertEqual(view["memberCount"], 1)
+        self.assertIsNone(view["members"][0]["previousStatus"])
 
 
 class FakeParent:
