@@ -866,6 +866,13 @@ class SubagentManager:
             return self._handle_from_submission(replay.get("result"))
 
         task_name = self._next_available_task_name(requested_task_name)
+        # Refuse to start a child while the spawner itself is being torn down. A turn that
+        # was stopped mid-flight can still finish the tool call it is inside -- the stop is
+        # observed between turns, not inside one -- so spawn_agent can run *after* the
+        # parent was told to shut down. That child is then orphaned the moment the parent
+        # exits: nobody reads its output, and it holds an active-agent slot until it dies
+        # on its own. CC guards the same window with subagent_spawner_stop_pending.
+        self._reject_spawn_while_stopping(task_name)
         permission_metadata = normalize_permission_metadata(
             {"permission_profile": permission_profile, "permission_options": permission_options or {}, "parent_permission_mode": parent_permission_mode}
         )
@@ -1284,12 +1291,55 @@ class SubagentManager:
         """List derived agent states without persisting state or registry refreshes."""
         return self._list_agent_states(self.probe_agent, path_prefix=path_prefix, include_closed=include_closed)
 
-    def send_message(self, target, message, *, author="/root", other_recipients=None, submission_id=None):
+    def send_message(self, target, message, *, author="/root", other_recipients=None, submission_id=None, notify_when_idle=False):
         if self._is_lead_target(target):
             return self._queue_lead_message(message, author=author, trigger_turn=False)
-        return self._queue_message(
+        row = self._queue_message(
             target, message, author=author, trigger_turn=False, other_recipients=other_recipients, submission_id=submission_id
         )
+        if notify_when_idle:
+            self._subscribe_idle(self._task_name_from_target(target), author=author)
+        return row
+
+    def _subscribe_idle(self, task_name, *, author=None):
+        """Record a one-shot "tell me when this agent is available" subscription.
+
+        Best-effort: a subscription that cannot be written must not fail a send whose
+        message is already durably queued.
+        """
+        try:
+            from genericagent.agents.idle_subscriptions import IdleSubscriptions
+
+            IdleSubscriptions(self.subagents_state_dir).subscribe(f"/root/{task_name}", requested_by=author)
+        except Exception:
+            pass
+
+    def _check_name_pin(self, task_name, agent_path):
+        """Bind ``task_name`` to the agent it first reached; refuse a later rebind.
+
+        Kept separate from the dead-mailbox check because the two answer different
+        questions: that one asks "is anyone listening?", this one asks "is it the same
+        listener as before?". Both must run, and neither is a substitute for the other.
+
+        A registry/state read failure must not block delivery here either: the pin is a
+        guard against cross-talk, not a delivery precondition, so a manager that cannot
+        resolve the target's run id simply skips pinning for that call.
+        """
+        from genericagent.agents.name_pins import NamePins, rebound_message
+
+        run_id = None
+        try:
+            row = self.registry.get(agent_path)
+            run_id = getattr(row, "run_id", None)
+        except FileNotFoundError:
+            state = read_json_or_none(self.task_root / task_name / "state.json") or {}
+            run_id = state.get("run_id")
+        except Exception:
+            return
+
+        result = NamePins(self.subagents_state_dir).resolve(task_name, agent_path, run_id=run_id)
+        if result.get("kind") == "rebound":
+            raise ValueError(rebound_message(result))
 
     def _reject_dead_mailbox(self, agent_path, task_name):
         """Refuse to queue a message no live agent will ever read.
@@ -2284,7 +2334,47 @@ class SubagentManager:
         task_dir.mkdir(parents=True, exist_ok=True)
         append_parent_inbox_event(task_dir, frame)
         append_jsonl_event(task_dir / "events.jsonl", frame)
+        self._notify_idle_subscriber(task_name, frame)
         return frame
+
+    def _notify_idle_subscriber(self, task_name, frame):
+        """If someone asked to be told when this agent frees up, push the idle frame.
+
+        The idle frame otherwise only lands in the parent inbox and the local events
+        file, so a caller waiting for availability had no way to learn about it without
+        polling ``state.json``. Routing it through the event bus with ``notify=True``
+        means the existing notification queue and fold-point injection carry it, so the
+        subscriber needs no new channel.
+
+        One-shot: the subscription is consumed before publishing, so a target that goes
+        idle repeatedly cannot spam a subscriber that only asked once.
+        """
+        try:
+            from genericagent.agents.idle_subscriptions import IdleSubscriptions
+
+            subscriptions = IdleSubscriptions(self.subagents_state_dir)
+            if subscriptions.consume(f"/root/{task_name}") is None:
+                return
+        except Exception:
+            return
+        try:
+            state = read_json_or_none(self.task_root / task_name / "state.json") or {}
+            self.event_bus.append_event(
+                "idle_notification",
+                agent_path=state.get("agent_path") or f"/root/{task_name}",
+                run_id=state.get("run_id"),
+                task_name=task_name,
+                status={
+                    "turn_status": state.get("turn_status"),
+                    "process_status": state.get("process_status"),
+                },
+                payload=dict(frame),
+                notify=True,
+            )
+        except Exception:
+            # The frame is already durable in the inbox/events files; losing the push
+            # costs a delay, not the information.
+            pass
 
     def _queue_message(self, target, message, *, author, trigger_turn, other_recipients=None, submission_id=None, _fanout=True):
         task_name = self._task_name_from_target(target)
@@ -2296,6 +2386,11 @@ class SubagentManager:
         # vanished. Naming the way out matters as much as the refusal: a bare "not found" makes
         # the model retry the same name.
         self._reject_dead_mailbox(primary_path, task_name)
+        # Pin the name to the agent it first reached. A name can come back around to a
+        # *different* agent (a removed task dir lets spawn reuse the bare name), and
+        # delivering to the new holder just because it shares the name is how cross-talk
+        # starts. First send binds; a later send that would land elsewhere is refused.
+        self._check_name_pin(task_name, primary_path)
         extra_paths = self._resolve_other_recipients(other_recipients, exclude=primary_path) if _fanout else []
         task_dir = self.task_root / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -2402,6 +2497,40 @@ class SubagentManager:
             mailbox.annotate(message_id, other_recipients=peers)
         except Exception:
             pass
+
+    def _reject_spawn_while_stopping(self, task_name):
+        """Refuse a spawn when this manager's own agent has a pending stop.
+
+        The stop signal is observed between turns, so a tool call already in flight keeps
+        running -- which means a stopped parent can still reach ``spawn_agent``. The child
+        it starts is orphaned on the parent's exit: no one reads its output, and it holds
+        an active-agent slot until it dies by itself. That is the storm CC prevents with
+        ``subagent_spawner_stop_pending``.
+
+        The signal is the same durable one every other stop path uses: a ``_stop`` file in
+        the spawner's own task dir (``close_agent`` writes it, and so does the shutdown
+        path). Root has no task dir -- it is the interactive session -- so root is never
+        refused here; a user who aborts and then types a new message should be able to
+        spawn again.
+
+        Deliberately not consuming ``_stop``: this is a read to decide whether to start
+        work, and eating the signal would cancel the stop for the rest of the turn.
+        """
+        parent_path = str(self.self_agent_path).rstrip("/")
+        if parent_path in {"", "/root", "root"}:
+            return
+        task_dir = self.task_root / parent_path.rsplit("/", 1)[-1]
+        if not (task_dir / "_stop").exists():
+            return
+        message = (
+            f"`{parent_path}` has a pending stop request, so it cannot start new subagents: "
+            f"any child spawned now would be orphaned as soon as this agent exits. "
+            f"Nothing was spawned. If the stop is unwanted, finish the turn and retry; "
+            f"otherwise let the agent shut down and spawn from the lead."
+        )
+        exc = ValueError(message)
+        self._record_spawn_rejection(task_name, exc)
+        raise exc
 
     @staticmethod
     def _submission_message_id(submission_id, recipient_path):

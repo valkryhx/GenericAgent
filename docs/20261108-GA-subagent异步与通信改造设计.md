@@ -459,10 +459,10 @@ GA 已有 `run_id`（`AgentState.run_id`），天然可做钉住的 key。
 | 2 | `loop.py` fold 点注入 + 延迟 ack | P0 | ✅ **已完成**（§9.2） |
 | 3 | `send_message` 投递前校验目标活着 | P0 | ✅ **已完成**（§9.3） |
 | 4 | ~~`_wait_for_change` file 模式改 stat 等待~~ | — | ❌ 不需要（步 0 已用 realtime 解决） |
-| 5 | `name_pins.py` 钉住 | P1 | ⬜ 待做 |
-| 6 | `notify_when_idle` | P2 | ⬜ 待做 |
-| 7 | spawner stop-pending 守卫 | P2 | ⬜ 待做 |
-| 8 | 回归 | — | ✅ 全量 2241 例 OK（skipped=4） |
+| 5 | `name_pins.py` 钉住 | P1 | ✅ **已完成**（§10.1） |
+| 6 | `notify_when_idle` | P2 | ✅ **已完成**（§10.2） |
+| 7 | spawner stop-pending 守卫 | P2 | ✅ **已完成**（§10.3） |
+| 8 | 回归 | — | ✅ 全量 2268 例 OK（skipped=4） |
 
 ### 3.1 关键测试用例（写成真的集成测试，不是 mock）
 
@@ -784,3 +784,113 @@ run 2: 7.81s
 
 fold 点测试用真实 `agent_runner_loop` + 真实 `SubagentEventBus`（不是 mock 通知），
 只替换 LLM client 与 handler——断言的是"模型看到的 messages"，正是用户可见现象本身。
+
+---
+
+## 10. 步 5-7 实施结果（2026-11-08）
+
+全量 2268 例 OK（skipped=4）。三步都按设计做了，但每步都有一处必须偏离原设计的
+判断，记在下面。
+
+### 10.1 步 5：名字钉住（`name_pins.py`）
+
+新增 `genericagent/agents/name_pins.py`，文件形如：
+
+```json
+{"schema_version": 1, "pins": {"worker": {"agent_path": "/root/worker",
+  "run_id": "run_000001", "ref": "3f9a01", "pinned_at": "..."}}}
+```
+
+`resolve(name, agent_path, run_id)` 返回三态，对齐 CC 的 `hei()`：
+
+| 情形 | 结果 |
+| --- | --- |
+| 无钉记录 | `proceed` + 写入钉 |
+| 有钉，路径相同 | `proceed` |
+| 有钉，路径不同 | `rebound` |
+
+**偏离 1：比较键是 `agent_path`，不是 `run_id`。** 设计里写"解析出的 `run_id` 与钉住的
+不一致则拒绝"，我查了 `resume_agent` 的实现——它**保留原 run_id 重启同一任务目录**，
+所以这条规则本身不冲突；但真正的风险不是 run 变了，而是**名字被另一个 agent 拿走**。
+`agent_path` 才是名字解析的目标，用它做键，语义才和"这个名字指向谁"一致。
+`resume_agent` 带新 run_id 但不换路径 → 判为 proceed，这正是文档承诺的"完成后可 resume"。
+
+**偏离 2：钉记录不随 `close_agent` 删除。** 设计已经写明这一点，实现时用测试钉住了
+（`test_clear_is_not_offered_on_close` 断言 `NamePins` 上不存在 `unpin`/`clear`）。
+删掉就退化成"名字=当前持有者"，正是 CC 明确说错的 latest-wins。
+
+**ref 的取法**：`sha256(agent_path)[:6]`，等长 CC 的 `S_t` 切片（`M = 6`）。理由和 CC 一样：
+拒绝信息里必须能指出"这个名字以前指向谁"，否则调用方无法消歧。
+
+拒绝文案（`rebound_message`）保留 CC 的关键短语 `Nothing was sent.`，并给出两个出口：
+用完整 `agent_path` 重新寻址，或 `resume_agent` 找回原来那个。
+
+**实现细节：读失败不阻断投递。** `_check_name_pin` 在 registry/state 都读不到时直接
+`return`。钉住是防串话的守卫，不是投递前提——拒一次有效投递比放过一次串话更糟。
+
+### 10.2 步 6：`notify_when_idle`（`idle_subscriptions.py`）
+
+新增一次性订阅表：
+
+```json
+{"schema_version": 1, "subscriptions": {"/root/worker": {"subscribed_at": "...", "requested_by": "/root"}}}
+```
+
+- `send_message(..., notify_when_idle=True)` 写订阅（`manager.send_message` 新参数，
+  工具层同步暴露 `notify_when_idle`/`notifyWhenIdle`）
+- `emit_idle_notification` 与 `app.py::_teammate_idle_hook` 两处产出 idle 帧时
+  `consume()` 订阅；命中则把帧以 `notify=True` 推进 event bus
+- 帧同时**仍然**写 parent inbox 与 events.jsonl → 推送失败只损失时延，不丢信息
+
+**为什么是一次性而非长期订阅**：长期订阅会在目标每次空闲都触发，对一个正常干活的
+agent 就是持续噪音。要再通知就再发一次消息。
+
+**与 `turn_completed` 的区别**（这是设计的要点，测试也钉了）：`turn_completed` 每个回合
+结束都发，无论有没有人要；idle 帧说的是"这个 agent 手上没活了"，正是等着派后续任务的人
+需要的信息。
+
+**偏离：CC 的抑制条件保留。** 设计没提，但 `emit_idle_notification` 原本就有
+`sent_lead_dm_since_last_round` 抑制（CC m1448）。我保留它并加了测试
+（`test_a_lead_dm_suppresses_the_idle_frame_entirely`）——如果 agent 这一轮已经主动
+给 lead 发过消息，再补一条 idle 就是重复。
+
+### 10.3 步 7：spawner stop-pending 守卫
+
+CC 用 `subagent_spawner_stop_pending`（`m0795:910`）挡住"已停的 agent 再派"。
+GA 没有"停机中"这个中间态，所以守卫要落到 GA 真正拥有的信号上：
+
+**判据 = spawner 自己的 task dir 下存在 `_stop` 文件。**
+
+这条选择有依据：`close_agent` 写 `_stop`（`manager.py:2015`），`abort()` 后
+`app.py` 的 stop watcher 也走同一条路。所以 `_stop` 就是 GA 的"停机中"。
+
+**为什么必须挡**：停止信号是在**回合之间**被观察的，正在执行的工具调用会继续跑完。
+所以一个已被要求停止的 agent 仍然可能走到 `spawn_agent`；它派出去的子进程会在父进程
+退出的瞬间变成孤儿——没人读它的输出，却继续占着 active-agent 槽位直到自己死掉。
+
+**root 不被挡**（`self_agent_path` 为 `/root` 时直接返回）：root 是交互会话，没有 task dir；
+用户中断后重新输入消息，理应能再派 agent。
+
+**不消费 `_stop`**：只在决定要不要开工时读它。吃掉信号会把这个 turn 剩下的停止请求一起取消。
+测试 `test_the_stop_file_is_not_consumed_by_the_guard` 钉住这条。
+
+拒绝会写 `spawn_rejected` 事件（复用已有的 `_record_spawn_rejection`），所以拒绝不是静默的。
+
+### 10.4 新增测试（步 5-7）
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `test_subagent_name_pins.py`（新） | 11 | ref 稳定/短/可区分；首次钉住；换人 rebind；resume 换 run 不算 rebind；钉不被新持有者覆盖；不存在 unpin/clear；拒绝文案含双方与 `Nothing was sent`；管理器路径上真的生效；读失败不阻断投递 |
+| `test_subagent_idle_subscriptions.py`（新） | 10 | 订阅一次性；可重订；未订阅时 consume 是 no-op；带 flag 才订阅；idle 帧只进通知流一次；未订阅不进通知流；帧仍落 inbox；lead DM 抑制 |
+| `test_subagent_spawner_stop_pending.py`（新） | 6 | root 不被挡；停机中拒绝且文案给出原因；拒绝不留下 state；不消费 `_stop`；无 `_stop` 正常派；拒绝写事件可观测 |
+
+### 10.5 一处工具层的格式陷阱
+
+四份 `tools_schema*` 分两种排版：仓库根 `assets/` 是两空格缩进的标准 JSON，
+包内 `genericagent/resources/assets/` 是**手工紧凑格式**（一行一个属性）。
+第一版脚本统一用 `json.dumps` 重写，包内两份产生了 1231 行 diff——虽然 JSON 等价，
+但把整个文件重排了，后续任何改动都无法 review。
+
+已还原并改为**文本插入**（定位 `submission_id` 行，把结尾 `}}}` 拆成 `},`
+再插入新行），diff 降到 3 行/份。插入后先 `json.loads` 验证再落盘——schema 一旦
+不合法，工具会静默消失。

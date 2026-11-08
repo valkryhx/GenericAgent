@@ -2511,6 +2511,28 @@ def _teammate_idle_hook(task_dir, task_name):
             )
             append_parent_inbox_event(task_dir, frame)
             append_jsonl_event(events_path, frame)
+            # A caller that sent with notify_when_idle is waiting for exactly this
+            # transition. The frame already sits in the durable files above; pushing it
+            # onto the event bus is what lets the main agent see it at its next fold
+            # point instead of polling state.json.
+            from genericagent.agents.idle_subscriptions import IdleSubscriptions
+
+            subscriptions = IdleSubscriptions(os.path.join(os.path.dirname(task_dir), 'subagents'))
+            if subscriptions.consume('/root/' + task_name) is not None:
+                from genericagent.agents.event_bus import SubagentEventBus
+
+                SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
+                    'idle_notification',
+                    agent_path=state.get('agent_path') or '/root/' + task_name,
+                    run_id=state.get('run_id'),
+                    task_name=task_name,
+                    status={
+                        'turn_status': state.get('turn_status'),
+                        'process_status': state.get('process_status'),
+                    },
+                    payload=dict(frame),
+                    notify=True,
+                )
         return False
     except Exception:
         return False

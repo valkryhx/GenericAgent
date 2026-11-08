@@ -145,7 +145,8 @@
       "target": {"type": "string", "description": "task_name 或 /root/task_name"},
       "message": {"type": "string", "description": "消息内容"},
       "other_recipients": {"type": "array", "items": {"type": "string"}, "description": "可选，额外接收同一条消息的 task_name 列表；会作为同收者上下文写入每个副本"},
-      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试不会再排入第二条相同消息。只有确实是一条全新消息时才可以省略"}}}
+      "submission_id": {"type": "string", "description": "本次控制面调用的幂等键。只要你在重试、或不确定上一次调用是否生效，就必须带上：用同一个 submission_id 重试不会再排入第二条相同消息。只有确实是一条全新消息时才可以省略"},
+      "notify_when_idle": {"type": "boolean", "default": false, "description": "设为 true 时，该子智能体下次空闲会通知你。idle 帧会推入常规通知流，在你下一轮工具调用结束后即可看到，因此不要再用轮询 state.json 或 sleep 等待。一次性订阅，需要再次通知就再发一次。它与「回合完成」通知不同：后者每个回合结束都会发，不代表该 agent 是否已经空闲可接新活"}}}
   }},
   {"type": "function", "function": {
     "name": "followup_task",

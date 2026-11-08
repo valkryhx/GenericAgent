@@ -620,6 +620,11 @@
           "submission_id": {
             "type": "string",
             "description": "Idempotency key for this control-plane call. Set this whenever you retry the send or are not sure whether the previous call took effect: retrying with the same submission_id does not queue a second copy of the message. Omit it only for a genuinely new message"
+          },
+          "notify_when_idle": {
+            "type": "boolean",
+            "description": "Set true to be told when this subagent next goes idle. The idle frame is pushed onto the normal notification stream and reaches you at your next tool-round fold point, so use this instead of polling state.json or sleeping. One-shot: send again to re-subscribe. Distinct from the turn-completed notice, which fires for every finished turn and says nothing about whether the agent is free",
+            "default": false
           }
         }
       }

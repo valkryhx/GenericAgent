@@ -2225,6 +2225,7 @@ class GenericAgentHandler(BaseHandler):
             author=self._self_author(),
             other_recipients=self._other_recipients_arg(args),
             submission_id=args.get("submission_id") or args.get("submissionId"),
+            notify_when_idle=bool(args.get("notify_when_idle") or args.get("notifyWhenIdle")),
         )
         yield f"[Status] Message queued for {row.get('recipient')}.\n"
         return StepOutcome({"status": "queued", "message": row}, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
