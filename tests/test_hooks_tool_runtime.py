@@ -87,6 +87,11 @@ class HooksToolRuntimeTests(unittest.TestCase):
                 wait_for_decision=lambda *a, **k: self.fail("user approval should be skipped")
             )
             Path(td, "workspace", "inside.txt").write_text("allowed", encoding="utf-8")
+            # This test is about the PermissionRequest hook bypassing user
+            # approval, not about the write-before-read gate. Satisfy the gate's
+            # precondition so the assertion below still observes what it intends:
+            # an overwrite requires having read the current contents.
+            exhaust(handler.dispatch("file_read", {"path": "inside.txt"}, None))
             outcome = exhaust(handler.dispatch("file_write", {"path": "inside.txt", "content": "ok"}, None))
             self.assertEqual(outcome.data["status"], "success")
             self.assertEqual(Path(td, "workspace", "inside.txt").read_text(encoding="utf-8"), "ok")

@@ -15,6 +15,15 @@ _configure_stdio_utf8()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from genericagent.core.loop import BaseHandler, StepOutcome, json_default, try_call_generator
+from genericagent.core.exit_codes import classify_exit_code, exit_code_note
+from genericagent.core.file_search import (
+    GREP_DEFAULT_HEAD_LIMIT,
+    format_glob_result,
+    format_grep_result,
+    glob_files,
+    grep_files,
+)
+from genericagent.core.read_before_write import ReadBeforeWriteRegistry
 from genericagent.workflow.workspace import WorkspacePathError
 from genericagent.agents.wait import is_workflow_run_id
 script_dir = str(paths.PROJECT_ROOT)
@@ -158,14 +167,35 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         exit_code = process.poll()
 
         stdout_str = "".join(full_stdout)
-        status = "success" if exit_code == 0 else "error"
+        # Exit codes are not binary. `grep` with no matches, `diff` with
+        # differences and `test` with a false condition all exit 1 \u2014 calling those
+        # "error" is the single most common way an agent misreads its own tools.
+        # Only apply the POSIX convention when we actually ran a POSIX shell:
+        # on Windows this branch goes through PowerShell, where exit 1 has no such
+        # shared meaning. See genericagent/core/exit_codes.py.
+        executor_is_posix_shell = os.name != 'nt' and code_type in ("bash", "sh", "shell")
+        status = classify_exit_code(
+            code_type=code_type,
+            command=code,
+            exit_code=exit_code if exit_code is not None else -1,
+            executor_is_posix_shell=executor_is_posix_shell,
+        )
+        note = exit_code_note(
+            code_type=code_type,
+            command=code,
+            exit_code=exit_code if exit_code is not None else -1,
+            executor_is_posix_shell=executor_is_posix_shell,
+        )
+        status_line = f"[Status] Exit Code: {exit_code}" + (f" ({note})" if note else "") + "\n"
         output_snippet = smart_format(stdout_str, max_str_len=600, omit_str='\n\n[omitted long output]\n\n')
         output_snippet = re.sub(r'`{4,}', lambda m: m.group(0)[:3] + '\u200b' + m.group(0)[3:], output_snippet)
-        yield f"[Status] Exit Code: {exit_code}\n[Stdout]\n{output_snippet}\n"
+        yield f"{status_line}[Stdout]\n{output_snippet}\n"
         if process.stdout: threading.Thread(target=process.stdout.close, daemon=True).start()
         return {
             "status": status,
-            "stdout": smart_format(stdout_str, max_str_len=maxlen, omit_str='\n\n[omitted long output]\n\n'),
+            # Default omit_str: the note now carries the real omitted char/byte
+            # counts, so the model can tell a 2 KB drop from a 2 MB one.
+            "stdout": smart_format(stdout_str, max_str_len=maxlen),
             "exit_code": exit_code
         }
     except Exception as e:
@@ -312,6 +342,18 @@ def _scan_files(base, depth=2):
             elif depth > 0 and e.is_dir(follow_symlinks=False): yield from _scan_files(e.path, depth - 1)
     except (PermissionError, OSError): pass
 def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
+    """Read a slice of a file.
+
+    Returns ``str`` on failure (an ``Error:``/``Keyword ... not found`` message) or
+    on the plain path; ``_file_read_detailed`` is the variant that also reports
+    whether the whole file was covered, which the write-before-read gate needs.
+    """
+    text, _complete = _file_read_detailed(path, start, keyword, count, show_linenos)
+    return text
+
+
+def _file_read_detailed(path, start=1, keyword=None, count=200, show_linenos=True):
+    """Return ``(text, complete)`` where complete means "reached end of file"."""
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
             stream = ((i, l.rstrip('\r\n')) for i, l in enumerate(f, 1))
@@ -323,8 +365,10 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
                         res = list(before) + [(i, l)] + list(itertools.islice(stream, count - len(before) - 1))
                         break
                     before.append((i, l))
-                else: return f"Keyword '{keyword}' not found after line {start}. Falling back to content from line {start}:\n\n" \
-                               + file_read(path, start, None, count, show_linenos)
+                else:
+                    fallback, fallback_complete = _file_read_detailed(path, start, None, count, show_linenos)
+                    return (f"Keyword '{keyword}' not found after line {start}. Falling back to content from line {start}:\n\n"
+                            + fallback), fallback_complete
             else: res = list(itertools.islice(stream, count))
             realcnt = len(res); L_MAX = min(max(100, 256000//max(realcnt,1)), 8000); TAG = " ... [TRUNCATED]"
             remaining = sum(1 for _ in itertools.islice(stream, 5000))
@@ -337,7 +381,8 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
             if show_linenos: result = total_tag + result
             elif partial: result += f"\n\n[FILE PARTIAL: showing {realcnt}/{tl_str} lines; assess need for more]"
             _read_dirs.add(os.path.dirname(os.path.abspath(path)))
-            return result
+            # `partial` is exactly "the caller has not seen the end of the file".
+            return result, not partial
     except FileNotFoundError:
         msg = f"Error: File not found: {path}"
         try:
@@ -348,13 +393,40 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
             top = [(s, c) for s, c in top if s > 0.3]
             if top: msg += "\n\nDid you mean:\n" + "\n".join(f"  {c[1]}  ({s:.0%})" for s, c in top)
         except Exception: pass
-        return msg
-    except Exception as e: return f"Error: {str(e)}"
+        return msg, False
+    except Exception as e: return f"Error: {str(e)}", False
 
-def smart_format(data, max_str_len=100, omit_str=' ... '):
+def smart_format(data, max_str_len=100, omit_str=None):
+    """Keep the head and tail of a long string, and say how much was dropped.
+
+    The old version spliced in a bare ``' ... '`` between the two halves, so the
+    model could see that *something* was missing but not how much — it cannot
+    decide whether to reread, page, or filter without that number. Claude Code
+    reports the omitted size explicitly (``m0426:380``:
+    ``[… 12.3KB omitted …]``); this mirrors that.
+
+    ``omit_str`` is still accepted for callers that want custom wording; when
+    omitted, a note carrying the real counts is generated.
+    """
     if not isinstance(data, str): data = str(data)
-    if len(data) < max_str_len + len(omit_str)*2: return data
-    return f"{data[:max_str_len//2]}{omit_str}{data[-max_str_len//2:]}"
+    if max_str_len <= 0: return data
+    if len(data) <= max_str_len: return data
+    head = max_str_len // 2
+    tail = max_str_len - head
+    head_part = data[:head]
+    tail_part = data[-tail:] if tail else ''
+    if omit_str is None:
+        # Measure the omitted middle, not the input: subtracting character counts
+        # from a byte total is wrong the moment the text is not ASCII (a Chinese
+        # character is 3 bytes but 1 char), and the note would overstate the drop.
+        omitted_chars = len(data) - len(head_part) - len(tail_part)
+        omitted_bytes = len(
+            data[len(head_part):len(data) - len(tail_part) if tail_part else len(data)].encode('utf-8', errors='replace')
+        )
+        omit_str = (f"\n\n[omitted {omitted_chars:,} chars / "
+                    f"{omitted_bytes:,} bytes of the middle; "
+                    f"full output not persisted]\n\n")
+    return f"{head_part}{omit_str}{tail_part}"
 
 def consume_file(dr, file):
     if dr and os.path.exists(os.path.join(dr, file)): 
@@ -383,7 +455,19 @@ class GenericAgentHandler(BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
     def __init__(self, parent, last_history=None, cwd='./temp', workspace_root=None):
         self.parent = parent
+        # Register per-tool result limits once per handler. Idempotent, and it
+        # leaves `mcp__*` limits (registered by the MCP runtime) untouched.
+        try:
+            from genericagent.core.tool_results.tool_result_defaults import install_tool_result_defaults
+            install_tool_result_defaults()
+        except Exception:
+            # Limits are an optimization; a failure here must not block startup.
+            pass
         self.working = {}
+        # Tracks which files this handler has read, so an overwrite cannot be
+        # based on a stale or never-seen snapshot. Per-handler on purpose: one
+        # agent's read must not vouch for another agent's write.
+        self.read_registry = ReadBeforeWriteRegistry()
         self.cwd = cwd;  self.current_turn = 0
         self.workspace_root = str(workspace_root) if workspace_root else None
         self.history_info = last_history if last_history else []
@@ -1078,6 +1162,13 @@ class GenericAgentHandler(BaseHandler):
         yield f"[Action] Patching file: {path}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")
+        # A patch is only safe if `old_content` came from the current file. If the
+        # file was never read, or changed since, the replacement could hit a
+        # coincidentally-similar block and corrupt it.
+        verdict = self.read_registry.check_write(path)
+        if not verdict.allowed:
+            yield f"[Status] ✗ {verdict.reason}\n"
+            return StepOutcome({"status": "error", "msg": verdict.reason}, next_prompt="\n")
         try: new_content = expand_file_refs(new_content, base_dir=self.cwd, workspace_root=self.workspace_root)
         except ValueError as e:
             yield f"[Status] ✗ 引用展开失败: {e}\n"
@@ -1106,6 +1197,13 @@ class GenericAgentHandler(BaseHandler):
         if not content:
             yield f"[Status] ✗ 失败: 未在回复中找到<file_content>代码块内容\n"
             return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
+        # An overwrite replaces everything, so it must be based on what the file
+        # actually contains right now. append/prepend and brand-new files are
+        # exempt: neither can silently destroy unread content.
+        verdict = self.read_registry.check_write(path, mode=mode)
+        if not verdict.allowed:
+            yield f"[Status] ✗ {verdict.reason}\n"
+            return StepOutcome({"status": "error", "msg": verdict.reason}, next_prompt="\n")
         try:
             new_content = expand_file_refs(content, base_dir=self.cwd, workspace_root=self.workspace_root)
             # newline="" preserves the model's LF bytes on every platform; text
@@ -1130,18 +1228,77 @@ class GenericAgentHandler(BaseHandler):
         count = args.get("count", 200)
         keyword = args.get("keyword")
         show_linenos = args.get("show_linenos", True)
-        result = file_read(path, start=start, keyword=keyword,
-                           count=count, show_linenos=show_linenos)
+        result, complete = _file_read_detailed(path, start=start, keyword=keyword,
+                                               count=count, show_linenos=show_linenos)
+        # Remember this read so a later overwrite can be checked against it. Only
+        # successful reads count: an error string must not vouch for a file.
+        if not result.startswith("Error:") and not result.startswith("Keyword '"):
+            self.read_registry.record_read(path, complete=complete)
         if show_linenos and not result.startswith("Error:"): result = '由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n' + result 
         if ' ... [TRUNCATED]' in result: result += '\n\n（某些行被截断，如需完整内容可改用 code_run 读取）'
-        maxlen = 20000 // args.get('_tool_num', 1)
-        result = smart_format(result, max_str_len=maxlen, omit_str='\n\n[omitted long content]\n\n')
+        # No second truncation here. `file_read` used to `smart_format(...)` its own
+        # output down to 20000//tool_num chars, which meant the generic budget never
+        # saw the real size: the model got a silently shortened string and no
+        # persisted copy to reread. The budget layer now owns size control for this
+        # tool (global default 50,000, full output persisted to disk); the per-line
+        # `L_MAX` cap in `file_read()` still bounds a single giant line.
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         log_memory_access(path)
         if 'memory' in path or 'sop' in path: 
             next_prompt += "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory."
         return StepOutcome(result, next_prompt=next_prompt)
-    
+
+    def do_file_glob(self, args, response):
+        '''按文件名模式查找文件（跨目录）。只回路径，不做内容搜索。'''
+        pattern = str(args.get("pattern") or "").strip()
+        if not pattern:
+            return StepOutcome(
+                {"status": "error", "msg": "file_glob requires `pattern`, e.g. **/*.py"},
+                next_prompt="\n",
+            )
+        root = self._get_abs_path(args.get("path") or ".")
+        yield f"[Action] Glob {pattern} in {root}\n"
+        result = glob_files(root, pattern)
+        text = format_glob_result(result)
+        yield f"\n{text}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(text, next_prompt=next_prompt)
+
+    def do_file_grep(self, args, response):
+        '''按正则搜索文件内容（跨文件）。比 file_read 的 keyword 更强：支持多文件、上下文和输出模式。'''
+        pattern = args.get("pattern")
+        if pattern is None or str(pattern) == "":
+            return StepOutcome(
+                {"status": "error", "msg": "file_grep requires `pattern` (a regular expression)"},
+                next_prompt="\n",
+            )
+        root = self._get_abs_path(args.get("path") or ".")
+        glob_pattern = args.get("glob")
+        ignore_case = bool(args.get("ignore_case") or args.get("-i"))
+        try:
+            context = max(0, int(args.get("context") or 0))
+        except (TypeError, ValueError):
+            context = 0
+        try:
+            head_limit = max(1, int(args.get("head_limit") or GREP_DEFAULT_HEAD_LIMIT))
+        except (TypeError, ValueError):
+            head_limit = GREP_DEFAULT_HEAD_LIMIT
+        mode = str(args.get("output_mode") or "content")
+        yield f"[Action] Grep {pattern!r} in {root}\n"
+        result = grep_files(
+            root,
+            str(pattern),
+            glob=str(glob_pattern) if glob_pattern else None,
+            ignore_case=ignore_case,
+            context=context,
+            head_limit=head_limit,
+            mode=mode,
+        )
+        text = format_grep_result(result)
+        yield f"\n{text}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(text, next_prompt=next_prompt)
+
     def _in_plan_mode(self): return self.working.get('in_plan_mode')
     def _exit_plan_mode(self): self.working.pop('in_plan_mode', None)
     def enter_plan_mode(self, plan_path): 

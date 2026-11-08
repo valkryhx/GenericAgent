@@ -24,7 +24,7 @@ READ = "read"
 WRITE = "write"
 EXECUTE = "execute"
 
-READ_TOOL_NAMES = frozenset({"file_read"})
+READ_TOOL_NAMES = frozenset({"file_read", "file_glob", "file_grep"})
 WRITE_TOOL_NAMES = frozenset({"file_write", "file_patch"})
 EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
 NON_FILESYSTEM_TOOL_NAMES = frozenset({"no_tool", "ask_user", "load_skill", "web_scan", "web_fetch"})
@@ -157,7 +157,12 @@ def check_tool_call(workspace_root, tool_name: str, args: dict | None) -> PathAc
     if name in READ_TOOL_NAMES:
         target = str(data.get("path") or "")
         if not target.strip():
-            return PathAclDecision(False, READ, "", "file_read requires a path")
+            # file_read must name its file. The search tools may omit `path` and
+            # default to the workspace root, which is inherently in-scope — but
+            # only they may omit it.
+            if name in {"file_glob", "file_grep"}:
+                return check_path_access(workspace_root, ".", READ)
+            return PathAclDecision(False, READ, "", f"{name} requires a path")
         return check_path_access(workspace_root, target, READ)
 
     if name in WRITE_TOOL_NAMES:

@@ -47,7 +47,10 @@ def get_pretty_json(data):
 # overlap. Everything else keeps the original strictly-ordered execution:
 # browser control, code_run (it can chdir the process), writes, subagent
 # control, and ask_user all depend on ordering or on exclusive access.
-_PARALLEL_SAFE_TOOLS = frozenset({"file_read"})
+#
+# file_glob / file_grep are pure reads: they walk the tree, touch no handler
+# state, and do not change cwd, so overlapping them is safe.
+_PARALLEL_SAFE_TOOLS = frozenset({"file_read", "file_glob", "file_grep"})
 
 
 def _tool_execution_mode(tool_name):

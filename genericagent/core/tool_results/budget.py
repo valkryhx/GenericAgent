@@ -25,7 +25,15 @@ PERSISTED_OPEN = "<persisted-output>"
 PERSISTED_CLOSE = "</persisted-output>"
 TRUNCATED_OPEN = "<truncated-output>"
 TRUNCATED_CLOSE = "</truncated-output>"
-_EXEMPT_TOOLS = frozenset({"file_read", "code_run", "structured_output", "no_tool"})
+
+# Tools that emit machine-critical payloads the model must see verbatim.
+# ``file_read`` and ``code_run`` used to be here too, on the theory that their own
+# internal truncation made the budget redundant. It does not: those internal caps
+# (20,000 and 10,000 chars, hard-coded) drop the tail with a bare "...", so the
+# model never learns how much was lost nor where to reread it. They now go through
+# the budget like everything else, with per-tool limits registered in
+# ``tool_results.limits`` (see ``tool_result_defaults``).
+_EXEMPT_TOOLS = frozenset({"structured_output", "no_tool"})
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 

@@ -127,11 +127,27 @@ class ToolResultBudgetTest(unittest.TestCase):
         self.assertIn("truncated: true", result)
         self.assertLess(len(result), 80_000)
 
-    def test_self_bounded_tools_are_exempt(self):
+    def test_file_read_and_code_run_are_budgeted_not_exempt(self):
+        # These used to bypass the budget on the theory that their own internal
+        # caps made it redundant. Those caps drop the tail with a bare "...", so
+        # the model neither learned how much was lost nor where to reread it.
         with tempfile.TemporaryDirectory() as tmp:
-            content = "x" * 80_000
-            result = budget_tool_result(self._handler(tmp), "file_read", "t1", content)
-        self.assertEqual(result, content)
+            handler = self._handler(tmp)
+            for tool_name in ("file_read", "code_run"):
+                with self.subTest(tool=tool_name):
+                    result = budget_tool_result(handler, tool_name, "t1", "x" * 80_000)
+                    self.assertIn("<persisted-output>", result)
+                    self.assertIn("originalChars:", result)
+
+    def test_machine_critical_tools_stay_exempt(self):
+        # `structured_output` and `no_tool` carry protocol payloads, not prose;
+        # shortening them would corrupt the contract rather than save context.
+        with tempfile.TemporaryDirectory() as tmp:
+            for tool_name in ("structured_output", "no_tool"):
+                with self.subTest(tool=tool_name):
+                    content = "x" * 80_000
+                    result = budget_tool_result(self._handler(tmp), tool_name, "t1", content)
+                    self.assertEqual(result, content)
 
     def test_registered_per_tool_limit_overrides_global_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
