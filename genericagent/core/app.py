@@ -2268,7 +2268,7 @@ def _subagent_transcript_append(task_dir, event_type, payload):
         run_id = state.get('run_id') or payload.get('run_id')
         if parent_session_id and run_id:
             from genericagent.agents.transcript import SubagentTranscriptStore
-            SubagentTranscriptStore(os.path.join(os.path.dirname(task_dir), 'sessions')).append_event(
+            SubagentTranscriptStore(_child_session_dir(task_dir)).append_event(
                 parent_session_id,
                 run_id,
                 event_type,
@@ -2323,7 +2323,7 @@ def _release_subagent_slot(task_dir):
             pid_create_time = _default_process_identity(pid)
         except Exception:
             pid_create_time = None
-        registry = SubagentRegistry(os.path.join(os.path.dirname(task_dir), 'subagents'))
+        registry = SubagentRegistry(_subagent_bus_dir(task_dir))
         return registry.release_agent_slot(agent_path, pid=pid, pid_create_time=pid_create_time)
     except Exception:
         return None
@@ -2344,6 +2344,34 @@ def _subagent_bus_dir(task_dir):
     if explicit:
         return explicit
     return os.path.join(os.path.dirname(task_dir), 'subagents')
+
+
+def _child_session_dir(task_dir):
+    """The session directory this child writes its transcripts into.
+
+    Same split as :func:`_subagent_bus_dir`, same reason, but it must not reuse the bus:
+    on the legacy layout the bus is ``<stateRoot>/temp/subagents`` while sessions live in
+    ``<stateRoot>/temp/sessions``. The spawner hands over ``GA_SESSION_DATA_DIR``.
+    """
+    explicit = str(os.environ.get('GA_SESSION_DATA_DIR') or '').strip()
+    if explicit:
+        return explicit
+    return os.path.join(os.path.dirname(task_dir), 'sessions')
+
+
+def _child_provenance(task_dir):
+    """The (ledger, roster) pair this child verifies teammate messages with.
+
+    Both must read the bus the *lead* wrote to. Built here rather than inline because
+    getting it wrong is silent and destructive: a digest recorded in ``<bus>`` but looked
+    up in ``<bus>/tasks/subagents`` is never found, the author ``/root`` is in the roster,
+    and ``verify`` answers ``forged`` -- which ``consume_trigger_turn`` treats as
+    permanent. The message is dropped and the sender already has a success receipt.
+    """
+    from genericagent.agents.receipts import ProvenanceLedger, build_roster
+
+    bus_dir = _subagent_bus_dir(task_dir)
+    return ProvenanceLedger(bus_dir), build_roster(bus_dir=bus_dir)
 
 
 def _subagent_event(task_dir, event):
@@ -2547,11 +2575,11 @@ def _teammate_idle_hook(task_dir, task_name):
             # point instead of polling state.json.
             from genericagent.agents.idle_subscriptions import IdleSubscriptions
 
-            subscriptions = IdleSubscriptions(os.path.join(os.path.dirname(task_dir), 'subagents'))
+            subscriptions = IdleSubscriptions(_subagent_bus_dir(task_dir))
             if subscriptions.consume('/root/' + task_name) is not None:
                 from genericagent.agents.event_bus import SubagentEventBus
 
-                SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
+                SubagentEventBus(_subagent_bus_dir(task_dir)).append_event(
                     'idle_notification',
                     agent_path=state.get('agent_path') or '/root/' + task_name,
                     run_id=state.get('run_id'),
@@ -2744,7 +2772,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             try:
                 from genericagent.agents.artifacts import SubagentArtifactStore
                 run_id = state_before_final.get('run_id') or f"legacy_{task_name}"
-                artifact_dir = state_before_final.get('artifact_dir') or os.path.join(os.path.dirname(task_dir), 'subagents', 'runs', run_id)
+                artifact_dir = state_before_final.get('artifact_dir') or os.path.join(_subagent_bus_dir(task_dir), 'runs', run_id)
                 artifact = SubagentArtifactStore(artifact_dir).record_final_output(output_path, round_no=int(nround) if isinstance(nround, int) else 0)
                 final_output_ref = artifact.get('artifact_id')
                 state_before_final['artifact_dir'] = artifact_dir
@@ -2797,10 +2825,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             # Provenance + receipts for the durable file bus (CC m0300 / m0188): a row that
             # was not written through the ledger is not a genuine teammate message.
             try:
-                from genericagent.agents.receipts import ProvenanceLedger, build_roster
-
-                _prov_ledger = ProvenanceLedger(os.path.join(os.path.dirname(task_dir), 'subagents'))
-                _roster = build_roster(os.path.dirname(task_dir))
+                _prov_ledger, _roster = _child_provenance(task_dir)
             except Exception:
                 _prov_ledger, _roster = None, None
 

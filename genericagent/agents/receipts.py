@@ -208,13 +208,21 @@ class ProvenanceLedger:
             return "forged"
         return "unverifiable"
 
-def build_roster(temp_dir):
-    """Agent paths currently known to the registry, for provenance verification."""
+def build_roster(temp_dir=None, *, bus_dir=None):
+    """Agent paths currently known to the registry, for provenance verification.
+
+    ``bus_dir`` is the bus directory itself; ``temp_dir`` is the older form that meant
+    "the parent of ``subagents``". The distinction matters on the product layout, where the
+    bus is ``<projectData>/<session>/subagents``: ``temp_dir/subagents`` there is a second,
+    orphaned registry, so the roster came back as ``{"/root"}`` and every genuine teammate
+    message was marked ``forged``.
+    """
     paths = {"/root"}
     try:
         from genericagent.agents.registry import SubagentRegistry
 
-        registry = SubagentRegistry(Path(temp_dir) / "subagents")
+        base = Path(bus_dir) if bus_dir is not None else Path(temp_dir) / "subagents"
+        registry = SubagentRegistry(base)
         for state in registry.list_agents(include_closed=True):
             if getattr(state, "agent_path", None):
                 paths.add(str(state.agent_path))
