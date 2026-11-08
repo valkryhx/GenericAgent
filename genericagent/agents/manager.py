@@ -247,6 +247,34 @@ class SubagentManager:
     STARTUP_HANDSHAKE_TIMEOUT_S = 10.0
     STARTUP_HANDSHAKE_POLL_S = 0.05
 
+    @staticmethod
+    def resolve_dirs(*, project_root, project_state_root, project_data_dir=None, session_data_dir=None, parent_session_id=None):
+        """Return ``(session_data_dir, task_root, subagents_state_dir)`` for a manager.
+
+        This is the single source of truth for the subagent bus layout. It has to be
+        shared: the manager writes notifications here, the main agent drains them from
+        here, and a child mirrors its own events here. When those three derived the path
+        independently they disagreed -- the reader looked in ``<projectRoot>/temp/subagents``
+        while the writer used the project bucket ``<projectData>/<session>/subagents``, so
+        on the product path no notification ever reached the model, at a fold point or at
+        a turn start, and every unit test still passed because the legacy layout makes the
+        two coincide.
+
+        Project-bucket callers get ``<projectData>/<sessionId>/subagents``; direct/legacy
+        callers keep ``<stateRoot>/temp`` and ``<stateRoot>/temp/sessions``.
+        """
+        temp_dir = Path(project_state_root) / "temp"
+        data_dir = Path(project_data_dir) if project_data_dir is not None else temp_dir
+        session_id = str(parent_session_id or "").strip() or None
+        if project_data_dir is not None and session_id:
+            session_dir = data_dir / session_id / "subagents"
+            return session_dir, session_dir / "tasks", session_dir
+        if project_data_dir is not None:
+            session_dir = Path(session_data_dir) if session_data_dir is not None else data_dir
+            return session_dir, data_dir, data_dir / "subagents"
+        session_dir = Path(session_data_dir) if session_data_dir is not None else temp_dir / "sessions"
+        return session_dir, temp_dir, temp_dir / "subagents"
+
     def __init__(self, root_dir=None, process_exists=None, terminate_process=None, sleep=None, popen=None, python_executable=None, worktree_creator=None, worktree_runner=None, realtime_channel_factory=None, self_agent_path=None, process_identity=None, workflow_run_resolver=None, state_root=None, project_root=None, project_state_root=None, task_store_root=None, team_key=None, project_data_dir=None, session_data_dir=None, worktree_root=None, parent_session_id=None):
         # ``project_root`` is the user's project (cwd for ordinary children and
         # the repository for real git worktrees). ``project_state_root`` is the
@@ -271,21 +299,19 @@ class SubagentManager:
         self.temp_dir = self.project_state_root / "temp"
         self.project_data_dir = Path(project_data_dir) if project_data_dir is not None else self.temp_dir
         self.parent_session_id = str(parent_session_id or "").strip() or None
-        # Project-bucket callers get the target shape:
-        # <projectData>/<sessionId>/subagents. Direct/legacy callers keep
-        # <stateRoot>/temp/<task> and <stateRoot>/temp/sessions.
-        if project_data_dir is not None and self.parent_session_id:
-            self.session_data_dir = self.project_data_dir / self.parent_session_id / "subagents"
-            self.task_root = self.session_data_dir / "tasks"
-            self.subagents_state_dir = self.session_data_dir
-        elif project_data_dir is not None:
-            self.session_data_dir = Path(session_data_dir) if session_data_dir is not None else self.project_data_dir
-            self.task_root = self.project_data_dir
-            self.subagents_state_dir = self.project_data_dir / "subagents"
-        else:
-            self.session_data_dir = Path(session_data_dir) if session_data_dir is not None else self.temp_dir / "sessions"
-            self.task_root = self.temp_dir
-            self.subagents_state_dir = self.temp_dir / "subagents"
+        # Layout comes from resolve_dirs so the three parties that share this bus
+        # cannot drift apart again. See its docstring for the defect that motivated it.
+        (
+            self.session_data_dir,
+            self.task_root,
+            self.subagents_state_dir,
+        ) = self.resolve_dirs(
+            project_root=self.project_root,
+            project_state_root=self.project_state_root,
+            project_data_dir=project_data_dir,
+            session_data_dir=session_data_dir,
+            parent_session_id=self.parent_session_id,
+        )
         self.project_workflows_dir = self.project_data_dir / "workflow-runs"
         self.project_workflow_children_dir = self.project_data_dir / "workflow_child_agents"
         self.worktree_root = Path(worktree_root) if worktree_root is not None else self.project_root / ".ga" / "worktrees"
@@ -451,6 +477,10 @@ class SubagentManager:
         env["GA_SESSION_DATA_DIR"] = str(self.session_data_dir)
         env["GA_PARENT_SESSION_ID"] = str(self.parent_session_id or "")
         env["GA_TASK_ROOT"] = str(self.task_root)
+        # The child mirrors its own turn events onto this bus. It cannot derive the path:
+        # its task dir is <bus>/tasks/<name> on the product layout but <stateRoot>/temp/<name>
+        # on the legacy one, so any guess is wrong for one of them. Hand it down explicitly.
+        env["GA_SUBAGENTS_STATE_DIR"] = str(self.subagents_state_dir)
         resolved_team_key = self.team_key
         if not resolved_team_key:
             from genericagent.agents.team import team_name_for

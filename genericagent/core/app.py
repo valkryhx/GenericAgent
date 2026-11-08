@@ -581,7 +581,15 @@ def build_system_prompt_sections(agent=None):
     if not is_subagent:
         try:
             from genericagent.agents.notifications import build_subagent_notifications_prompt
-            notifications = build_subagent_notifications_prompt(project_root)
+            # The manager writes to the project bucket; a bare project_root would resolve
+            # the legacy <projectRoot>/temp/subagents and find nothing. Pass the agent's
+            # own identity so both sides land on the same directory.
+            _session_id = str(getattr(agent, "session_id", "") or "").strip()
+            notifications = build_subagent_notifications_prompt(
+                project_root,
+                data_root=getattr(agent, "data_root", None),
+                session_id=_session_id or None,
+            )
         except Exception:
             pass
     return {
@@ -2321,6 +2329,23 @@ def _release_subagent_slot(task_dir):
         return None
 
 
+def _subagent_bus_dir(task_dir):
+    """The bus directory this child must mirror its events into.
+
+    ``dirname(task_dir)/subagents`` was a guess that only holds for the legacy layout
+    (``<stateRoot>/temp/<task>``). On the product path the task dir is
+    ``<projectData>/<session>/subagents/tasks/<task>``, so the guess lands in
+    ``.../subagents/tasks/subagents`` -- a second, orphaned bus that the main agent never
+    reads. The parent already knows the right directory, so ``spawn`` passes it as
+    ``GA_SUBAGENTS_STATE_DIR``; the guess stays only for a child launched without it
+    (unit tests and legacy callers).
+    """
+    explicit = str(os.environ.get('GA_SUBAGENTS_STATE_DIR') or '').strip()
+    if explicit:
+        return explicit
+    return os.path.join(os.path.dirname(task_dir), 'subagents')
+
+
 def _subagent_event(task_dir, event):
     append_jsonl_event(os.path.join(task_dir, 'events.jsonl'), event)
     is_turn_started = event.get('type') == 'turn_started'
@@ -2339,7 +2364,7 @@ def _subagent_event(task_dir, event):
     bus_error = None
     try:
         from genericagent.agents.event_bus import SubagentEventBus
-        SubagentEventBus(os.path.join(os.path.dirname(task_dir), 'subagents')).append_event(
+        SubagentEventBus(_subagent_bus_dir(task_dir)).append_event(
             event.get('type') or 'subagent_update',
             agent_path=agent_path,
             run_id=run_id,

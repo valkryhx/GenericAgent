@@ -60,7 +60,50 @@ def prefix_system_notification(text):
     return ANTI_SPOOF_PREAMBLE + value
 
 
-def build_subagent_notifications_prompt(root_dir):
+def resolve_notification_bus_dir(project_root=None, *, data_root=None, project_data_dir=None, session_id=None):
+    """Directory holding the subagent notification bus for the main agent.
+
+    The main agent used to build this path itself as ``<project_root>/temp/subagents``
+    while the manager wrote to the project bucket, so on the product path the two were
+    different directories and notifications never arrived -- silently, because a missing
+    ``notifications.jsonl`` just reads as "nothing pending". Both sides now derive the
+    layout from :meth:`SubagentManager.resolve_dirs`; this helper is the reader's handle
+    on it, so the reader cannot drift from the writer again.
+
+    Without a session identity (``project_data_dir`` / ``session_id``) the historical
+    ``<project_root>/temp/subagents`` answer is kept: that is the layout a manager built
+    the legacy way writes to, and callers that never had a session must not change
+    meaning.
+    """
+    from genericagent.agents.manager import SubagentManager
+    from genericagent import paths
+
+    project_root = project_root or paths.PROJECT_ROOT
+    if project_data_dir is None and not session_id:
+        return Path(project_root) / "temp" / "subagents"
+
+    if project_data_dir is None:
+        roots = paths.project_roots(project=project_root, data_root=data_root)
+        project_data_dir = roots.project_data_dir
+        data_root = data_root or roots.data_root
+    _, _, bus_dir = SubagentManager.resolve_dirs(
+        project_root=project_root,
+        project_state_root=data_root or paths.data_root(),
+        project_data_dir=project_data_dir,
+        parent_session_id=session_id,
+    )
+    return bus_dir
+
+
+def _bus(root_dir, *, data_root=None, project_data_dir=None, session_id=None):
+    return SubagentEventBus(
+        resolve_notification_bus_dir(
+            root_dir, data_root=data_root, project_data_dir=project_data_dir, session_id=session_id
+        )
+    )
+
+
+def build_subagent_notifications_prompt(root_dir, **kwargs):
     """Render pending notifications and advance the cursor.
 
     Kept for callers that render into the system prompt at user-turn start,
@@ -68,13 +111,13 @@ def build_subagent_notifications_prompt(root_dir):
     :func:`peek_subagent_notifications_prompt` so a failure between render and
     delivery does not lose the notices.
     """
-    text, ack_upto = peek_subagent_notifications_prompt(root_dir)
+    text, ack_upto = peek_subagent_notifications_prompt(root_dir, **kwargs)
     if text:
-        _ack(root_dir, ack_upto)
+        _ack(root_dir, ack_upto, **kwargs)
     return text
 
 
-def peek_subagent_notifications_prompt(root_dir):
+def peek_subagent_notifications_prompt(root_dir, **kwargs):
     """Render pending notifications *without* advancing the cursor.
 
     Returns ``(text, ack_upto)``. ``ack_upto`` is the highest ``event_seq``
@@ -84,8 +127,7 @@ def peek_subagent_notifications_prompt(root_dir):
     duplicating a notification costs one redundant model call, dropping one
     means the main agent never learns the task finished.
     """
-    bus = SubagentEventBus(Path(root_dir) / "temp" / "subagents")
-    notifications = bus.peek_notifications()
+    notifications = _bus(root_dir, **kwargs).peek_notifications()
     if not notifications:
         return "", None
     # One drain of background results; cap a single result at 4000 and the whole
@@ -97,15 +139,14 @@ def peek_subagent_notifications_prompt(root_dir):
     return "\n".join(lines), int(notifications[-1].get("event_seq") or 0)
 
 
-def ack_subagent_notifications(root_dir, upto_event_seq):
+def ack_subagent_notifications(root_dir, upto_event_seq, **kwargs):
     """Advance the notification cursor after the text was delivered."""
-    _ack(root_dir, upto_event_seq)
+    _ack(root_dir, upto_event_seq, **kwargs)
 
 
-def _ack(root_dir, upto_event_seq):
+def _ack(root_dir, upto_event_seq, **kwargs):
     try:
-        bus = SubagentEventBus(Path(root_dir) / "temp" / "subagents")
-        bus.ack_notifications(upto_event_seq)
+        _bus(root_dir, **kwargs).ack_notifications(upto_event_seq)
     except Exception:
         # Never let bookkeeping break the turn; the notices simply come back.
         pass

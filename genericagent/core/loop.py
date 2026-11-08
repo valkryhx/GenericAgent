@@ -201,6 +201,27 @@ def _run_parallel_tools(handler, response, batch, tool_num, verbose):
     # the outcome tuples; the strings above stream straight through.
     return [(index, tool_call, outcomes.get(index)) for index, tool_call in batch]
 
+def _notification_bus_kwargs(handler):
+    """The bus coordinates the main agent's own subagents were written to.
+
+    A bare project root is not enough: the writer uses the project bucket
+    (``<projectData>/<session>/subagents``) while ``<projectRoot>/temp/subagents`` is the
+    legacy layout. Passing the agent's real identity makes the reader resolve the same
+    directory the manager writes to.
+    """
+    parent = getattr(handler, "parent", None)
+    if parent is None:
+        return {}
+    kwargs = {}
+    data_root = getattr(parent, "data_root", None)
+    if data_root:
+        kwargs["data_root"] = str(data_root)
+    session_id = str(getattr(parent, "session_id", "") or "").strip()
+    if session_id:
+        kwargs["session_id"] = session_id
+    return kwargs
+
+
 def _main_agent_project_root(handler):
     """Project root used for the notification stream, or ``None`` for a child.
 
@@ -232,7 +253,7 @@ def _peek_pending_notifications(handler):
     try:
         from genericagent.agents.notifications import peek_subagent_notifications_prompt
 
-        return peek_subagent_notifications_prompt(root)
+        return peek_subagent_notifications_prompt(root, **_notification_bus_kwargs(handler))
     except Exception:
         # A notification is never a reason to abort the turn; it will be
         # retried at the next fold point because nothing was acked.
@@ -247,7 +268,7 @@ def _ack_pending_notifications(handler, ack_upto):
     try:
         from genericagent.agents.notifications import ack_subagent_notifications
 
-        ack_subagent_notifications(root, ack_upto)
+        ack_subagent_notifications(root, ack_upto, **_notification_bus_kwargs(handler))
     except Exception:
         pass
 
