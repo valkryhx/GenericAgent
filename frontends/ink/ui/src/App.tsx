@@ -130,6 +130,7 @@ import {
 } from './promptChrome.js'
 import { completedStatusSegments, pickRunningVerb, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
+import { agentNoticeFromRecord, agentNoticeLine, type AgentNotice } from './agentNotice.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
@@ -628,6 +629,7 @@ function InputView({ viewport, showCursor, columns, theme }: { viewport: InputVi
 
 type CompletedTurnActivity = { durationSeconds: number; completedAt: number }
 
+
 function ActivityView({ seconds, label, tokenUsage, completedTurn, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; completedTurn: CompletedTurnActivity | null; theme: InkTheme }) {
   // Token counts are the numbers people actually read off this line, so they are
   // rendered bold while the surrounding prose stays normal weight. Bolding the
@@ -765,6 +767,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   //   native click-drag selection away from the terminal, so the default is `off`.
   const fullscreen = useMemo(() => resolveFullscreenMode(), [])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
+  // Subagent lifecycle announcements. The bridge already streams every child's status
+  // (`agent_snapshot`); before this, the UI stored it and rendered nothing, so a child
+  // finishing was invisible unless you read state.json off disk. Keyed by execution id so
+  // a re-emitted snapshot cannot announce the same child twice, and kept in arrival order
+  // so several children finishing together accumulate instead of replacing each other.
+  const [agentNotices, setAgentNotices] = useState<AgentNotice[]>([])
+  const announcedAgentsRef = useRef<Set<string>>(new Set())
+  // Tracks whether the session was actually running, so "notices are stale" can be told
+  // apart from "the app has never run a turn yet". Without it the clear-on-idle path also
+  // fires on the initial `connecting -> idle` transition and eats the first snapshot.
+  const wasBusyRef = useRef(false)
   // Prompts the user typed while a turn was running. They are folded into that turn
   // at the next tool boundary (the bridge is the one that actually delivers them);
   // this copy exists so the composer can say "accepted, waiting its turn" instead of
@@ -1104,6 +1117,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
 
   useEffect(() => {
     if (state.status === 'running' || state.status === 'stopping') {
+      wasBusyRef.current = true
       setRunningStartedAt(value => {
         if (value !== null) return value
         setLastActivitySeconds(0)
@@ -1117,6 +1131,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // The turn these prompts belonged to is over, so the "queued" badge must not
     // survive into the next turn as a lie about a message that was already delivered.
     setQueuedPrompts(prompts => (prompts.length > 0 ? [] : prompts))
+    // Same reason for the subagent announcements, but only on a real turn end.
+    // Clearing on *any* non-running state also wiped the notices that arrive during
+    // startup (`connecting` -> `idle`), which is when a snapshot can land before the
+    // first turn ever runs -- that made the announcement appear at random.
+    if (wasBusyRef.current) {
+      wasBusyRef.current = false
+      setAgentNotices(items => (items.length > 0 ? [] : items))
+      announcedAgentsRef.current.clear()
+    }
     if (runningStartedAt !== null) {
       setLastActivitySeconds(Math.max(0, Math.floor((Date.now() - runningStartedAt) / 1000)))
     }
@@ -1373,6 +1396,30 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         const taskIdStr = String(event.taskId)
         delete pendingDeltas[taskIdStr]
         dispatch({ type: 'assistant_done', taskId: event.taskId, text: event.text })
+        return
+      }
+      if (event.type === 'agent_snapshot') {
+        // Announce each child exactly once, when it first reaches a terminal status.
+        // The bridge re-emits the whole snapshot whenever anything changes, so without
+        // the id set a single child would announce itself on every other child's update.
+        const fresh: AgentNotice[] = []
+        for (const record of event.snapshot.records || []) {
+          const notice = agentNoticeFromRecord(record as Parameters<typeof agentNoticeFromRecord>[0])
+          if (!notice) continue
+          const key = `${notice.executionId}:${notice.word}`
+          if (announcedAgentsRef.current.has(key)) continue
+          announcedAgentsRef.current.add(key)
+          fresh.push(notice)
+        }
+        if (fresh.length > 0) {
+          setAgentNotices(current => {
+            // Newest last; keep a bounded window so a long session cannot grow the
+            // chrome forever. Older announcements have already been read.
+            const next = [...current, ...fresh]
+            return next.length > 6 ? next.slice(-6) : next
+          })
+        }
+        dispatch(event)
         return
       }
       dispatch(event)
@@ -2050,6 +2097,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     inputRows,
     panelRows,
     goalRows,
+    noticeRows: agentNotices.length,
     // Inline scrollback: no title/status header. A live "GenericAgent running"
     // band sits after <Static> and looks jammed into the middle of output.
     // Full mouse mode keeps a 1-row header (single viewport, no Static).
@@ -2264,6 +2312,19 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
+    // Subagent announcements sit above the hint so a finishing child is the last thing
+    // the eye lands on before the prompt. Green + bold on purpose: a completion is the
+    // one event worth catching at a glance while the agent is busy working.
+    if (section === 'hint' && agentNotices.length > 0) {
+      return (
+        <Box key={section} flexDirection="column" paddingX={1}>
+          {agentNotices.map(item => React.cloneElement(
+            agentNoticeLine(item, theme.success) as React.ReactElement,
+            { key: item.executionId },
+          ))}
+        </Box>
+      )
+    }
     if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint))}</Text></Box>
     // The caret is drawn whatever the turn status is: while a turn runs the composer
     // still accepts text (that text is queued), so hiding the caret removed the only

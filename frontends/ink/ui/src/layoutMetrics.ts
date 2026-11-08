@@ -11,6 +11,14 @@ export type LayoutMetricInput = {
   goalRows?: number
   /** When 0, no title/status header band (default inline scrollback). */
   headerRows?: number
+  /**
+   * Rows the subagent announcements need above the hint.
+   *
+   * They used to share the single activity row, so with two or more children the extras
+   * were silently clipped -- the user saw only the last one. Counting them here is what
+   * makes "three children finished" actually visible as three lines.
+   */
+  noticeRows?: number
 }
 
 export type LayoutMetrics = {
@@ -51,7 +59,8 @@ export function computeLayoutMetrics(input: LayoutMetricInput): LayoutMetrics {
   const inputRows = Math.max(1, Math.floor(input.inputRows ?? 1))
   const baseBottomRows = 3 + inputRows
   const goalRows = Math.max(0, Math.floor(input.goalRows ?? 0))
-  const activityRows = 1 + goalRows
+  const noticeRows = Math.max(0, Math.floor(input.noticeRows ?? 0))
+  const activityRows = 1 + goalRows + noticeRows
   const errorRows = input.hasError ? 1 : 0
   const requestedPanelRows = input.hasPanel || input.hasSlashSuggestions
     ? Math.max(0, input.panelRows ?? (input.hasSlashSuggestions ? 6 : 8))
