@@ -129,10 +129,14 @@ npm run start
 ### Python 测试
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests -t .
 python -m unittest tests.test_ink_bridge
 python -m unittest tests.test_workflow_prompt_guided_planner
 ```
+
+> `-t .` 不是可选项：不加时 unittest 把 `tests/` 当顶层目录、按顶层模块导入，
+> **不会执行 `tests/__init__.py`**，测试临时目录就不会重定向到 `D:\tmp`
+> （见 `tests/__init__.py`）。两种写法的用例数相同，已实测核对。
 
 ### Ink UI 测试
 

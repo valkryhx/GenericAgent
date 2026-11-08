@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 python -m pip install -e .
-python -m unittest discover -s tests
+python -m unittest discover -s tests -t .
 python -m unittest tests.test_ink_bridge
 python -m unittest tests.test_ink_bridge.InkBridgeTest.test_resume_transcript_uses_exact_backend_history_before_each_turn_for_rewind
 ```

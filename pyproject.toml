@@ -26,6 +26,14 @@ dependencies = [
 mcp = [
     "mcp>=1.0",
     "fastmcp>=2.0",
+    # fastmcp -> pydocket (which pins no upper bound) does
+    # ``from fakeredis.aioredis import FakeServer``. fakeredis removed that name
+    # in 2.39.0 (renamed to TcpFakeServer), so without this ceiling every MCP
+    # stdio fixture dies at startup with ImportError and the MCP tests fail for
+    # a reason that looks nothing like a dependency problem. 2.38.0 is the last
+    # release that still exports it. Drop the ceiling once pydocket stops
+    # importing the removed symbol.
+    "fakeredis[lua]>=2.32.1,<2.39",
 ]
 langfuse = [
     "langfuse",

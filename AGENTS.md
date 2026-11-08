@@ -9,7 +9,9 @@ GenericAgent 是一个 Python 项目。核心运行时实现位于 `genericagent
 - `python -m pip install -e .`：安装核心包、`ga` 命令以及 `ga` / `ga ink` 所需依赖。
 - `ga` / `ga ink`：受支持的 React/Ink 终端入口；`ga cli` 为轻量排障入口。
 - `npm install --prefix frontends/ink/ui`：安装 Ink UI 的 npm 依赖。
-- `python -m unittest discover -s tests`：运行当前测试套件。
+- `python -m unittest discover -s tests -t .`：运行当前测试套件。`-t .` 必须带：
+  不加时 unittest 按顶层模块导入，不会执行 `tests/__init__.py`，测试临时目录就不重定向到
+  `D:\tmp`（`GA_TEST_TEMP` 可覆盖）。两种写法用例数相同，已实测。
 
 Textual、Qt、Streamlit、pywebview、桌面宠物、Hub、聊天机器人等旧入口已 deprecated：源码保留但不维护，也不再进入默认依赖。详见 `docs/20261022-GA入口收敛与旧前端退役说明.md`。
 
@@ -29,7 +31,9 @@ Textual、Qt、Streamlit、pywebview、桌面宠物、Hub、聊天机器人等�
 
 ## 测试指南
 
-测试使用标准库 `unittest`。测试文件命名为 `test_*.py`，放在 `tests/`。新增前端或适配器行为时，应 stub 外部服务，避免依赖真实 API 凭据。提交前运行 `python -m unittest discover -s tests`，修复 bug 时补充聚焦的回归测试。
+测试使用标准库 `unittest`。测试文件命名为 `test_*.py`，放在 `tests/`。新增前端或适配器行为时，应 stub 外部服务，避免依赖真实 API 凭据。提交前运行 `python -m unittest discover -s tests -t .`，修复 bug 时补充聚焦的回归测试。
+
+测试临时目录默认重定向到 `D:\tmp`（由 `tests/__init__.py` 完成，`GA_TEST_TEMP` 可覆盖，非 Windows 默认不改动）。**不要**在测试里硬编码 `C:\Users\...\Temp` 或假定系统临时目录；需要临时目录时用 `tempfile`，它会拿到重定向后的位置。子进程（subagent / workflow child）通过环境变量继承同一位置。
 
 ### Ink UI 测试：优先「无截图」的程序化手段
 

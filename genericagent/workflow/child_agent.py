@@ -243,7 +243,25 @@ class LiveJobTelemetry:
                 "updatedAt": now,
             }
             try:
-                fingerprint = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+                # Dedupe on the *semantic* fields only. `elapsedSeconds` and
+                # `updatedAt` change on every call by construction, so hashing
+                # the whole payload made the comparison below always false and
+                # the dedupe dead: an after-callback that changed nothing still
+                # re-emitted and re-rendered the UI row. The timing fields stay
+                # in the payload because the status bar shows them.
+                fingerprint = json.dumps(
+                    {
+                        "jobId": self._job_id,
+                        "turn": payload["turn"],
+                        "toolCalls": payload["toolCalls"],
+                        "lastToolName": payload["lastToolName"],
+                        "lastToolSummary": payload["lastToolSummary"],
+                        "tokenUsage": payload["tokenUsage"],
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                )
             except (TypeError, ValueError):
                 fingerprint = None
             if not force and fingerprint is not None and fingerprint == self._last_fingerprint:

@@ -296,7 +296,11 @@ class WorkflowAuthoringPathDisciplineTest(unittest.TestCase):
 
     def test_skill_forbids_hardcoding_repo_root_in_prompts(self):
         skill = (REPO_ROOT / "skills" / "workflow-authoring" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Never hardcode the repository", skill)
+        # 9847986 reworded this from "Never hardcode..." to "Do not hardcode..."
+        # while relaxing the surrounding rule (an explicitly requested absolute
+        # target is now passed through verbatim). The prohibition itself stands,
+        # so assert on the meaning rather than on the original wording.
+        self.assertIn("hardcode the repository", skill)
         self.assertIn("${args.workspacePath}", skill)
 
 

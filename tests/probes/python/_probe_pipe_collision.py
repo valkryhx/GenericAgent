@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from genericagent.agents.realtime_ipc import default_channel_address  # noqa: E402
