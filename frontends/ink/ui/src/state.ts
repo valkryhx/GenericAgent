@@ -186,6 +186,32 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       error: null,
     }
   }
+  if (event.type === 'prompt_queued') {
+    // A prompt typed while the turn was running. It goes into the transcript as a user
+    // message with a marker, because the user's question is "did my text get in, and is
+    // it what I meant to send?" -- and the answer has to be readable, not inferred from
+    // the agent's eventual reply.
+    //
+    // Deduplicated on the text: the bridge reports the queue depth along with each
+    // acceptance, and a retry or a repeated frame must not paint the same line twice.
+    if (state.messages.some(message => message.role === 'user' && message.text.includes(event.text))) {
+      return state
+    }
+    return {
+      ...state,
+      messages: [
+        ...state.messages,
+        {
+          id: `q-${state.messages.length}`,
+          role: 'user',
+          text: `${event.text}\n(queued — will be sent at the next tool boundary)`,
+          done: true,
+          queuedPrompt: true,
+        },
+      ],
+      error: null,
+    }
+  }
   if (event.type === 'agent_snapshot') {
     return {
       ...state,

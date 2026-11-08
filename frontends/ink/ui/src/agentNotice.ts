@@ -18,7 +18,15 @@ export type AgentNotice = {
   detail?: string
 }
 
-/** Statuses that mean "this child is done and the user should be told". */
+/**
+ * Statuses that mean "this child is done and the user should be told".
+ *
+ * `killed` is here because a child can be reclaimed by force *after* finishing its work:
+ * `close_agent` waits `grace_s` for the process to exit and then calls
+ * `terminate_process()`, so a child that took slightly longer to exit ends up with
+ * `process_status == "killed"` while `completion_status == "completed"` and its output is
+ * on disk. How a process was reclaimed says nothing about whether its work succeeded.
+ */
 export const AGENT_TERMINAL_STATUSES = new Set([
   'succeeded',
   'completed',
@@ -35,9 +43,14 @@ export const AGENT_TERMINAL_STATUSES = new Set([
 export type AgentRecordLike = {
   executionId?: string
   status?: string
+  /** The pre-projection status; `completed` here beats a `killed` process status. */
+  sourceStatus?: string | null
   agentPath?: string | null
   metadata?: Record<string, unknown>
 }
+
+/** Words that mean the *work* succeeded, whatever the process ended up doing. */
+const COMPLETED_STATUSES = new Set(['succeeded', 'completed'])
 
 /**
  * Turn a bridge record into an announcement, or `null` when there is nothing to say.
@@ -45,6 +58,12 @@ export type AgentRecordLike = {
  * Non-terminal records are silent on purpose: a child that is merely running would
  * otherwise announce itself on every snapshot, training the user to ignore the line that
  * is supposed to be noticeable.
+ *
+ * Success is decided from the work status (`sourceStatus`, then `completionStatus` in the
+ * metadata), never from the process status alone. The bridge projects `killed` before
+ * `completed` (`core/control/process.py:_project_status`), so trusting `status` marks a
+ * finished child as failed -- which is exactly what happened to a real session's
+ * `probe_mid`: MID_ONE, MID_TWO and MID_DONE in its output file, announced in red.
  */
 export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | null {
   const status = String(record.status || '').toLowerCase()
@@ -53,6 +72,13 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
   if (!executionId) return null
 
   const meta = record.metadata || {}
+  const workStatus = String(
+    record.sourceStatus ||
+      (typeof meta.completionStatus === 'string' && meta.completionStatus) ||
+      (typeof meta.completion_status === 'string' && meta.completion_status) ||
+      '',
+  ).toLowerCase()
+
   const fromMeta =
     (typeof meta.taskName === 'string' && meta.taskName) ||
     (typeof meta.task_name === 'string' && meta.task_name) ||
@@ -62,7 +88,12 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
     : ''
   const name = String(fromMeta || fromPath || executionId)
 
-  const ok = status === 'succeeded' || status === 'completed'
+  // Did the work succeed? The work status is authoritative when present. Without one the
+  // projected status is all there is, and a bare `killed` then really does mean the child
+  // was cut off rather than finished.
+  const ok = workStatus
+    ? COMPLETED_STATUSES.has(workStatus)
+    : COMPLETED_STATUSES.has(status)
   const word = ok ? 'completed' : status === 'degraded' ? 'degraded' : 'failed'
   const detail =
     typeof meta.summary === 'string' && meta.summary.trim()

@@ -403,6 +403,7 @@ export type BridgeEvent =
   | { type: 'activity'; label: string | null }
   | ({ type: 'token_usage'; taskId?: number } & TokenUsage)
   | { type: 'user'; taskId: number; text: string }
+  | { type: 'prompt_queued'; text: string; queued?: number }
   | { type: 'assistant_delta'; taskId: number; text: string }
   | { type: 'assistant_done'; taskId: number; text: string }
   | { type: 'system'; text: string }
@@ -475,4 +476,6 @@ export type ChatMessage = {
   done: boolean
   taskId?: number
   localCommand?: 'input' | 'output'
+  /** True for a prompt typed mid-turn, queued for the next tool boundary. */
+  queuedPrompt?: boolean
 }
