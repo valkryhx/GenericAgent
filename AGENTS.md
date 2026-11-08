@@ -35,6 +35,61 @@ Textual、Qt、Streamlit、pywebview、桌面宠物、Hub、聊天机器人等�
 
 测试临时目录默认重定向到 `D:\tmp`（由 `tests/__init__.py` 完成，`GA_TEST_TEMP` 可覆盖，非 Windows 默认不改动）。**不要**在测试里硬编码 `C:\Users\...\Temp` 或假定系统临时目录；需要临时目录时用 `tempfile`，它会拿到重定向后的位置。子进程（subagent / workflow child）通过环境变量继承同一位置。
 
+### TDD 红绿灯（强制，违反即返工）
+
+**铁律：没有先失败的测试，就不写生产代码。** 修 bug、加功能、改行为、重构全部适用，没有"这次太简单"的例外。
+
+用 superpowers 的 `test-driven-development` skill 走红-绿-重构：
+
+```
+RED    → 写一个最小失败测试
+         跑，确认它因为「功能缺失」而失败（不是笔误、不是报错）
+GREEN  → 只写让这个测试通过的最小实现
+         跑，确认全绿
+REFACTOR → 在保持全绿的前提下清理
+```
+
+**先写了代码？删掉，从测试重来。** 不要"留作参考"、不要"边写测试边调整"——那是测试后补，不是 TDD。
+
+#### 必须做的反向确认（这一步抓出过两次假验收）
+
+测试变绿**不能**证明它有效。每次修 bug，都要把实现 stash 掉再跑一次：
+
+```powershell
+git stash push -- genericagent/core/app.py genericagent/agents/receipts.py
+python -m pytest tests/test_xxx.py -q      # 必须重新变红
+git stash pop
+```
+
+没经过这一步，不许说"修好了"。本仓库实际踩过的两个假验收：
+
+| 假验收 | 为什么会绿 |
+| --- | --- |
+| 探针自己重新推导路径公式 | 探针与产品共用同一个错误假设 |
+| 守卫用 tokenize 逐 token 拼行 | 每 token 单独成行，目标表达式永远拼不出来 |
+
+#### 真实 E2E 同样要双向
+
+层 C / 层 I 的真实模型跑动（`GA_RUN_REAL_API_E2E=1`）也要在 pre-fix 代码上跑一次，
+否则无法证明它抓得住缺陷。
+
+#### 判定"送达/生效"的硬信号
+
+只断言"没有错误行"是不够的——消息根本没入队时它也是绿的。正确做法：让载荷里带一个
+**只存在于这条消息**的随机 token，要求下游把它复述出来。
+
+#### 测试反模式（本仓库真实踩过）
+
+| 反模式 | 后果 | 正确做法 |
+| --- | --- | --- |
+| 测试里重新推导产品路径公式 | 测试和产品共用同一个错误假设，永远绿 | 调真实函数/属性取值 |
+| 只用文本匹配做静态守卫 | 注释里合法提到旧写法 → 因错误原因失败 → 被删掉 | 用 AST 按函数作用域检查 |
+| 只读 `output.txt` 判后续轮次 | 第 N 轮写 `outputN.txt`，正常投递被误判成丢消息 | 合并全部 `output*.txt` |
+| 只断言"没有 forged 行" | 消息没入队时也绿 | 加随机 token 复述 |
+| 测试后补 | 立即通过，证明不了任何事 | 先看它红 |
+
+完整方法论见 `docs/20261108-GA-subagent链路真实证据核验手册.md` §11。
+
 ### Ink UI 测试：优先「无截图」的程序化手段
 
 Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。

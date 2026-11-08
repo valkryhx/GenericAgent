@@ -292,6 +292,9 @@ GA_RUN_REAL_API_E2E=1 GA_SELFTEST_TIMEOUT=180 python tests/real_ink_selftest.py
 | 整目录扫 `model_responses` | 歷史会话通知冒充本轮 | 跑前快照，取差集 |
 | 把多次 sleep 合并成一次 | 只有一个 fold 点，且子代理可能没跑完 | 明确要求分三次工具轮 |
 | 对着 `temp/<name>` 断言子进程产出 | 产品布局下那里什么都没有 | 从 `manager.task_root` 取 |
+| 只读 `output.txt` 判后续轮次 | 第 N 轮写在 `outputN.txt`，working 的投递看起来像丢了消息 | 合并 `output*.txt` 全部轮次 |
+| 只断言"没有 forged 行" | 消息根本没入队时也通过 | 要求子进程复述只存在于消息里的随机 token |
+| 没在修复前的代码上跑过 | 无法证明测试真的抓得住缺陷 | `git stash` 后必须变红，见 §10 |
 
 ---
 
@@ -337,3 +340,68 @@ python -m unittest discover -s tests -t .
 
 判定方法：`git stash push -- genericagent/` → 复跑 → `git stash pop`。
 **不经这一步不要把这些记到本轮改动账上。**
+
+---
+
+## 11. 双向验证：只有"修复前会红"的测试才算数（2026-11-08 补）
+
+本手册 §1 写着"路径必须问代码要"，那一轮之后又出现了同类缺陷的第二批（7 处），
+原因是：**我按"我遇到过的那条路径"去扫，而不是按表达式扫**。同一轮里我还写了两处假验收：
+
+| 假验收 | 它为什么会绿 | 怎么发现的 |
+| --- | --- | --- |
+| 探针自己重新推导 `dirname(task_dir)/subagents` | 探针与产品共用同一个错误假设 | 改成调真实函数后结论反转 |
+| 守卫测试用 tokenize 逐 token 拼行 | 每个 token 单独成行，`dirname(task_dir)` 永远拼不出来 | `git stash` 后仍绿 |
+
+两条都是同一类错误：**验证代码本身没有经过验证**。
+
+### 11.1 强制流程
+
+```powershell
+# 1. RED：先写测试，在未修复代码上跑
+python -m pytest tests/test_child_bus_handdown_paths.py -q     # 必须变红
+
+# 2. GREEN：写最小实现，跑绿
+python -m pytest tests/test_child_bus_handdown_paths.py -q     # 必须全绿
+
+# 3. 反向确认：把实现 stash 掉，测试必须重新变红
+git stash push -- genericagent/core/app.py genericagent/agents/receipts.py
+python -m pytest tests/test_child_bus_handdown_paths.py -q
+git stash pop
+```
+
+第 3 步不能省。它抓出了本文档里记录的两处假验收，也抓出了"守卫范围过宽
+（把与总线无关的 `dirname(dirname(task_dir))` 也算进去）"这个问题。
+
+### 11.2 真实 E2E 同样要双向
+
+层 C / 层 I 的真实模型跑动也要在 pre-fix 代码上跑一次。实测对比（`tests/real_child_handdown_delivery_e2e.py`）：
+
+| 信号 | pre-fix | fixed |
+| --- | --- | --- |
+| `mailbox.jsonl` state | `forged` | `consumed` |
+| 子进程复述 followup-only token | `False` | `True` |
+| 孤儿 `tasks/sessions` | 存在 | 不存在 |
+
+pre-fix 那次同时暴露了一个真实的坑：`followup accepted = True` 而消息其实被丢弃了——
+**只看工具返回值不足以判断送达**。
+
+### 11.3 判定送达的唯一硬信号
+
+让消息里带一个**只存在于这条消息**的随机 token（不出现在 spawn prompt、任务名、
+任何子进程可读的文件里），要求子进程把它复述到输出。然后：
+
+- 合并该任务目录下**全部** `output*.txt`（第 N 轮写 `outputN.txt`，只读 `output.txt`
+  会把正常投递误判成丢消息——本轮真的踩了）；
+- 再叠加"没有 `forged` 行"作为辅助，但不能只靠它：消息根本没入队时它也是绿的。
+
+### 11.4 一个能挡住复发的守卫
+
+`tests/test_child_bus_handdown_paths.py::NoPathGuessRemainsTest` 用 AST 按函数作用域
+检查 `os.path.join(os.path.dirname(task_dir), ...)`，白名单只有两个 helper 自己的
+legacy 兜底。要点：
+
+- **不要用文本匹配**：注释里会合法地提到旧表达式，纯文本匹配会让守卫因错误的原因失败，
+  然后被下一个人删掉；
+- **不要用 tokenize 逐 token 重建**：拼不回原表达式，守卫会在还有 7 处缺陷时保持全绿；
+- 用 AST 限定"哪个函数里的哪种调用"，语义和缺陷本身对齐。
