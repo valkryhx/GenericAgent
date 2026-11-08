@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GA 教程</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --fg: #1f2328; --muted: #656d76;
+    --card: #ffffff; --line: #d0d7de; --accent: #2a6fd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e;
+      --card: #161b22; --line: #30363d; --accent: #6cb6ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 20px; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  a.card {
+    display: block; padding: 20px 22px; margin-bottom: 14px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    color: inherit; text-decoration: none; transition: border-color .15s, transform .15s;
+  }
+  a.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .card h2 { font-size: 16px; margin: 0 0 6px; color: var(--accent); }
+  .card p { margin: 0; font-size: 13.5px; color: var(--muted); }
+  .tag {
+    display: inline-block; margin-top: 10px; padding: 2px 8px;
+    font-size: 11.5px; border-radius: 20px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>GA 教程</h1>
+    <p class="sub">GenericAgent 内部机制的图解与说明</p>
+
+    <a class="card" href="./ga-subagent-diagram.html">
+      <h2>子代理机制图解</h2>
+      <p>可交互架构图：主代理如何派生子代理、子代理如何独立运行、结果如何回到主代理。支持明暗主题与动效播放。</p>
+      <span class="tag">架构图</span>
+    </a>
+
+    <a class="card" href="./ga-subagent-mechanism.html">
+      <h2>子代理机制说明</h2>
+      <p>配套文字说明：为什么用独立进程、六个关键设计、两件容易误解的事，以及逐条代码位置索引。</p>
+      <span class="tag">文档</span>
+    </a>
+  </div>
+</body>
+</html>
