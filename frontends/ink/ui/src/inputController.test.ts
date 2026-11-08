@@ -36,10 +36,29 @@ test('handleInput submits when Enter includes a raw carriage return', () => {
   assert.deepEqual(decision, { value: '', command: { type: 'submit', text: 'hello' } })
 })
 
-test('handleInput keeps text when Enter is pressed while running', () => {
+test('handleInput queues text when Enter is pressed while running', () => {
+  // Enter used to keep the text and do nothing at all. That is indistinguishable from
+  // a hung app: no frame, no message, no state change. The draft is now queued and
+  // folded into the running turn at the next tool boundary, so the user's intent
+  // survives instead of sitting in a box they cannot tell is alive.
   const store = createPasteStore()
 
   const decision = handleInput('next prompt', '', { return: true }, 'running', store)
+
+  // `cursorOffset` is only echoed when the caller tracks one (the App passes it);
+  // this call does not, so the decision carries just the value and the command.
+  assert.deepEqual(decision, {
+    value: '',
+    command: { type: 'queue_prompt', text: 'next prompt' },
+  })
+})
+
+test('handleInput still swallows Enter while connecting', () => {
+  // No turn exists yet and the bridge handshake has not completed, so queueing would
+  // promise a delivery that cannot happen either.
+  const store = createPasteStore()
+
+  const decision = handleInput('next prompt', '', { return: true }, 'connecting', store)
 
   assert.deepEqual(decision, { value: 'next prompt' })
 })

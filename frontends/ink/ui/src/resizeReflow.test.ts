@@ -189,7 +189,10 @@ test('App: terminal width change must not duplicate the live frame (resize reflo
     'STREAM-PROBE-0',
     'STREAM-PROBE-1',
     'STREAM-PROBE-2',
-    'Enter keeps draft',
+    // The running hint. It used to read "Enter keeps draft", which described the old
+    // behaviour (Enter did nothing mid-run); the composer now queues, so the probe has
+    // to track the copy that is actually rendered.
+    'type to queue',
   ]
 
   try {

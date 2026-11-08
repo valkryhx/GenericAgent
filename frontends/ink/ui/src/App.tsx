@@ -587,8 +587,7 @@ function BottomChrome({ children, columns, height }: { children: React.ReactNode
   )
 }
 
-function InputView({ viewport, showCursor, columns, theme }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme }) {
-  const lines = viewport.lines
+function InputView({ viewport, showCursor, columns, theme }: { viewport: InputViewport; showCursor: boolean; columns: number; theme: InkTheme }) {  const lines = viewport.lines
   const contentColumns = inputContentColumns(columns)
   return (
     <Box
@@ -766,6 +765,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   //   native click-drag selection away from the terminal, so the default is `off`.
   const fullscreen = useMemo(() => resolveFullscreenMode(), [])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
+  // Prompts the user typed while a turn was running. They are folded into that turn
+  // at the next tool boundary (the bridge is the one that actually delivers them);
+  // this copy exists so the composer can say "accepted, waiting its turn" instead of
+  // leaving the user guessing. Cleared when the turn they belong to ends.
+  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([])
   const [workflowPanel, setWorkflowPanel] = useState<WorkflowPanelState | null>(null)
   const [teamPanel, setTeamPanel] = useState<TeamPanelState | null>(null)
   const [hooksPanel, setHooksPanel] = useState<HooksPanelState | null>(null)
@@ -985,6 +989,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (command.type === 'submit') {
         setInputHistory(history => recordInput(history, command.text))
         setTranscriptScrollOffset(0)
+      } else if (command.type === 'queue_prompt') {
+        // The draft moves into the queue: it will be folded into the running turn at
+        // the next tool boundary. Recording it in history here keeps up-arrow useful
+        // for re-sending after the turn ends, which is what the user expects from a
+        // draft they typed deliberately.
+        setInputHistory(history => recordInput(history, command.text))
+        setQueuedPrompts(prompts => [...prompts, command.text])
       } else if (command.type === 'skill_invoke') {
         setInputHistory(history => recordInput(history, `/${command.skill}${command.args ? ` ${command.args}` : ''}`))
         setTranscriptScrollOffset(0)
@@ -1103,6 +1114,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       const timer = setInterval(() => setNow(Date.now()), 1000)
       return () => clearInterval(timer)
     }
+    // The turn these prompts belonged to is over, so the "queued" badge must not
+    // survive into the next turn as a lie about a message that was already delivered.
+    setQueuedPrompts(prompts => (prompts.length > 0 ? [] : prompts))
     if (runningStartedAt !== null) {
       setLastActivitySeconds(Math.max(0, Math.floor((Date.now() - runningStartedAt) / 1000)))
     }
@@ -2203,7 +2217,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // Selection panels live below the composer. Keep their native cursor
     // hidden: the input already draws its inverse caret, while parking the
     // terminal cursor can leave a second visible cursor over the panel title.
-    const inactive = !terminalReady || state.status === 'running' || state.status === 'stopping' || Boolean(activePanel)
+    //
+    // A running turn is NOT a reason to hide it. CC keeps the native cursor on the
+    // composer's caret for the whole turn, and that is what makes the composer read
+    // as usable while the agent works. Hiding it during a run was reported as "the
+    // app looks dead, I cannot tell whether I can type".
+    const inactive = !terminalReady || Boolean(activePanel)
     if (inactive) {
       cursorPark.setPark(null)
       return
@@ -2229,9 +2248,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     }
   }, [mouseMode, transcriptScrollOffset, visibleTranscript.scrollOffset])
 
-  const inputHint = state.status === 'running' || state.status === 'stopping'
-    ? 'Running · Enter keeps draft · PgUp/PgDn · Ctrl+O tools · Esc stop'
-    : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
+  const inputHint = queuedPrompts.length > 0
+    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc stop`
+    : (state.status === 'running' || state.status === 'stopping')
+      ? 'Running · type to queue · Enter queues · PgUp/PgDn · Ctrl+O tools · Esc stop'
+      : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
   const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
   const activitySeconds = runningStartedAt === null ? lastActivitySeconds : runningSeconds
   const inputSections = inputChromeSections({
@@ -2244,7 +2265,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
     if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint))}</Text></Box>
-    if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={state.status !== 'running' && state.status !== 'stopping'} columns={metrics.canvasColumns} theme={theme} />
+    // The caret is drawn whatever the turn status is: while a turn runs the composer
+    // still accepts text (that text is queued), so hiding the caret removed the only
+    // visual answer to "can I type right now?".
+    if (section === 'input') return <InputView key={section} viewport={promptViewport} showCursor={true} columns={metrics.canvasColumns} theme={theme} />
     if (section === 'mcpStatus') return <McpStartupStatusView key={section} rows={mcpStartupRows} loading={Boolean(mcpStartupStatus?.loading)} theme={theme} height={panelRows > 0 ? panelRows : undefined} />
     if (section === 'panel') {
       if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />

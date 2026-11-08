@@ -400,7 +400,19 @@ export function handleInput(
     if (!expanded) return decision(value, offset)
     const slash = parseSlashSubmit(expanded, skillNames)
     if (slash) return decision('', 0, slash)
-    if (status === 'running' || status === 'stopping' || status === 'connecting') return decision(value, offset)
+    if (status === 'running' || status === 'stopping') {
+      // Enter during a turn queues the draft instead of being swallowed.
+      //
+      // It used to `return decision(value, offset)` — keep the text, do nothing. That
+      // is indistinguishable from a hung app: the keystroke produced no frame, no
+      // message, no state change. CC queues it and the message is folded into the
+      // running turn at the next tool boundary, so the intent is preserved rather than
+      // silently parked in a text box the user cannot be sure is even alive.
+      return decision('', 0, { command: { type: 'queue_prompt', text: expanded } })
+    }
+    // ``connecting`` still swallows: there is no turn to queue into and no bridge
+    // handshake yet, so accepting the text would claim a delivery that cannot happen.
+    if (status === 'connecting') return decision(value, offset)
     const images = imageStore ? attachmentsForSubmit(imageStore, expanded) : []
     // 清空 store 中已提交的引用（placeholder 会随 value 清空）
     if (imageStore) {
