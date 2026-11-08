@@ -851,7 +851,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   // a re-emitted snapshot cannot announce the same child twice, and kept in arrival order
   // so several children finishing together accumulate instead of replacing each other.
   const [agentNotices, setAgentNotices] = useState<AgentNotice[]>([])
-  const announcedAgentsRef = useRef<Set<string>>(new Set())
+  /**
+   * The notices as of the last render, for the bridge event callback.
+   *
+   * The callback is installed once (its effect depends only on the bridge config), so it
+   * closes over the first `agentNotices` value. Reading the ref is what lets a later
+   * snapshot see -- and correct -- what was already shown.
+   */
+  const agentNoticesRef = useRef<AgentNotice[]>([])
+  agentNoticesRef.current = agentNotices
   // Tracks whether the session was actually running, so "notices are stale" can be told
   // apart from "the app has never run a turn yet". Without it the clear-on-idle path also
   // fires on the initial `connecting -> idle` transition and eats the first snapshot.
@@ -1224,7 +1232,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (wasBusyRef.current) {
       wasBusyRef.current = false
       setAgentNotices(items => (items.length > 0 ? [] : items))
-      announcedAgentsRef.current.clear()
     }
     if (runningStartedAt !== null) {
       setLastActivitySeconds(Math.max(0, Math.floor((Date.now() - runningStartedAt) / 1000)))
@@ -1485,25 +1492,36 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         return
       }
       if (event.type === 'agent_snapshot') {
-        // Announce each child exactly once, when it first reaches a terminal status.
-        // The bridge re-emits the whole snapshot whenever anything changes, so without
-        // the id set a single child would announce itself on every other child's update.
-        const fresh: AgentNotice[] = []
+        // Announce each child exactly once, keyed by the child -- NOT by its verdict.
+        //
+        // A child's status legitimately moves while it finishes: `running` -> `closed`
+        // (process reclaimed, no work verdict yet) -> `succeeded`, and its metadata gains
+        // `turnStatus: completed`. Keying on `${executionId}:${word}` treated each of
+        // those as a brand new child, so one subagent left a `✗ failed` line and then a
+        // `✓ completed` line beside it. The same name flipping between two verdicts is
+        // what the user reported, and neither line can be trusted next to the other.
+        //
+        // The verdict that survives is the latest one. Announcing the *first* terminal
+        // word instead would be wrong in the other direction, because the first word is
+        // exactly the unreliable one -- it is taken before the turn's own verdict lands.
+        let changed = false
+        const byExecution = new Map<string, AgentNotice>()
+        for (const notice of agentNoticesRef.current) byExecution.set(notice.executionId, notice)
         for (const record of event.snapshot.records || []) {
           const notice = agentNoticeFromRecord(record as Parameters<typeof agentNoticeFromRecord>[0])
           if (!notice) continue
-          const key = `${notice.executionId}:${notice.word}`
-          if (announcedAgentsRef.current.has(key)) continue
-          announcedAgentsRef.current.add(key)
-          fresh.push(notice)
+          const previous = byExecution.get(notice.executionId)
+          // Nothing to do when the verdict has not moved. Without this, the bridge's
+          // re-emission of an unchanged snapshot would rewrite the chrome every frame.
+          if (previous && previous.ok === notice.ok && previous.word === notice.word) continue
+          byExecution.set(notice.executionId, notice)
+          changed = true
         }
-        if (fresh.length > 0) {
-          setAgentNotices(current => {
-            // Newest last; keep a bounded window so a long session cannot grow the
-            // chrome forever. Older announcements have already been read.
-            const next = [...current, ...fresh]
-            return next.length > 6 ? next.slice(-6) : next
-          })
+        if (changed) {
+          // Oldest first, bounded: a long session must not grow the chrome forever, and
+          // older announcements have already been read.
+          const next = [...byExecution.values()]
+          setAgentNotices(next.length > 6 ? next.slice(-6) : next)
         }
         dispatch(event)
         return
