@@ -1669,6 +1669,19 @@ class SubagentManager:
             result.get("resume_context") or {},
         )
 
+    # A single ``wait_agent`` call may not hold the turn for its whole requested
+    # timeout. Claude Code treats "sleep / poll until the subagent finishes" as an
+    # anti-pattern precisely because it freezes everything else: the user cannot steer,
+    # notifications pile up unread, and the turn loop never reaches a fold point where
+    # mid-turn input could be delivered.
+    #
+    # So a wait is a *slice*: it returns as soon as anything happens, and otherwise
+    # returns "still running, here is what to do next" after a short bound. The model
+    # can call it again, or do other work. Nothing is lost: the notification for a
+    # child that finishes later still arrives through the event bus at the next fold
+    # point, which is the mechanism the whole design already depends on.
+    WAIT_SLICE_MAX_S = 10.0
+
     def wait_agents(
         self,
         targets=None,
@@ -1680,6 +1693,9 @@ class SubagentManager:
     ):
         deadline = time.monotonic() + timeout_s
         condition = str(wait_condition or "event").strip().lower()
+        # Cap the synchronous part. A caller asking for a shorter wait keeps exactly
+        # that; only absurd waits get shortened.
+        slice_deadline = time.monotonic() + min(float(timeout_s), self.WAIT_SLICE_MAX_S)
         if targets is None:
             targets = [state.task_name for state in self.list_agents()]
         else:
@@ -1768,9 +1784,13 @@ class SubagentManager:
                 decision = evaluate_wait_condition(observed, condition)
                 if decision.satisfied:
                     return self._wait_result_from_decision(decision, states, "Wait predicate satisfied.", state_events, self.event_bus.last_event_seq())
+            # Real deadline first: when the caller asked for less than one slice, the
+            # two coincide and it must be reported as a timeout, not as "nothing yet".
             if time.monotonic() >= deadline:
                 return self._timed_out_wait_result(targets, condition)
-            self._wait_for_change(targets, poll_interval_s, deadline)
+            if time.monotonic() >= slice_deadline:
+                return self._wait_slice_elapsed(targets, condition)
+            self._wait_for_change(targets, poll_interval_s, min(slice_deadline, deadline))
 
     def _probe_wait_targets(self, targets):
         observed = []
@@ -1824,6 +1844,45 @@ class SubagentManager:
             terminal_targets=decision.terminal_targets,
             result_refs=decision.result_refs,
             recommended_next_action=decision.recommended_next_action,
+        )
+
+    def _wait_slice_elapsed(self, targets, condition="event"):
+        """Return "not yet" after a bounded slice, with guidance instead of a dead end.
+
+        This is deliberately *not* reported as a timeout. A timeout says "the thing you
+        waited for did not happen"; a slice says "nothing happened yet, and you are free
+        to do something else". Reporting a slice as a timeout would push the model into
+        retrying the same blocking wait, which is the behaviour being removed.
+        """
+        observed = []
+        for target in targets:
+            try:
+                observed.append(self.probe_agent(target))
+            except (FileNotFoundError, ValueError):
+                continue
+        decision = evaluate_wait_condition(observed, condition)
+        remaining = decision.remaining_targets or [str(getattr(s, "task_name", "")) for s in observed]
+        names = ", ".join(name for name in remaining if name)
+        return WaitResult(
+            False,
+            [],
+            (
+                f"Nothing to report yet; still waiting on {names or 'the target(s)'}. "
+                f"The notification will arrive on its own when they finish."
+            ),
+            [],
+            self.event_bus.last_event_seq(),
+            observed_agents=observed,
+            condition=decision.condition,
+            satisfied=False,
+            remaining_targets=decision.remaining_targets,
+            terminal_targets=decision.terminal_targets,
+            result_refs=decision.result_refs,
+            recommended_next_action=(
+                "Do other work now, or call wait_agent again if you truly have nothing else "
+                "to do; the child's completion notification arrives at the next tool "
+                "boundary either way."
+            ),
         )
 
     def _wait_for_change(self, targets, poll_interval_s, deadline):

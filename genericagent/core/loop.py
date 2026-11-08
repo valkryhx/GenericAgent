@@ -273,6 +273,38 @@ def _ack_pending_notifications(handler, ack_upto):
         pass
 
 
+def _consume_queued_prompts(handler):
+    """Drain prompts the user typed while this turn was running.
+
+    Folded in at the same point as subagent notifications: after the tool batch, before
+    the next ``chat()``. That is the only moment a mid-turn message can reach the model
+    without aborting the turn, and it is also the point a long synchronous tool call
+    (``wait_agent``) eventually reaches, so the wait stops being a black hole.
+
+    Returns ``""`` for the many callers that have no queue: subagents, workflow children
+    and the unit-test stubs. Delivery is destructive on purpose -- a message that was
+    handed to the model must not be handed over again on the next boundary.
+    """
+    getter = getattr(handler, "pending_prompts", None)
+    if getter is None:
+        return ""
+    try:
+        queue = getter()
+    except Exception:
+        return ""
+    if queue is None:
+        return ""
+    try:
+        drained = queue.drain()
+    except Exception:
+        return ""
+    if not drained:
+        return ""
+    from genericagent.core.pending_input import render_queued_prompts
+
+    return render_queued_prompts(drained)
+
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=40, verbose=True, initial_user_content=None):
     messages = [
         {"role": "system", "content": system_prompt},
@@ -397,6 +429,12 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         if notif_text:
             next_prompt = notif_text + chr(10) + next_prompt
             pending_notification_ack = notif_ack
+        # Mid-turn user input goes AFTER the notifications and immediately before the
+        # continuation instruction: the user is talking to the agent right now, so their
+        # message must be the last thing read before the model decides what to do next.
+        queued_text = _consume_queued_prompts(handler)
+        if queued_text:
+            next_prompt = next_prompt + chr(10) + queued_text
         messages = [{"role": "user", "content": next_prompt, "tool_results": tool_results}]   # just new message, history is kept in *Session
     if exit_reason: handler.turn_end_callback(response, tool_calls, tool_results, turn, '', exit_reason)
     return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}

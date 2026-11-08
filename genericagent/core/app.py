@@ -707,6 +707,13 @@ class GenericAgent:
         self.task_dir = None
         self.history = []; self.handler = None;
         self.task_queue = queue.Queue()
+        # Prompts typed while a turn is running. Drained at the next fold point inside
+        # that turn (core/loop.py), never escalated into a second turn. It lives on the
+        # agent rather than on the turn so a message arriving just after the last fold
+        # point survives into the next turn instead of vanishing.
+        from genericagent.core.pending_input import PendingPromptQueue
+
+        self.pending_prompts = PendingPromptQueue()
         self.is_running = False; self.stop_sig = False
         self._shutdown_requested = False
         self.tool_event_callback = None

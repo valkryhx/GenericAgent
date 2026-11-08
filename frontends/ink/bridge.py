@@ -475,6 +475,39 @@ class GenericAgentBridge:
         with backend_output_redirect():
             self.agent.run()
 
+    def queue_prompt(self, text: str) -> bool:
+        """Accept a prompt typed while a turn is running.
+
+        Not a second turn: the text waits for the next tool boundary inside the turn
+        that is already running (``core/loop.py`` folds it in next to the subagent
+        notifications). This is what makes the composer usable during a long
+        synchronous tool call, and it is the GA counterpart of Claude Code's mid-turn
+        ``queued_command``.
+
+        A prompt that arrives between turns -- nothing is running by the time it lands --
+        is promoted to a normal submit rather than left in a queue that may not see
+        another fold point.
+        """
+        text = str(text or "")
+        if not text.strip():
+            self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
+            return False
+        if not (getattr(self.agent, "is_running", False) or self._is_consuming()):
+            # The turn ended in the window between the UI deciding to queue and this
+            # call arriving. Starting a turn now is what the user meant.
+            return self.submit(text) >= 0
+        queue = getattr(self.agent, "pending_prompts", None)
+        if queue is None:
+            # An agent built before this feature cannot hold the message; saying so is
+            # better than pretending it was accepted.
+            self.emit({"type": "error", "code": "queue_unavailable", "message": "this agent cannot queue prompts"})
+            return False
+        if not queue.push(text, source="user"):
+            self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
+            return False
+        self.emit({"type": "prompt_queued", "text": text, "queued": len(queue)})
+        return True
+
     def submit(self, text: str, display_text: str | None = None, images: list | None = None) -> int:
         text = str(text or "")
         if not text.strip() and not images:
@@ -3283,6 +3316,11 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             if images is not None and not isinstance(images, list):
                 images = []
             bridge.submit(str(command.get("text") or ""), images=images)
+        elif cmd_type == "queue_prompt":
+            # Typed while a turn was running. The message is folded into that turn at
+            # the next tool boundary (core/loop.py), so it reaches the model without
+            # starting a second turn.
+            bridge.queue_prompt(str(command.get("text") or ""))
         elif cmd_type == "stop":
             bridge.abort_current_turn()
         elif cmd_type == "new_session":

@@ -460,6 +460,15 @@ def _stop_hook_block_cap(default=DEFAULT_STOP_HOOK_BLOCK_CAP):
 
 class GenericAgentHandler(BaseHandler):
     '''Generic Agent 工具库，包含多种工具的实现。工具函数自动加上了 do_ 前缀。实际工具名没有前缀。'''
+    def pending_prompts(self):
+        """The mid-turn prompt queue owned by the agent this handler runs for.
+
+        The loop drains it at each fold point. Returning ``None`` (no such attribute)
+        is the normal case for subagents, workflow children and test stubs, which is why
+        the loop treats a missing queue as "nothing queued" rather than an error.
+        """
+        return getattr(self.parent, "pending_prompts", None)
+
     def __init__(self, parent, last_history=None, cwd='./temp', workspace_root=None):
         self.parent = parent
         # Register per-tool result limits once per handler. Idempotent, and it
