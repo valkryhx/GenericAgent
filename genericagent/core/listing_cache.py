@@ -19,7 +19,11 @@ import json
 import os
 import tempfile
 
-VERSION = 1
+# Bumped to 2 when _scan_session_summary started recording agent_kind /
+# parent_session_id: entries cached under v1 lack the marker and would never
+# refresh (freshness only compares mtime+size), so child sessions would stay
+# visible in /resume for ever.
+VERSION = 2
 
 
 def load(path):
