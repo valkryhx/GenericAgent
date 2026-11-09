@@ -4994,6 +4994,9 @@ class InkBridgeTeamListTest(unittest.TestCase):
         self.assertEqual(member["taskCount"], 1)
         self.assertEqual(member["currentTask"], "Add parser")
         self.assertEqual(member["turnStatus"], "completed")
+        # The wire contract carries the registry's liveness verdict too; the panel must
+        # not have to re-derive "is this row a leftover?" from the lifecycle word.
+        self.assertIn("live", member)
         self.assertEqual([t["subject"] for t in payload["tasks"]], ["Add parser"])
 
 

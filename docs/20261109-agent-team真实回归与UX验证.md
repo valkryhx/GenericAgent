@@ -13,7 +13,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端单元（team / registry / subagent） | ✅ 544 + 23 + 44 例全绿（2 skipped）；修复后重跑仍 544 + 25 + 44 |
+| 后端单元（team / registry / subagent） | ✅ 首轮 544 + 23 + 44 全绿（2 skipped）；两轮修复后 544 + 28 + 44 + child_bus 17 全绿 |
 | `/team` 面板单测（TS） | ✅ 26 例全绿（原 17 + 新增 9） |
 | Ink UI 全量单测 | ✅ 630/630 通过；`tsc --noEmit` 干净 |
 | `/team` 版面 e2e（L2，无 LLM） | ✅ PASS（header / Task board / footer / 宽度） |
