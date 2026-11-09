@@ -20,12 +20,12 @@ from genericagent.workflow.runtime import WorkflowRuntime
 from genericagent.workflow.scheduler import SchedulerConfig
 from genericagent.workflow.store import WorkflowStore
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.4")
+PROFILE_NAME = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_WORKFLOW_E2E") == "1"
 
-WORKFLOW_SCRIPT = r'''
+WORKFLOW_SCRIPT = r'''export const meta = { name: 'optional-skill-e2e', description: 'optional skill awareness e2e' }
 phase('Optional Skill E2E')
 log('start optional skill progress e2e')
 
@@ -67,16 +67,13 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def check_profile(summary: dict) -> bool:
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from genericagent.llm.core import reload_mykeys
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
+    from genericagent.workflow.llm import binding_from_profile
+
+    binding = binding_from_profile(PROFILE_NAME)
     profile = {
-        "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode", "chat_completions"),
-        "loadLogChars": len(captured.getvalue()),
+        "configName": PROFILE_NAME,
+        "name": binding.profile_name,
+        "model": binding.model_id,
     }
     summary["profile"] = profile
     summary["profileOk"] = profile["name"] == EXPECTED_NAME and profile["model"] == EXPECTED_MODEL
@@ -88,7 +85,7 @@ def main() -> int:
     summary: dict[str, Any] = {
         "passed": False,
         "skipped": False,
-        "configName": CONFIG_NAME,
+        "expectedProfile": PROFILE_NAME,
         "expectedName": EXPECTED_NAME,
         "expectedModel": EXPECTED_MODEL,
         "root": str(root),
@@ -112,7 +109,7 @@ def main() -> int:
             status="running",
         ))
         runner = NativeGPTChildAgentRunner(
-            config_name=CONFIG_NAME,
+            profile_name=PROFILE_NAME,
             max_tokens=1536,
             max_turns=8,
         )

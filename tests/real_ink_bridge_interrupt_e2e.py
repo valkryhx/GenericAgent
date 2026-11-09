@@ -17,7 +17,8 @@ What it verifies end to end, on a real LLM turn:
   U3  no `ga-stop-file-watcher` thread is ever created on the UI path (task_dir is None)
   U4  the agent is reusable afterwards: a second real turn completes and streams
 
-Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to the `cc-opus-5` profile (claude-opus-5).
+Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to the `zhanlu-ds-anthropic` profile
+(Anthropic Messages wire on the ecloud gateway, model moma/deepseek-latest-flash).
 
 Negative controls (temp probe patched `agentmain.py`, then reverted). Two mechanisms serve the UI
 interrupt and either one alone is sufficient, so disabling one at a time does NOT go red:
@@ -52,8 +53,8 @@ for entry in (REPO, FRONTENDS):
         sys.path.insert(0, str(entry))
 
 
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "claude-opus-5")
-EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "cc-opus-5")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "zhanlu-ds-anthropic")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})", re.IGNORECASE)
 
@@ -233,6 +234,9 @@ def check_ui_interrupt(bridge, agent, events: list[dict], summary: dict) -> None
         e.get("type") == "assistant_done" and e.get("taskId") == task_id for e in events
     )
     row["statusSequence"] = statuses(events)
+    # The loop clears is_running/stop_sig in its finally block, which can land a
+    # tick after the idle status event; give that cleanup a brief bounded wait.
+    wait_for(lambda: not getattr(agent, "is_running", False), timeout_s=5, interval_s=0.05)
     row["agentIsRunningAfterStop"] = bool(getattr(agent, "is_running", False))
     if row["agentIsRunningAfterStop"]:
         summary["issues"].append("agent_still_marked_running_after_stop")

@@ -1,7 +1,7 @@
 /**
  * Real Ink UI e2e: goal + background workflow + agent-team surfaces together.
  *
- * Real bridge + real model (default/deepseek-v4.1-flash) + real Ink render +
+ * Real bridge + real model (default/moma/deepseek-latest-flash) + real Ink render +
  * real stdin. Drives one session so that an active GOAL, a running WORKFLOW and
  * a live TEAM subagent all exist, then captures painted ANSI frames while it
  * switches overlays:

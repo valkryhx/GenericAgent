@@ -14,7 +14,7 @@ What it verifies end to end:
   M7  a replayed resume (same submission_id) does not start a second process
   B2  a replayed followup_task does not make the child run the task twice
 
-Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to the `cc-opus-5` profile (claude-opus-5).
+Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to the `default` profile (zhanlu-ds, moma/deepseek-latest-flash).
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "claude-opus-5")
-EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "cc-opus-5")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})", re.IGNORECASE)
 

@@ -6,10 +6,8 @@
 
 用法：
   python tests/real_compact_selftest.py            # active_profile
-  python tests/real_compact_selftest.py grok       # 指定 profile
-  python tests/real_compact_selftest.py glm
+  python tests/real_compact_selftest.py zhanlu-ds-anthropic  # 指定 profile
   python tests/real_compact_selftest.py default
-  python tests/real_compact_selftest.py gpt-mini
 
 依赖：仓库根目录有 llm.yaml（gitignored，含真实 key）。本脚本本身不含任何密钥。
 """

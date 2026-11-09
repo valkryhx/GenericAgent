@@ -31,7 +31,7 @@ MAX_FANOUT = 32
 DEFAULT_ROUNDS = 1
 MAX_ROUNDS = 5
 
-STRESS_SCRIPT = r'''
+STRESS_SCRIPT = r'''export const meta = { name: 'stress-script', description: 'p8 real api e2e' }
 phase('P8 Real API Stress Diagnostic');
 log('start p8 real api stress diagnostic round ' + String(args.round) + ' fanout ' + String(args.fanout));
 const items = Array.from({length: args.fanout}, (_, index) => index + 1);

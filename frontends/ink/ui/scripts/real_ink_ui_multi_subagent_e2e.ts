@@ -23,7 +23,7 @@ import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
 const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
-const PROFILE = process.env.GA_MULTI_SUBAGENT_E2E_PROFILE || 'deepseek-v4.1-flash'
+const PROFILE = process.env.GA_MULTI_SUBAGENT_E2E_PROFILE || 'default'
 const EXPECTED_MODEL = process.env.GA_MULTI_SUBAGENT_E2E_MODEL || ''
 const START_TIMEOUT_MS = Number(process.env.GA_MULTI_SUBAGENT_E2E_START_TIMEOUT_MS || 300_000)
 const TOTAL_TIMEOUT_MS = Number(process.env.GA_MULTI_SUBAGENT_E2E_TIMEOUT_MS || 600_000)

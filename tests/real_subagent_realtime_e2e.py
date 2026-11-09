@@ -6,7 +6,7 @@ configuration that no test covers end to end: a real spawned child process, over
 named pipe / unix socket, authenticated with a real per-run authkey, validated by the real
 owner check, receiving a real parent-sent follow-up that drives a real LLM turn.
 
-Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to claude-opus-5 (provider gorouter).
+Opt in with GA_RUN_REAL_API_E2E=1. Model defaults to the `default` profile (zhanlu-ds, moma/deepseek-latest-flash).
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "claude-opus-5")
-EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "cc-opus-5")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})", re.IGNORECASE)
 

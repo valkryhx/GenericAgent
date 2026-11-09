@@ -1,4 +1,4 @@
-"""Opt-in real ``gpt-5.6-luna`` cross-engine control-plane E2E.
+"""Opt-in real ``zhanlu-ds`` cross-engine control-plane E2E.
 
 The process and workflow calls are deliberately sequential.  Both children receive the same
 bounded marker request, then the common facade is used to inspect their durable records,
@@ -27,15 +27,15 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-TARGET_PROFILE = "luna"
-EXPECTED_MODEL = "gpt-5.6-luna"
-EXPECTED_PROVIDER = "gpt-super-responses"
+TARGET_PROFILE = "default"
+EXPECTED_MODEL = "moma/deepseek-latest-flash"
+EXPECTED_PROVIDER = "zhanlu-ds"
 MARKER = "GA_P2_1_LUNA_OK_20260806"
 OPT_IN = os.environ.get("GA_RUN_REAL_P2_1_E2E") == "1"
 
 PROCESS_PROMPT = f"不要调用工具，只输出这一行精确文本：`{MARKER}`"
-WORKFLOW_SCRIPT = f"""
-const result = await agent('不要调用工具，只输出这一行精确文本：`{MARKER}`', {{ label: 'p2-1-luna-child' }})
+WORKFLOW_SCRIPT = f"""export const meta = {{ name: 'p2-1-zhanlu', description: 'cross-engine control plane e2e' }}
+const result = await agent('不要调用工具，只输出这一行精确文本：`{MARKER}`', {{ label: 'p2-1-zhanlu-child' }})
 return {{ summary: result.summary }}
 """
 
@@ -144,7 +144,7 @@ def main() -> int:
         "issues": [],
     }
     if not OPT_IN:
-        summary["reason"] = "set GA_RUN_REAL_P2_1_E2E=1 to run the real gpt-5.6-luna E2E"
+        summary["reason"] = "set GA_RUN_REAL_P2_1_E2E=1 to run the real zhanlu-ds E2E"
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
 
@@ -222,7 +222,7 @@ def main() -> int:
             store = WorkflowStore(root=workflow_root)
             run = store.create_run(
                 WorkflowRun(
-                    run_id="wf_p2_1_luna",
+                    run_id="wf_p2_1_zhanlu",
                     session_id="real_p2_1_agent_control",
                     script=WORKFLOW_SCRIPT,
                     status="running",
@@ -380,7 +380,7 @@ def main() -> int:
 
 @unittest.skipUnless(OPT_IN, "set GA_RUN_REAL_P2_1_E2E=1 to run the real cross-engine E2E")
 class RealP21AgentControlE2ETest(unittest.TestCase):
-    def test_real_luna_cross_engine_control_plane(self):
+    def test_real_zhanlu_cross_engine_control_plane(self):
         self.assertEqual(0, main())
 
 

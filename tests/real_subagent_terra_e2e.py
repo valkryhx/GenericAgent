@@ -17,8 +17,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.6-terra")
-EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "terra")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})", re.IGNORECASE)
 
@@ -84,7 +84,7 @@ def main() -> int:
         "issues": [],
     }
     if not OPT_IN:
-        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real terra subagent E2E"})
+        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real zhanlu-ds subagent E2E"})
         print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
         return 0
 
@@ -118,7 +118,7 @@ def main() -> int:
             None,
         )
         if profile is None:
-            summary["issues"].append("terra_profile_not_found")
+            summary["issues"].append("zhanlu_profile_not_found")
             print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
             return 2
         llm_no, profile_row = profile
@@ -132,14 +132,14 @@ def main() -> int:
             "你正在执行 GA subagent resume_agent 真实 API 回归测试。不要调用工具，不要输出 Markdown。"
             f"只输出这一行精确文本：{resume_marker}"
         )
-        with tempfile.TemporaryDirectory(dir=REPO / "temp", prefix="terra_subagent_e2e_"):
+        with tempfile.TemporaryDirectory(dir=REPO / "temp", prefix="zhanlu_subagent_e2e_"):
             manager = SubagentManager(root_dir=REPO, python_executable=sys.executable)
             handle = manager.spawn_agent(
-                "terra_real_subagent",
+                "zhanlu_real_subagent",
                 prompt,
                 llm_no=llm_no,
                 verbose=False,
-                parent_session_id="real_terra_subagent_e2e",
+                parent_session_id="real_zhanlu_subagent_e2e",
                 parent_permission_mode="read_only",
             )
             summary["handle"] = {
@@ -155,7 +155,7 @@ def main() -> int:
             summary["state"] = drained["state"]
             artifact = SubagentArtifactStore(drained["state"]["artifact_dir"]).get("final_output_round_0")
             summary["artifact"] = {"artifact_id": artifact.get("artifact_id"), "sha256": artifact.get("sha256")}
-            transcript_path = REPO / "temp" / "sessions" / "real_terra_subagent_e2e" / "subagents" / f"{handle.run_id}.jsonl"
+            transcript_path = REPO / "temp" / "sessions" / "real_zhanlu_subagent_e2e" / "subagents" / f"{handle.run_id}.jsonl"
             # 先关闭第一轮等待中的子进程，再通过 resume_agent 复用同一 run_id 启动第二轮。
             try:
                 manager.close_agent(handle.task_name, reason="real_e2e_before_resume", grace_s=0.2)

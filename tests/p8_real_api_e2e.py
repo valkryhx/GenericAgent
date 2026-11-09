@@ -28,9 +28,9 @@ from genericagent.workflow.runtime import WorkflowRuntime
 from genericagent.workflow.scheduler import SchedulerConfig
 from genericagent.workflow.store import WorkflowStore
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
+CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "default")
+EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 REAL_MCP_OPT_IN = os.environ.get("GA_RUN_REAL_MCP_E2E") == "1"
 
@@ -58,7 +58,7 @@ BLOCKING_SECRET_PATTERNS = [
 ]
 SKIPPED_ARTIFACT_SUFFIXES = {".pyc", ".pyo"}
 
-RUNTIME_SCRIPT = r'''
+RUNTIME_SCRIPT = r'''export const meta = { name: 'runtime-script', description: 'p8 real api e2e' }
 phase('P8 Real API Runtime E2E');
 log('start p8 real api runtime e2e');
 const single = await agent('Reply with one concise sentence containing token GA_P8_SINGLE.', {label:'single-real'});
@@ -79,14 +79,14 @@ return {
 };
 '''
 
-BRIDGE_SCRIPT = r'''
+BRIDGE_SCRIPT = r'''export const meta = { name: 'bridge-script', description: 'p8 real api e2e' }
 phase('P8 Real API Bridge E2E');
 log('start p8 real api bridge e2e');
 const result = await agent('Reply with one concise sentence containing token GA_P8_BRIDGE.', {label:'bridge-real'});
 return { marker: 'GA_P8_BRIDGE_DONE', length: String(result.summary || '').length };
 '''
 
-INHERIT_PERMISSION_SMOKE_SCRIPT = r'''
+INHERIT_PERMISSION_SMOKE_SCRIPT = r'''export const meta = { name: 'inherit-permission-smoke-script', description: 'p8 real api e2e' }
 phase('P8 Real API Permission Inheritance Smoke');
 log('start p8 real api permission inheritance smoke');
 const result = await agent('Return one short safe sentence. Do not call tools, MCP, or skills. Avoid secrets. Include token GA_P8_INHERIT_PERMISSION_SMOKE if natural.', {label:'inherit-permission-smoke'});
@@ -96,7 +96,7 @@ return {
 };
 '''
 
-TOOL_INHERITANCE_SCRIPT = r'''
+TOOL_INHERITANCE_SCRIPT = r'''export const meta = { name: 'tool-inheritance-script', description: 'p8 real api e2e' }
 phase('P8 Real API Native Tool Inheritance File Skill MCP');
 log('start p8 real api native child file skill mcp inheritance e2e');
 const result = await agent(`You must prove NativeGPTChildAgentRunner tool calling by using tools before the final answer.
@@ -113,7 +113,7 @@ return {
 };
 '''
 
-REAL_MCP_DIAGNOSTIC_SCRIPT = r'''
+REAL_MCP_DIAGNOSTIC_SCRIPT = r'''export const meta = { name: 'real-mcp-diagnostic-script', description: 'p8 real api e2e' }
 phase('P8 Real MCP Diagnostic');
 log('start p8 real non-mock mcp diagnostic');
 const result = await agent(`Use the real MCP tool ${args.toolName} exactly once before final answer.
@@ -128,7 +128,7 @@ return {
 };
 '''
 
-TIMEOUT_BRIDGE_DIAGNOSTIC_SCRIPT = r'''
+TIMEOUT_BRIDGE_DIAGNOSTIC_SCRIPT = r'''export const meta = { name: 'timeout-bridge-diagnostic-script', description: 'p8 real api e2e' }
 phase('P8 Real API Timeout Bridge Diagnostic');
 log('start p8 real api timeout bridge diagnostic');
 const result = await agent(`Generate a deliberately long but safe response with many short numbered lines.
@@ -142,7 +142,7 @@ return {
 };
 '''
 
-PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT = r'''
+PARALLEL_PARTIAL_FAILURE_DIAGNOSTIC_SCRIPT = r'''export const meta = { name: 'parallel-partial-failure-diagnostic-script', description: 'p8 real api e2e' }
 phase('P8 Real API Parallel Partial Failure Diagnostic');
 log('start p8 real api parallel partial failure diagnostic');
 const results = await parallel([
@@ -155,7 +155,7 @@ return {
 };
 '''
 
-BRIDGE_STOP_RESUME_DIAGNOSTIC_SCRIPT = r'''
+BRIDGE_STOP_RESUME_DIAGNOSTIC_SCRIPT = r'''export const meta = { name: 'bridge-stop-resume-diagnostic-script', description: 'p8 real api e2e' }
 phase('P8 Real API Bridge Stop Resume Diagnostic');
 log('start p8 real api bridge stop resume diagnostic');
 const first = await agent('Reply with one concise safe sentence containing token GA_P8_BRIDGE_STOP_PREFIX. Do not call tools, MCP, or skills.', {label:'bridge-stop-prefix'});
@@ -167,7 +167,7 @@ return {
 };
 '''
 
-MID_CALL_STOP_DIAGNOSTIC_SCRIPT = r'''
+MID_CALL_STOP_DIAGNOSTIC_SCRIPT = r'''export const meta = { name: 'mid-call-stop-diagnostic-script', description: 'p8 real api e2e' }
 phase('P8 Real API Mid-Call Stop Diagnostic');
 log('start p8 real api mid-call stop diagnostic');
 const first = await agent('Reply with one concise safe sentence containing token GA_P8_MID_CALL_STOP_PREFIX. Do not call tools, MCP, or skills.', {label:'mid-call-stop-prefix'});
@@ -181,14 +181,14 @@ return {
 };
 '''
 
-FAILED_SOURCE_SCRIPT = r'''
+FAILED_SOURCE_SCRIPT = r'''export const meta = { name: 'failed-source-script', description: 'p8 real api e2e' }
 phase('P8 Failed Source Resume E2E');
 log('start p8 failed source resume e2e');
 const first = await agent('Reply with one concise sentence containing token GA_P8_FAILED_PREFIX.', {label:'failed-prefix'});
 throw new Error('GA_P8_FORCED_SOURCE_FAILURE after prefix length ' + String(first.summary || '').length);
 '''
 
-RESUME_AFTER_FAILED_SCRIPT = r'''
+RESUME_AFTER_FAILED_SCRIPT = r'''export const meta = { name: 'resume-after-failed-script', description: 'p8 real api e2e' }
 phase('P8 Failed Source Resume E2E');
 log('resume p8 failed source resume e2e');
 const first = await agent('Reply with one concise sentence containing token GA_P8_FAILED_PREFIX.', {label:'failed-prefix'});
@@ -200,7 +200,7 @@ return {
 };
 '''
 
-KILLED_SOURCE_SCRIPT = r'''
+KILLED_SOURCE_SCRIPT = r'''export const meta = { name: 'killed-source-script', description: 'p8 real api e2e' }
 phase('P8 Killed Source Resume E2E');
 log('start p8 killed source resume e2e');
 const first = await agent('Reply with one concise sentence containing token GA_P8_KILLED_PREFIX.', {label:'killed-prefix'});
@@ -212,7 +212,7 @@ return {
 };
 '''
 
-RESUME_AFTER_KILLED_SCRIPT = r'''
+RESUME_AFTER_KILLED_SCRIPT = r'''export const meta = { name: 'resume-after-killed-script', description: 'p8 real api e2e' }
 phase('P8 Killed Source Resume E2E');
 log('resume p8 killed source resume e2e');
 const first = await agent('Reply with one concise sentence containing token GA_P8_KILLED_PREFIX.', {label:'killed-prefix'});
@@ -224,7 +224,7 @@ return {
 };
 '''
 
-INTERRUPTED_SOURCE_RESUME_SCRIPT = r'''
+INTERRUPTED_SOURCE_RESUME_SCRIPT = r'''export const meta = { name: 'interrupted-source-resume-script', description: 'p8 real api e2e' }
 phase('P8 Interrupted Source Resume Diagnostic');
 log('start p8 interrupted source resume diagnostic');
 const first = await agent('Reply with one concise sentence containing token GA_P8_INTERRUPTED_PREFIX_A. Do not call tools, MCP, or skills.', {label:'interrupted-prefix-a'});
@@ -718,7 +718,7 @@ def run_tool_inheritance_real_api_case(root: Path) -> dict:
     advertised_tool_names = set(capability.get("toolNames") or [])
     expected_tools = {"file_read", "load_skill", "mcp__p8_stub__read_marker"}
     advertised_ok = expected_tools.issubset(advertised_tool_names)
-    skill_ok = any(event.get("toolName") == "load_skill" and (event.get("data") or {}).get("status") == "success" and (event.get("data") or {}).get("name") == "p8-real-tool-skill" and "GA_P8_REAL_TOOL_SKILL_MARKER" in str(event.get("data")) for event in tool_results)
+    skill_ok = any(event.get("toolName") == "load_skill" and (event.get("data") or {}).get("status") == "success" and (event.get("data") or {}).get("name") == "p8-real-tool-skill" and (event.get("data") or {}).get("loaded") is True for event in tool_results)
     file_ok = any(event.get("toolName") == "file_read" and "GA_P8_REAL_TOOL_FILE_READ_MARKER" in str(event.get("data")) for event in tool_results)
     mcp_ok = any(event.get("toolName") == "mcp__p8_stub__read_marker" and "GA_P8_REAL_TOOL_MCP_MARKER" in str(event.get("data")) for event in tool_results)
     passed = (

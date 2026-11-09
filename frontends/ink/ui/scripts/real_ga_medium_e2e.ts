@@ -17,7 +17,7 @@ const BRIDGE_SCRIPT = path.join(REPO, 'frontends', 'ink', 'bridge.py')
 const RUN_ID = process.env.GA_MEDIUM_E2E_RUNID || String(Date.now())
 const ART_DIR = path.join(REPO, 'temp', `ga_medium_e2e_${RUN_ID}`)
 const TIMEOUT_MS = Number(process.env.GA_MEDIUM_E2E_TIMEOUT_MS || 900_000)
-const EXPECTED_MODEL = process.env.GA_MEDIUM_E2E_MODEL || 'default/deepseek-v4.1-flash'
+const EXPECTED_MODEL = process.env.GA_MEDIUM_E2E_MODEL || 'zhanlu-ds/moma/deepseek-latest-flash'
 
 class CaptureWriteStream extends EventEmitter {
   columns = 100

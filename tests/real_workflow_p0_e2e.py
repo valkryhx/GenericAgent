@@ -1,4 +1,4 @@
-"""Opt-in real gpt-5.6-luna E2E for the P0 workflow gates.
+"""Opt-in real zhanlu-ds E2E for the P0 workflow gates.
 
 Run with ``GA_RUN_REAL_P0_WORKFLOW_E2E=1 python tests/real_workflow_p0_e2e.py``.
 The child is allowed to edit only a temporary workspace. The summary contains
@@ -121,8 +121,8 @@ def main() -> int:
     store = WorkflowStore(root=root / "runtime")
     run = store.create_run(
         WorkflowRun(
-            run_id="wf_real_p0_luna",
-            session_id="real_p0_luna",
+            run_id="wf_real_p0_zhanlu",
+            session_id="real_p0_zhanlu",
             script=WORKFLOW_SCRIPT,
             status="running",
         )

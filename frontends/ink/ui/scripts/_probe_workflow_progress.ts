@@ -13,7 +13,7 @@ import { writeFileSync } from 'node:fs'
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
 const PYTHON = process.env.PYTHON || 'python'
 const BRIDGE = path.join(REPO, 'frontends', 'ink', 'bridge.py')
-const PROFILE = process.env.GA_PROBE_PROFILE || 'cc-deepseek-v4.1-flash-chat'
+const PROFILE = process.env.GA_PROBE_PROFILE || 'default'
 const TASK = process.env.GA_PROBE_TASK
   || '使用 Tavily 搜索 Python 官方文档中 pathlib.Path.write_text 的行为，然后生成一份介绍该 API 的 HTML 文件并验证文件'
 const IDLE_TIMEOUT_MS = Number(process.env.GA_PROBE_IDLE_TIMEOUT_MS || 600_000)

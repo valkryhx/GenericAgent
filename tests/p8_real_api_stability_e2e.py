@@ -29,7 +29,7 @@ STABILITY_OPT_IN = os.environ.get("GA_RUN_REAL_API_STABILITY") == "1"
 DEFAULT_ROUNDS = 3
 MAX_ROUNDS = 10
 
-STABILITY_SCRIPT = r'''
+STABILITY_SCRIPT = r'''export const meta = { name: 'stability-script', description: 'p8 real api e2e' }
 phase('P8 Real API Stability Diagnostic');
 log('start p8 real api stability diagnostic round ' + String(args.round));
 const single = await agent('Reply with one concise safe sentence containing token GA_P8_STABILITY_SINGLE_' + String(args.round) + '. Do not call tools, MCP, or skills.', {label:'stability-single'});

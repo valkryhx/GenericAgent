@@ -15,9 +15,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 
 SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,})", re.IGNORECASE)
@@ -51,18 +50,21 @@ def parse_json_object(raw: str) -> dict:
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from genericagent.llm.core import reload_mykeys
+        from genericagent.llm.client import load_clients_from_yaml
 
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
+        clients, _active, config_path, _mtime = load_clients_from_yaml(start_dir=REPO)
+    target = next((c for c in clients if getattr(c.backend, "name", "") == EXPECTED_NAME), None)
+    backend = getattr(target, "backend", None)
     profile = {
-        "configName": CONFIG_NAME,
-        "name": cfg.get("name"),
-        "model": cfg.get("model"),
-        "apiMode": cfg.get("api_mode", "chat_completions"),
+        "configName": str(config_path),
+        "name": getattr(backend, "name", None),
+        "model": getattr(backend, "model", None),
+        "backend": type(backend).__name__ if backend is not None else None,
+        "available": [getattr(c.backend, "name", "") for c in clients],
         "loadLogChars": len(captured.getvalue()),
     }
     summary["profile"] = profile
-    summary["profileOk"] = profile["model"] == EXPECTED_MODEL and (not EXPECTED_NAME or profile["name"] == EXPECTED_NAME)
+    summary["profileOk"] = target is not None and profile["model"] == EXPECTED_MODEL and (not EXPECTED_NAME or profile["name"] == EXPECTED_NAME)
     return summary["profileOk"]
 
 
@@ -74,9 +76,10 @@ def role_prompt(task_dir: str | None) -> str:
 
 
 def ask_real_model(system_prompt: str) -> tuple[str, dict]:
-    from genericagent.llm.core import resolve_client
+    from genericagent.llm.config import find_llm_config, load_llm_config
+    from genericagent.llm.client import build_client
 
-    client = resolve_client(CONFIG_NAME)
+    client = build_client(load_llm_config(find_llm_config(str(REPO))), EXPECTED_NAME)
     backend = getattr(client, "backend", None)
     if backend is not None:
         try:
@@ -106,13 +109,13 @@ def main() -> int:
     summary: dict[str, Any] = {
         "passed": False,
         "skipped": False,
-        "configName": CONFIG_NAME,
+        "expectedProfile": EXPECTED_NAME,
         "expectedName": EXPECTED_NAME,
         "expectedModel": EXPECTED_MODEL,
         "issues": [],
     }
     if not OPT_IN:
-        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real gpt-5.5 role prompt smoke"})
+        summary.update({"skipped": True, "reason": "set GA_RUN_REAL_API_E2E=1 to run real zhanlu-ds role prompt smoke"})
         print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
         return 0
     try:

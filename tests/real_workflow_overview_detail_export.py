@@ -19,9 +19,8 @@ if str(FRONTENDS) not in sys.path:
 from genericagent.core.redaction import sanitize  # noqa: E402
 from frontends.ink.bridge import GenericAgentBridge  # noqa: E402
 
-CONFIG_NAME = os.environ.get("GA_REAL_API_CONFIG", "native_oai_config")
-EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "gpt-native")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "gpt-5.5")
+EXPECTED_PROFILE_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 
 
@@ -63,11 +62,22 @@ class FakeAgent:
 def check_profile(summary: dict) -> bool:
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-        from genericagent.llm.core import reload_mykeys
+        from genericagent.llm.client import load_clients_from_yaml
 
-        cfg = reload_mykeys()[0].get(CONFIG_NAME) or {}
-    summary["profile"] = sanitize({"configName": CONFIG_NAME, "name": cfg.get("name"), "model": cfg.get("model")})
-    return cfg.get("name") == EXPECTED_PROFILE_NAME and cfg.get("model") == EXPECTED_MODEL
+        clients, _active, config_path, _mtime = load_clients_from_yaml(start_dir=REPO_ROOT)
+    target = next((c for c in clients if getattr(c.backend, "name", "") == EXPECTED_PROFILE_NAME), None)
+    backend = getattr(target, "backend", None)
+    summary["profile"] = sanitize({
+        "configName": str(config_path),
+        "name": getattr(backend, "name", None),
+        "model": getattr(backend, "model", None),
+        "available": [getattr(c.backend, "name", "") for c in clients],
+    })
+    return (
+        target is not None
+        and summary["profile"]["name"] == EXPECTED_PROFILE_NAME
+        and summary["profile"]["model"] == EXPECTED_MODEL
+    )
 
 
 def main() -> int:
@@ -78,7 +88,7 @@ def main() -> int:
         print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
         return 0
     if not check_profile(summary):
-        summary["error"] = "profile mismatch; expected configured gpt-5.5 profile"
+        summary["error"] = "profile mismatch; expected the zhanlu-ds default profile"
         print(json.dumps(sanitize(summary), ensure_ascii=False, indent=2))
         return 2
     captured = io.StringIO()
