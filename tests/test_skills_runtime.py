@@ -246,22 +246,18 @@ class SkillsRuntimeTest(unittest.TestCase):
     def test_truncated_description_keeps_the_trigger_sentence(self):
         from genericagent.core.skills import SkillSpec, format_skill_listing
 
-        # 500+ chars: the "Use when..." sentence sits past the old 250-char cut.
-        description = (
-            "Produce polished, validated architecture diagrams as standalone HTML with inline SVG, "
-            "light and dark themes, and PNG or SVG export. "
-            "Use it to turn a plain-language requirement or a pasted Mermaid flowchart into an "
-            "explorable document that holds up in a design review, and to keep the diagram in sync "
-            "with the repository's real code. "
-            "Use when the user asks to visualize a system, a workflow, a data pipeline, an API call "
-            "sequence, or a state machine, or to convert an existing Mermaid diagram."
-        )
-        self.assertGreater(len(description), 450)
+        # Longer than the 1536 cap (so compaction runs), trigger last.
+        head = ("Produce polished, validated architecture diagrams as standalone HTML "
+                "with inline SVG, dark and light themes, and PNG or SVG export. ")
+        description = head * 14 + (
+            "Use when the user asks to visualize a system, a workflow, a data pipeline, "
+            "an API call sequence, or a state machine.")
+        self.assertGreater(len(description), 1536)
         skill = SkillSpec(name="diagrams", description=description, source="test",
                           root=Path("C:/skills/d"), path=Path("C:/skills/d/SKILL.md"), body="b")
-        listing = format_skill_listing([skill], char_budget=8000)
+        listing = format_skill_listing([skill], char_budget=16384)
         self.assertIn("Use when the user asks to visualize", listing)
-        self.assertLess(len(listing.split(": ", 1)[1]), 500)
+        self.assertLess(len(listing), 1700)
 
     def test_cjk_descriptions_keep_their_trigger_too(self):
         from genericagent.core.skills import SkillSpec, format_skill_listing
@@ -273,13 +269,29 @@ class SkillsRuntimeTest(unittest.TestCase):
             "把仓库里的变更整理成结构化的技术报告，覆盖背景、动机、方案对比、实现细节、验证证据、"
             "风险与后续建议，并要求每一项结论都附上对应的文件路径与行号，方便评审人复核。"
         )
-        description = sentence * 6 + "用来在交付评审会上解释清楚每一项技术决策的理由与代价。"
-        self.assertGreater(len(description), 400)
+        description = sentence * 22 + "用来在交付评审会上解释清楚每一项技术决策的理由与代价。"
+        self.assertGreater(len(description), 1536)
         skill = SkillSpec(name="report", description=description, source="test",
                           root=Path("C:/skills/r"), path=Path("C:/skills/r/SKILL.md"), body="b")
-        listing = format_skill_listing([skill], char_budget=8000)
+        listing = format_skill_listing([skill], char_budget=16384)
         self.assertIn("用来在交付评审会上", listing)
-        self.assertLess(len(listing), 500)
+        self.assertLess(len(listing), 1900)
+
+    def test_descriptions_up_to_the_cc_limit_are_listed_whole(self):
+        # _SKILL_DESC_CAP matches CC (1536, m0591:110718). A description that fits
+        # that limit must reach the model verbatim -- no half sentence, and no
+        # reliance on the trigger-splice fallback.
+        from genericagent.core.skills import SkillSpec, format_skill_listing
+
+        description = ("Handle the whole widget catalogue workflow end to end. " * 16
+                       + "Use when the user asks about the widget catalogue.")
+        self.assertGreater(len(description), 900)
+        self.assertLess(len(description), 1536)
+        skill = SkillSpec(name="catalogue", description=description, source="test",
+                          root=Path("C:/skills/c"), path=Path("C:/skills/c/SKILL.md"), body="b")
+        listing = format_skill_listing([skill], char_budget=16384)
+        self.assertIn(description.strip(), listing)
+        self.assertNotIn("...", listing)
 
     def test_listing_default_budget_is_the_module_constant(self):
         # The default grew to 16K so no skill degrades to a bare name on a
