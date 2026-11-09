@@ -95,6 +95,30 @@ class WorkflowChildAdapter:
     def _runs(self) -> list[WorkflowRun]:
         return self.store.list_runs(session_id=self._session_id())
 
+    def initial_cursors(self) -> dict[str, int]:
+        """Seed each run's live stream at its current durable tail.
+
+        Session-scoped on purpose: ``temp/sessions`` is shared by every GA
+        session, and the bridge used to call ``store.list_runs()`` unscoped
+        here -- with 118 historical runs that added ~1s to every Ink start and
+        the cost grew without bound. No session means nothing from this
+        adapter can be shown, so nothing is seeded (and nothing is scanned).
+        """
+        session_id = self._session_id()
+        if not session_id:
+            return {}
+        cursors: dict[str, int] = {}
+        for run in self._runs():
+            try:
+                rows = self.store.replay_events(run.run_id)
+            except Exception:
+                continue
+            cursors[make_workflow_source_cursor(run.run_id)] = max(
+                (int(row.sequence or 0) for row in rows),
+                default=0,
+            )
+        return cursors
+
     def list_records(self, *, include_terminal: bool = False, path_prefix: str | None = None) -> list[AgentRecord]:
         records: list[AgentRecord] = []
         for run in self._runs():

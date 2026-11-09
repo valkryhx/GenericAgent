@@ -1864,17 +1864,16 @@ class GenericAgentBridge:
                 # Workflow sources are per-run. Seed existing runs to their
                 # current tails so a fresh Ink session does not replay every
                 # historical workflow event into the bounded UI event list.
-                store = getattr(adapter, "store", None)
-                try:
-                    from genericagent.core.models import make_workflow_source_cursor
-                    for run in store.list_runs() if store is not None else ():
-                        rows = store.replay_events(run.run_id)
-                        cursors[make_workflow_source_cursor(run.run_id)] = max(
-                            (int(row.sequence or 0) for row in rows),
-                            default=0,
-                        )
-                except Exception:
-                    pass
+                # The adapter owns the scope: it seeds only the *current*
+                # session's runs. Asking the store directly here used to scan
+                # every run of every GA session on each start (~1s with 118
+                # historical runs; see docs/20261109-GA-workflow启动卡顿与journal性能分析.md).
+                seed = getattr(adapter, "initial_cursors", None)
+                if callable(seed):
+                    try:
+                        cursors.update(seed())
+                    except Exception:
+                        pass
         return cursors
 
     def _emit_agent_read_model(self) -> None:
