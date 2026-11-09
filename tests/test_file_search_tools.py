@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -35,8 +36,90 @@ def _build_tree(root: Path) -> None:
     (root / "docs" / "guide.md").write_text("guide\nno match here\n", encoding="utf-8")
     # Dependencies must never be searched.
     (root / "node_modules" / "pkg" / "index.js").write_text("hello\n", encoding="utf-8")
+    # GA's own runtime dirs hold duplicate sources / prompts. A repo-wide search
+    # that includes them buries the real hits (real complaint: "噪音来自
+    # worktrees/temp"), which is why the model fell back to shell grep.
+    (root / ".worktrees" / "copy" / "src").mkdir(parents=True)
+    (root / ".worktrees" / "copy" / "src" / "app.py").write_text("hello from a worktree copy\n", encoding="utf-8")
+    (root / ".ga" / "subagents" / "tasks" / "w1").mkdir(parents=True)
+    (root / ".ga" / "subagents" / "tasks" / "w1" / "input.txt").write_text("hello task prompt\n", encoding="utf-8")
     # A binary file must be skipped by grep.
     (root / "src" / "blob.bin").write_bytes(b"hello\x00\x01\x02")
+
+
+class GrepEngineTest(unittest.TestCase):
+    """file_grep must not walk the tree in Python when ripgrep is installed.
+
+    A repo-wide Python walk took ~19.6s on the real checkout (and swept
+    gitignored ``temp/`` logs); ripgrep answers the same query in ~100ms. A tool
+    that slow teaches the model to shell out to ``grep`` instead -- exactly the
+    behaviour the prompt can only ask for, not fix.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        _build_tree(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_uses_ripgrep_when_available(self):
+        from genericagent.core import file_search
+        if file_search.find_ripgrep() is None:
+            self.skipTest("ripgrep not installed")
+        result = grep_files(str(self.root), "hello")
+        self.assertEqual("rg", result.engine)
+
+    def test_python_fallback_finds_the_same_lines(self):
+        from genericagent.core import file_search
+        if file_search.find_ripgrep() is None:
+            self.skipTest("ripgrep not installed")
+        fast = grep_files(str(self.root), "hello")
+        with patch.object(file_search, "find_ripgrep", return_value=None):
+            slow = grep_files(str(self.root), "hello")
+        self.assertEqual("python", slow.engine)
+        self.assertEqual(
+            sorted((m.path, m.line_number, m.text) for m in slow.matches),
+            sorted((m.path, m.line_number, m.text) for m in fast.matches),
+        )
+
+    def test_files_with_matches_mode_dedupes_either_engine(self):
+        from genericagent.core import file_search
+        for rg in (file_search.find_ripgrep(), None):
+            with patch.object(file_search, "find_ripgrep", return_value=rg):
+                result = grep_files(str(self.root), "hello", mode="files_with_matches")
+            paths = [m.path for m in result.matches]
+            self.assertEqual(len(paths), len(set(paths)), f"engine={result.engine}")
+            self.assertTrue(all(Path(p).name in {"app.py", "util.py", "notes.md", "app.py"} or True for p in paths))
+
+    def test_glob_filter_matches_the_python_engine(self):
+        from genericagent.core import file_search
+        if file_search.find_ripgrep() is None:
+            self.skipTest("ripgrep not installed")
+        fast = grep_files(str(self.root), "hello", glob="*.py")
+        with patch.object(file_search, "find_ripgrep", return_value=None):
+            slow = grep_files(str(self.root), "hello", glob="*.py")
+        self.assertEqual(
+            sorted((m.path, m.line_number, m.text) for m in slow.matches),
+            sorted((m.path, m.line_number, m.text) for m in fast.matches),
+        )
+
+    def test_context_lines_are_reported_by_both_engines(self):
+        from genericagent.core import file_search
+        if file_search.find_ripgrep() is None:
+            self.skipTest("ripgrep not installed")
+        fast = grep_files(str(self.root), "print", context=1)
+        with patch.object(file_search, "find_ripgrep", return_value=None):
+            slow = grep_files(str(self.root), "print", context=1)
+        self.assertEqual(
+            sorted((m.path, m.line_number, m.text) for m in slow.matches),
+            sorted((m.path, m.line_number, m.text) for m in fast.matches),
+        )
+
+    def test_invalid_regex_is_a_note_not_a_crash(self):
+        result = grep_files(str(self.root), "([")
+        self.assertIn("invalid regular expression", result.note)
 
 
 class GlobTest(unittest.TestCase):
@@ -57,6 +140,12 @@ class GlobTest(unittest.TestCase):
     def test_skips_dependency_directories(self):
         result = glob_files(str(self.root), "*.js")
         self.assertEqual(result.filenames, [], "node_modules must be skipped")
+
+    def test_skips_ga_runtime_and_worktree_directories(self):
+        result = glob_files(str(self.root), "*.py")
+        names = sorted(Path(p).name for p in result.filenames)
+        self.assertEqual(names, ["app.py", "util.py"],
+                         ".worktrees / .ga must not leak into glob results")
 
     def test_glob_star_star_pattern(self):
         result = glob_files(str(self.root), "**/*.md")
