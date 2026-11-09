@@ -1492,6 +1492,8 @@ class GenericAgentBridge:
                     # A live row is `running` between turns; the turn status is the work
                     # verdict the panel needs for a member that already finished.
                     "turnStatus": member.get("turnStatus"),
+                    # Registry liveness: a leftover `running` row must not read as work.
+                    "live": member.get("live"),
                     "parentPath": member.get("parentPath"),
                     "runId": member.get("runId"),
                     "role": "lead" if agent_id == lead_id else "teammate",

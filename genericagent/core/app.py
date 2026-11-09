@@ -2323,6 +2323,14 @@ def _release_subagent_slot(task_dir):
         agent_path = state.get('agent_path')
         if not agent_path:
             return None
+        # A self-releasing child never passes through the parent's `close_agent`, which is
+        # the only other place that returns unfinished work to the board. Without this,
+        # an `in_progress` task keeps a dead owner forever (real data 2026-11-09:
+        # 1 of 58 task rows was owned by an already-closed member).
+        try:
+            _subagent_task_store(task_dir, state).reclaim_owner(str(agent_path))
+        except Exception:
+            pass
         from genericagent.agents.registry import SubagentRegistry, _default_process_identity
 
         pid = os.getpid()
@@ -2517,6 +2525,31 @@ def resolve_reply_wait_schedule(reply_wait_iterations, reply_sleep_s, poll_inter
     return interval, timeout, None
 
 
+def _subagent_task_store(task_dir, state):
+    """The shared task board as this child sees it, from the hand-down where present.
+
+    Same resolution the idle hook needs: the spawner passes GA_TASKS_ROOT / GA_TEAM_KEY /
+    GA_PROJECT_ROOT / GA_DATA_DIR; re-deriving the board root from ``task_dir`` depth lands
+    in the orphaned legacy tree on the product layout.
+    """
+    from genericagent.agents.tasks import SubagentTaskStore
+    from genericagent.agents.team import team_name_for
+
+    tasks_root = os.environ.get('GA_TASKS_ROOT')
+    team_key = os.environ.get('GA_TEAM_KEY')
+    if tasks_root and team_key:
+        return SubagentTaskStore(
+            os.environ.get('GA_PROJECT_ROOT') or task_dir,
+            list_id=team_name_for(state.get('parent_session_id')),
+            state_root=os.environ.get('GA_DATA_DIR') or os.path.dirname(os.path.dirname(task_dir)),
+            tasks_root=tasks_root,
+            team_key=team_key,
+        )
+    # Legacy task workers did not receive an identity snapshot.
+    root_dir = os.path.dirname(os.path.dirname(task_dir))
+    return SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
+
+
 def _teammate_idle_hook(task_dir, task_name):
     """Self-driving teammate: claim the next open task, or report idle (CC m1575 qe / m0300 mat).
 
@@ -2527,26 +2560,12 @@ def _teammate_idle_hook(task_dir, task_name):
     try:
         from genericagent.agents.idle import build_idle_notification, sent_lead_dm_since_last_turn
         from genericagent.agents.state import append_jsonl_event, append_parent_inbox_event
-        from genericagent.agents.tasks import SubagentTaskStore, next_task_prompt
-        from genericagent.agents.team import team_name_for
+        from genericagent.agents.tasks import next_task_prompt
 
         state = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
-        tasks_root = os.environ.get('GA_TASKS_ROOT')
-        team_key = os.environ.get('GA_TEAM_KEY')
-        if tasks_root and team_key:
-            # The parent child-env snapshot is authoritative. Never infer the
-            # task board root from task_dir depth when identity is present.
-            store = SubagentTaskStore(
-                os.environ.get('GA_PROJECT_ROOT') or task_dir,
-                list_id=team_name_for(state.get('parent_session_id')),
-                state_root=os.environ.get('GA_DATA_DIR') or os.path.dirname(os.path.dirname(task_dir)),
-                tasks_root=tasks_root,
-                team_key=team_key,
-            )
-        else:
-            # Legacy task workers did not receive an identity snapshot.
-            root_dir = os.path.dirname(os.path.dirname(task_dir))
-            store = SubagentTaskStore(root_dir, list_id=team_name_for(state.get('parent_session_id')))
+        # The parent child-env snapshot is authoritative. Never infer the task board
+        # root from task_dir depth when identity is present.
+        store = _subagent_task_store(task_dir, state)
         events_path = os.path.join(task_dir, 'events.jsonl')
         # A completed turn is only a process fact, not proof that the assigned
         # task succeeded.  The teammate must call task_update(status="completed")

@@ -24,6 +24,9 @@ export type TeamMember = {
    *  A background teammate stays `status="running"` between turns, so this is the only
    *  field that says its work already finished. */
   turnStatus?: string | null
+  /** The registry's own liveness verdict for a non-closed row. `false` means the row is
+   *  a leftover: its process is gone but nobody ever closed it. */
+  live?: boolean | null
   parentPath?: string | null
   runId?: string | null
   role?: string | null

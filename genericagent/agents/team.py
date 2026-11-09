@@ -80,6 +80,17 @@ class SubagentTeam:
         """
         members = []
         for entry in self.members(include_closed=include_closed):
+            # Ask the registry whether the row still owns a live process. A child that
+            # died without releasing keeps `status="running"` forever; without this probe
+            # the panel shows it as `● running`. "Cannot tell" must stay alive: the roster
+            # is a report, and calling a live agent dead is the worse mistake.
+            live = True
+            probe = getattr(self.registry, "is_live", None)
+            if callable(probe):
+                try:
+                    live = bool(probe(entry.agent_path))
+                except Exception:
+                    live = True
             members.append(
                 {
                     "agentId": str(entry.agent_path),
@@ -99,6 +110,9 @@ class SubagentTeam:
                     # finished work only shows up here. Without it the panel paints a
                     # completed member as `● running` forever (24 of 80 real rows did).
                     "turnStatus": getattr(entry, "turn_status", None),
+                    # Registry liveness, not the lifecycle word: a `running` row whose
+                    # process is gone is a leftover, and the panel must not paint it as work.
+                    "live": live,
                     "parentPath": str(entry.parent_path) if entry.parent_path else None,
                     "runId": entry.run_id,
                 }

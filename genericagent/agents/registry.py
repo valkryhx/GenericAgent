@@ -270,6 +270,19 @@ class SubagentRegistry:
         """Return active and closed registry rows for durable result discovery."""
         return self.list_agents(path_prefix=path_prefix, include_closed=True)
 
+    def is_live(self, agent_path):
+        """Whether this row still owns an active slot (read-only; never mutates).
+
+        This is the same authority `_reap_stale_agents` uses. Reading the row's `status`
+        is not enough: a child that dies without releasing leaves `status="running"`
+        forever, and a roster that trusts the word reports a dead teammate as working.
+        "Cannot tell" stays alive -- reaping a live agent's row would be the worse error.
+        """
+        raw = self._load().get("agents", {}).get(str(_coerce_agent_path(agent_path)))
+        if raw is None:
+            return False
+        return bool(self._row_is_live(raw))
+
     def descendants(self, agent_path, include_closed=False):
         """Rows strictly below ``agent_path``, deepest first.
 

@@ -52,6 +52,9 @@ const VERDICT_GLYPH: Record<string, string> = {
   interrupted: '\u2717',
   evicted: '\u00d7',
   released: '\u00b7',
+  // A `running` row whose process is gone. Not a lifecycle word the registry writes --
+  // it is what the panel concludes after asking the registry for liveness.
+  stale: '\u00d7',
 }
 
 /** The single glyph shown when the verdict is not recognised (see below). */
@@ -69,7 +72,7 @@ const FAILED_CLOSE_STATUSES = new Set(['worktree_error', 'killed'])
 /** The terminal work states a closed row can hand back through `previousStatus`. */
 const WORK_VERDICTS = new Set(['completed', 'errored', 'interrupted', 'failed', 'cancelled', 'canceled'])
 
-export type TeamMemberFields = Pick<TeamMember, 'status' | 'previousStatus' | 'closedStatus' | 'turnStatus'>
+export type TeamMemberFields = Pick<TeamMember, 'status' | 'previousStatus' | 'closedStatus' | 'turnStatus' | 'live'>
 
 /**
  * How a member ended, as opposed to whether its row is still open.
@@ -92,13 +95,22 @@ export function teamMemberVerdict(member: TeamMemberFields): string {
   // A live teammate is `running` between turns, so the status alone cannot tell a
   // member that never started from one that already finished. The turn status carries
   // the real answer; `running`/`pending` mid-turn values are not verdicts.
-  if (status !== 'closed') return WORK_VERDICTS.has(turn) ? turn : status
+  if (status !== 'closed') {
+    if (WORK_VERDICTS.has(turn)) return turn
+    // `live === false` means the registry proved the process is gone: the row is a
+    // leftover, not a member at work. Unknown liveness stays `running` -- never dead.
+    return member.live === false ? 'stale' : status
+  }
   if (WORK_VERDICTS.has(previous)) return previous
   if (FAILED_CLOSE_STATUSES.has(closed)) return 'failed'
   // Legacy rows were closed before the registry recorded `previousStatus`
   // (`closed_status=released` writes `previous_status="running"`); the turn status is
   // then the only surviving work verdict.
   if (WORK_VERDICTS.has(turn)) return turn
+  // No work verdict survived, but the close reason still says something stronger than
+  // the lifecycle word `running`: a reaped row was dead, a released row handed its slot
+  // back. Reporting `running` here is what painted dead members as working.
+  if (closed === 'stale' || closed === 'released') return closed
   return previous || status
 }
 

@@ -134,6 +134,69 @@ class ChildRegistryReleaseTest(unittest.TestCase):
             entry = SubagentRegistry(manager.subagents_state_dir).list_agents(include_closed=True)[0]
             self.assertEqual("closed", getattr(entry, "status", None))
 
+    def test_a_self_releasing_child_returns_its_unfinished_tasks(self):
+        """Releasing the slot must hand unfinished work back to the shared board.
+
+        `manager.close_agent` reclaims owned tasks, but a child that ends by itself calls
+        `release_agent_slot` directly and never passes through the manager. Real data
+        (2026-11-09): one board task stayed `in_progress` with an owner whose registry row
+        was already closed (`closed_status=released`).
+        """
+        from genericagent import paths
+        from genericagent.agents.tasks import SubagentTaskStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = _product_manager(tmp)
+            roots = paths.project_roots(
+                project=manager.project_root, data_root=manager.project_state_root
+            )
+            team_key = paths.team_key(roots.project_key, "default")
+            store = SubagentTaskStore(
+                roots.project_root,
+                list_id="default",
+                state_root=roots.data_root,
+                tasks_root=roots.tasks_dir,
+                team_key=team_key,
+            )
+            task = store.create_task("half-done work")
+            store.claim_task(task["id"], "/root/kid", start=True)
+
+            task_dir = manager.task_root / "kid"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            manager.register_agent("kid", {"pid": os.getpid()})
+            (task_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "agent_path": "/root/kid",
+                        "pid": os.getpid(),
+                        "parent_session_id": "s1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GA_SUBAGENTS_STATE_DIR": str(manager.subagents_state_dir),
+                    "GA_TASKS_ROOT": str(roots.tasks_dir),
+                    "GA_TEAM_KEY": team_key,
+                    "GA_PROJECT_ROOT": str(roots.project_root),
+                    "GA_DATA_DIR": str(roots.data_root),
+                    "GA_TEAM_NAME": "default",
+                },
+                clear=False,
+            ):
+                agentmain._release_subagent_slot(str(task_dir))
+
+            row = store.get_task(task["id"])
+            self.assertIsNone(row.get("owner"), "a released child still owns a task")
+            self.assertEqual(
+                "pending",
+                row.get("status"),
+                "unfinished work was not returned to the board when the child released its slot",
+            )
+
     def test_no_second_registry_appears_under_the_task_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = _product_manager(tmp)

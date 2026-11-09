@@ -188,6 +188,46 @@ class TeamRosterWorkVerdictTest(unittest.TestCase):
         self.assertEqual(team.view()["members"][0]["turnStatus"], "completed")
 
 
+class _LiveRegistry(_FakeRegistry):
+    """Registry stand-in that also answers the liveness probe."""
+
+    def __init__(self, entries, live):
+        super().__init__(entries)
+        self._live = live
+
+    def is_live(self, agent_path):
+        return bool(self._live.get(str(agent_path), True))
+
+
+class TeamRosterLivenessProjectionTest(unittest.TestCase):
+    """The roster must ask the registry whether a running row still owns a live process.
+
+    Real data (2026-11-09 audit): all 29 rows still marked `status=running` across the
+    machine were judged dead by the registry's own liveness probe (pid gone or identity
+    mismatch). `/team` painted every one of them as `● running`, so an abandoned session
+    looked like a team hard at work. The registry already owns the answer; the read path
+    must ask it instead of trusting the lifecycle word.
+    """
+
+    def test_a_dead_running_row_is_marked_not_live(self):
+        registry = _LiveRegistry(
+            [_Entry("/root/alpha", "alpha", status="running")], {"/root/alpha": False}
+        )
+        member = SubagentTeam(registry, "/root").view()["members"][0]
+        self.assertFalse(member["live"])
+
+    def test_a_live_running_row_stays_live(self):
+        registry = _LiveRegistry(
+            [_Entry("/root/alpha", "alpha", status="running")], {"/root/alpha": True}
+        )
+        self.assertTrue(SubagentTeam(registry, "/root").view()["members"][0]["live"])
+
+    def test_a_registry_without_a_probe_does_not_invent_dead_members(self):
+        # The roster is a report: "cannot tell" must render as alive, never as dead.
+        member = SubagentTeam(_FakeRegistry([_Entry("/root/alpha", "alpha")]), "/root").view()["members"][0]
+        self.assertTrue(member["live"])
+
+
 class FakeParent:
     def __init__(self):
         self.llmclient = None

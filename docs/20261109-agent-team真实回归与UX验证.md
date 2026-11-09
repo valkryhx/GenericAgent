@@ -14,12 +14,12 @@
 | 项 | 状态 |
 | --- | --- |
 | 后端单元（team / registry / subagent） | ✅ 544 + 23 + 44 例全绿（2 skipped）；修复后重跑仍 544 + 25 + 44 |
-| `/team` 面板单测（TS） | ✅ 20 例全绿（原 17 + 新增 3） |
+| `/team` 面板单测（TS） | ✅ 26 例全绿（原 17 + 新增 9） |
 | Ink UI 全量单测 | ✅ 630/630 通过；`tsc --noEmit` 干净 |
 | `/team` 版面 e2e（L2，无 LLM） | ✅ PASS（header / Task board / footer / 宽度） |
 | 真实 LLM e2e（zhanlu-ds，L2+L3 混合） | ✅ PASS：3 teammate、3 任务全 completed、面板 3 行 `✓ completed`、report.md 落盘 |
-| 发现的真缺陷 | 1 个，已修（见 §4）：`turnStatus` 未透出，**已完成但仍在线的 teammate 在 `/team` 显示 `● running`** |
-| 未修 / 待观察 | 2 个（见 §5）：僵尸 running 行、`in_progress` 任务挂在已关闭成员上（1/52） |
+| 发现的真缺陷 | 3 个，均已修：`turnStatus` 未透出（§4）、roster 不问活体权威（§5.1）、自释放不归还任务（§5.2） |
+| 未修 / 待观察 | 1 个（§5.3 重名后缀，本次未触发；另见 §5.4 的两条非缺陷记录） |
 
 ---
 
@@ -151,32 +151,66 @@ running 行里 turn_status 已终结的: 24
 
 ---
 
-## 5. 未修 / 剩余风险
+## 5. 深入根因后追加修复的两个缺陷
 
-### 5.1 僵尸 `running` 行仍会显示 `● running`
+初版本文把下面两项写成"未修/待观察"；顺着根因继续查，两项都能在**不改语义**的前提下修掉。
 
-`registry._row_is_live()` 只在**派生子代理时**才被 `_reap_stale_agents()` 调用；
-一个会话结束后不再派生子代理，死进程留下的 `running` 行就永远 `running`。
-若这些行的 `turn_status` 也没有终态，`/team` 仍显示 `● running`。
+### 5.1 僵尸 `running` 行：读侧不问登记表的活体权威（已修）
 
-**建议**（未实施，改动面较大）：roster 读侧做一次只读的 liveness 判定，
-把死行投影成 `stale`（面板显式 `?`/`×`），不写回 registry。需要先确认
-`process_exists` 探针在 Windows 上的成本与本机行为。
+**真实现场**：本机 29 条 `status=running` 的行，用 registry 自己的 `_row_is_live()`
+逐条复核，**29/29 全部判定为死**（pid 已消失或进程身份不匹配）。也就是说：
+登记表内部本来就有权威答案，`/team` 的读侧却只信生命周期词 `running`。
 
-### 5.2 `in_progress` 任务挂在已关闭成员上（1/52）
+**根因**：`_reap_stale_agents()` 只在**派生子代理时**运行；一个会话不再派生，
+死行永远留着。roster 读的是 `entry.status`，从不问活体探针。
 
-`manager.close_agent` 会 `reclaim_tasks_for()` 把未完任务退回 pending；
-但 registry 自释放路径（`closed_status=released`）**不经过** manager，任务会留在
-`in_progress` 且 owner 指向已关闭路径。`tasks.complete_owned_in_progress()` 刻意没有
-自动调用者（CC 也是靠 teammate 自己 `TaskUpdate`），所以这是产品语义而非 bug；
-但面板上会出现"✓ 成员 + [~] 任务"。若要收口，应改在 `mark_released` 的调用方补
-`reclaim_tasks_for`，而不是在 idle 时自动完成。
+**修复（只读投影，不改 registry 数据）**：
 
-### 5.3 §4 重名后缀（`probe_fast` / `probe_fast_1`）
+- `SubagentRegistry.is_live(agent_path)`：公开 `_row_is_live` 的判定，**"说不清"一律算活**
+  （把活代理误判致死比反过来更糟）；
+- `SubagentView.view()` 增加 `live`；bridge / `protocol.ts` 透传；
+- 面板 verdict：非 closed 行在无回合结论时，`live === false` → `stale`（字形 `×`）；
+- closed 行同样收口：`previous_status=running` + `closed_status=stale/released` 且无回合结论时，
+  分别读成 `stale` / `released`，不再把 `running` 当结论。
+
+**实测**：用真实会话（`session_c7e66…`）调用 `SubagentTeam.view()`，两行都返回
+`live=False`，面板 verdict 为 `completed`（回合已完成优先于活体结论）。
+
+### 5.2 任务挂在已关闭成员上：自释放路径不归还任务（已修）
+
+**真实现场**：58 条任务里 1 条 `in_progress`，owner 的注册行已 `closed` +
+`closed_status=released`，且 `closed_at` 有值——不是历史脏数据，是运行路径产生的。
+
+**根因（两条终止路径，不变量不同）**：
+
+| 终止路径 | 是否归还任务 |
+| --- | --- |
+| 父代理 `manager.close_agent()` | ✅ `reclaim_tasks_for()` |
+| 子进程自己结束 → `app.py::_release_subagent_slot()` | ❌ 只关注册行 |
+
+子代理空闲退出时走的是第二条，于是它名下的 `in_progress` 任务永久挂在一个死 owner 上。
+
+**修复**：把子进程的任务板解析抽成 `_subagent_task_store(task_dir, state)`
+（优先用 spawn 下发的 `GA_TASKS_ROOT/GA_TEAM_KEY/GA_PROJECT_ROOT/GA_DATA_DIR`，
+legacy 布局才回落到路径推导），`_release_subagent_slot()` 在关行前调用
+`reclaim_owner(agent_path)`。idle hook 复用同一个 helper，两处解析不再各写一份。
+
+**TDD**：先写"自释放后任务应回到 pending 且 owner 为空"，在真实产品布局下变红
+（`'/root/kid' is not None`）；修复后绿；stash `app.py` 重新变红。
+
+### 5.3 重名后缀（`probe_fast` / `probe_fast_1`）
 
 `view()` 现在默认包含 closed 行，同名重跑会在面板里留下两行（旧行 `✓ completed`，
 新行 `● running`）。本次真实运行没有触发（名字唯一）。是否合并留给产品决定；
 当前字形/verdict 至少能区分"这两个是两个生命周期"。
+
+### 5.4 仍存在的行为（非缺陷，记录）
+
+- `_reap_stale_agents` 只在派生时写回 registry，因此死行会一直留在文件里；
+  面板现在读得对，但数据本身不会被清理（读侧主动写回注册表会在多写者下引入竞争，
+  本次刻意不做）。
+- `tasks.complete_owned_in_progress()` 仍没有自动调用者：回合完成不等于任务成功，
+  这是 CC 对齐的语义，不是遗漏。
 
 ---
 
@@ -204,12 +238,15 @@ npx.cmd tsx scripts\real_ink_team_swarm_e2e.ts
 
 | 文件 | 类型 |
 | --- | --- |
-| `genericagent/agents/team.py` | 后端：roster 透出 `turnStatus` |
-| `frontends/ink/bridge.py` | 后端：桥透传 `turnStatus` |
-| `frontends/ink/ui/src/protocol.ts` | 契约：`TeamMember.turnStatus` |
-| `frontends/ink/ui/src/teamPanel.ts` | UX：verdict 链使用 turn status |
-| `frontends/ink/ui/src/teamPanelRoster.test.ts` | 测试：+3 例（含 legacy closed 回落） |
-| `tests/test_subagent_team.py` | 测试：+2 例（roster 暴露 turnStatus） |
+| `genericagent/agents/team.py` | 后端：roster 透出 `turnStatus` / `live` |
+| `genericagent/agents/registry.py` | 后端：新增公开 `is_live()`（复用 `_row_is_live`，说不清算活） |
+| `genericagent/core/app.py` | 后端：抽出 `_subagent_task_store()`；子进程自释放前归还未完任务 |
+| `frontends/ink/bridge.py` | 后端：桥透传 `turnStatus` / `live` |
+| `frontends/ink/ui/src/protocol.ts` | 契约：`TeamMember.turnStatus` / `live` |
+| `frontends/ink/ui/src/teamPanel.ts` | UX：verdict 链使用回合结论、活体结论、关闭原因 |
+| `frontends/ink/ui/src/teamPanelRoster.test.ts` | 测试：+9 例（turn 结论、活体 stale、legacy closed 回落） |
+| `tests/test_subagent_team.py` | 测试：+5 例（roster 暴露 turnStatus / live） |
+| `tests/test_child_bus_handdown_paths.py` | 测试：+1 例（自释放归还未完任务） |
 | `tests/test_ink_bridge.py` | 测试：桥 payload 透传 `turnStatus` |
 | `frontends/ink/ui/scripts/real_ink_team_swarm_e2e.ts` | 测试：模型断言 + 面板 verdict 断言 + 陈旧注释订正 |
 | `temp/regression/team_registry_audit.py` | 取证脚本（temp 不入库） |

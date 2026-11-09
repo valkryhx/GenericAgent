@@ -116,6 +116,27 @@ test('the panel row shows the verdict text, so the glyph is not the only signal'
   assert.match(row!, /completed/, `the row does not say the member completed: ${row}`)
 })
 
+test('a row reaped as stale reads as stale, not as running', () => {
+  // `_reap_stale_agents` closes a dead row with `previous_status="running"` and
+  // `closed_status="stale"`. "running" is a lifecycle word, not a verdict: without this
+  // the row painted as `● running` even after the registry had reaped it.
+  assert.equal(
+    teamMemberVerdict({ status: 'closed', previousStatus: 'running', closedStatus: 'stale' }),
+    'stale',
+  )
+  assert.equal(
+    teamMemberGlyph({ status: 'closed', previousStatus: 'running', closedStatus: 'stale' }),
+    '×',
+  )
+})
+
+test('a released row with no turn verdict reads as released', () => {
+  assert.equal(
+    teamMemberVerdict({ status: 'closed', previousStatus: 'running', closedStatus: 'released' }),
+    'released',
+  )
+})
+
 test('a legacy closed row falls back to the turn verdict', () => {
   // `closed_status=released` writes `previous_status="running"`, a lifecycle word rather
   // than a verdict. The turn status is then the only surviving work verdict.
@@ -123,6 +144,32 @@ test('a legacy closed row falls back to the turn verdict', () => {
     teamMemberVerdict({ status: 'closed', previousStatus: 'running', closedStatus: 'released', turnStatus: 'completed' }),
     'completed',
   )
+})
+
+test('a running row the registry calls dead does not claim to be working', () => {
+  // Real data: 29 of 29 `status=running` rows were dead by the registry's own probe --
+  // the process was gone but nobody ever closed the row.
+  assert.equal(teamMemberVerdict({ status: 'running', live: false }), 'stale')
+  assert.equal(teamMemberGlyph({ status: 'running', live: false }), '×')
+})
+
+test('a finished turn outranks a dead process row', () => {
+  assert.equal(
+    teamMemberVerdict({ status: 'running', live: false, turnStatus: 'completed' }),
+    'completed',
+  )
+})
+
+test('unknown liveness is not treated as dead', () => {
+  assert.equal(teamMemberVerdict({ status: 'running' }), 'running')
+  assert.equal(teamMemberVerdict({ status: 'running', live: true }), 'running')
+})
+
+test('the panel row says stale, so the glyph is not the only signal', () => {
+  const lines = teamPanelLines(state([member({ status: 'running', live: false })]))
+  const row = lines.find(line => line.includes('probe_fast'))
+  assert.ok(row, `no row for the member:\n${lines.join('\n')}`)
+  assert.match(row!, /stale/)
 })
 
 test('a member closed without ever running does not claim it completed', () => {
