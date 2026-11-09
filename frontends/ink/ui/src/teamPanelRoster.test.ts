@@ -71,6 +71,22 @@ test('a live member keeps its lifecycle word as the verdict', () => {
   assert.equal(teamMemberVerdict({ status: 'idle' }), 'idle')
 })
 
+test('a live member whose turn already ended reports the turn verdict, not "running"', () => {
+  // A background teammate stays alive between turns: `status="running"` with
+  // `turn_status="completed"`. Real data: 24 of 80 registry rows sat exactly there, so a
+  // completed member painted as `● running` -- the same lifecycle-word trap as `closed`.
+  assert.equal(teamMemberVerdict({ status: 'running', turnStatus: 'completed' }), 'completed')
+  assert.equal(teamMemberGlyph({ status: 'running', turnStatus: 'completed' }), '✓')
+  assert.equal(teamMemberVerdict({ status: 'running', turnStatus: 'errored' }), 'errored')
+  assert.equal(teamMemberGlyph({ status: 'running', turnStatus: 'errored' }), '✗')
+})
+
+test('a live member still working keeps running, and a mid-turn value is not a verdict', () => {
+  assert.equal(teamMemberVerdict({ status: 'running', turnStatus: 'running' }), 'running')
+  assert.equal(teamMemberVerdict({ status: 'running', turnStatus: 'pending' }), 'running')
+  assert.equal(teamMemberVerdict({ status: 'running', turnStatus: null }), 'running')
+})
+
 test('the glyph distinguishes a completed member from an idle one', () => {
   // A hollow circle reads as "not started". Showing that for a member that finished is
   // the worst possible answer: the user thinks it is stuck.
@@ -98,6 +114,15 @@ test('the panel row shows the verdict text, so the glyph is not the only signal'
   const row = lines.find(line => line.includes('probe_fast'))
   assert.ok(row, `no row for the member:\n${lines.join('\n')}`)
   assert.match(row!, /completed/, `the row does not say the member completed: ${row}`)
+})
+
+test('a legacy closed row falls back to the turn verdict', () => {
+  // `closed_status=released` writes `previous_status="running"`, a lifecycle word rather
+  // than a verdict. The turn status is then the only surviving work verdict.
+  assert.equal(
+    teamMemberVerdict({ status: 'closed', previousStatus: 'running', closedStatus: 'released', turnStatus: 'completed' }),
+    'completed',
+  )
 })
 
 test('a member closed without ever running does not claim it completed', () => {

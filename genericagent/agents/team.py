@@ -95,6 +95,10 @@ class SubagentTeam:
                     # turn the whole panel into an error.
                     "previousStatus": getattr(entry, "previous_status", None),
                     "closedStatus": getattr(entry, "closed_status", None),
+                    # A background teammate keeps `status="running"` between turns; its
+                    # finished work only shows up here. Without it the panel paints a
+                    # completed member as `● running` forever (24 of 80 real rows did).
+                    "turnStatus": getattr(entry, "turn_status", None),
                     "parentPath": str(entry.parent_path) if entry.parent_path else None,
                     "runId": entry.run_id,
                 }

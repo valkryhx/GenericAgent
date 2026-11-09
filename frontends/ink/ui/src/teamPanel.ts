@@ -69,7 +69,7 @@ const FAILED_CLOSE_STATUSES = new Set(['worktree_error', 'killed'])
 /** The terminal work states a closed row can hand back through `previousStatus`. */
 const WORK_VERDICTS = new Set(['completed', 'errored', 'interrupted', 'failed', 'cancelled', 'canceled'])
 
-export type TeamMemberFields = Pick<TeamMember, 'status' | 'previousStatus' | 'closedStatus'>
+export type TeamMemberFields = Pick<TeamMember, 'status' | 'previousStatus' | 'closedStatus' | 'turnStatus'>
 
 /**
  * How a member ended, as opposed to whether its row is still open.
@@ -88,9 +88,17 @@ export function teamMemberVerdict(member: TeamMemberFields): string {
   const status = String(member.status || '').toLowerCase()
   const previous = String(member.previousStatus || '').toLowerCase()
   const closed = String(member.closedStatus || '').toLowerCase()
-  if (status !== 'closed') return status
+  const turn = String(member.turnStatus || '').toLowerCase()
+  // A live teammate is `running` between turns, so the status alone cannot tell a
+  // member that never started from one that already finished. The turn status carries
+  // the real answer; `running`/`pending` mid-turn values are not verdicts.
+  if (status !== 'closed') return WORK_VERDICTS.has(turn) ? turn : status
   if (WORK_VERDICTS.has(previous)) return previous
   if (FAILED_CLOSE_STATUSES.has(closed)) return 'failed'
+  // Legacy rows were closed before the registry recorded `previousStatus`
+  // (`closed_status=released` writes `previous_status="running"`); the turn status is
+  // then the only surviving work verdict.
+  if (WORK_VERDICTS.has(turn)) return turn
   return previous || status
 }
 

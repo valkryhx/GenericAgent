@@ -22,12 +22,23 @@ from genericagent.agents.team import (  # noqa: E402
 
 
 class _Entry:
-    def __init__(self, agent_path, task_name, status="running", parent_path=None, run_id="run1"):
+    def __init__(
+        self,
+        agent_path,
+        task_name,
+        status="running",
+        parent_path=None,
+        run_id="run1",
+        turn_status=None,
+        process_status=None,
+    ):
         self.agent_path = agent_path
         self.task_name = task_name
         self.status = status
         self.parent_path = parent_path
         self.run_id = run_id
+        self.turn_status = turn_status
+        self.process_status = process_status
 
 
 class _FakeRegistry:
@@ -138,6 +149,43 @@ class TeamRosterLivenessTest(unittest.TestCase):
         view = team.view()
         self.assertEqual(view["memberCount"], 1)
         self.assertIsNone(view["members"][0]["previousStatus"])
+
+
+class TeamRosterWorkVerdictTest(unittest.TestCase):
+    """A live row whose turn already ended must expose that turn's verdict.
+
+    A background teammate stays alive between turns: the registry holds
+    ``status="running"`` with ``turn_status="completed"`` and
+    ``process_status="waiting_reply"``. Measured on real data: 24 of 80 rows sat in
+    exactly that state. The roster only exposed ``status``, so ``/team`` painted them
+    as ``● running`` forever -- indistinguishable from a member that never started,
+    and blind to the same lifecycle-word trap the subagent announcements already fixed.
+    """
+
+    def test_a_live_member_reports_its_finished_turn(self):
+        team = SubagentTeam(
+            _FakeRegistry([_Entry("/root/alpha", "alpha", status="running", turn_status="completed")]),
+            "/root",
+        )
+        member = team.view()["members"][0]
+        self.assertEqual(member["status"], "running")
+        self.assertEqual(member["turnStatus"], "completed")
+
+    def test_closed_members_also_carry_the_turn_status(self):
+        team = SubagentTeam(
+            _FakeRegistry(
+                [
+                    _Entry(
+                        "/root/alpha",
+                        "alpha",
+                        status="closed",
+                        turn_status="completed",
+                    )
+                ]
+            ),
+            "/root",
+        )
+        self.assertEqual(team.view()["members"][0]["turnStatus"], "completed")
 
 
 class FakeParent:

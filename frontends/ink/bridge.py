@@ -1489,6 +1489,9 @@ class GenericAgentBridge:
                     # row's `status` is just "closed"; these two hold the verdict.
                     "previousStatus": member.get("previousStatus"),
                     "closedStatus": member.get("closedStatus"),
+                    # A live row is `running` between turns; the turn status is the work
+                    # verdict the panel needs for a member that already finished.
+                    "turnStatus": member.get("turnStatus"),
                     "parentPath": member.get("parentPath"),
                     "runId": member.get("runId"),
                     "role": "lead" if agent_id == lead_id else "teammate",

@@ -4960,6 +4960,9 @@ class InkBridgeTeamListTest(unittest.TestCase):
                 state_path=temp / "agent_1" / "state.json",
                 pid=1234,
             )
+            # A background teammate stays `running` between turns; the roster must carry
+            # the finished turn so the panel can say `completed` instead of `running`.
+            registry.mark_running("/root/agent_1", turn_status="completed")
             team_key = paths.team_key(runtime_roots.project_key, "default")
             store = SubagentTaskStore(
                 tmp,
@@ -4990,6 +4993,7 @@ class InkBridgeTeamListTest(unittest.TestCase):
         member = next(m for m in payload["members"] if m["name"] == "agent_1")
         self.assertEqual(member["taskCount"], 1)
         self.assertEqual(member["currentTask"], "Add parser")
+        self.assertEqual(member["turnStatus"], "completed")
         self.assertEqual([t["subject"] for t in payload["tasks"]], ["Add parser"])
 
 

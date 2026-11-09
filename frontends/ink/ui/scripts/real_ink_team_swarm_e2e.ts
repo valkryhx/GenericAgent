@@ -10,11 +10,12 @@ import { App } from '../src/App.js'
 import { startBridge, type BridgeClient } from '../src/bridgeClient.js'
 import { createCursorParkStdout } from '../src/stdoutCursorPark.js'
 import { applyBridgeEvent, initialState, type AppState } from '../src/state.js'
+import { teamMemberVerdict } from '../src/teamPanel.js'
 import type { BridgeCommand, BridgeEvent } from '../src/protocol.js'
 
 // Real-LLM agent-team e2e driven through the Ink input box (see
 // docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md). Uses the *current* model
-// (default deepseek-flash); no model switch. Types a hard, decomposable task
+// (default zhanlu-ds); no model switch. Types a hard, decomposable task
 // and asserts the team really formed (task board + team_mode teammates) and
 // produced real artifacts.
 
@@ -27,6 +28,7 @@ const MIN_MEMBERS = Number(process.env.GA_TEAM_E2E_MIN_MEMBERS || 2)
 const TIMEOUT_MS = Number(process.env.GA_TEAM_E2E_TIMEOUT_MS || 720_000)
 const CUSTOM_PROMPT = process.env.GA_TEAM_E2E_PROMPT || ''
 const SOFT = process.env.GA_TEAM_E2E_SOFT === '1'
+const EXPECTED_MODEL = process.env.GA_TEAM_E2E_EXPECT_MODEL || 'zhanlu-ds/moma/deepseek-latest-flash'
 
 class CaptureWriteStream extends EventEmitter {
   columns = 80
@@ -112,6 +114,23 @@ interface ChildEvidence {
   turnStatus: string | null
   processStatus: string | null
   capabilityProfile: string | null
+  sendMessageCalls: number
+}
+
+/** The child's durable transcript (the run's JSONL log), if it exists yet. */
+function childTranscriptPath(projectDir: string, session: string, runId: string | null): string | null {
+  if (!runId) return null
+  const subsRoot = path.join(projectDir, session, 'subagents')
+  try {
+    for (const dir of fs.readdirSync(subsRoot)) {
+      if (!dir.startsWith('session_')) continue
+      const candidate = path.join(subsRoot, dir, 'subagents', `${runId}.jsonl`)
+      if (fs.existsSync(candidate)) return candidate
+    }
+  } catch {
+    return null
+  }
+  return null
 }
 
 function readJson(file: string): any {
@@ -173,6 +192,16 @@ function childrenSince(runStartMs: number): ChildEvidence[] {
           turnStatus: state?.turn_status ?? null,
           processStatus: state?.process_status ?? null,
           capabilityProfile: state?.capability_profile ?? null,
+          sendMessageCalls: (() => {
+            const transcript = childTranscriptPath(projectDir, session, entry.run_id ? String(entry.run_id) : null)
+            if (!transcript) return 0
+            try {
+              const text = fs.readFileSync(transcript, 'utf8')
+              return text.split('"tool_name":"send_message"').length - 1
+            } catch {
+              return 0
+            }
+          })(),
         })
       }
     }
@@ -269,6 +298,11 @@ async function main(): Promise<number> {
       .find((event): event is Extract<BridgeEvent, { type: 'model_status' }> => event.type === 'model_status')
     const current = modelStatus?.models.find(model => model.current)
     summary.model = current?.name ?? null
+    assert.equal(
+      summary.model,
+      EXPECTED_MODEL,
+      `team e2e must run on ${EXPECTED_MODEL} (current: ${String(summary.model)})`,
+    )
     stdin.send('')
     await delay(150)
 
@@ -302,7 +336,15 @@ async function main(): Promise<number> {
     validateFrame(teamFrame, 'after /team')
     summary.teamRoster = {
       memberCount: roster?.team?.memberCount ?? null,
-      members: roster?.members?.map(member => ({ name: member.name, role: member.role, status: member.status })) ?? [],
+      members: roster?.members?.map(member => ({
+        name: member.name,
+        role: member.role,
+        status: member.status,
+        previousStatus: member.previousStatus,
+        closedStatus: member.closedStatus,
+        turnStatus: member.turnStatus,
+        taskCount: member.taskCount,
+      })) ?? [],
       taskCount: roster?.tasks?.length ?? null,
     }
     stdin.send('\u001b')
@@ -322,16 +364,18 @@ async function main(): Promise<number> {
 
     summary.evidence = {
       childrenSinceRun: children.map(child => child.taskName),
-      teamModeChildren: teamChildren.map(child => ({ taskName: child.taskName, taskId: child.taskId, turnStatus: child.turnStatus, profile: child.capabilityProfile })),
+      teamModeChildren: teamChildren.map(child => ({ taskName: child.taskName, taskId: child.taskId, turnStatus: child.turnStatus, profile: child.capabilityProfile, sendMessageCalls: child.sendMessageCalls })),
       taskIds: teamChildren.map(child => child.taskId),
       taskBoard: board ? { listId: board.listId, count: boardTasks.length, completed: completedBoardTasks.length, subjects: boardTasks.map(task => task.subject) } : null,
       report: { exists: reportExists, size: reportSize },
       artifacts: artifactFiles,
     }
 
-    // NOTE: /team lists *active* members (include_closed=False). The lead closes
-    // teammates right after reading their results, so a post-run roster is empty by
-    // design; what persists is the shared task board, which /team must still surface.
+    // NOTE: `/team` is a *report*: the roster keeps finished members (`view()`
+    // defaults to include_closed=True) so opening the panel after the lead has read
+    // the results still shows the team. Each closed row carries `previousStatus`,
+    // which is the work verdict -- asserting on it is the only way to tell a
+    // completed teammate from one that errored (both have status="closed").
     summary.teamRosterFrame = teamFrame.slice(0, 600)
     if (SOFT) {
       // 观测模式：只记录证据，不强制团队成立（用于验证自然输入是否自触发 team）
@@ -349,6 +393,48 @@ async function main(): Promise<number> {
       assert.equal(new Set(subjects).size, subjects.length, `task board contains duplicate subjects: ${JSON.stringify(subjects)}`)
       assert.ok((roster?.tasks?.length ?? 0) >= MIN_MEMBERS, `/team payload did not surface the shared task board (saw ${roster?.tasks?.length} tasks)`)
       assert.ok(teamFrame.includes('Task board'), `/team panel frame missing "Task board": ${JSON.stringify(teamFrame.slice(0, 200))}`)
+
+      // §10.3 of docs/20261109-agent-team在subagent播报修复后的复查清单.md: the earlier
+      // verification was code-level only. A finished session's /team must show its
+      // members (not 0), and each row must read as a verdict rather than "closed".
+      const rosterMembers = roster?.members ?? []
+      assert.ok(
+        rosterMembers.length >= MIN_MEMBERS,
+        `/team roster hid finished members (saw ${rosterMembers.length}, expected >=${MIN_MEMBERS}): ${JSON.stringify(summary.teamRoster)}`,
+      )
+      assert.equal(
+        roster?.team?.memberCount,
+        rosterMembers.length,
+        'roster memberCount disagrees with the members payload',
+      )
+      for (const member of rosterMembers) {
+        assert.ok(String(member.name || '').trim(), `a roster member has no name: ${JSON.stringify(member)}`)
+        // One rule, shared with the panel: closed rows answer with `previousStatus`,
+        // live rows with `turnStatus` (a background teammate stays `running` between
+        // turns). Either way the row must read as finished work, not as a lifecycle word.
+        assert.equal(
+          teamMemberVerdict(member),
+          'completed',
+          `teammate ${member.name} reads as ${teamMemberVerdict(member)} in /team (status=${member.status}, previous=${member.previousStatus}, turn=${member.turnStatus})`,
+        )
+      }
+      const verdictRows = teamFrame.split('\n').filter(line => line.includes('✓') && line.includes('completed'))
+      assert.ok(
+        verdictRows.length >= MIN_MEMBERS,
+        `/team panel did not paint one completed row per teammate (saw ${verdictRows.length}): ${JSON.stringify(teamFrame.slice(0, 600))}`,
+      )
+      assert.ok(
+        !teamFrame.includes(' ? '),
+        `/team panel painted an unknown verdict glyph: ${JSON.stringify(teamFrame.slice(0, 600))}`,
+      )
+      // Process assertion (docs/20261103-GA真实LLM测试策略-过程断言优先.md): the team
+      // channel must actually be used. Each teammate's prompt requires send_message to
+      // the lead; a green run where nobody spoke would still produce a plausible report.
+      const silentTeammates = teamChildren.filter(child => child.sendMessageCalls === 0)
+      assert.ok(
+        silentTeammates.length === 0,
+        `teammate(s) never called send_message: ${JSON.stringify(silentTeammates.map(child => child.taskName))}`,
+      )
       assert.ok(reportExists && reportSize > 0, `expected lead to write report.md in ${ART_DIR}`)
     }
 

@@ -20,6 +20,10 @@ export type TeamMember = {
   previousStatus?: string | null
   /** Why the row was closed (`shutdown` / `killed` / `released` / `stale` / ...). */
   closedStatus?: string | null
+  /** The member's last turn (`completed` / `errored` / `interrupted` / `running` / `pending`).
+   *  A background teammate stays `status="running"` between turns, so this is the only
+   *  field that says its work already finished. */
+  turnStatus?: string | null
   parentPath?: string | null
   runId?: string | null
   role?: string | null
