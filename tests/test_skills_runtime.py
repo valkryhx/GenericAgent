@@ -220,6 +220,7 @@ class SkillsRuntimeTest(unittest.TestCase):
 
         self.assertIn("partially relevant", prompt)
         self.assertIn("authoritative", prompt)
+        self.assertIn("task type", prompt)
 
     def test_skill_overrides_and_frontmatter_control_visibility(self):
         import os
