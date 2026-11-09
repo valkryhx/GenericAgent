@@ -13,6 +13,7 @@
 | 已修（本轮，TDD + 反向确认） | 3 | 运行时确定性 shim、prompt provenance 框架、resume 内容寻址匹配 |
 | 已确认、本轮不修 | 3 | 三态 stall 检测缺失、`budget` DSL 缺失、VM 边界 4096 数组上限缺失 |
 | 审计通过（语义一致，无需改） | 3 | orchestration 工具裁剪、`parallel`/`pipeline` 失败语义、`bashCommandClamp` |
+| 真实回归 | **11/11 通过** | 10 个 Python workflow e2e + 1 个 Ink 全链路（zhanlu-ds，含 `/workflow` opt-in 与 Tavily MCP），详见 §8 |
 
 对照基准用 319 文档 §12.5 的六个不变量：
 
@@ -201,6 +202,42 @@ printf '%s\n' '{"type":"start","script":"export const meta = { name: \"p\", desc
 # 审计用例
 python -m unittest tests.test_workflow_worker_sandbox tests.test_workflow_resume_matching tests.test_workflow_child_agent tests.test_workflow_runtime
 ```
+
+---
+
+---
+
+## 8. 真实 LLM 回归矩阵（11 次，2026-11-09）
+
+目的：验证 2026-11-08 的子智能体改造与本轮 workflow 修改之后，GA 自己的动态工作流仍能正常跑。
+全部使用真实 LLM（`zhanlu-ds/moma/deepseek-latest-flash`），日志与汇总在 `temp/perf/matrix/`（临时目录，不入库）。
+
+| # | 场景 | 脚本 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | P0 门禁：红 gate → 修复 agent → 绿 gate | `real_workflow_p0_e2e.py` | 11.9s | ✅ passed |
+| 2 | max turns 重试 | `real_workflow_max_turns_retry_e2e.py` | 10.2s | ✅ passed |
+| 3 | 严格 schema 子代理 | `real_workflow_strict_schema_child_e2e.py` | 8.2s | ✅ passed |
+| 4 | 降级语义 | `real_workflow_degraded_semantics_e2e.py` | 22.3s | ✅ passed |
+| 5 | slice7 schema 回落 | `real_workflow_slice7_schema_fallback_e2e.py` | 7.0s | ✅ passed |
+| 6 | wait barrier（上游完成才放行下游） | `real_workflow_wait_barrier_e2e.py` | 72.7s | ✅ passed（2 job，barrier 满足） |
+| 7 | overview/detail 导出 | `real_workflow_overview_detail_export.py` | 1.1s | ✅ passed（导出既有 run，非新执行） |
+| 8 | 工作区外 deliverables（3 并行写） | `real_workflow_external_dir_deliverables_e2e.py` | 11.2s | ✅ 10/10 checks |
+| 9 | 经 bridge 工具入口、工作区外报告 | `real_workflow_external_reports_via_tool_e2e.py` | 25.3s | ✅ 10/10 checks（3 agent 各 token>0） |
+| 10 | P0 复跑（稳定性） | `real_workflow_p0_e2e.py` | 12.7s | ✅ passed |
+| 11 | Ink 真实 App：`使用 workflow` opt-in → Tavily 搜索 → 生成 result.html | `real_ink_ui_workflow_autonomous_e2e.ts` | 约 6 分钟 | ✅ passed（MCP 工具真实调用、result.html 12,943 B、UI 回到 idle） |
+
+结论：11/11 通过，未发现 workflow 链路回归。
+
+> 说明：第 8/9 条的 `PASS/RESULT` 打印被 bridge 的后台日志重定向捕获，
+> 实际结果在 `temp/ink_bridge_backend.log`（两次均 10/10）。
+
+### 8.1 关于"开关"
+
+这些脚本走的是 workflow 运行时/工具入口（`workflow_launch_from_tool`、`WorkflowRuntime`），
+不经过会话级开关。会话开关 `/workflow on` 只影响**对话式自动编排**的判定
+（`WorkflowActivationState`），不限制工具入口本身；单轮里写"使用 workflow"也会得到同样的 opt-in。
+开关路径由第 11 条（Ink 真实 App + 真实 bridge + 真实 LLM）覆盖：
+该条用 `使用 workflow` 单轮 opt-in 触发，与 `/workflow on` 走同一个 `resolve_workflow_activation`。
 
 ---
 
