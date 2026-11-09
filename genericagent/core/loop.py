@@ -22,7 +22,26 @@ class BaseHandler:
         if hasattr(self, method_name):
             args['_index'] = index; args['_tool_num'] = tool_num
             prer = yield from try_call_generator(self.tool_before_callback, tool_name, args, response)
-            ret = yield from try_call_generator(getattr(self, method_name), args, response)
+            # A tool failure is the model's to read, not the process's to die from. Before
+            # this guard a ValueError raised inside a tool (e.g. `send_message` addressed to
+            # a name no agent owns) unwound `agent_runner_loop` -> `_drain_agent_stream` ->
+            # `Agent.run`, killing the whole worker thread. The model then never saw why,
+            # and the supervisor had to resume a worker mid-task. Anything a tool raises is
+            # turned into an error result with the tool's own words, so the next turn can
+            # correct the arguments. Only descendants of `Exception` are caught:
+            # KeyboardInterrupt / SystemExit must still stop the process.
+            try:
+                ret = yield from try_call_generator(getattr(self, method_name), args, response)
+            except Exception as tool_error:
+                error_text = f"{type(tool_error).__name__}: {tool_error}"
+                yield f"[Tool error] {tool_name}: {error_text}" + chr(10)
+                return StepOutcome(
+                    {"status": "error", "tool_error": {"tool_name": str(tool_name), "error": error_text}},
+                    next_prompt=(
+                        f"工具 `{tool_name}` 执行失败：{error_text}。"
+                        "请修正参数后重试，或改用其它可行做法；不要原样重试同一调用。"
+                    ),
+                )
             _ = yield from try_call_generator(self.tool_after_callback, tool_name, args, response, ret)
             return ret
         elif tool_name == 'bad_json': return StepOutcome(None, next_prompt=args.get('msg', 'bad_json'), should_exit=False)

@@ -15,7 +15,7 @@ import os
 
 
 LEAD_AGENT_NAME = "team-lead"
-RESERVED_AGENT_NAMES = frozenset({"main", "team-lead", "user", "system"})
+RESERVED_AGENT_NAMES = frozenset({"main", "team-lead", "user", "system", "root"})
 TEAM_NAME_ENV = "GA_TEAM_NAME"
 
 

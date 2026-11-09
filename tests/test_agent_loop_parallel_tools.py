@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from genericagent.core.loop import (  # noqa: E402
+    BaseHandler,
     StepOutcome,
     _batch_tool_calls,
     _run_single_tool,
@@ -240,4 +241,55 @@ class ToolFenceTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    unittest.main()
+
+
+class ToolExceptionContainmentTest(unittest.TestCase):
+    """A tool that raises must not unwind the whole turn.
+
+    Real 15-task run 1794216552052: a teammate sent `send_message` to the lead's own path
+    (`/root`), the product raised ValueError inside `do_send_message`, nothing caught it,
+    `_drain_agent_stream` propagated out of `Agent.run`, the worker thread died and the lead
+    had to resume it with two tasks left orphaned on the board. A tool failure belongs to the
+    model as a result it can read and retry -- not to the process as a fatal error.
+    """
+
+    def _drive(self, gen):
+        chunks = []
+        try:
+            while True:
+                chunks.append(next(gen))
+        except StopIteration as stop:
+            return chunks, stop.value
+
+    def test_a_tool_that_raises_becomes_an_error_result(self):
+        class Handler(BaseHandler):
+            def do_boom(self, args, response):
+                raise ValueError("no agent named `/root/root` exists")
+
+        chunks, outcome = self._drive(Handler().dispatch("boom", {}, None))
+
+        joined = "".join(chunks)
+        self.assertIn("no agent named", joined)
+        self.assertIn("boom", joined)
+        self.assertIsInstance(outcome, StepOutcome)
+        self.assertEqual(outcome.data.get("status"), "error")
+        self.assertIn("boom", outcome.next_prompt)
+
+    def test_a_tool_that_dies_mid_stream_keeps_what_it_already_printed(self):
+        class Handler(BaseHandler):
+            def do_stream(self, args, response):
+                yield "partial output\n"
+                raise RuntimeError("stream died")
+
+        chunks, outcome = self._drive(Handler().dispatch("stream", {}, None))
+
+        joined = "".join(chunks)
+        self.assertIn("partial output", joined)
+        self.assertIn("stream died", joined)
+        self.assertEqual(outcome.data.get("status"), "error")
+
+
+
+if __name__ == '__main__':
     unittest.main()

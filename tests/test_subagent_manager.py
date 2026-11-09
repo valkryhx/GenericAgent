@@ -2600,10 +2600,26 @@ class LeadMessageRoutingTest(unittest.TestCase):
     reads, and never spawns a new turn on the sender side."""
 
     def test_lead_aliases_are_recognized(self):
-        for alias in ("team-lead", "lead", "main", "/root/team-lead", "TEAM-LEAD", " team-lead "):
+        # `/root` is the lead's real agent path and the only address a teammate can read off
+        # `list_agents`; leaving it out made `send_message(target="/root")` resolve to
+        # `/root/root` and raise "no agent named /root/root exists" (15-task run 1794216552052).
+        for alias in ("team-lead", "lead", "main", "root", "/root", "/root/", "/root/team-lead", "TEAM-LEAD", " team-lead "):
             self.assertTrue(SubagentManager._is_lead_target(alias), alias)
         for peer in ("agent_1", "/root/agent_1", "team-leads", "leader", ""):
             self.assertFalse(SubagentManager._is_lead_target(peer), peer)
+
+    def test_a_teammate_addressing_the_lead_as_root_lands_in_the_parent_inbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._teammate(td)
+
+            row = manager.send_message("/root", "M03 done", author="/root/agent_1")
+
+            self.assertTrue(row.get("lead_message"))
+            self.assertEqual(row["recipient"], "/root")
+            self.assertEqual(self._inbox(td)[-1]["message"], "M03 done")
+            # The refusal used to mkdir a `/root/root` task dir before failing; nothing may
+            # be created for an address that is not an agent.
+            self.assertFalse((Path(td) / "temp" / "root").exists())
 
     def _teammate(self, td, name="agent_1"):
         return SubagentManager(root_dir=td, self_agent_path=f"/root/{name}")

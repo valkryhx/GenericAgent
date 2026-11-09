@@ -13,13 +13,13 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端单元（team / registry / subagent） | ✅ 首轮 544 + 23 + 44 全绿（2 skipped）；两轮修复后 544 + 28 + 44 + child_bus 17 全绿 |
-| `/team` 面板单测（TS） | ✅ 26 例全绿（原 17 + 新增 9） |
-| Ink UI 全量单测 | ✅ 630/630 通过；`tsc --noEmit` 干净 |
+| 后端单元（team / registry / subagent / close / dispatch） | ✅ 目标 8 套件 183 例、`test_ga_subagent_tools` + `test_subagent_prompts` 56 例全绿 |
+| `/team` 面板单测（TS） | ✅ 28 例全绿（verdict 链 + viewport） |
+| Ink UI 全量单测 | ✅ 643/643 通过；`tsc --noEmit` 干净 |
 | `/team` 版面 e2e（L2，无 LLM） | ✅ PASS（header / Task board / footer / 宽度） |
-| 真实 LLM e2e（zhanlu-ds，L2+L3 混合） | ✅ PASS：3 teammate、3 任务全 completed、面板 3 行 `✓ completed`、report.md 落盘 |
-| 发现的真缺陷 | 3 个，均已修：`turnStatus` 未透出（§4）、roster 不问活体权威（§5.1）、自释放不归还任务（§5.2） |
-| 未修 / 待观察 | 1 个（§5.3 重名后缀，本次未触发；另见 §5.4 的两条非缺陷记录） |
+| 真实 LLM e2e（zhanlu-ds，L2+L3 混合） | ✅ 3 任务场景 PASS；15 任务规模场景见 §8（含 5 次真实运行与逐次根因） |
+| 发现的真缺陷 | 6 个，均已修：`turnStatus` 未透出（§4）、roster 不问活体权威（§5.1）、自释放不归还任务（§5.2）、面板 16 行静默截断（§8.2）、关闭竞态把完成记成 interrupted（§8.7）、`/root` 非 lead 别名 + 工具异常掀翻 worker + `full_resp` 未绑定（§8.8） |
+| 未修 / 待观察 | §5.3 重名后缀（未触发）；§5.4 两条非缺陷记录 |
 
 ---
 
@@ -367,6 +367,53 @@ stash 掉 `manager.py` 反向确认重新变红；修复后 `test_subagent_manag
 共 131 例全绿。
 
 
+### 8.8 第五次运行（`runId=1794216552052`）：链路级缺陷三连
+
+任务板 14/15，`#14 (M04)` 停在 `in_progress`；三个 teammate 中途各被 resume 过两次
+（`output.txt → output1.txt → output2.txt`，`resume_source=sidechain_transcript`）。
+这不是模型发挥不稳，而是一条**从工具调用一路炸到进程**的链路，证据在子进程 stderr：
+
+```
+do_send_message(target="/root")
+  -> manager.send_message: _is_lead_target("/root") == False      # LEAD_TARGETS 不含 root
+  -> _queue_message: primary_path = "/root/root"
+  -> _reject_dead_mailbox: ValueError: no agent named `/root/root` exists
+  -> loop.BaseHandler.dispatch: 未捕获，异常穿出工具层
+  -> app._drain_agent_stream: next(gen) 抛出
+  -> app.run except 分支: failed_resp = full_resp + ...           # full_resp 尚未绑定
+  -> UnboundLocalError（把原始 ValueError 掩盖掉）-> worker 线程死亡
+  -> lead 用 resume 重启 worker；该任务 owner 已被归还为 pending
+  -> 重启后的 worker 写完产物却完不成 task_update，任务留在板上
+```
+
+三个修复，各带 TDD 与反向确认：
+
+| # | 缺陷 | 修复 | 测试 |
+| --- | --- | --- | --- |
+| 1 | `/root` 是 lead 的真实 agent path，但不是 lead 别名 | `LEAD_TARGETS` 增加 `root`；同时把 `root` 加入 `RESERVED_AGENT_NAMES`（杜绝 `/root/root` 子代理名，消除歧义） | 别名用例 + "发给 `/root` 落进 parent inbox 且不创建 `/root/root` 目录" + 保留名用例 |
+| 2 | 工具抛异常会把整个回合/worker 掀翻 | `BaseHandler.dispatch` 捕获工具异常 → `StepOutcome(status=error, tool_error=...)` + `next_prompt`，让模型看到失败原因并修正；只捕 `Exception`，`KeyboardInterrupt`/`SystemExit` 照常终止 | `ToolExceptionContainmentTest` 2 例（直接抛；yield 一半后抛），stash `loop.py` 反向确认 2 例变红 |
+| 3 | 错误分支引用未绑定的 `full_resp`，`UnboundLocalError` 掩盖真实错误 | 流式 `try` 之前 `full_resp = ''` | `tests/test_app_run_error_path.py`：AST 守卫断言 "try 之前必须绑定 full_resp" 且 "except 仍读 full_resp"（改注释不影响判定），临时删掉初始化即变红 |
+
+单测全绿：目标 8 个 Python 套件 **183 例**、`test_ga_subagent_tools` + `test_subagent_prompts` **56 例**。
+
+
+### 8.9 第六次运行（`runId=1794220837477`）：三处修复后全绿
+
+同场景、同模型（`zhanlu-ds/moma/deepseek-latest-flash`），`passed: true`：
+
+| 维度 | 结果 |
+| --- | --- |
+| 任务板 | 15/15 `completed`，id/subject 唯一，全部有 owner |
+| teammate | w1 / w2 / w3 全部 `turn=completed`，`send_message` 15 / 9 / 12 次 |
+| 稳定性 | 三个 worker 各只有一份 `output.txt`——**没有一次 resume、没有 traceback**（第五次是 2 次 resume/人） |
+| 关闭结论 | registry 三行 `previous_status=completed`；其中 w1 `closed_status=killed`（关闭时进程被强杀），面板仍读作 `✓ completed`，正是 §8.7 修复的目标 |
+| 执行期进度 | 137 次 `/team` 采样、129 个有效进度样本；`completed` 0→15 单调递增；首个部分进度样本 `completed=1, inProgress=2, pending=12`；129 个采样都有真实 Ink 帧 |
+| 正确性 | 10 个简单答案与独立复算完全一致（1/178/31/7/123/132/200/8/311/28，仓库新增测试后计数随之上移）；5 个中等摘要均含关键词；`report.md` 4312 B |
+
+耗时约 7 分钟（第五次同规模因崩溃+重启耗时约 26 分钟）。三处修复都没有引入新的 `/team` 渲染问题：
+面板 verdict 无 `?`，行宽在终端宽度内，15 条任务超长时仍有 `… (+N more line(s))` 提示。
+
+
 ## 9. 变更清单（本轮）
 
 | 文件 | 类型 |
@@ -381,6 +428,15 @@ stash 掉 `manager.py` 反向确认重新变红；修复后 `test_subagent_manag
 | `frontends/ink/ui/src/App.tsx` | UX：面板改用 `teamPanelViewport()`，超长时显式提示隐藏行数 |
 | `frontends/ink/ui/src/teamPanel.test.ts` | 测试：+2 例（viewport 截断可见 / 不截断原样） |
 | `frontends/ink/ui/scripts/real_ink_team_scale_e2e.ts` | 测试：15 任务规模 e2e，执行期采样 `/team` |
+| `genericagent/agents/manager.py` | 后端：关闭时重读子进程最终回合状态；`LEAD_TARGETS` 增加 `root` |
+| `genericagent/agents/team.py` | 后端：`RESERVED_AGENT_NAMES` 增加 `root`，杜绝 `/root/root` 子代理名 |
+| `genericagent/core/loop.py` | 后端：工具异常收敛为 `StepOutcome(status=error)`，不再掀翻回合/worker |
+| `tests/test_subagent_manager.py` | 测试：+2 例（grace 内完成仍记 completed；`/root` 别名落 parent inbox） |
+| `tests/test_subagent_team.py` | 测试：保留名用例纳入 `root` / `ROOT` |
+| `tests/test_app_run_error_path.py` | 测试：AST 守卫（full_resp 绑定顺序 + except 前提）2 例 |
+| `tests/test_agent_loop_parallel_tools.py` | 测试：+2 例（工具异常收敛，含 stash 反向确认） |
+| `frontends/ink/ui/src/teamSampling.ts` | 测试基础设施：`/team` 采样停机规则（纯函数） |
+| `frontends/ink/ui/src/teamSampling.test.ts` | 测试：+5 例（含第三次运行 bug 的反向确认） |
 | `frontends/ink/ui/src/teamPanelRoster.test.ts` | 测试：+9 例（turn 结论、活体 stale、legacy closed 回落） |
 | `tests/test_subagent_team.py` | 测试：+5 例（roster 暴露 turnStatus / live） |
 | `tests/test_child_bus_handdown_paths.py` | 测试：+1 例（自释放归还未完任务） |

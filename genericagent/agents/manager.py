@@ -2302,7 +2302,7 @@ class SubagentManager:
                 pass
         return CloseResult(target, previous, closed, previous.final_output_path)
 
-    LEAD_TARGETS = frozenset({"team-lead", "lead", "main"})
+    LEAD_TARGETS = frozenset({"team-lead", "lead", "main", "root"})
 
     @classmethod
     def _is_lead_target(cls, target):

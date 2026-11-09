@@ -59,7 +59,7 @@ class SubagentTeamTest(unittest.TestCase):
         self.assertEqual(team_name_for("session_a47239e44b0f42eabd6b3cee0f193ef2"), "session-a47239e4")
 
     def test_reserved_names(self):
-        for name in ("main", "team-lead", "user", "system", "USER"):
+        for name in ("main", "team-lead", "user", "system", "USER", "root", "ROOT"):
             self.assertTrue(is_reserved_name(name), name)
         self.assertFalse(is_reserved_name("researcher"))
         self.assertFalse(is_reserved_name(""))

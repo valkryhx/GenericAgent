@@ -2038,6 +2038,11 @@ class GenericAgent:
                                 handler, effective_tools_schema, max_turns=70, verbose=self.verbose,
                                 initial_user_content=initial_content)
             stop_watcher = self._start_stop_file_watcher()
+            # Bound before the stream: the except branch below builds its turn response from
+            # `full_resp`, and `_drain_agent_stream` can raise before returning (a tool error
+            # used to do exactly that). Without this the error handler itself died with
+            # UnboundLocalError, masking the real failure and killing the worker thread.
+            full_resp = ''
             try:
                 full_resp, self.last_turn_outcome = self._drain_agent_stream(gen, display_queue, source)
                 # Do NOT rewrite markup only on `done` (e.g. </summary> → </summary>\n\n).
