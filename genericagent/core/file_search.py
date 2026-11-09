@@ -38,6 +38,11 @@ _BINARY_SNIFF_BYTES = 8192
 _COMMON_IGNORE_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".next",
+    # GA's own runtime tree: ``.ga/`` holds subagent worktrees/registries and a
+    # checkout may keep ``.worktrees/`` copies of whole sources. Searching them
+    # returns duplicate hits and buries the real ones -- the reason a model
+    # gives up on file_grep and shells out to grep instead.
+    ".ga", ".worktrees",
 })
 
 
@@ -89,6 +94,109 @@ def find_ripgrep() -> str | None:
         except OSError:
             continue
     return None
+
+
+def _grep_with_ripgrep(
+    root: str,
+    pattern: str,
+    *,
+    glob: str | None,
+    ignore_case: bool,
+    context: int,
+    head_limit: int,
+    mode: str,
+) -> GrepResult | None:
+    """Run the same query through ripgrep, or ``None`` when it cannot be used.
+
+    The Python walk below is correct but scans every file: on the real checkout a
+    repo-wide ``files_with_matches`` query took ~19.6s, which is why the model
+    gave up on ``file_grep`` and shelled out to ``grep``. ripgrep answers the
+    same query in ~100ms, honours ``.gitignore`` and skips binaries, and the
+    explicit ``--glob`` negations keep GA's own runtime dirs out of the results.
+
+    Any rg failure (missing binary, unsupported regex syntax, unexpected exit
+    code) returns ``None`` so the caller can fall back to the Python scan.
+    """
+    rg = find_ripgrep()
+    if not rg:
+        return None
+    command = [rg, "--no-messages", "--color", "never", "--line-number", "--no-heading"]
+    if ignore_case:
+        command.append("--ignore-case")
+    if context:
+        command += ["--context", str(context)]
+    if glob:
+        command += ["--glob", glob]
+    for ignored in sorted(_COMMON_IGNORE_DIRS):
+        command += ["--glob", "!**/" + ignored + "/**"]
+    if mode == "files_with_matches":
+        command.append("--files-with-matches")
+    elif mode == "count":
+        command.append("--count-matches")
+    command += ["--", pattern, "."]
+    try:
+        completed = subprocess.run(
+            command, cwd=str(root), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode not in (0, 1):
+        return None
+
+    base = Path(root)
+
+    def _absolute(path_text: str) -> str:
+        # rg prints a dot-separated relative path with the platform separator;
+        # a plain lstrip would leave a leading backslash, which pathlib then
+        # treats as drive-root-relative, so join the cleaned relative part.
+        normalized = path_text.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return str(base / normalized)
+
+    matches: list[GrepMatch] = []
+    total = 0
+    truncated = False
+    line_pattern = re.compile(r"^(.*?)([:-])(\d+)([:-])(.*)$")
+    for raw in completed.stdout.splitlines():
+        if not raw:
+            continue
+        if mode == "files_with_matches":
+            total += 1
+            if len(matches) >= head_limit:
+                truncated = True
+                continue
+            matches.append(GrepMatch(path=_absolute(raw), line_number=0, text=""))
+            continue
+        if mode == "count":
+            path_text, _, count_text = raw.rpartition(":")
+            try:
+                count = int(count_text)
+            except ValueError:
+                continue
+            total += count
+            if len(matches) >= head_limit:
+                truncated = True
+                continue
+            matches.append(GrepMatch(path=_absolute(path_text), line_number=0, text=str(count)))
+            continue
+        parsed = line_pattern.match(raw)
+        if parsed is None:
+            continue
+        path_text, separator, line_text, _, content = parsed.groups()
+        if separator == ":":
+            total += 1
+            if total > head_limit:
+                truncated = True
+                continue
+        matches.append(GrepMatch(
+            path=_absolute(path_text),
+            line_number=int(line_text),
+            text=content,
+        ))
+    return GrepResult(matches=matches, total_matches=total, truncated=truncated,
+                      mode=mode, engine="rg")
 
 
 def _is_probably_binary(path: Path) -> bool:
@@ -212,6 +320,11 @@ def grep_files(
         regex = _compile(pattern, ignore_case)
     except re.error as exc:
         return GrepResult(note=f"invalid regular expression: {exc}", mode=normalized_mode)
+
+    fast = _grep_with_ripgrep(str(root), str(pattern), glob=glob, ignore_case=ignore_case,
+                              context=context, head_limit=head_limit, mode=normalized_mode)
+    if fast is not None:
+        return fast
 
     matches: list[GrepMatch] = []
     total = 0

@@ -408,7 +408,8 @@ def build_skill_prompt(char_budget: int = 8000) -> str:
         return ""
     return (
         f"{NL}[Available Skills]{NL}"
-        "When a user task matches one of these skills, call load_skill with the skill name before answering or acting. "
-        "The listing is only an index; load the full SKILL.md before following it. "
-        f"{listing}{NL}"
+        "Before starting a task, scan this list. If any skill is even partially relevant to the task's domain, "
+        "repository, process or deliverable, call load_skill and read the full SKILL.md first; do not skip it "
+        "because you think you already know how. The listing is only an index; the loaded skill is authoritative. "
+        f"{NL}{listing}{NL}"
     )

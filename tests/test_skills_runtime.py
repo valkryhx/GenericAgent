@@ -186,6 +186,41 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertLessEqual(len(listing), 220)
         self.assertIn("long", listing)
 
+    def test_skill_prompt_puts_the_listing_on_its_own_lines(self):
+        # The instruction used to end with a space and run straight into the
+        # first listing row ("...following it. - workflow-authoring: ..."), so
+        # the highest-salience skill looked like part of the sentence.
+        from genericagent.core import skills as skills_runtime
+
+        spec = skills_runtime.SkillSpec(
+            name="demo",
+            description="demo skill",
+            source="test",
+            root=Path("C:/skills/demo"),
+            path=Path("C:/skills/demo/SKILL.md"),
+            body="body",
+        )
+        with patch.object(skills_runtime, "discover_skills", return_value=[spec]),              patch.object(skills_runtime, "_skill_overrides", return_value={}):
+            prompt = skills_runtime.build_skill_prompt()
+
+        lines = [line for line in prompt.splitlines() if line.strip()]
+        self.assertEqual("[Available Skills]", lines[0].strip())
+        self.assertTrue(any(line.startswith("- demo: demo skill") for line in lines))
+        self.assertNotIn("following it. - demo", prompt)
+
+    def test_skill_prompt_tells_the_model_to_scan_before_acting(self):
+        from genericagent.core import skills as skills_runtime
+
+        spec = skills_runtime.SkillSpec(
+            name="demo", description="d", source="test",
+            root=Path("C:/skills/demo"), path=Path("C:/skills/demo/SKILL.md"), body="body",
+        )
+        with patch.object(skills_runtime, "discover_skills", return_value=[spec]),              patch.object(skills_runtime, "_skill_overrides", return_value={}):
+            prompt = skills_runtime.build_skill_prompt()
+
+        self.assertIn("partially relevant", prompt)
+        self.assertIn("authoritative", prompt)
+
     def test_skill_overrides_and_frontmatter_control_visibility(self):
         import os
         from unittest.mock import patch
