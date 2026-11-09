@@ -282,9 +282,11 @@ def discover_skills(
 _SKILL_DESC_CAP = 400
 
 # Claude Code derives its budget (window x 4 x 0.01 ~= 8000 at 200k) and allows an
-# override; GA keeps 8000 as the default and exposes the same escape hatch.
+# override. GA lists more skills (the local/Claude/Codex roots share one index), so
+# the default is 2x CC's -- 16K keeps every description whole on this machine --
+# and the env knob is the same escape hatch in both directions.
 SKILL_LISTING_CHAR_BUDGET_ENV = "GA_SKILL_LISTING_CHAR_BUDGET"
-DEFAULT_SKILL_LISTING_CHAR_BUDGET = 8000
+DEFAULT_SKILL_LISTING_CHAR_BUDGET = 16384
 
 
 def _skill_listing_budget() -> int:
@@ -365,7 +367,7 @@ def _compact_description(text: str, cap: int) -> str:
 
 def format_skill_listing(
     skills: Iterable[SkillSpec],
-    char_budget: int = 8000,
+    char_budget: int = DEFAULT_SKILL_LISTING_CHAR_BUDGET,
     *,
     for_model: bool = True,
 ) -> str:

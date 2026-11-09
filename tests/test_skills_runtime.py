@@ -281,6 +281,23 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertIn("用来在交付评审会上", listing)
         self.assertLess(len(listing), 500)
 
+    def test_listing_default_budget_is_the_module_constant(self):
+        # The default grew to 16K so no skill degrades to a bare name on a
+        # machine with ~50 skills; one source of truth, no literal drift.
+        from genericagent.core import skills as skills_runtime
+
+        self.assertEqual(16384, skills_runtime.DEFAULT_SKILL_LISTING_CHAR_BUDGET)
+        captured = {}
+
+        def fake_listing(specs, char_budget=None, *, for_model=True):
+            captured["budget"] = char_budget
+            return "- demo"
+
+        with patch.object(skills_runtime, "format_skill_listing", side_effect=fake_listing),              patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GA_SKILL_LISTING_CHAR_BUDGET", None)
+            skills_runtime.build_skill_prompt()
+        self.assertEqual(skills_runtime.DEFAULT_SKILL_LISTING_CHAR_BUDGET, captured.get("budget"))
+
     def test_listing_budget_env_override_is_honoured(self):
         from genericagent.core import skills as skills_runtime
 
