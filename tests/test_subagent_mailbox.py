@@ -288,6 +288,9 @@ class SubagentMailboxTest(unittest.TestCase):
             class DoneQueue:
                 def get(self, timeout=None):
                     return {"done": "ok"}
+                def get_nowait(self):
+                    # await_turn_done drains the queue non-blocking first.
+                    return {"done": "ok"}
 
             class FakeAgent:
                 peer_hint = True

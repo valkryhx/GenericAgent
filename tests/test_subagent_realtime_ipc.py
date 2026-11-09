@@ -301,6 +301,9 @@ class SubagentChildSubscriptionTest(unittest.TestCase):
         class DoneQueue:
             def get(self, timeout=None):
                 return {"done": "ok"}
+            def get_nowait(self):
+                # await_turn_done drains the queue non-blocking first.
+                return {"done": "ok"}
 
         class FakeAgent:
             peer_hint = True
@@ -442,6 +445,9 @@ class MailboxTriggerOverRealtimeTest(unittest.TestCase):
             class DoneQueue:
                 def get(self, timeout=None):
                     return {"done": "ok"}
+                def get_nowait(self):
+                    # await_turn_done drains the queue non-blocking first.
+                    return {"done": "ok"}
 
             class FakeAgent:
                 peer_hint = True
@@ -472,6 +478,9 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
 
         class DoneQueue:
             def get(self, timeout=None):
+                return {"done": "ok"}
+            def get_nowait(self):
+                # await_turn_done drains the queue non-blocking first.
                 return {"done": "ok"}
 
         class FakeAgent:
@@ -546,6 +555,9 @@ class ChildSubscriptionObservabilityTest(unittest.TestCase):
 
             class DoneQueue:
                 def get(self, timeout=None):
+                    return {"done": "ok"}
+                def get_nowait(self):
+                    # await_turn_done drains the queue non-blocking first.
                     return {"done": "ok"}
 
             class FakeAgent:
@@ -955,6 +967,9 @@ class ChildEventSignalsTheParentTest(unittest.TestCase):
 
             class DoneQueue:
                 def get(self, timeout=None):
+                    return {"done": "ok"}
+                def get_nowait(self):
+                    # await_turn_done drains the queue non-blocking first.
                     return {"done": "ok"}
 
             class FakeAgent:

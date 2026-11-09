@@ -48,7 +48,13 @@ class ChildPathRecoveryTest(unittest.TestCase):
 
             self.assertIsInstance(outcome.data, dict)
             self.assertEqual("error", outcome.data["status"])
-            self.assertIn("invalid workspace path", outcome.data["msg"])
+            # The failure is surfaced through the generic tool-exception
+            # containment (loop.BaseHandler.dispatch): the tool name and the
+            # WorkspacePathError both reach the model as a retryable error.
+            tool_error = outcome.data["tool_error"]
+            self.assertEqual("file_read", tool_error["tool_name"])
+            self.assertIn("workspace child", tool_error["error"])
+            self.assertIn("file_read", outcome.next_prompt or "")
 
     def test_file_read_on_relative_child_still_reads(self):
         with tempfile.TemporaryDirectory() as tmp:

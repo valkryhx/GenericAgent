@@ -145,6 +145,10 @@ class SubagentEventBusTest(unittest.TestCase):
                 def get(self, timeout=None):
                     return {"done": "finished"}
 
+                def get_nowait(self):
+                    # await_turn_done drains the queue non-blocking first.
+                    return {"done": "finished"}
+
             class FakeAgent:
                 peer_hint = True
                 task_dir = None
