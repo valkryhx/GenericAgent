@@ -143,6 +143,14 @@ class RepoPromptLayersTest(unittest.TestCase):
             "read_agent_result",
             "update_working_checkpoint",
             "没跑成或跑不动的验证要在汇报里明说",
+            # Tool-selection discipline (CC 319 "# Using your tools": dedicated
+            # tools first, shell only for shell-only operations).
+            "file_glob",
+            "file_grep",
+            "只有 shell 才能做的事才用 code_run",
+            # Skills are authoritative procedures, not optional references.
+            "部分相关",
+            "load_skill",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.base)
@@ -152,6 +160,10 @@ class RepoPromptLayersTest(unittest.TestCase):
             with self.subTest(heading=heading):
                 self.assertIn(heading, self.base_en)
         self.assertIn("read_agent_result", self.base_en)
+        for expected in ("file_glob", "file_grep", "Use code_run only for what needs a shell",
+                         "partially relevant"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.base_en)
 
     def test_project_doc_stays_the_project_layer(self):
         for heading in (

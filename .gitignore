@@ -213,3 +213,6 @@ projects/genericagent-*/
 bug/
 tool-results/session/
 reports/
+# runtime asset manifest written by paths.ensure_runtime_assets()
+assets/.bundled-assets.json
+skills/.bundled-assets.json

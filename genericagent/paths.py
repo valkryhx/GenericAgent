@@ -7,9 +7,11 @@ project root from their own ``__file__`` location.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,34 +192,133 @@ def seed_llm_config() -> Path | None:
 LLM_CONFIG_PATH = resolve_llm_config_path() or (user_config_dir() / "llm.yaml")
 
 
-def _copy_tree_missing(source: Path, target: Path) -> None:
-    """Copy bundled read-only resources into the writable runtime directory.
+# Records the sha256 of every bundled file we wrote into the runtime directory.
+# Without it a shipped file can never be updated (the old merge-only seeding
+# kept a stale 31-tool schema for ever, so an installed GA silently lacked the
+# tools the repository had), and without the hash a user edit cannot be told
+# apart from a stale copy.
+ASSET_MANIFEST_NAME = ".bundled-assets.json"
 
-    Existing user files are never overwritten.  This is a merge, not a mirror.
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_asset_manifest(target: Path) -> dict:
+    try:
+        payload = json.loads((target / ASSET_MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = payload.get("files") if isinstance(payload, dict) else None
+    return dict(files) if isinstance(files, dict) else {}
+
+
+def _save_asset_manifest(target: Path, files: dict) -> None:
+    tmp = None
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".bundled-assets.", suffix=".tmp", dir=target)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump({"version": 1, "files": files}, handle, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, target / ASSET_MANIFEST_NAME)
+        tmp = None
+    except OSError:
+        return
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _sync_bundled_tree(source: Path, target: Path, *, force: bool = False) -> None:
+    """Seed bundled read-only resources, refreshing the ones we manage.
+
+    Rules, in order:
+
+    * missing in the runtime directory -> copy it and record its hash;
+    * recorded and unchanged since we wrote it -> refresh it when the bundled
+      content changed (this is how a shipped fix reaches an existing install);
+    * recorded but changed since we wrote it -> the user edited it; leave it;
+    * not recorded (legacy install or a hand-placed file) -> leave it and mark
+      it unmanaged (``null`` in the manifest), so no later bundle can clobber
+      it. ``force`` (``GA_REFRESH_ASSETS=1``) overwrites these too, for a
+      deliberate repair of an install seeded before the manifest existed.
     """
     if not source.is_dir():
         return
     try:
         target.mkdir(parents=True, exist_ok=True)
-        for item in source.rglob("*"):
-            if not item.is_file():
-                continue
-            relative = item.relative_to(source)
-            destination = target / relative
-            if destination.exists():
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, destination)
     except OSError:
-        # Runtime asset seeding is best-effort; callers report the concrete
-        # failure when a required feature asks for a missing file.
         return
+    manifest = _load_asset_manifest(target)
+    changed = False
+    for item in source.rglob("*"):
+        if not item.is_file() or item.name == ASSET_MANIFEST_NAME:
+            continue
+        relative = item.relative_to(source).as_posix()
+        destination = target / relative
+        try:
+            bundled = _sha256_file(item)
+        except OSError:
+            continue
+        if not destination.exists():
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+            except OSError:
+                continue
+            manifest[relative] = bundled
+            changed = True
+            continue
+        try:
+            current = _sha256_file(destination)
+        except OSError:
+            continue
+        if relative not in manifest or manifest[relative] is None:
+            if not force:
+                # Legacy install or a hand-placed file: adopt it as *unmanaged*
+                # (recorded as null) so no later bundle can overwrite it.
+                if relative not in manifest:
+                    manifest[relative] = None
+                    changed = True
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+            except OSError:
+                continue
+            manifest[relative] = bundled
+            changed = True
+            continue
+        recorded = manifest[relative]
+        if force or (current == recorded and current != bundled):
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+            except OSError:
+                continue
+            manifest[relative] = bundled
+            changed = True
+    if changed:
+        _save_asset_manifest(target, manifest)
+
+
+def _refresh_assets_requested() -> bool:
+    value = str(os.environ.get("GA_REFRESH_ASSETS") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def ensure_runtime_assets() -> None:
     """Seed assets and bundled skills into the per-user runtime directory."""
-    _copy_tree_missing(BUNDLED_ASSETS_DIR, ASSETS_DIR)
-    _copy_tree_missing(BUNDLED_SKILLS_DIR, SKILLS_DIR)
+    force = _refresh_assets_requested()
+    _sync_bundled_tree(BUNDLED_ASSETS_DIR, ASSETS_DIR, force=force)
+    _sync_bundled_tree(BUNDLED_SKILLS_DIR, SKILLS_DIR, force=force)
 
 
 def ensure_runtime_dirs() -> None:
