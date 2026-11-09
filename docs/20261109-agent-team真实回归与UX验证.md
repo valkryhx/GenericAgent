@@ -234,16 +234,153 @@ npx.cmd tsx scripts\real_ink_team_swarm_e2e.ts
 
 ---
 
-## 7. 变更清单（本轮）
+## 8. 规模场景：10 个简单 + 5 个中等任务的真实团队回归（2026-11-09）
+
+前面几次真实运行都是 3 个任务，只能证明链路通。规模一上来，问题才露头：
+任务板是否真的能被自驱动 teammate 逐条认领、`/team` 在执行**过程中**是否看得到进度、
+面板装不装得下 15 条任务。
+
+### 8.1 场景与脚本
+
+新增 `frontends/ink/ui/scripts/real_ink_team_scale_e2e.ts`（真实 App + 真实 bridge + zhanlu-ds）：
+
+- lead 用 `task_create` 建 15 个任务（S01–S10 简单、M01–M05 中等）；
+- 起 3 个 teammate（`team_mode=true`，绑定前三个任务），其余任务由 idle hook 自动认领；
+- 每个任务要求：产物写到 `temp/team_scale_<runId>/<subject前缀>.txt`，
+  `task_update ... completed`，并 `send_message` 给 lead；
+- **执行期间每 ~1.5s 发一次 `/team`**，记录 roster 快照（成员、任务状态、面板文本、真实 Ink 帧）。
+
+断言分三层：
+
+| 层 | 断言 |
+| --- | --- |
+| 后端 | 任务板恰好 15 条、id/subject 唯一、全部 completed 且有 owner；3 个 team_mode 子代理都 completed、都真的调过 `send_message`；lead 写出 `report.md` |
+| 正确性 | 10 个简单任务的答案由测试**独立复算**（文件数 / 标题数），必须与产物里的 `count=` 完全一致；5 个中等任务摘要必须包含指定关键词 |
+| 前端 | 采样期间至少 3 个快照；`completed` 单调不减；至少一个快照显示"正在干活"（`in_progress>0` 或 `0<completed<15`）；面板里出现 `Task board` 且带 `[~]`/`[x]`；成员行 verdict 不得是 `?`；行宽 < 终端宽度；截断必须可见 |
+
+### 8.2 规模暴露的 UX 缺陷：面板 16 行硬截断且静默
+
+`App.tsx` 原来把面板行 `slice(0, TEAM_PANEL_MAX_ROWS=16)`。15 个任务 + 3 个成员 + 表头/页脚
+约 23 行，于是**任务板的后 6 条永远看不到，且界面没有任何"还有更多"的提示**——
+用户会以为团队只做了 9 件事。
+
+修复：`teamPanelViewport(lines, maxRows)`（`teamPanel.ts`）——保留表头、保留末尾键位提示、
+中间插入 `… (+N more line(s); r refresh)`；App 改用它。新增 2 例单测，
+并做反向确认：改回 `slice` 后"截断必须可见"立即变红。
+
+### 8.3 第一次运行结果（`runId=1794210261197`）
+
+- **任务板**：15/15 completed，id/subject 唯一，全部有 owner。
+- **正确性**：10 个简单任务的答案与测试独立复算**全部一致**
+  （S01=1、S02=176、S03=31、S04=7、S05=123、S06=130、S07=200、S08=8、S09=309、S10=28）；
+  5 个中等摘要都包含指定关键词；`report.md` 3730 B；3 个 teammate 各有 9–12 次 `send_message`。
+- **失败点**：w1 被 lead 以 `all 15 tasks completed` 关闭时仍处于回合中
+  （`previous_turn_status=running`、`process_status=alive`），registry 记为 `interrupted`，
+  测试"每个 teammate 回合 completed"断言失败。
+
+**这条失败暴露的是真问题**：w1 在 15:55:25 已经产出最终 assistant 文本（transcript 有 assistant 事件），
+但 `output.txt` 没有 `[ROUND END]`、没有 `turn_completed` 事件，state 仍是 `running/alive`；
+lead 在 15:57:21 关闭它（116 秒后）。也就是**模型已给出最终答案，子进程却卡在收尾前**。
+扫本机 95 个 task dir，同签名（有 output 但无 `[ROUND END]`、无 `turn_completed`）只出现 1 次，
+不是系统性问题，但每次都会让 `/team` 把一个干完活的成员显示成 `✗ interrupted`。
+
+### 8.4 第二次运行（`runId=1794212230279`）与收尾修复
+
+同样 15 个任务、同模型，**一次通过**：
+
+- 任务板 15/15 completed；10 个简单答案独立复算全部一致；5 个中等摘要含关键词；
+  `report.md` 5026 B；3 个 teammate 全部 completed（`send_message` 6/9/18 次）。
+- **执行期进度可见**：共 256 个 `/team` 采样，`completed` 序列从 0 单调升到 15；
+  第一个部分进度样本是 `members=3, completed=1, inProgress=2, pending=12`；
+  期间 `inProgress` 最高为 2；256 个采样中**真实 Ink 帧**都包含面板（`realPanelFrames=256`），
+  面板行宽在终端宽度内，且未出现未知 verdict。
+- 未复现 w1 的收尾卡顿。但为消除该类风险，worker 的完成信号做了收敛。
+
+### 8.5 修复：不再把"显示队列的 done"当作唯一完成信号
+
+`genericagent/core/app.py` 新增 `await_turn_done()`，替换 worker 里裸的
+`dq.get(timeout=300)`：
+
+- 正常收到 `done` → 原样返回；
+- 若本轮**已有最终 assistant 文本**、agent 已停止运行、且队列空闲 ≥5s →
+  用该文本完成收尾，并写 `turn_finalize_recovered` 事件；
+- agent 仍在运行时**绝不**恢复；超时是**空闲超时**（每来一个流式 item 就重置），
+  所以超过 5 分钟的长回合不会被误杀（与原先 `dq.get(timeout=300)` 的语义一致）。
+
+依据是 w1 的证据：模型最终答案已经落盘（transcript assistant 事件），
+卡住的是"完成信号"，不是"生成"。恢复只在可证明安全时发生（有最终文本 + 进程已停）。
+
+新增 `tests/test_subagent_turn_finalize.py`（6 例）：正常 done、丢失 done 后恢复、
+仍在运行时等待、无最终文本时超时、队列活动重置恢复窗口、长回合不被误杀。
+反向确认：把恢复条件改成恒假 → 2 例红；恢复后全绿。
+另保留 `GA_SUBAGENT_DEBUG=1` 门控日志（queue created / queue item keys /
+assistant callback / round output written / finalize state write），后续复现可直接定位。
+
+### 8.6 第三次运行（`runId=1794214021444`）：测试脚本自己的假失败
+
+这一次任务是**全部完成**的：任务板 15/15 completed，10 个简单答案独立复算全部一致，
+5 个中等摘要含关键词，产物全在；只有 `report.md` 缺失——因为脚本提前退出，把 bridge 杀了，lead 没来得及写。
+
+提前退出的原因在**测试脚本**，不在产品：采样到约 412 s 时 `completed=5, inProgress=0, pending=10`，
+脚本判定"卡住"（当时规则是连续 4 次没有变化就退出），可 lead 的 transcript 显示
+16:53:57 还在派 `/root/w1` 领任务，worker 全部 `live=true`。**有活着的 worker 时，计数不动是派活间隔，不是卡死。**
+
+修法：
+- 停机判据改为「lead 空闲 **且** 没有活跃 worker **且** 计数连续 20 次不变」；
+- 抽成纯函数 `frontends/ink/ui/src/teamSampling.ts::advanceSampling()`，配 5 例单测：
+  计数变化重置、有活跃 worker 时永不退出、无活跃 worker + 20 次停、板满立停、lead 忙时不退出；
+- 反向确认：把规则改回第三次的旧版（`stalled>=4`，不看 liveWorkers）→ "a live worker keeps the run going"
+  立即变红；恢复后 5/5 绿。
+
+### 8.7 第四次运行（`runId=1794214844108`）：暴露真缺陷——关闭竞态把干完活的成员记成失败
+
+任务板 15/15 completed、答案全对、`report.md` 落盘，但 roster 里 w2/w3 是 `interrupted`，
+面板把它们画成 `✗ failed`（只有 w1 是 `✓ completed`）。这不是模型问题，证据在子进程事件流里：
+
+```
+w2  17:14:09 stop_requested → 17:14:10 turn_finalize_recovered → turn_completed → 17:14:11 agent_closed
+w3  17:14:11 stop_requested → 17:14:12 turn_finalize_recovered → turn_completed → 17:14:13 agent_closed
+registry（关闭后）: status=closed, previous_status=running, closed_status=killed, turn_status=running
+```
+
+**根因**（`genericagent/agents/manager.py::_close_single_agent`）：
+
+1. 关闭流程**先** `read_agent()` 取快照（此刻子进程还在回合中，`turn_status=running`）；
+2. 然后写 `_stop`、等 `grace_s`（默认 2 s）——这 2 秒正是子进程 abort + 收尾的窗口
+   （§8.5 的 `turn_finalize_recovered` 就是在这时触发的）；
+3. 关闭逻辑却仍用**旧快照**算 `closed_turn_status`（`running` → `interrupted`），
+   并把 `previous_status=running` 写进 registry，同时把子进程刚写的 `completed` 覆盖掉。
+
+于是：**任务全部完成的成员，在 `/team` 里显示为失败。** 这是"生命周期词冒充工作结论"的第四个变种，
+与 §4、§5.1 同源。
+
+**修复**（同样只改读侧快照，不改进程控制）：
+
+- `stop` + grace 结束后**重读** `state.json`，走一次 `_refresh_state()`（`[ROUND END]` 即视为完成）；
+- 只有终态（`completed` / `errored`）才覆盖旧快照的 `turn_status` 与 `final_output_path`；
+- 真正被中途杀掉的成员仍然是 `running` → `interrupted`，不会把失败洗成完成。
+
+**TDD**：新增
+`tests/test_subagent_manager.py::test_close_agent_keeps_a_turn_that_finished_during_the_stop_grace`
+（模拟"读快照时还在跑、grace 期间写完 ROUND END"），RED 为 `'running' != 'completed'`；
+stash 掉 `manager.py` 反向确认重新变红；修复后 `test_subagent_manager` / `test_agent_control*`
+共 131 例全绿。
+
+
+## 9. 变更清单（本轮）
 
 | 文件 | 类型 |
 | --- | --- |
 | `genericagent/agents/team.py` | 后端：roster 透出 `turnStatus` / `live` |
 | `genericagent/agents/registry.py` | 后端：新增公开 `is_live()`（复用 `_row_is_live`，说不清算活） |
-| `genericagent/core/app.py` | 后端：抽出 `_subagent_task_store()`；子进程自释放前归还未完任务 |
+| `genericagent/core/app.py` | 后端：抽出 `_subagent_task_store()`；子进程自释放前归还未完任务；`await_turn_done()` 收尾恢复 + `GA_SUBAGENT_DEBUG` 日志 |
+| `tests/test_subagent_turn_finalize.py` | 测试：收尾信号丢失时的恢复（5 例，含反向确认） |
 | `frontends/ink/bridge.py` | 后端：桥透传 `turnStatus` / `live` |
 | `frontends/ink/ui/src/protocol.ts` | 契约：`TeamMember.turnStatus` / `live` |
-| `frontends/ink/ui/src/teamPanel.ts` | UX：verdict 链使用回合结论、活体结论、关闭原因 |
+| `frontends/ink/ui/src/teamPanel.ts` | UX：verdict 链使用回合结论、活体结论、关闭原因；`teamPanelViewport()` |
+| `frontends/ink/ui/src/App.tsx` | UX：面板改用 `teamPanelViewport()`，超长时显式提示隐藏行数 |
+| `frontends/ink/ui/src/teamPanel.test.ts` | 测试：+2 例（viewport 截断可见 / 不截断原样） |
+| `frontends/ink/ui/scripts/real_ink_team_scale_e2e.ts` | 测试：15 任务规模 e2e，执行期采样 `/team` |
 | `frontends/ink/ui/src/teamPanelRoster.test.ts` | 测试：+9 例（turn 结论、活体 stale、legacy closed 回落） |
 | `tests/test_subagent_team.py` | 测试：+5 例（roster 暴露 turnStatus / live） |
 | `tests/test_child_bus_handdown_paths.py` | 测试：+1 例（自释放归还未完任务） |

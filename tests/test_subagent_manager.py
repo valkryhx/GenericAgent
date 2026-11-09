@@ -295,6 +295,69 @@ class SubagentManagerReadTest(unittest.TestCase):
             self.assertEqual(result.closed_state.process_status, "shutdown")
             self.assertEqual(terminated, [])
 
+    def test_close_agent_keeps_a_turn_that_finished_during_the_stop_grace(self):
+        # Real 15-task run: the lead sent stop at 17:14:09 while w2 was mid-round; the child
+        # aborted, ran the finalize-recovery path and emitted turn_completed at 17:14:10;
+        # close landed at 17:14:11 and recorded previous_status="running"/closed="killed", so
+        # /team painted a worker whose tasks were all completed as `✗ failed`. `previous` is
+        # read *before* the stop request, so the close must re-read the child's last word.
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td) / "temp" / "late_finisher"
+            task_dir.mkdir(parents=True)
+            output_path = task_dir / "output.txt"
+            output_path.write_text("still working\n", encoding="utf-8")
+            state_path = task_dir / "state.json"
+            atomic_write_json(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "task_name": "late_finisher",
+                    "agent_path": "/root/late_finisher",
+                    "pid": 1234,
+                    "round": 0,
+                    "turn_status": "running",
+                    "process_status": "alive",
+                    "output_path": str(output_path),
+                    "final_output_path": None,
+                },
+            )
+            finished = {"count": 0}
+
+            def sleep(_seconds):
+                if finished["count"]:
+                    return
+                finished["count"] += 1
+                output_path.write_text("M05 done\n\n[ROUND END]\n", encoding="utf-8")
+                raw = read_json_or_none(state_path) or {}
+                raw.update(
+                    {
+                        "turn_status": "completed",
+                        "process_status": "waiting_reply",
+                        "final_output_path": str(output_path),
+                    }
+                )
+                atomic_write_json(state_path, raw)
+
+            manager = SubagentManager(
+                root_dir=td,
+                process_exists=lambda pid: pid == 1234,
+                terminate_process=lambda _pid: None,
+                sleep=sleep,
+            )
+
+            result = manager.close_agent("late_finisher", reason="all tasks completed", grace_s=1)
+
+            self.assertEqual(result.previous_state.turn_status, "completed")
+            self.assertEqual(result.closed_state.turn_status, "completed")
+            self.assertEqual(result.closed_state.process_status, "killed")
+            self.assertEqual(manager.registry.get("/root/late_finisher").previous_status, "completed")
+            closed_events = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["type"] == "agent_closed"
+            ]
+            self.assertEqual(closed_events[-1]["previous_turn_status"], "completed")
+
     def test_close_agent_appends_sidechain_agent_closed_event_when_session_is_known(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = self._write_running_state(td)

@@ -3,7 +3,7 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field, fields as dataclass_fields
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields, replace
 from pathlib import Path
 from genericagent import paths
 
@@ -2183,10 +2183,26 @@ class SubagentManager:
                     # that escape aborted the close and left the row open forever.
                     close_process_status = "shutdown" if self.process_exists(previous.pid) else "exited"
 
+        raw = read_json_or_none(task_dir / "state.json") or {}
+        # The stop request above is what makes a live child abort and finalize its turn, so
+        # `previous` -- read before it -- can be stale by exactly the interesting amount.
+        # The 15-task run showed stop_requested -> turn_finalize_recovered -> turn_completed
+        # at 17:14:10, close at 17:14:11, and the registry still recorded the worker as
+        # `running`/`killed`; /team then painted a member whose every task was completed as
+        # `✗ failed`. Re-read the child's last word and let the normal refresh reconcile
+        # `[ROUND END]` against it. Only a terminal turn status is taken over: a child that
+        # was killed mid-turn must still read as `interrupted`.
+        refreshed = self._refresh_state(previous.task_name, task_dir, raw)
+        refreshed_turn_status = str(refreshed.get("turn_status") or previous.turn_status)
+        if refreshed_turn_status in {"completed", "errored"} and refreshed_turn_status != previous.turn_status:
+            previous = replace(
+                previous,
+                turn_status=refreshed_turn_status,
+                final_output_path=refreshed.get("final_output_path") or previous.final_output_path,
+            )
         closed_turn_status = previous.turn_status
         if closed_turn_status not in {"completed", "errored"}:
             closed_turn_status = "interrupted"
-        raw = read_json_or_none(task_dir / "state.json") or {}
         raw.update(
             {
                 "schema_version": 1,

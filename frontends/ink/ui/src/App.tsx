@@ -34,6 +34,7 @@ import {
   teamPanelCommandForKey,
   teamPanelFromRoster,
   teamPanelLines,
+  teamPanelViewport,
   type TeamPanelState,
 } from './teamPanel.js'
 import { workflowStatusBarCommandForKey, workflowStatusBarFromState, workflowStatusBarRows } from './workflowStatusBar.js'
@@ -2161,7 +2162,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     [workflowPanel],
   )
   const teamPanelRows = useMemo(
-    () => (teamPanel ? teamPanelLines(teamPanel).slice(0, TEAM_PANEL_MAX_ROWS) : []),
+    () => (teamPanel ? teamPanelViewport(teamPanelLines(teamPanel), TEAM_PANEL_MAX_ROWS) : []),
     [teamPanel],
   )
   const hooksPanelRows = useMemo(

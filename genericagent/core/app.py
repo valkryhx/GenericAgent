@@ -2622,6 +2622,49 @@ def _teammate_idle_hook(task_dir, task_name):
         return False
 
 
+def await_turn_done(display_queue, *, on_item, agent_is_running, assistant_text_getter,
+                    timeout_s=300.0, recovery_grace_s=5.0, poll_s=0.5,
+                    monotonic_fn=time.monotonic, sleep_fn=time.sleep):
+    """Return ``(done_item, recovered)`` for one child turn.
+
+    The worker historically treated the display queue's ``done`` item as "this turn
+    finished". The model's final answer is already durable in the transcript and in
+    ``output.txt`` before that item arrives, so a lost or delayed ``done`` strands the
+    worker until the 300s timeout -- and a parent close in that window records
+    ``interrupted`` for a teammate whose tasks all completed (real case: 1 of 95 child
+    task dirs, 2026-11-09).
+
+    Recovery only happens when it is provably safe: the round produced a final assistant
+    text and the agent has stopped running. While the agent still runs, or before any
+    final text exists, this keeps waiting and ultimately times out.
+
+    ``timeout_s`` is an *idle* timeout: streaming a long turn keeps producing items, and a
+    turn longer than five minutes must not be killed just for being long (the original
+    ``dq.get(timeout=300)`` reset on every item; this keeps that behaviour).
+    """
+    last_activity = monotonic_fn()
+    while True:
+        try:
+            item = display_queue.get_nowait()
+        except queue.Empty:
+            item = None
+            sleep_fn(poll_s)
+        if item is not None:
+            if 'done' in item:
+                return item, False
+            if on_item is not None:
+                on_item(item)
+            last_activity = monotonic_fn()
+        now = monotonic_fn()
+        if now - last_activity >= timeout_s:
+            raise TimeoutError('subagent turn did not finish')
+        if item is not None:
+            continue
+        text = assistant_text_getter()
+        if text is not None and not agent_is_running() and now - last_activity >= recovery_grace_s:
+            return {'done': text}, True
+
+
 def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations=300, reply_sleep_s=2, sleep_fn=time.sleep, permission_profile=None, permission_options=None, parent_permission_mode=None, capability_options=None, poll_interval_s=None, idle_timeout_s=None, monotonic_fn=time.monotonic):
     task_dir = str(task_dir)
     task_name = os.path.basename(os.path.normpath(task_dir))
@@ -2706,6 +2749,11 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
         child_ipc_status=child_ipc_status,
         child_ipc_fallback_reason=child_ipc_fallback_reason,
     )
+    def _dbg(message):
+        # Diagnostics for the child finalize hand-off (GA_SUBAGENT_DEBUG=1).
+        if os.environ.get('GA_SUBAGENT_DEBUG') == '1':
+            print(f"[subagent-debug {time.time():.3f} {task_name}] {message}", file=sys.stderr, flush=True)
+
     nround = int(existing_state.get('round') or 0) if existing_state.get('round') else ''
     infile = os.path.join(task_dir, 'input.txt')
     if input_text:
@@ -2719,8 +2767,10 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
     with open(infile, encoding='utf-8') as f: raw = f.read()
     _subagent_transcript_append(task_dir, 'request', {'task_name': task_name, 'prompt': raw})
     _record_startup_phase('request_loaded', task_dir)
+    round_assistant_text = {'text': None}
     while True:
         output_path = os.path.join(task_dir, f'output{nround}.txt')
+        round_assistant_text['text'] = None
         try:
             _subagent_state(task_dir, task_name, nround, 'running', 'alive', output_path=output_path)
             _record_startup_phase('turn_state_written', task_dir)
@@ -2774,7 +2824,10 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                 }
                 if error:
                     payload['error'] = error
+                if not error:
+                    round_assistant_text['text'] = content
                 _subagent_transcript_append(task_dir, 'assistant', payload)
+                _dbg('assistant callback')
 
             agent._subagent_transcript_tool_before = _transcript_tool_before
             agent._subagent_transcript_tool_after = _transcript_tool_after
@@ -2787,11 +2840,25 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             agent._subagent_transcript_permission = _transcript_permission
             agent._subagent_transcript_assistant = _transcript_assistant
             dq = agent.put_task(raw, source='task')
-            while 'done' not in (item := dq.get(timeout=300)):
+            _dbg('queue created')
+
+            def _write_snapshot(item):
+                _dbg('queue item keys=%s' % sorted(item.keys()))
                 if 'next' in item and random.random() < 0.95:
                     with open(output_path, 'w', encoding='utf-8') as f: f.write(item.get('next', ''))
                     _subagent_event(task_dir, {'type': 'output_snapshot', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path})
+
+            item, recovered = await_turn_done(
+                dq,
+                on_item=_write_snapshot,
+                agent_is_running=lambda: bool(getattr(agent, 'is_running', False)),
+                assistant_text_getter=lambda: round_assistant_text['text'],
+            )
+            if recovered:
+                _dbg('turn finalize recovered from durable assistant text')
+                _subagent_event(task_dir, {'type': 'turn_finalize_recovered', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
             with open(output_path, 'w', encoding='utf-8') as f: f.write(item['done'] + '\n\n[ROUND END]\n')
+            _dbg('round output written')
             digest = sha256_file(output_path)
             state_before_final = read_json_or_none(os.path.join(task_dir, 'state.json')) or {}
             final_output_ref = None
@@ -2821,6 +2888,7 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                 )
             except Exception:
                 pass
+            _dbg('finalize state write')
             _subagent_state(task_dir, task_name, nround, 'completed', 'waiting_reply', output_path=output_path, final_output_path=output_path, final_output_sha256=digest)
             _subagent_event(task_dir, {'type': 'turn_completed', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0, 'output_path': output_path, 'sha256': digest, 'final_output_ref': final_output_ref})
             _subagent_event(task_dir, {'type': 'agent_waiting_reply', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})

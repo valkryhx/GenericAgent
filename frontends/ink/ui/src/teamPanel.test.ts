@@ -7,6 +7,7 @@ import {
   teamPanelCommandForKey,
   teamPanelFromRoster,
   teamPanelLines,
+  teamPanelViewport,
   teamTaskGlyph,
 } from './teamPanel.js'
 
@@ -67,6 +68,29 @@ test('glyphs fall back to the neutral marker', () => {
   assert.equal(teamMemberGlyph({ status: undefined }), '?')
   assert.equal(teamTaskGlyph('in_progress'), '[~]')
   assert.equal(teamTaskGlyph('nonsense'), '[ ]')
+})
+
+test('a long roster keeps the header, says how much is hidden, and keeps the footer', () => {
+  // Fifteen tasks plus three members overflow the fixed panel height. Slicing silently
+  // made the second half of the board vanish with no signal -- the user cannot tell the
+  // board is bigger than what is shown.
+  const tasks = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index + 1),
+    subject: `task ${index + 1}`,
+    status: 'completed',
+    owner: '/root/agent_1',
+  }))
+  const lines = teamPanelLines(teamPanelFromRoster({ ...rosterEvent, tasks }))
+  const view = teamPanelViewport(lines, 16)
+  assert.equal(view.length, 16, 'the viewport must fit the fixed panel height')
+  assert.equal(view[0], lines[0], 'the header line must survive truncation')
+  assert.equal(view.at(-1), lines.at(-1), 'the key-hint footer must survive truncation')
+  assert.match(view.join('\n'), /more line/, 'truncation must be visible, not silent')
+})
+
+test('a roster that fits the viewport is untouched', () => {
+  const lines = teamPanelLines(teamPanelFromRoster(rosterEvent))
+  assert.deepEqual(teamPanelViewport(lines, 16), lines)
 })
 
 test('moveTeamSelection wraps in both directions', () => {

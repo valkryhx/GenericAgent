@@ -170,6 +170,21 @@ export function teamPanelLines(state: TeamPanelState): string[] {
   return lines
 }
 
+/**
+ * Fit the panel into the fixed overlay height without hiding that it did so.
+ *
+ * App used to call ``slice(0, TEAM_PANEL_MAX_ROWS)``. With a 15-task board that silently
+ * dropped the tail: no scroll, no counter, no hint, so the panel looked like the whole
+ * team did almost nothing. Keep the header and the key-hint footer, and state how many
+ * lines are hidden.
+ */
+export function teamPanelViewport(lines: string[], maxRows: number): string[] {
+  if (lines.length <= maxRows) return lines
+  const head = lines.slice(0, Math.max(1, maxRows - 2))
+  const hidden = lines.length - head.length - 1
+  return [...head, `… (+${hidden} more line(s); r refresh)`, lines.at(-1) as string]
+}
+
 export function moveTeamSelection(state: TeamPanelState, delta: number): TeamPanelState {
   if (state.members.length === 0) return state
   const next = (state.selected + delta + state.members.length) % state.members.length
