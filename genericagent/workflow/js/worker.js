@@ -14,6 +14,51 @@ let nextRepairGroup = 1;
 // docs/20261013-ga-workflow-隐式默认隔离方案.md.
 let parallelGroup = null;
 
+function throwDenied(what) {
+  throw new Error(
+    `${what} is unavailable in workflow scripts (breaks resume). ` +
+      'Pass values via args, or stamp results after the workflow returns.',
+  );
+}
+
+// Runtime half of the determinism gate. determinism.py's static scan has the
+// documented blind spots (alias, Date["now"], globalThis) -- CC 319 pairs it with
+// a Date shim for exactly that reason, and without one a script could still make
+// a run non-reproducible. A Proxy keeps Date.parse/UTC/prototype and
+// `new Date(value)` working while making the wall-clock entry points throw.
+function shimDate(RealDate) {
+  return new Proxy(RealDate, {
+    construct(target, args) {
+      if (args.length === 0) throwDenied('new Date()');
+      return Reflect.construct(target, args);
+    },
+    apply() {
+      throwDenied('new Date()');
+    },
+    get(target, prop, receiver) {
+      if (prop === 'now') {
+        return function dateNowDenied() {
+          throwDenied('Date.now()');
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
+function shimMath(RealMath) {
+  return new Proxy(RealMath, {
+    get(target, prop, receiver) {
+      if (prop === 'random') {
+        return function mathRandomDenied() {
+          throwDenied('Math.random()');
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
 function emit(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
 }
@@ -94,6 +139,8 @@ async function executeScript(script, args, options) {
   }
   const sandbox = {
     args,
+    Date: shimDate(Date),
+    Math: shimMath(Math),
     agent: (prompt, options) =>
       rpc('agent', { prompt, options: normalizeAgentOptions(options), parallel: parallelGroup }),
     workflow: (nameOrRef, workflowArgs) => {
