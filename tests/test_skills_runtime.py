@@ -222,6 +222,78 @@ class SkillsRuntimeTest(unittest.TestCase):
         self.assertIn("authoritative", prompt)
         self.assertIn("task type", prompt)
 
+    def test_listing_never_drops_a_skill_when_over_budget(self):
+        # The old algorithm `break`-ed once even a bare name would not fit, so a
+        # tight budget made 13 of 51 skills invisible to the model -- a skill it
+        # cannot see is a skill it can never match. Claude Code keeps every skill
+        # in the listing and only spends budget on descriptions.
+        from genericagent.core.skills import SkillSpec, format_skill_listing
+
+        skills = [
+            SkillSpec(name=f"s{i}", description="x" * 80, source="test",
+                      root=Path("C:/skills/s"), path=Path("C:/skills/s/SKILL.md"), body="b")
+            for i in range(8)
+        ]
+        listing = format_skill_listing(skills, char_budget=40)
+        rows = listing.splitlines()
+        self.assertEqual(8, len(rows), "no skill may be dropped, whatever the budget")
+        for index, row in enumerate(rows):
+            self.assertTrue(row.startswith(f"- s{index}"), row)
+        # The first row always keeps a (truncated) description; the rest degrade
+        # to bare names once the budget is spent.
+        self.assertEqual([f"- s{i}" for i in range(1, 8)], rows[1:])
+
+    def test_truncated_description_keeps_the_trigger_sentence(self):
+        from genericagent.core.skills import SkillSpec, format_skill_listing
+
+        # 500+ chars: the "Use when..." sentence sits past the old 250-char cut.
+        description = (
+            "Produce polished, validated architecture diagrams as standalone HTML with inline SVG, "
+            "light and dark themes, and PNG or SVG export. "
+            "Use it to turn a plain-language requirement or a pasted Mermaid flowchart into an "
+            "explorable document that holds up in a design review, and to keep the diagram in sync "
+            "with the repository's real code. "
+            "Use when the user asks to visualize a system, a workflow, a data pipeline, an API call "
+            "sequence, or a state machine, or to convert an existing Mermaid diagram."
+        )
+        self.assertGreater(len(description), 450)
+        skill = SkillSpec(name="diagrams", description=description, source="test",
+                          root=Path("C:/skills/d"), path=Path("C:/skills/d/SKILL.md"), body="b")
+        listing = format_skill_listing([skill], char_budget=8000)
+        self.assertIn("Use when the user asks to visualize", listing)
+        self.assertLess(len(listing.split(": ", 1)[1]), 500)
+
+    def test_cjk_descriptions_keep_their_trigger_too(self):
+        from genericagent.core.skills import SkillSpec, format_skill_listing
+
+        # Chinese sentences have no space after the full stop, so a split that
+        # relies on whitespace would treat the whole text as one sentence and
+        # lose the trigger after the head-fill.
+        sentence = (
+            "把仓库里的变更整理成结构化的技术报告，覆盖背景、动机、方案对比、实现细节、验证证据、"
+            "风险与后续建议，并要求每一项结论都附上对应的文件路径与行号，方便评审人复核。"
+        )
+        description = sentence * 6 + "用来在交付评审会上解释清楚每一项技术决策的理由与代价。"
+        self.assertGreater(len(description), 400)
+        skill = SkillSpec(name="report", description=description, source="test",
+                          root=Path("C:/skills/r"), path=Path("C:/skills/r/SKILL.md"), body="b")
+        listing = format_skill_listing([skill], char_budget=8000)
+        self.assertIn("用来在交付评审会上", listing)
+        self.assertLess(len(listing), 500)
+
+    def test_listing_budget_env_override_is_honoured(self):
+        from genericagent.core import skills as skills_runtime
+
+        captured = {}
+
+        def fake_listing(specs, char_budget=8000, *, for_model=True):
+            captured["budget"] = char_budget
+            return "- demo"
+
+        with patch.object(skills_runtime, "format_skill_listing", side_effect=fake_listing),              patch.dict(os.environ, {"GA_SKILL_LISTING_CHAR_BUDGET": "12345"}, clear=False):
+            skills_runtime.build_skill_prompt()
+        self.assertEqual(12345, captured.get("budget"))
+
     def test_skill_overrides_and_frontmatter_control_visibility(self):
         import os
         from unittest.mock import patch
