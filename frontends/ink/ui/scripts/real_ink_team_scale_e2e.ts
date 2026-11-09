@@ -206,6 +206,29 @@ function childTranscriptPath(projectDir: string, session: string, runId: string 
   return null
 }
 
+// The shared board can reach "all tasks completed" while a teammate is still
+// writing its closing message: task_update happens inside the turn, the turn
+// ends after it. Asserting straight off the board therefore reads `running`
+// (or, if the lead closes the team in that window, `interrupted`) for work that
+// is in fact finishing normally. Wait for every teammate turn to reach a
+// terminal state first, bounded so a genuinely stuck worker still fails.
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'errored', 'interrupted', 'cancelled', 'canceled', 'failed'])
+const TEAMMATE_SETTLE_TIMEOUT_MS = Number(process.env.GA_TEAM_E2E_SETTLE_MS || 180_000)
+
+async function waitForTeammatesToSettle(runStartMs: number, timeoutMs: number): Promise<void> {
+  const end = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < end) {
+    const teamChildren = childrenSince(runStartMs).filter(child => child.teamMode)
+    if (teamChildren.length > 0 && teamChildren.every(child => TERMINAL_TURN_STATUSES.has(String(child.turnStatus || '').toLowerCase()))) {
+      return
+    }
+    last = teamChildren.map(child => `${child.taskName}:${child.turnStatus}`).join(',')
+    await delay(2000)
+  }
+  console.log(`[scale] teammate turns still unsettled after ${timeoutMs}ms: ${last}`)
+}
+
 function childrenSince(runStartMs: number): Array<{ taskName: string; taskId: string | null; teamMode: boolean; turnStatus: string | null; sendMessageCalls: number }> {
   const projectsRoot = path.join(process.env.LOCALAPPDATA || '', 'GenericAgent', 'projects')
   if (!fs.existsSync(projectsRoot)) return []
@@ -421,6 +444,7 @@ async function main(): Promise<number> {
     assert.ok(boardTasks.every(task => String(task.owner || '').trim()), 'a completed task has no owner')
 
     // ---- backend: teammates ----
+    await waitForTeammatesToSettle(runStartMs, TEAMMATE_SETTLE_TIMEOUT_MS)
     const children = childrenSince(runStartMs)
     const teamChildren = children.filter(child => child.teamMode)
     summary.children = teamChildren.map(child => ({ name: child.taskName, id: child.taskId, turn: child.turnStatus, sendMessageCalls: child.sendMessageCalls }))

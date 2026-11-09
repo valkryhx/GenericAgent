@@ -2792,15 +2792,16 @@ class GenericAgentBridge:
                     for path, mtime, preview, rounds in sessions
                 ],
             }
-            # Keep the historical /resume event byte-for-byte compatible.
-            # Source metadata and the ``all`` flag exist only for the explicit
-            # /resume --all view, where legacy rows need to be distinguishable.
+            # Keep the historical /resume event byte-for-byte compatible for
+            # project rows. A row that comes from the legacy root is labelled so
+            # the picker can print ``[legacy]``; project rows carry no field at
+            # all, which is what every existing consumer already expects.
             if include_legacy:
                 payload["all"] = True
-                for item in payload["sessions"]:
-                    source = self._session_source_scope(str(item["id"]))
-                    if source:
-                        item["source"] = source
+            for item in payload["sessions"]:
+                source = self._session_source_scope(str(item["id"]))
+                if source and source != "project":
+                    item["source"] = source
             self.emit(payload)
         except Exception as exc:
             self.emit({"type": "error", "code": "resume_list_failed", "message": str(exc)})
@@ -3029,9 +3030,13 @@ class GenericAgentBridge:
         roots = getattr(self, "project_roots", None)
         session_roots = None
         if roots is not None:
-            session_roots = [roots.project_data_dir]
-            if include_legacy:
-                session_roots.append(roots.legacy_sessions_dir)
+            # Both transcript roots are always listed: a conversation the user
+            # can resume must not disappear just because it predates the
+            # project-bucket layout. Rows outside the project bucket are tagged
+            # ``source="legacy"`` by ``list_resume_sessions``.
+            session_roots = [roots.project_data_dir, roots.legacy_sessions_dir]
+        # Only the legacy ``model_responses_*.txt`` scan stays opt-in: it is the
+        # slow, archaeology half of ``--all`` and is never resumable.
         legacy_roots = [roots.legacy_sessions_dir] if include_legacy and roots is not None else None
         return {
             "exclude_pid": os.getpid(),

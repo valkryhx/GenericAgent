@@ -24,6 +24,15 @@ DEFAULT_ROOT = paths.SESSIONS_DIR
 # order. The seq reflects true write order within a process run.
 _event_seq = itertools.count(1)
 
+# The preamble GA prepends to every team_mode spawn message
+# (genericagent/agents/tasks.py::team_task_protocol). A transcript whose FIRST
+# user turn starts with it was written by a child process, never by the user.
+TEAM_TASK_PROTOCOL_PREAMBLE = "[TEAM TASK PROTOCOL]"
+
+# Children write their own transcript under ``<parent>/subagents/sessions``
+# (CC m0279 ``lht()`` keeps agent transcripts under ``<session>/subagents``).
+SUBAGENT_SESSIONS_DIRNAME = "sessions"
+
 
 @dataclass
 class TranscriptTurn:
@@ -166,7 +175,8 @@ def create_session(root=None, cwd=None, session_id=None, frontend=None, schema=N
     if schema == 2:
         event["schema"] = 2
     if identity:
-        for key in ("original_cwd", "project_root", "launch_cwd", "project_key", "data_root", "layout"):
+        for key in ("original_cwd", "project_root", "launch_cwd", "project_key", "data_root", "layout",
+                    "agent_kind", "parent_session_id"):
             value = identity.get(key) if isinstance(identity, dict) else getattr(identity, key, None)
             if value is not None:
                 event[key] = str(value)
@@ -1219,6 +1229,8 @@ def _scan_session_summary(path, stat):
     p = Path(path)
     session_id = ""
     last_seq = 0
+    agent_kind = ""
+    parent_session_id = ""
     turns = []            # (user_text, backend_history_after)
     backend_after = None
     version = _detect_session_version(p)
@@ -1235,6 +1247,9 @@ def _scan_session_summary(path, stat):
             seq = event.get("seq")
             if isinstance(seq, int) and seq > last_seq:
                 last_seq = seq
+            if kind == "session_start":
+                agent_kind = event.get("agent_kind") or agent_kind
+                parent_session_id = event.get("parent_session_id") or parent_session_id
             if kind == "message":
                 turn_id = event.get("turn_id")
                 role = event.get("role")
@@ -1263,6 +1278,9 @@ def _scan_session_summary(path, stat):
         if isinstance(seq, int) and seq > last_seq:
             last_seq = seq
         kind = event.get("type")
+        if kind == "session_start":
+            agent_kind = event.get("agent_kind") or agent_kind
+            parent_session_id = event.get("parent_session_id") or parent_session_id
         if kind == "turn":
             before = event.get("backend_history_before") or []
             after = event.get("backend_history_after") or []
@@ -1290,6 +1308,8 @@ def _scan_session_summary(path, stat):
         "preview": preview,
         "rounds": len(turns),
         "last_seq": last_seq,
+        "agent_kind": agent_kind,
+        "parent_session_id": parent_session_id,
         "user_texts": [text.strip() for text, _ in turns if text.strip()],
     }
 
@@ -1301,11 +1321,37 @@ def project_session_root(project_root=None, data_root=None, *, roots=None) -> Pa
     return roots.project_data_dir
 
 
-def list_sessions(root=None, exclude_session_id=None, include_empty=False):
+def looks_like_child_session(entry):
+    """True when a scanned transcript was written by a spawned agent, not the user.
+
+    Two proofs, in order of strength:
+
+    * ``agent_kind == "subagent"`` -- written by ``create_session`` for a child
+      that inherited ``GA_PARENT_SESSION_ID`` (all new children);
+    * the first user turn starts with the team protocol preamble -- children
+      created before the marker existed. Only the *first* turn counts: a user
+      is free to type the phrase later.
+
+    A file that matches neither is treated as the user's. Hiding a real
+    conversation is worse than showing an old child transcript, so this never
+    guesses from filenames or mtimes.
+    """
+    if str(entry.get("agent_kind") or "").lower() == "subagent":
+        return True
+    preview = str(entry.get("preview") or "")
+    return preview.startswith(TEAM_TASK_PROTOCOL_PREAMBLE)
+
+
+def list_sessions(root=None, exclude_session_id=None, include_empty=False, include_subagents=False):
     """Summaries of ``session_*.jsonl`` under ``root``, newest-first.
 
     Each file is scanned once per (mtime, size) and the summary is cached next to
     it (``.listing_cache.json``); unchanged files are never re-parsed.
+
+    ``include_subagents=True`` also returns child transcripts (teammates,
+    process-backed subagents). They are excluded by default because /resume is
+    the user's conversation list, and a child's transcript reads like the user
+    had typed the task protocol themselves.
     """
     base = _root(root)
     if not base.exists():
@@ -1328,6 +1374,8 @@ def list_sessions(root=None, exclude_session_id=None, include_empty=False):
                 continue
             changed = True
         entries[key] = entry
+        if not include_subagents and looks_like_child_session(entry):
+            continue
         if exclude_session_id and entry.get("session_id") == exclude_session_id:
             continue
         rounds = int(entry.get("rounds") or 0)
@@ -1494,7 +1542,7 @@ def identity_from_environment(env=None):
         raise ValueError("project_identity_mismatch: GA_PROJECT_DATA_DIR does not match project identity")
     launch = str(source.get("GA_LAUNCH_CWD") or source.get("GA_ORIGINAL_CWD") or roots.project_root)
     original = str(source.get("GA_ORIGINAL_CWD") or launch)
-    return {
+    identity = {
         "original_cwd": original,
         "project_root": str(roots.project_root),
         "launch_cwd": launch,
@@ -1502,6 +1550,45 @@ def identity_from_environment(env=None):
         "data_root": str(roots.data_root),
         "layout": "project-v1",
     }
+    # A spawned child inherits GA_PARENT_SESSION_ID from SubagentManager. That
+    # single fact is what keeps its transcript out of the user's /resume list:
+    # it names the parent the child belongs to, and GA_SESSION_DATA_DIR is the
+    # parent's subagent bus directory (``<session>/subagents``).
+    parent_session = str(source.get("GA_PARENT_SESSION_ID") or "").strip()
+    if parent_session:
+        identity["parent_session_id"] = parent_session
+        identity["agent_kind"] = "subagent"
+        session_data = str(source.get("GA_SESSION_DATA_DIR") or "").strip()
+        if session_data:
+            identity["session_data_dir"] = session_data
+    return identity
+
+
+def subagent_session_root(identity):
+    """Root directory for a spawned child's own transcript, or None for a user session.
+
+    CC keeps agent transcripts under ``<projectDir>/<sessionId>/subagents/``
+    (m0279 ``lht()``) and the session picker enumerates only top-level
+    ``*.jsonl`` files (m0591:33509), so a child transcript can never be listed
+    as a resumable conversation. GA's children used to create their session
+    beside the user's, which put teammate task traffic into /resume.
+    """
+    if not isinstance(identity, dict) or not identity.get("parent_session_id"):
+        return None
+    session_data = str(identity.get("session_data_dir") or "").strip()
+    if session_data:
+        return Path(session_data) / SUBAGENT_SESSIONS_DIRNAME
+    project_data = identity.get("project_data_dir")
+    if not project_data and identity.get("project_root"):
+        try:
+            project_data = str(project_session_root(identity.get("project_root"),
+                                                    identity.get("data_root")))
+        except Exception:
+            project_data = None
+    if project_data:
+        return (Path(project_data) / str(identity["parent_session_id"])
+                / "subagents" / SUBAGENT_SESSIONS_DIRNAME)
+    return None
 
 
 def ensure_agent_session(agent, *, root=None, frontend=None, identity=None):
@@ -1528,7 +1615,10 @@ def ensure_agent_session(agent, *, root=None, frontend=None, identity=None):
     identity = identity or identity_from_environment()
     project_cwd = (identity or {}).get("project_root") or os.getcwd()
     if root is None:
-        if identity and identity.get("project_root"):
+        child_root = subagent_session_root(identity)
+        if child_root is not None:
+            root = child_root
+        elif identity and identity.get("project_root"):
             root = project_session_root(
                 identity.get("project_root"),
                 identity.get("data_root"),

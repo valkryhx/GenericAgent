@@ -1059,19 +1059,30 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual("exit", calls[0][2]["reason"])
 
     def test_list_resume_sessions_emits_picker_options(self):
+        import tempfile
+        from genericagent import paths
+
         agent = FakeAgent()
         events = []
-        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        with tempfile.TemporaryDirectory() as tmp:
+            agent.project_root = str(Path(tmp) / "project")
+            agent.data_root = str(Path(tmp) / "data")
+            Path(agent.project_root).mkdir()
+            bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+            roots = paths.project_roots(project=agent.project_root, data_root=agent.data_root)
+            row_path = str(roots.project_data_dir / "session-a.jsonl")
+            with patch("frontends.ink.bridge.continue_list",
+                       return_value=[(row_path, 1000.0, "first prompt", 2)]):
+                bridge.list_resume_sessions()
 
-        with patch("frontends.ink.bridge.continue_list", return_value=[("session-a.txt", 1000.0, "first prompt", 2)]):
-            bridge.list_resume_sessions()
-
+        # A project-bucket row is the historical shape: no ``source`` field, no
+        # ``all`` flag. Only legacy rows are labelled (see the test below).
         self.assertEqual(
             {
                 "type": "resume_sessions",
                 "sessions": [
                     {
-                        "id": "session-a.txt",
+                        "id": row_path,
                         "mtime": 1000.0,
                         "preview": "first prompt",
                         "rounds": 2,
@@ -1098,7 +1109,7 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual("session_current", kwargs["exclude_session_id"])
         self.assertTrue(kwargs["session_roots"])
 
-    def test_list_resume_sessions_all_marks_legacy_rows_only_on_explicit_request(self):
+    def test_list_resume_sessions_marks_legacy_rows_and_sets_all_only_on_request(self):
         import tempfile
         from genericagent import paths
 
@@ -1119,10 +1130,16 @@ class InkBridgeTest(unittest.TestCase):
             ]
             with patch("frontends.ink.bridge.continue_list", return_value=rows):
                 bridge.list_resume_sessions(include_legacy=True)
+                bridge.list_resume_sessions()
 
-        payload = events[-1]
+        payload = events[-2]
         self.assertTrue(payload["all"])
-        self.assertEqual(["project", "legacy"], [item["source"] for item in payload["sessions"]])
+        # Project rows keep the historical shape; legacy rows are labelled so
+        # the picker can print ``[legacy]``.
+        self.assertEqual([None, "legacy"], [item.get("source") for item in payload["sessions"]])
+        default = events[-1]
+        self.assertNotIn("all", default)
+        self.assertEqual([None, "legacy"], [item.get("source") for item in default["sessions"]])
 
     def test_workflow_all_lists_and_opens_a_legacy_run_by_source_path(self):
         import tempfile
