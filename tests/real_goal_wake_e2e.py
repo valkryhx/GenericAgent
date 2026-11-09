@@ -9,7 +9,7 @@ Phases:
   A default-off safety : goal set, turn ends, NO wake scheduled.
   B retry wake         : GA_GOAL_WAKE=1, arm a retry; a new real turn runs.
   C checkin wake       : arm a check-in; a new real turn runs.
-Model: default profile -> deepseek-v4.1-flash.
+Model: default profile -> moma/deepseek-latest-flash.
 """
 from __future__ import annotations
 import json, os, sys, time, threading, traceback
@@ -121,13 +121,13 @@ def main() -> int:
     from frontends.ink.bridge import GenericAgentBridge
     recorder = Rec()
     summary = {"target": str(TARGET), "dataRoot": str(DATA),
-               "model": "default/deepseek-v4.1-flash", "phases": {}}
+               "model": "default/moma/deepseek-latest-flash", "phases": {}}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=recorder)
         agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         time.sleep(2)
 
         # ---------- Phase A: default OFF must not schedule a wake ----------

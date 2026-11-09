@@ -16,7 +16,7 @@ real ``GenericAgentBridge`` (real default LLM), then asserts PROCESS evidence:
   - workflow run reached a terminal success.
 
 Run:  python tests/real_workflow_external_reports_via_tool_e2e.py
-Exit: 0 = PASS, 2 = FAIL. Real default LLM (deepseek-v4.1-flash).
+Exit: 0 = PASS, 2 = FAIL. Real default LLM (moma/deepseek-latest-flash).
 """
 from __future__ import annotations
 import json, os, sys, time, threading
@@ -60,7 +60,7 @@ def main() -> int:
     agent = bridge.agent
     threading.Thread(target=agent.run, daemon=True).start()
     try:
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
     except Exception as e:
         print("model_switch warn:", e, flush=True)
     time.sleep(2)

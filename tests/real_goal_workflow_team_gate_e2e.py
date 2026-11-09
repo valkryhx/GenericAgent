@@ -69,13 +69,13 @@ def goal_status_events(path):
     return out
 
 def main() -> int:
-    summary = {"target": str(TARGET), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "model": "default/moma/deepseek-latest-flash"}
     rec_ev = []
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=lambda e: rec_ev.append(e)); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         goal_text = (f"目录 {TARGET} 下同时存在 marker_wf.txt(WF_OK) 与 marker_team.txt(TEAM_OK)")
         agent._set_goal(goal_text)

@@ -73,12 +73,12 @@ def run_turn(agent, prompt, timeout, hard_cap=None):
 def main():
     setup_env(); TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
-    rec=Rec(); summary={"target":str(TARGET),"model":"default/deepseek-v4.1-flash"}
+    rec=Rec(); summary={"target":str(TARGET),"model":"default/moma/deepseek-latest-flash"}
     bridge=agent=None
     try:
         bridge=GenericAgentBridge(emit=rec); agent=bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         marker_name="wf_out.txt"
         goal_text=f"目录 {TARGET} 下存在文件 {marker_name} 且内容包含 WF_OK"

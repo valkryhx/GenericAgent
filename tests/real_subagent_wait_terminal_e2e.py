@@ -15,8 +15,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 OPT_IN = os.environ.get("GA_RUN_REAL_E2E") == "1"
-MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
-PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "deepseek-v4.1-flash")
+MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+PROFILE = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 
 
 def _profile():
@@ -30,6 +30,20 @@ def _profile():
         if model == MODEL and (not PROFILE or PROFILE in {"*", name} or PROFILE in name):
             return index, {"name": name, "model": model}
     raise RuntimeError(f"profile not found: {PROFILE}/{MODEL}")
+
+
+def _wait_until_satisfied(manager, names, *, wait_condition, timeout_s=900):
+    """``wait_agents`` caps one synchronous call at ``WAIT_SLICE_MAX_S`` (10s) and
+    returns a "still waiting" result after that slice; poll until the predicate is
+    satisfied or the overall deadline expires."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = max(1.0, deadline - time.monotonic())
+        result = manager.wait_agents(
+            names, timeout_s=min(10.0, remaining), wait_condition=wait_condition
+        )
+        if result.satisfied or time.monotonic() >= deadline:
+            return result
 
 
 def _events(path):
@@ -73,7 +87,7 @@ class RealSubagentWaitTerminalE2E(unittest.TestCase):
             report["waitPredicates"].append("all_terminal")
             self.assertFalse(early.satisfied, "spawn/turn_started cannot satisfy all_terminal")
             self.assertIn(first.task_name, early.remaining_targets)
-            done_a = manager.wait_agents(names, timeout_s=900, wait_condition="turn_terminal")
+            done_a = _wait_until_satisfied(manager, names, wait_condition="turn_terminal")
             report["waitReturnCount"] += 1
             report["waitPredicates"].append("turn_terminal")
             self.assertTrue(done_a.satisfied, done_a.message)
@@ -83,7 +97,7 @@ class RealSubagentWaitTerminalE2E(unittest.TestCase):
 
             second = manager.spawn_agent(f"wait_b_{suffix}", "读取 workflow_script_validation.py，列出两个不同边界条件。只读，不调用工具。回答包含 WAIT_B_DONE。", llm_no=llm_no, parent_session_id=suffix, permission_profile="read_only", fork_turns="none")
             names.append(second.task_name)
-            all_done = manager.wait_agents(names, timeout_s=900, wait_condition="all_terminal")
+            all_done = _wait_until_satisfied(manager, names, wait_condition="all_terminal")
             report["waitReturnCount"] += 1
             report["waitPredicates"].append("all_terminal")
             self.assertTrue(all_done.satisfied, all_done.message)

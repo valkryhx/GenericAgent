@@ -1,6 +1,6 @@
 """Real-LLM smoke for Stage F phase 5 (metadata / card / telemetry / nudge).
 
-Drives the real bridge + default LLM (deepseek-v4.1-flash). Checks:
+Drives the real bridge + default LLM (moma/deepseek-latest-flash). Checks:
   - /goal sets an active goal and emits goal_metadata (card data);
   - tokens/iterations survive; a real turn nudges iterations;
   - asking the model to satisfy the goal drives a met verdict -> terminal badge
@@ -92,14 +92,14 @@ def main() -> int:
     TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     recorder = Rec()
-    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/deepseek-v4.1-flash", "phases": {}}
+    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/moma/deepseek-latest-flash", "phases": {}}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=recorder)
         agent = bridge.agent
         import threading
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         time.sleep(2)
 
         marker = TARGET / "p5_done.txt"

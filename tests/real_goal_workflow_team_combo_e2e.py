@@ -110,12 +110,12 @@ def main() -> int:
     from frontends.ink.bridge import GenericAgentBridge
     from genericagent.core import goal_evaluator as ge
     rec_ev = Rec()
-    summary = {"target": str(TARGET), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "model": "default/moma/deepseek-latest-flash"}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=rec_ev); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         mwf = TARGET / "marker_wf.txt"
         mteam = TARGET / "marker_team.txt"

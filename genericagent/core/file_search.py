@@ -128,7 +128,16 @@ def glob_files(root: str, pattern: str, *, limit: int = GLOB_MAX_FILES) -> GlobR
     if rg:
         # `--files` lists files; `--glob` applies the pattern. Hidden files are
         # included because a bare `**/*.json` should still find `.eslintrc.json`.
-        command = [rg, "--files", "--hidden", "--glob", pattern, str(base)]
+        # Dependency/VCS directories must be excluded explicitly: ripgrep only
+        # honors `.gitignore`, and a search root outside a repo (e.g. a
+        # tempfile directory) has none, so `node_modules` would leak into the
+        # results. Negations must come after the include pattern, and the
+        # leading `**/` is required because rg matches the full path when the
+        # search root is absolute.
+        command = [rg, "--files", "--hidden", "--glob", pattern]
+        for ignored in sorted(_COMMON_IGNORE_DIRS):
+            command += ["--glob", f"!**/{ignored}/**"]
+        command.append(str(base))
         try:
             completed = subprocess.run(
                 command, capture_output=True, text=True, encoding="utf-8",

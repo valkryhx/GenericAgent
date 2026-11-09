@@ -63,12 +63,12 @@ def main() -> int:
     setup_env(); TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     from frontends.terminal import continue_cmd
-    summary = {"target": str(TARGET), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "model": "default/moma/deepseek-latest-flash"}
     bridge = agent = rest_agent = None
     try:
         bridge = GenericAgentBridge(emit=Rec()); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         r0 = run_turn(agent, "请在当前工作目录创建文件 scratch_note.txt，内容写 SCRATCH_OK，然后结束。", 300)
         summary["warmup"] = r0; rec("warmup turn completed", r0["ok"], r0["text"][:80])

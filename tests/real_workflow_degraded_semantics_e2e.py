@@ -1,7 +1,7 @@
 """Real-LLM E2E for the workflow degraded/fail-closed semantics.
 
 Opt in with ``GA_RUN_REAL_WORKFLOW_DEGRADED_E2E=1``. Defaults to the local
-``llm.yaml`` ``profiles.default`` (cc-deepseek-v4.1-flash-chat) and refuses to
+``llm.yaml`` ``profiles.default`` (moma/deepseek-latest-flash) and refuses to
 run when the resolved model does not match ``GA_REAL_API_EXPECTED_MODEL``.
 
 Two scenarios, each a real planner + real child agent run:

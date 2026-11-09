@@ -27,7 +27,7 @@ from genericagent.workflow.store import WorkflowStore
 
 
 PROFILE = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
 OPT_IN = os.environ.get("GA_RUN_REAL_P0_WORKFLOW_E2E") == "1"
 
 WORKFLOW_SCRIPT = r"""

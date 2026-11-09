@@ -16,7 +16,7 @@ This e2e drives the *same* entry point a user hits in the Ink UI
   4. after the workflow handoff turn, a NON-deferred goal_status appears
      (the goal is actually evaluated, not left dangling).
 
-Real default model (default/deepseek-v4.1-flash). Records are written to
+Real default model (default/moma/deepseek-latest-flash). Records are written to
 temp/goal_wf_slash_submit/ (git-ignored run artifacts).
 """
 from __future__ import annotations
@@ -80,12 +80,12 @@ def main() -> int:
     setup_env(); TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     rec_ev = Rec()
-    summary = {"target": str(TARGET), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "model": "default/moma/deepseek-latest-flash"}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=rec_ev); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         marker = TARGET / "wf_ok.txt"
         # Genuine workflow opt-in phrasing (matches the real failing user input).

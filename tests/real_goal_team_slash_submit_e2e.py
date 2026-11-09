@@ -12,7 +12,7 @@ This e2e drives the real entry point with a leading space before "/goal", and
 asserts the goal is actually armed, the team executes, and the goal is finally
 evaluated to met=True.
 
-Real default model (default/deepseek-v4.1-flash). Artifacts under temp/goal_team_slash_submit/.
+Real default model (default/moma/deepseek-latest-flash). Artifacts under temp/goal_team_slash_submit/.
 """
 from __future__ import annotations
 import json, os, sys, time, threading, traceback
@@ -75,12 +75,12 @@ def main() -> int:
     setup_env(); TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     rec_ev = Rec()
-    summary = {"target": str(TARGET), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "model": "default/moma/deepseek-latest-flash"}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=rec_ev); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         # Force the team session switch, then submit WITH a leading space on /goal
         # (the exact shape that used to break command dispatch).

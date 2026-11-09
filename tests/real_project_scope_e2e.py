@@ -10,7 +10,7 @@ Opt in with::
     GA_RUN_REAL_PROJECT_SCOPE_E2E=1
 
 The default model selector is the user-confirmed self-test profile:
-``default/deepseek-v4.1-flash``. Evidence is written under
+``default/moma/deepseek-latest-flash``. Evidence is written under
 ``temp/project-scope-e2e/<timestamp>/``.
 """
 
@@ -36,7 +36,7 @@ from genericagent import paths
 from genericagent.core.redaction import sanitize
 
 OPT_IN = os.environ.get("GA_RUN_REAL_PROJECT_SCOPE_E2E") == "1"
-MODEL_SELECTOR = os.environ.get("GA_SELFTEST_MODEL", "default/deepseek-v4.1-flash").strip()
+MODEL_SELECTOR = os.environ.get("GA_SELFTEST_MODEL", "default/moma/deepseek-latest-flash").strip()
 TIMEOUT = float(os.environ.get("GA_SELFTEST_TIMEOUT", "240"))
 BUNDLE_ROOT = REPO_ROOT / "temp" / "project-scope-e2e"
 BACKEND_LOG = REPO_ROOT / "temp" / "ink_bridge_backend.log"
@@ -244,7 +244,7 @@ def run() -> int:
         bridge.model_switch(MODEL_SELECTOR)
         switch = wait_for(rec, "model_status", 30, after=model_cursor)
         current = next((item.get("name") for item in (switch or {}).get("models", []) if item.get("current")), None)
-        record(checks, "default/deepseek-v4.1-flash selected", current == MODEL_SELECTOR, current)
+        record(checks, "default/moma/deepseek-latest-flash selected", current == MODEL_SELECTOR, current)
 
         prompt = (
             "You are validating project-scoped filesystem behavior. "
@@ -407,7 +407,7 @@ return await agent('Reply with exactly the single token WORKFLOW_SCOPE_OK. Do no
         record(checks, "real subagent completed", child_state is not None and child_state.turn_status == "completed")
         record(checks, "subagent task/state/artifact live in A bucket", child_state is not None and under(child_state.task_dir, project_a_data) and under(child_state.artifact_dir, project_a_data))
         record(checks, "subagent inherited A project session identity", child_state is not None and child_state.parent_session_id == session_a)
-        record(checks, "subagent used deepseek-v4.1-flash", child_state is not None and getattr(child_state, "model_id", None) == "deepseek-v4.1-flash" and getattr(child_state, "model_profile", None) == "default")
+        record(checks, "subagent used moma/deepseek-latest-flash", child_state is not None and getattr(child_state, "model_id", None) == "moma/deepseek-latest-flash" and getattr(child_state, "model_profile", None) == "default")
 
         roster_cursor = len(rec.of("team_roster"))
         bridge.team_list()

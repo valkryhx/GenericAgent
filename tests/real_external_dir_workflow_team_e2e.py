@@ -115,7 +115,7 @@ def main() -> int:
     BUNDLE.mkdir(parents=True, exist_ok=True)
     recorder = Rec()
     summary = {"target": str(TARGET), "dataRoot": str(DATA), "outRoot": str(OUT),
-               "model": "default/deepseek-v4.1-flash", "phases": {}}
+               "model": "default/moma/deepseek-latest-flash", "phases": {}}
     from frontends.ink.bridge import GenericAgentBridge
     bridge = None
     try:
@@ -134,10 +134,10 @@ def main() -> int:
 
         # model switch
         cur = len(recorder.of("model_status"))
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         st = wait_for(recorder, "model_status", 30, after=cur)
         now = next((m.get("name") for m in (st or {}).get("models", []) if m.get("current")), None)
-        rec("model is default/deepseek-v4.1-flash", now == "default/deepseek-v4.1-flash", now)
+        rec("model is default/moma/deepseek-latest-flash", now == "default/moma/deepseek-latest-flash", now)
 
         # ---- P1: ordinary chat, read documentation in the project ----
         p1 = run_turn(bridge, recorder,

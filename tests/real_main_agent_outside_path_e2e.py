@@ -64,7 +64,7 @@ def main() -> int:
     agent = bridge.agent
     threading.Thread(target=agent.run, daemon=True).start()
     try:
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
     except Exception as e:
         print("model_switch warn:", e, flush=True)
     time.sleep(2)

@@ -7,7 +7,7 @@ message drives a real model turn, matching Claude Code's ``shouldQuery: true``
 (/goal = type:query returning {value: "Goal set: ...", prompt: <kickoff>}).
 
 Run:  python tests/real_goal_slash_kickoff_e2e.py
-Exit: 0 = PASS, 1 = FAIL. Drives the real default LLM (deepseek-v4.1-flash).
+Exit: 0 = PASS, 1 = FAIL. Drives the real default LLM (moma/deepseek-latest-flash).
 """
 from __future__ import annotations
 import json, os, sys, time, threading, traceback
@@ -46,7 +46,7 @@ def main() -> int:
     agent = bridge.agent
     threading.Thread(target=agent.run, daemon=True).start()
     try:
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
     except Exception as e:
         print("model_switch warn:", e)
     time.sleep(2)
@@ -86,7 +86,7 @@ def main() -> int:
     rec("goal reached met", "goal_met" in new_events, new_events)
     rec("goal auto-cleared after met (active_goal None)", getattr(agent, "active_goal", None) is None)
 
-    summary = {"target": str(TARGET), "elapsed_secs": secs, "model": "default/deepseek-v4.1-flash",
+    summary = {"target": str(TARGET), "elapsed_secs": secs, "model": "default/moma/deepseek-latest-flash",
                "assistant_len": len(done or ""), "goal_events_new": new_events, "checks": CHECKS}
     (OUTDIR / f"summary_{TAG}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2),
                                                 encoding="utf-8", newline="\n")

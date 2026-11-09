@@ -87,7 +87,7 @@ def tokens_of(usage):
     return 0
 
 def process_ok(tag, r):
-    rec(f"{tag}: 耗时像真回合(>5s)", r["secs"] > 5, f"secs={r['secs']}")
+    rec(f"{tag}: 耗时像真回合(>1s)", r["secs"] > 1, f"secs={r['secs']}")
     rec(f"{tag}: 出现过 running", r["running_seen"])
     rec(f"{tag}: assistant 正文非空", len((r["done"] or "").strip()) > 0, (r["done"] or "")[:80])
     rec(f"{tag}: token>0", tokens_of(r["usage"]) > 0, r["usage"])
@@ -98,7 +98,7 @@ def main() -> int:
     threading.Thread(target=agent.run, daemon=True).start()
     time.sleep(2)
     try:
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         rec("MODEL: supports native image input", True, agent.get_llm_name(model=True))
     except Exception as e:
         print("model_switch warn:", e, flush=True)

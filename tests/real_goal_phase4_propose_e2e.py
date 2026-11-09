@@ -40,7 +40,7 @@ events=[]
 bridge=GenericAgentBridge(emit=lambda e: events.append(e))
 agent=bridge.agent
 try:
-    bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+    bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
     # ---- Part A1: direct path via real handler ----
     from genericagent.core.handler import GenericAgentHandler
@@ -58,6 +58,16 @@ try:
     rec("A1 origin recorded as proposal_direct", getattr(g,"origin",None)==goal_core.ORIGIN_PROPOSAL_DIRECT, getattr(g,"origin",None))
     # clear it so Part B starts clean
     agent._clear_goal(met=False, reason="reset for test")
+    # A1's goal kickoff turn is already queued/running. On slower models it can
+    # occupy the loop for minutes and starve Part B's prompt, so abort it and
+    # wait for the loop to go idle before starting Part B.
+    try:
+        agent.abort()
+    except Exception:
+        pass
+    _abort_deadline = time.time() + 30
+    while time.time() < _abort_deadline and getattr(agent, "is_running", False):
+        time.sleep(0.2)
 
     # ---- Part A2: gate rejections ----
     agent.is_subagent=True

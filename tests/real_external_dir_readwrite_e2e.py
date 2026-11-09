@@ -120,7 +120,7 @@ def main() -> int:
     setup_env()
     recorder = Rec()
     summary = {"target": str(TARGET), "dataRoot": str(DATA),
-               "model": "default/deepseek-v4.1-flash", "phases": {}}
+               "model": "default/moma/deepseek-latest-flash", "phases": {}}
     from frontends.ink.bridge import GenericAgentBridge
     bridge = None
     try:
@@ -134,10 +134,10 @@ def main() -> int:
         rec("identity: workspace_root == D:/test20260416/123", Path(bridge.workspace_root).resolve()==TARGET.resolve(), bridge.workspace_root)
 
         cur = len(recorder.of("model_status"))
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         st = wait_for(recorder, "model_status", 30, after=cur)
         now = next((m.get("name") for m in (st or {}).get("models",[]) if m.get("current")), None)
-        rec("model is default/deepseek-v4.1-flash", now=="default/deepseek-v4.1-flash", now)
+        rec("model is default/moma/deepseek-latest-flash", now=="default/moma/deepseek-latest-flash", now)
 
         # ---------- A1: code generation (main agent writes a Python module) ----------
         calc = TARGET / "src" / "calc.py"
@@ -351,7 +351,7 @@ def main() -> int:
                 files.append(fp)
         files.sort()
         manifest = TARGET / "_MANIFEST.txt"
-        lines = ["GA E2E output manifest (%s)" % RUN_TAG, "model: default/deepseek-v4.1-flash", ""]
+        lines = ["GA E2E output manifest (%s)" % RUN_TAG, "model: default/moma/deepseek-latest-flash", ""]
         for fp in files:
             b = fp.read_bytes()
             enc = "utf-8"

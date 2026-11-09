@@ -1,6 +1,6 @@
 """Real-LLM smoke for Phase 6 gap 1: goal survivability across resume.
 
-Flow (default LLM = deepseek-v4.1-flash):
+Flow (default LLM = moma/deepseek-latest-flash):
   1) set a /goal and run a real working turn so the transcript persists an
      ``active_goal`` event plus a working_state with session_output_tokens;
   2) build a FRESH agent and restore that session via the same helper the
@@ -78,13 +78,13 @@ def main() -> int:
     TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     from frontends.terminal import continue_cmd
-    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/deepseek-v4.1-flash"}
+    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/moma/deepseek-latest-flash"}
     bridge = None; agent = None; rest_agent = None
     try:
         bridge = GenericAgentBridge(emit=Rec())
         agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         time.sleep(2)
 
         # 1) A plain working turn FIRST accrues real output tokens (no goal yet).

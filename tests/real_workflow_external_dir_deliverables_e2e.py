@@ -19,7 +19,7 @@ just the final result:
     written during this run (mtime >= start), not a stale leftover.
 
 Run:  python tests/real_workflow_external_dir_deliverables_e2e.py
-Exit: 0 = PASS, 2 = FAIL. Drives the real default LLM (deepseek-v4.1-flash).
+Exit: 0 = PASS, 2 = FAIL. Drives the real default LLM (moma/deepseek-latest-flash).
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from genericagent.workflow.scheduler import SchedulerConfig
 from genericagent.workflow.store import WorkflowStore
 
 PROFILE = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
 
 CHECKS: list[dict] = []
 def rec(name: str, ok: bool, detail=""):

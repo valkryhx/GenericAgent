@@ -79,12 +79,12 @@ def main():
     setup_env(); TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     import genericagent.core.app as appmod
-    recorder=Rec(); summary={"target":str(TARGET),"dataRoot":str(DATA),"model":"default/deepseek-v4.1-flash"}
+    recorder=Rec(); summary={"target":str(TARGET),"dataRoot":str(DATA),"model":"default/moma/deepseek-latest-flash"}
     bridge=agent=None
     try:
         bridge=GenericAgentBridge(emit=recorder); agent=bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
         # set goal first (normal turn, not capped)
         _goal = agent._set_goal("主目录下必须存在文件 auto_done.txt 且内容包含 AUTO_OK")
         rec("goal set before capping", getattr(agent,"active_goal",None) is not None)

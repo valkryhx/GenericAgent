@@ -6,7 +6,7 @@ the pre-workflow transcript, blocked the turn, and spun the main agent for many
 model steps in a single turn (probe showed 9 steps, done=False).
 
 This e2e runs the REAL agent loop with the REAL default model
-(default/deepseek-v4.1-flash) and asserts the end-to-end chain:
+(default/moma/deepseek-latest-flash) and asserts the end-to-end chain:
 
   1. /goal sets an active goal.
   2. Main turn launches a real background workflow -> the turn must END
@@ -99,12 +99,12 @@ def main() -> int:
     from frontends.ink.bridge import GenericAgentBridge
     rec_ev = Rec()
     summary = {"target": str(TARGET), "dataRoot": str(DATA),
-               "model": "default/deepseek-v4.1-flash"}
+               "model": "default/moma/deepseek-latest-flash"}
     bridge = agent = None
     try:
         bridge = GenericAgentBridge(emit=rec_ev); agent = bridge.agent
         threading.Thread(target=agent.run, daemon=True).start()
-        bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+        bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
         marker_abs = TARGET / "wf_out.txt"
         goal_text = f"目录 {TARGET} 下存在文件 wf_out.txt 且内容包含 WF_OK"
@@ -118,6 +118,13 @@ def main() -> int:
         # actually achievable regardless of the run's own workspace.
         wf_script = (
             "export const meta = { name: 'coop-wf', description: 'write wf_out.txt to goal dir' }\n"
+            # Keep the workflow deterministically in flight when the launch turn
+            # ends: the goal gate records goal_defer=True only while a workflow
+            # is still running, and a single fast child can finish in the same
+            # window as the launch turn on fast models.
+            "phase('delay')\n"
+            "await agent(`You MUST call code_run exactly once with the Python script "
+            "\\`import time; time.sleep(20)\\`, then reply DELAY_DONE.`, { label: 'delay' })\n"
             "phase('write')\n"
             f"const a = await agent(`Write a file at the exact absolute path {marker_abs} "
             f"(use file_write). Its content must be exactly WF_OK. Do not write anywhere else.`, "

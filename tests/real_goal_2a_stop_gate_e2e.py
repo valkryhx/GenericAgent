@@ -1,6 +1,6 @@
 """Controlled real-LLM proof of Stage 2-A at the actual Stop gate.
 
-- real GenericAgent + real LLM (default/deepseek-v4.1-flash)
+- real GenericAgent + real LLM (default/moma/deepseek-latest-flash)
 - real background sub-agent spawned (slow, sleeps) so it is genuinely in flight
 - call handler.run_stop_gate() exactly as the loop does at turn end:
     * while child in flight -> defer: action must be 'none', no model eval,
@@ -49,11 +49,11 @@ def goal_status_events(path):
     return out
 
 rec_events=[]; bridge=None; agent=None
-summary={"target":str(TARGET),"dataRoot":str(DATA),"model":"default/deepseek-v4.1-flash"}
+summary={"target":str(TARGET),"dataRoot":str(DATA),"model":"default/moma/deepseek-latest-flash"}
 try:
     bridge=GenericAgentBridge(emit=lambda e:rec_events.append(e)); agent=bridge.agent
     th=threading.Thread(target=agent.run,daemon=True); th.start()
-    bridge.model_switch("default/deepseek-v4.1-flash"); time.sleep(2)
+    bridge.model_switch("default/moma/deepseek-latest-flash"); time.sleep(2)
 
     # register goal hook for real
     agent._set_goal("The background child task must have completed successfully.")

@@ -23,8 +23,8 @@ from genericagent.workflow.store import WorkflowStore  # noqa: E402
 
 
 PROFILE_NAME = os.environ.get("GA_WORKFLOW_LLM_PROFILE", "default")
-EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "deepseek-v4.1-flash")
-EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "deepseek-v4.1-flash")
+EXPECTED_MODEL = os.environ.get("GA_REAL_API_EXPECTED_MODEL", "moma/deepseek-latest-flash")
+EXPECTED_NAME = os.environ.get("GA_REAL_API_EXPECTED_NAME", "default")
 OPT_IN = os.environ.get("GA_RUN_REAL_API_E2E") == "1"
 
 SECRET_PATTERNS = [

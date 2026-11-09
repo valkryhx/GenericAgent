@@ -14,9 +14,9 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 OPT_IN = os.environ.get('GA_RUN_REAL_E2E') == '1'
 MCP_OPT_IN = os.environ.get('GA_RUN_REAL_MCP_E2E') == '1'
-PROFILE = os.environ.get('GA_WORKFLOW_LLM_PROFILE', 'deepseek-v4.1-flash')
-EXPECTED_MODEL = os.environ.get('GA_REAL_API_EXPECTED_MODEL', 'deepseek-v4.1-flash')
-EXPECTED_NAME = os.environ.get('GA_REAL_API_EXPECTED_NAME', 'deepseek-v4.1-flash')
+PROFILE = os.environ.get('GA_WORKFLOW_LLM_PROFILE', 'default')
+EXPECTED_MODEL = os.environ.get('GA_REAL_API_EXPECTED_MODEL', 'moma/deepseek-latest-flash')
+EXPECTED_NAME = os.environ.get('GA_REAL_API_EXPECTED_NAME', 'default')
 
 WORKFLOW_SCRIPT = r'''
 export const meta = { name: 'wait-barrier-e2e', description: 'dependency barrier between module analysis and test suggestions' }

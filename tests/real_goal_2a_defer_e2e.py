@@ -107,7 +107,7 @@ def main() -> int:
     TARGET.mkdir(parents=True, exist_ok=True)
     from frontends.ink.bridge import GenericAgentBridge
     recorder = Rec()
-    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/deepseek-v4.1-flash", "phases": {}}
+    summary = {"target": str(TARGET), "dataRoot": str(DATA), "model": "default/moma/deepseek-latest-flash", "phases": {}}
     bridge = None
     agent = None
     try:
@@ -117,7 +117,7 @@ def main() -> int:
         import threading
         th = threading.Thread(target=agent.run, daemon=True)
         th.start()
-        bridge.model_switch("default/deepseek-v4.1-flash")
+        bridge.model_switch("default/moma/deepseek-latest-flash")
         time.sleep(2)
 
         marker = TARGET / "child_done.txt"
