@@ -432,6 +432,7 @@ class AgentScheduler:
 
     def tick(self, *, failure_policy: str = "continue") -> list[WorkflowJob]:
         completed: list[WorkflowJob] = []
+        self._demote_stale_cached_jobs()
         completed.extend(self._start_queued_jobs())
         for job in list(self.jobs):
             if job.status != "running":
@@ -590,6 +591,53 @@ class AgentScheduler:
             job,
             {"reason": "implicit-parallel-writer", "parallelBatch": batch},
         )
+
+    def _demote_stale_cached_jobs(self) -> None:
+        """Only keep a cached job when every upstream job was reused too.
+
+        ``runtime._match_cached_agent`` now reuses an agent by content even when
+        its position moved. GA injects upstream output as *handoff metadata*,
+        not into the prompt, so the cache key cannot see it: if a dependency
+        re-ran in this run, the old downstream result was computed from output
+        that no longer exists. Demote to ``queued`` and let it run for real --
+        a re-run is cheap next to a silently stale answer.
+        """
+
+        for job in list(self.jobs):
+            if job.status != "cached":
+                continue
+            dependencies = [str(item) for item in (job.metadata.get("dependsOn") or [])]
+            if not dependencies:
+                continue
+            if not self._dependencies_satisfied(job):
+                # Upstream still running: decide once it settles.
+                continue
+            reused = True
+            for dependency in dependencies:
+                upstream = next((item for item in self.jobs if item.metadata.get("label") == dependency), None)
+                if upstream is None or upstream.status != "cached":
+                    reused = False
+                    break
+            if reused:
+                continue
+            previous_ref = job.result_ref
+            job.status = "queued"
+            job.result_ref = None
+            for key in (
+                "result",
+                "handoff",
+                "transcriptRef",
+                "tokenUsage",
+                "toolSummary",
+                "cachedFromRunId",
+                "cachedFromJobId",
+            ):
+                job.metadata.pop(key, None)
+            self._append(
+                "agent_cache_demoted",
+                job,
+                {"reason": "dependency_changed", "dependsOn": dependencies, "previousResultRef": previous_ref},
+            )
 
     def _start_queued_jobs(self) -> list[WorkflowJob]:
         if self._stopping:

@@ -1666,20 +1666,27 @@ class WorkflowRuntime:
         options: dict,
         scheduler: AgentScheduler,
     ) -> dict | None:
-        if not resume_plan or call_index >= len(resume_plan):
+        if not resume_plan:
             return None
-        candidate = resume_plan[call_index]
         probe = WorkflowJob(job_id="probe", prompt=prompt, metadata={"callIndex": call_index, "options": dict(options or {})})
         key = scheduler._cache_key(probe)
-        if candidate.get("callIndex") != call_index:
-            return None
-        if candidate.get("promptHash") != key.get("promptHash"):
-            del resume_plan[call_index:]
-            return None
-        if candidate.get("optionsHash") != key.get("optionsHash"):
-            del resume_plan[call_index:]
-            return None
-        return candidate
+        # Same position first: an unchanged script hits on the first probe.
+        if call_index < len(resume_plan):
+            candidate = resume_plan[call_index]
+            if (
+                candidate.get("callIndex") == call_index
+                and candidate.get("promptHash") == key.get("promptHash")
+                and candidate.get("optionsHash") == key.get("optionsHash")
+            ):
+                return candidate
+        # Then by content. Editing one line of the script shifts every later
+        # call index; matching on position alone (and discarding the rest of the
+        # plan on the first miss) re-ran every agent after the edit. CC 319
+        # journals per content hash (§12.2.1) so unchanged agents stay cached.
+        for candidate in resume_plan:
+            if candidate.get("promptHash") == key.get("promptHash") and candidate.get("optionsHash") == key.get("optionsHash"):
+                return candidate
+        return None
 
     def _append(self, run: WorkflowRun, event_type: str, payload: dict | None = None) -> None:
         self.store.append_event(
