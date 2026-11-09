@@ -276,10 +276,12 @@ def discover_skills(
     return skills
 
 
-# Claude Code caps one listing line at 1536 chars; GA compacts harder because the
-# index also carries the user's Claude/Codex skills. 400 keeps the "what" plus the
-# trigger sentence (see _compact_description) without eating the whole budget.
-_SKILL_DESC_CAP = 400
+# One listing line, not one skill: Claude Code caps the description at 1536 chars
+# (m0591:110718 `rRr`) and blind-cuts it (`aRr()`). GA uses the same number so a
+# long description is shown whole, and _compact_description() only kicks in past
+# it -- keeping the trigger sentence instead of slicing mid-word. The 16K budget,
+# not this cap, is what constrains the whole listing today (0 rows compacted here).
+_SKILL_DESC_CAP = 1536
 
 # Claude Code derives its budget (window x 4 x 0.01 ~= 8000 at 200k) and allows an
 # override. GA lists more skills (the local/Claude/Codex roots share one index), so
