@@ -276,9 +276,98 @@ def discover_skills(
     return skills
 
 
+# Claude Code caps one listing line at 1536 chars; GA compacts harder because the
+# index also carries the user's Claude/Codex skills. 400 keeps the "what" plus the
+# trigger sentence (see _compact_description) without eating the whole budget.
+_SKILL_DESC_CAP = 400
+
+# Claude Code derives its budget (window x 4 x 0.01 ~= 8000 at 200k) and allows an
+# override. GA lists more skills (the local/Claude/Codex roots share one index), so
+# the default is 2x CC's -- 16K keeps every description whole on this machine --
+# and the env knob is the same escape hatch in both directions.
+SKILL_LISTING_CHAR_BUDGET_ENV = "GA_SKILL_LISTING_CHAR_BUDGET"
+DEFAULT_SKILL_LISTING_CHAR_BUDGET = 16384
+
+
+def _skill_listing_budget() -> int:
+    raw = str(os.environ.get(SKILL_LISTING_CHAR_BUDGET_ENV) or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SKILL_LISTING_CHAR_BUDGET
+    return value if value > 0 else DEFAULT_SKILL_LISTING_CHAR_BUDGET
+
+
+def _split_description_sentences(text: str) -> list[str]:
+    # CJK sentences have no space after the full stop; ASCII ones need one, or
+    # "e.g." / "1.5" would be cut apart.
+    parts = re.split(r"(?<=[。！？；])|(?<=[.!?])\s+", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+# Phrases that carry the "when should I load this" signal. Skill descriptions put
+# them at the END ("... Use when the user asks for X"), which a blind head-truncation
+# cuts off -- and that trigger is exactly what an implicit-match scan needs.
+_SKILL_TRIGGER_RE = re.compile(
+    r"(use when|use this|use for|when the user|trigger|do not use|使用|触发|当用户|用来)",
+    re.IGNORECASE,
+)
+
+
+def _compact_description(text: str, cap: int) -> str:
+    """Trim a listing description without losing its trigger sentence.
+
+    Claude Code caps one listing line at 1536 chars and lets the caller's budget
+    degrade whole rows. GA lists far more skills (the user's Claude/Codex skills
+    share the index), so it compacts harder -- but a blind head-cut drops the
+    "Use when ..." tail that implicit matching depends on. Keep the head, then
+    splice a (possibly shortened) trigger sentence back in.
+
+    When the trigger is already the first sentence a plain head-fill keeps it,
+    and splicing would print a confusing leading "..." -- so that case just
+    fills from the front.
+    """
+    if len(text) <= cap:
+        return text
+    sentences = _split_description_sentences(text)
+    trigger_index = next(
+        (index for index, sentence in enumerate(sentences) if _SKILL_TRIGGER_RE.search(sentence)),
+        None,
+    )
+    kept: list[str] = []
+    used = 0
+
+    def take_while(seq: list[str], limit: int) -> bool:
+        nonlocal used
+        for sentence in seq:
+            if used + len(sentence) + 1 > limit:
+                return False
+            kept.append(sentence)
+            used += len(sentence) + 1
+        return True
+
+    if trigger_index in (None, 0):
+        complete = take_while(sentences, cap - 2)
+        result = " ".join(kept).strip()
+        if not complete:
+            result = (result + " ...").strip()
+        return (result or text[: max(0, cap - 1)].rstrip() + "...")[:cap].rstrip()
+
+    take_while(sentences[:trigger_index], max(40, int(cap * 0.6)))
+    remaining = cap - used - 2  # room for the "..." join marker
+    if remaining > 24:
+        trigger = sentences[trigger_index]
+        if len(trigger) > remaining:
+            trigger = trigger[: max(0, remaining - 1)].rstrip() + "..."
+        kept.append("... " + trigger)
+    else:
+        kept = [text[: max(0, cap - 1)].rstrip() + "..."]
+    return (" ".join(kept).strip())[:cap].rstrip()
+
+
 def format_skill_listing(
     skills: Iterable[SkillSpec],
-    char_budget: int = 8000,
+    char_budget: int = DEFAULT_SKILL_LISTING_CHAR_BUDGET,
     *,
     for_model: bool = True,
 ) -> str:
@@ -296,8 +385,7 @@ def format_skill_listing(
         if skill.when_to_use:
             desc = f"{desc} - {skill.when_to_use}" if desc else skill.when_to_use
         desc = re.sub(r"\s+", " ", desc).strip()
-        if len(desc) > 250:
-            desc = desc[:249].rstrip() + "..."
+        desc = _compact_description(desc, _SKILL_DESC_CAP)
         if state == "name-only":
             line = f"- {name}"
         else:
@@ -306,13 +394,12 @@ def format_skill_listing(
                 line += f" [{skill.source}]"
         extra = len(line) + (1 if lines else 0)
         if lines and used + extra > char_budget:
-            compact = f"- {name}"
-            compact_extra = len(compact) + 1
-            if used + compact_extra <= char_budget:
-                lines.append(compact)
-                used += compact_extra
-                continue
-            break
+            # Degrade the whole row to `- name` -- never drop the skill. Claude
+            # Code's algorithm keeps every skill in the listing and only spends
+            # budget on descriptions; a `break` here made 15 of 53 skills
+            # invisible to the model, which can then never match them.
+            line = f"- {name}"
+            extra = len(line) + (1 if lines else 0)
         if not lines and extra > char_budget:
             line = line[: max(0, char_budget - 3)].rstrip() + "..."
             extra = len(line)
@@ -401,15 +488,18 @@ def skill_status_rows(
     return rows
 
 
-def build_skill_prompt(char_budget: int = 8000) -> str:
+def build_skill_prompt(char_budget: int | None = None) -> str:
     skills = discover_skills()
-    listing = format_skill_listing(skills, char_budget=char_budget, for_model=True)
+    budget = char_budget if char_budget is not None else _skill_listing_budget()
+    listing = format_skill_listing(skills, char_budget=budget, for_model=True)
     if not listing:
         return ""
     return (
         f"{NL}[Available Skills]{NL}"
-        "Before starting a task, scan this list. If any skill is even partially relevant to the task's domain, "
-        "repository, process or deliverable, call load_skill and read the full SKILL.md first; do not skip it "
-        "because you think you already know how. The listing is only an index; the loaded skill is authoritative. "
+        "Before starting a task, scan this list and match by *task type* (diagnosis, design, review, workflow "
+        "authoring, diagrams, slides), not only when the user names a skill. If any skill is even partially "
+        "relevant to the task's domain, repository, process or deliverable, call load_skill and read the full "
+        "SKILL.md first; do not skip it because you think you already know how. The listing is only an index; "
+        "the loaded skill is authoritative. "
         f"{NL}{listing}{NL}"
     )

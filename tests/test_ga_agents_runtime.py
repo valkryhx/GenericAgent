@@ -148,9 +148,12 @@ class RepoPromptLayersTest(unittest.TestCase):
             "file_glob",
             "file_grep",
             "只有 shell 才能做的事才用 code_run",
-            # Skills are authoritative procedures, not optional references.
+            # Skills are authoritative procedures, not optional references, and
+            # the scan is driven by task type rather than a name in the prompt.
             "部分相关",
             "load_skill",
+            "任务类型",
+            "没有实际验证 UI",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.base)
@@ -161,7 +164,7 @@ class RepoPromptLayersTest(unittest.TestCase):
                 self.assertIn(heading, self.base_en)
         self.assertIn("read_agent_result", self.base_en)
         for expected in ("file_glob", "file_grep", "Use code_run only for what needs a shell",
-                         "partially relevant"):
+                         "partially relevant", "task type", "the UI was not actually verified"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.base_en)
 
