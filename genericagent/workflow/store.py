@@ -94,6 +94,59 @@ def normalize_named_workflow_name(name: str) -> str:
     return slug
 
 
+_TAIL_WINDOW_BYTES = 64 * 1024
+
+
+def _tail_sequence(journal_path: Path) -> int:
+    """Highest ``sequence`` in an append-only journal, reading only its tail.
+
+    The next sequence needs exactly one thing: the last record's sequence. The
+    previous implementation re-read and re-parsed the *whole* journal on every
+    append, so writing n events cost O(n^2) -- 2000 events spent ~31s inside
+    the store. A bounded tail window keeps each append O(1).
+    """
+    try:
+        with journal_path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            window = min(size, _TAIL_WINDOW_BYTES)
+            handle.seek(size - window)
+            data = handle.read(window)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return 0
+    if not data:
+        return 0
+
+    def parse(lines):
+        for raw in reversed(lines):
+            if not raw.strip():
+                continue
+            try:
+                return int(json.loads(raw.decode("utf-8", "replace")).get("sequence") or 0)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return None
+
+    if window < size:
+        # The first line of the window may be cut in half; start after it.
+        newline = data.find(b"\n")
+        lines = data[newline + 1:].splitlines() if newline != -1 else []
+    else:
+        lines = data.splitlines()
+    found = parse(lines)
+    if found is None and window < size:
+        # Tail unreadable (e.g. an oversized record): fall back once, so a
+        # sequence is never silently reset to 0 and reused.
+        try:
+            fallback = journal_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return 0
+        found = parse(fallback)
+    return found or 0
+
+
 class WorkflowStore:
     def __init__(
         self,
@@ -156,15 +209,7 @@ class WorkflowStore:
         journal_path = artifact_dir / "journal.jsonl"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         with cross_process_lock(artifact_dir / ".journal.lock"):
-            current_max = 0
-            if journal_path.exists():
-                for line in journal_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        current_max = max(current_max, int(json.loads(line).get("sequence") or 0))
-                    except (ValueError, TypeError, json.JSONDecodeError):
-                        continue
+            current_max = _tail_sequence(journal_path)
             if event.sequence <= current_max:
                 event.sequence = current_max + 1
             with journal_path.open("a", encoding="utf-8", errors="replace") as fh:
