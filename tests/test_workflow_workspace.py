@@ -158,6 +158,37 @@ class WorkflowWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual({}, snapshot_workspace(Path(tmp) / "does-not-exist"))
 
+    def test_snapshot_reports_truncation_instead_of_silently_capping(self):
+        """超过 max_entries 时不能假装扫全了：产物归属会漏报，调用方必须能看见。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(5):
+                (root / ("f%d.txt" % index)).write_text("x", encoding="utf-8")
+            meta = {}
+            snap = snapshot_workspace(root, max_entries=3, meta=meta)
+            self.assertEqual(3, len(snap))
+            self.assertTrue(meta.get("truncated"))
+            self.assertEqual(3, meta.get("entries"))
+            self.assertEqual(3, meta.get("max_entries"))
+
+            complete = {}
+            snapshot_workspace(root, max_entries=10, meta=complete)
+            self.assertFalse(complete.get("truncated"))
+            self.assertEqual(5, complete.get("entries"))
+
+    def test_snapshot_order_is_deterministic(self):
+        """os.scandir 顺序依赖文件系统；同一目录两次扫描必须给出同一顺序。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "m.txt").write_text("m", encoding="utf-8")
+            (root / "a.txt").write_text("a", encoding="utf-8")
+            (root / "sub").mkdir()
+            (root / "sub" / "b.txt").write_text("b", encoding="utf-8")
+            first = list(snapshot_workspace(root))
+            second = list(snapshot_workspace(root))
+            self.assertEqual(first, second)
+            self.assertEqual(["a.txt", "m.txt", "sub/b.txt"], first)
+
 
 
 class ObservedArtifactShapeTest(unittest.TestCase):

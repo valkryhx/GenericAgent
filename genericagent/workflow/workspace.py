@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import deque
 from pathlib import Path
 from genericagent import paths
 
@@ -72,7 +73,12 @@ def create_run_workspace(base_root: str | os.PathLike[str], run_id: str) -> Path
     return root
 
 
-def snapshot_workspace(root: str | os.PathLike[str], *, max_entries: int = 20_000) -> dict[str, tuple[int, int]]:
+def snapshot_workspace(
+    root: str | os.PathLike[str],
+    *,
+    max_entries: int = 20_000,
+    meta: dict | None = None,
+) -> dict[str, tuple[int, int]]:
     """Map workspace-relative file paths to ``(mtime_ns, size)``.
 
     Used to detect what a child produced without enumerating tool names: any
@@ -83,34 +89,47 @@ def snapshot_workspace(root: str | os.PathLike[str], *, max_entries: int = 20_00
     directories are rarely huge but the workspace can be a full checkout; the
     scan runs twice per child job, and ``os.walk`` re-stats every entry through
     string paths (1.7s on this repository versus 0.07s here).
+
+    ``max_entries`` bounds the work, so a huge workspace is scanned partially.
+    That used to be silent -- the caller assumed the diff was complete. Pass
+    ``meta`` to learn the truth: it receives ``entries``, ``max_entries`` and
+    ``truncated`` (``True`` means the artifact diff is best-effort). Entries are
+    visited breadth-first in sorted name order so repeated scans of an unchanged
+    tree return the same subset (``os.scandir`` order is filesystem-dependent).
     """
     base = Path(root)
+    if meta is not None:
+        meta.update({"entries": 0, "max_entries": int(max_entries), "truncated": False})
     if not base.is_dir():
         return {}
     snapshot: dict[str, tuple[int, int]] = {}
-    pending = [str(base)]
+    pending = deque([str(base)])
     while pending:
-        directory = pending.pop()
+        directory = pending.popleft()
         try:
-            entries = os.scandir(directory)
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
         except OSError:
             continue
-        with entries:
-            for entry in entries:
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        if entry.name not in HOST_OWNED_WORKSPACE_DIRS:
-                            pending.append(entry.path)
-                        continue
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-                    stat = entry.stat(follow_symlinks=False)
-                except OSError:
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in HOST_OWNED_WORKSPACE_DIRS:
+                        pending.append(entry.path)
                     continue
-                relative = os.path.relpath(entry.path, base).replace(os.sep, "/")
-                snapshot[relative] = (int(stat.st_mtime_ns), int(stat.st_size))
-                if len(snapshot) >= max_entries:
-                    return snapshot
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            relative = os.path.relpath(entry.path, base).replace(os.sep, "/")
+            snapshot[relative] = (int(stat.st_mtime_ns), int(stat.st_size))
+            if max_entries > 0 and len(snapshot) >= max_entries:
+                if meta is not None:
+                    meta.update({"entries": len(snapshot), "truncated": True})
+                return snapshot
+    if meta is not None:
+        meta["entries"] = len(snapshot)
     return snapshot
 
 

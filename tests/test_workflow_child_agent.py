@@ -1111,6 +1111,34 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
             self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
             self.assertEqual(0, result.tool_summary["denied"])
 
+    def test_child_result_flags_a_truncated_artifact_scan(self):
+        """扫描被上限截断时，产物归属是“尽力而为”，结果里必须显式带标记。"""
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            for name in ("a.txt", "b.txt", "c.txt"):
+                (workspace / name).write_text("x", encoding="utf-8")
+            client = StubToolClient([StubToolResponse("<summary>done</summary>nothing to do")])
+            job = WorkflowJob(
+                job_id="agent_scan_cap",
+                prompt="do nothing",
+                metadata={
+                    "runId": "wf_test",
+                    "permissionProfile": "inherit-current-permissions",
+                    "permissionPolicyVersion": "inherit-current-v1",
+                    "workspacePath": str(workspace),
+                },
+            )
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: [])
+            with mock.patch.dict(os.environ, {"GA_WORKFLOW_SNAPSHOT_MAX_ENTRIES": "1"}):
+                with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                    runner.start(job)
+                    result = self.wait_for_result(runner, job)
+
+            self.assertEqual("succeeded", result.status)
+            self.assertTrue(result.tool_summary.get("artifactScanTruncated"))
+            self.assertEqual(1, result.tool_summary.get("artifactScanLimit"))
+
     def test_default_child_can_read_a_file_outside_workspace_path(self):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "workspace"
