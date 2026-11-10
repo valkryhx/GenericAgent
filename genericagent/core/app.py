@@ -1137,6 +1137,34 @@ class GenericAgent:
         })
         return display_queue
 
+    def _emit_context_usage(self, display_queue):
+        """One warn/compact/blocked line per level crossing (CC warn tier)."""
+        try:
+            from genericagent.core.context import note_context_usage
+            note = note_context_usage(self)
+        except Exception:
+            return
+        if note:
+            display_queue.put({"system": note, "source": "system"})
+
+    def _compact_after_hard_trim(self, display_queue):
+        """The hard line trimmed the request view: summarize so the text is not lost.
+
+        Trimming happens on a deepcopy, so nothing was destroyed -- but the model also
+        stopped seeing those messages. One compaction restores them as a summary.
+        """
+        backend = getattr(getattr(self, "llmclient", None), "backend", None)
+        trim = getattr(backend, "last_trim", None)
+        if not trim:
+            return False
+        backend.last_trim = None
+        from genericagent.core.context import maybe_auto_compact
+        note = maybe_auto_compact(self, pending_text="")
+        if note:
+            display_queue.put({"system": note + " (after hard-limit trim)", "source": "system"})
+            return True
+        return False
+
     def _recover_from_context_overflow(self, display_queue):
         """Upstream rejected the request as too long: compress so the next try fits.
 
@@ -1853,6 +1881,7 @@ class GenericAgent:
             model_prefix = str(task.get("model_prefix") or "")
             if source == "user" and not str(raw_query or "").strip().startswith("/"):
                 self._auto_compact_before_task(raw_query, display_queue)
+                self._emit_context_usage(display_queue)
             raw_query = self._prepare_model_query(raw_query, model_prefix, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
@@ -2185,6 +2214,10 @@ class GenericAgent:
                         self._maybe_arm_goal_wake_after_turn(handler, self.last_turn_outcome)
                 except Exception:
                     pass
+                try:
+                    self._compact_after_hard_trim(display_queue)
+                except Exception as exc:
+                    print(f"[WARN] post-trim compaction failed: {exc}")
                 try:
                     self._recover_from_context_overflow(display_queue)
                 except Exception as exc:

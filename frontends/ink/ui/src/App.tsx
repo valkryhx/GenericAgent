@@ -58,6 +58,7 @@ import {
   type SelectorState,
 } from './selectors.js'
 import type { BridgeEvent, PermissionMode, ResumeSession, TokenUsage } from './protocol.js'
+import { contextUsageHint } from './contextHint.js'
 import {
   loadingMcpPanel,
   mcpPanelRows,
@@ -846,6 +847,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   //   native click-drag selection away from the terminal, so the default is `off`.
   const fullscreen = useMemo(() => resolveFullscreenMode(), [])
   const [footerPanel, setFooterPanel] = useState<FooterPanel | null>(null)
+  const [contextHint, setContextHint] = useState<string | null>(null)
   // Subagent lifecycle announcements. The bridge already streams every child's status
   // (`agent_snapshot`); before this, the UI stored it and rendered nothing, so a child
   // finishing was invisible unless you read state.json off disk. Keyed by execution id so
@@ -1258,6 +1260,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (event.type === 'ready') {
         bridgeRef.current?.send({ type: 'skill_status' })
         bridgeRef.current?.send({ type: 'mcp_watch_start' })
+      }
+      if (event.type === 'context_usage') {
+        setContextHint(contextUsageHint(event))
       }
       if (event.type === 'status') {
         if (event.status === "running" && activeTurnStartedAtRef.current === null) {
@@ -2483,7 +2488,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         </Box>
       )
     }
-    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint))}</Text></Box>
+    if (section === 'hint') return <Box key={section} paddingX={1}><Text color={notice ? theme.warning : state.goalNudge ? theme.accent : theme.muted} wrap="truncate-end">{notice ?? (footerPanel?.type === 'status' ? footerPanel.text : (contextHint ?? (state.goalNudge ? `✦ ${state.goalNudge}` : inputHint)))}</Text></Box>
     // The caret is drawn whatever the turn status is: while a turn runs the composer
     // still accepts text (that text is queued), so hiding the caret removed the only
     // visual answer to "can I type right now?".
