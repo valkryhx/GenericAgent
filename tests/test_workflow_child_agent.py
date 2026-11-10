@@ -1073,35 +1073,43 @@ class NativeGPTChildAgentRunnerTest(unittest.TestCase):
         self.assertEqual("ok", capabilities["mcpDiscovery"]["status"])
 
     def test_native_tool_runner_allows_file_read_through_generic_handler_dispatch(self):
-        client = StubToolClient([
-            StubToolResponse("<summary>need read</summary>", [StubToolCall("file_read", {"path": __file__, "show_linenos": False})]),
-            StubToolResponse("<summary>done</summary>read complete"),
-        ])
-        job = WorkflowJob(
-            job_id="agent_tool_read",
-            prompt="read test file",
-            metadata={"runId": "wf_test", "permissionProfile": "inherit-current-permissions", "permissionPolicyVersion": "inherit-current-v1", "workspacePath": str(Path(__file__).resolve().parent.parent)},
-        )
-        tools = [
-            {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
-        ]
-        runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
+        # 子代理会在运行前后各快照一次「整个 workspace」作为产物依据。原来把 workspacePath
+        # 指到仓库根：单次快照 2 万条（上限）× 0.9s，直接吃满 wait_for_result 的 2s 预算，
+        # 全量跑批时必然超时（表现为偶发）。这里用小临时目录，让用例只测工具分发本身。
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            workspace.mkdir()
+            target = workspace / "sample.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            client = StubToolClient([
+                StubToolResponse("<summary>need read</summary>", [StubToolCall("file_read", {"path": str(target), "show_linenos": False})]),
+                StubToolResponse("<summary>done</summary>read complete"),
+            ])
+            job = WorkflowJob(
+                job_id="agent_tool_read",
+                prompt="read test file",
+                metadata={"runId": "wf_test", "permissionProfile": "inherit-current-permissions", "permissionPolicyVersion": "inherit-current-v1", "workspacePath": str(workspace)},
+            )
+            tools = [
+                {"type": "function", "function": {"name": "file_read", "parameters": {"type": "object", "properties": {}}}},
+            ]
+            runner = NativeGPTChildAgentRunner(client_factory=lambda config_name: client, tools_schema_factory=lambda: tools)
 
-        with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
-            runner.start(job)
-            result = self.wait_for_result(runner, job)
+            with mock.patch("genericagent.mcp.runtime.discover_mcp_tools_cached", return_value=[]):
+                runner.start(job)
+                result = self.wait_for_result(runner, job)
 
-        self.assertEqual("succeeded", result.status)
-        self.assertIn("read complete", result.payload["text"])
-        self.assertEqual({"input_tokens": 5, "output_tokens": 4}, result.token_usage)
-        self.assertTrue(client.tools_seen)
-        advertised = {(tool.get("function") or {}).get("name") for tool in client.tools_seen[0]}
-        self.assertIn("file_read", advertised)
-        self.assertIn("load_skill", advertised)
-        self.assertTrue(any(event.get("type") == "tool_call" and event.get("toolName") == "file_read" for event in result.transcript_events))
-        self.assertTrue(any(event.get("type") == "tool_result" and event.get("toolName") == "file_read" for event in result.transcript_events))
-        self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
-        self.assertEqual(0, result.tool_summary["denied"])
+            self.assertEqual("succeeded", result.status)
+            self.assertIn("read complete", result.payload["text"])
+            self.assertEqual({"input_tokens": 5, "output_tokens": 4}, result.token_usage)
+            self.assertTrue(client.tools_seen)
+            advertised = {(tool.get("function") or {}).get("name") for tool in client.tools_seen[0]}
+            self.assertIn("file_read", advertised)
+            self.assertIn("load_skill", advertised)
+            self.assertTrue(any(event.get("type") == "tool_call" and event.get("toolName") == "file_read" for event in result.transcript_events))
+            self.assertTrue(any(event.get("type") == "tool_result" and event.get("toolName") == "file_read" for event in result.transcript_events))
+            self.assertEqual(["file_read", "no_tool"], result.tool_summary["allowedTools"])
+            self.assertEqual(0, result.tool_summary["denied"])
 
     def test_default_child_can_read_a_file_outside_workspace_path(self):
         with tempfile.TemporaryDirectory() as td:
