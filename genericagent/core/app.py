@@ -1147,6 +1147,19 @@ class GenericAgent:
         if note:
             display_queue.put({"system": note, "source": "system"})
 
+    def _precompute_compaction(self):
+        """Warm the next compaction while the user is reading the answer.
+
+        Skipped when a task is already queued: the summarizer temporarily swaps
+        history under the backend lock, so a request arriving mid-precompute just
+        waits -- better to leave it for the next idle boundary.
+        """
+        task_queue = getattr(self, "task_queue", None)
+        if task_queue is not None and not task_queue.empty():
+            return None
+        from genericagent.core.context import precompute_compaction
+        return precompute_compaction(self)
+
     def _compact_after_hard_trim(self, display_queue):
         """The hard line trimmed the request view: summarize so the text is not lost.
 
@@ -2222,6 +2235,10 @@ class GenericAgent:
                     self._recover_from_context_overflow(display_queue)
                 except Exception as exc:
                     print(f"[WARN] overflow recovery failed: {exc}")
+                try:
+                    self._precompute_compaction()
+                except Exception as exc:
+                    print(f"[WARN] precompute compaction failed: {exc}")
                 self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.cancel()

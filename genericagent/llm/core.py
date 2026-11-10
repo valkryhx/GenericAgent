@@ -862,7 +862,9 @@ class BaseSession:
         # 与硬线裁剪都跳过；手动 /compact 不受此开关影响，仍可触发。
         self.auto_compact_enabled = bool(cfg.get('auto_compact_enabled', True))
         self.history = []
-        self.lock = threading.Lock()
+        # RLock: compaction temporarily swaps history while calling ask(), which
+        # itself takes this lock; a plain Lock would deadlock there.
+        self.lock = threading.RLock()
         self.system = ""
         self.name = cfg.get('name', self.model)
         proxy = cfg.get('proxy')

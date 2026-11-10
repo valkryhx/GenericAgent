@@ -442,6 +442,124 @@ class InTurnHandlerStateTest(unittest.TestCase):
         self.assertEqual("LIVE-STATE", agent._compact_working_state["handler_working"]["key_info"])
 
 
+class PrecomputedCompactionTest(unittest.TestCase):
+    def _agent(self, used_total=900_000, auto=100_000):
+        agent = FakeAgent(_conversation())
+        backend = agent.llmclient.backend
+        backend.auto_compact_tokens = auto
+        backend.hard_limit_tokens = auto + 10_000
+        backend.last_usage_tokens = {"total_tokens": used_total}
+        return agent
+
+    def test_below_the_watermark_nothing_is_computed(self):
+        agent = self._agent(used_total=1_000)
+        calls = []
+        self.assertIsNone(compact_context.precompute_compaction(
+            agent, summarize_fn=lambda src, ins: calls.append(1) or "S"))
+        self.assertEqual([], calls)
+
+    def test_only_the_prefix_is_summarized(self):
+        agent = self._agent()
+        seen = []
+        record = compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: seen.append(src) or "PRECOMPUTED")
+        self.assertIsNotNone(record)
+        self.assertEqual(1, len(seen))
+        self.assertNotIn("latest request LAMBDA", seen[0])
+        self.assertNotIn("latest tool output OMEGA", seen[0])
+        self.assertIn("old request ALPHA", seen[0])
+        self.assertEqual(4, record["coverage_len"])
+
+    def test_the_summary_is_reused_and_the_tail_kept_verbatim(self):
+        agent = self._agent()
+        compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: "PRECOMPUTED")
+        # new messages land after the coverage point: they must survive untouched
+        agent.llmclient.backend.history.append({"role": "assistant", "content": _text("fresh answer TAU")})
+
+        def boom(src, ins):
+            raise AssertionError("the summarizer must not run when a valid cache exists")
+
+        result = compact_context.compact_agent_context(
+            agent, summarize_fn=boom, instructions=compact_context.AUTO_COMPACT_INSTRUCTIONS,)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(result.precomputed_reused)
+        dumped = _dump(agent.llmclient.backend.history)
+        self.assertIn("PRECOMPUTED", dumped)
+        self.assertIn("latest request LAMBDA", dumped)
+        self.assertIn("fresh answer TAU", dumped)
+        self.assertNotIn("old request ALPHA", dumped)
+
+    def test_a_stale_cache_is_discarded_and_rewritten(self):
+        agent = self._agent()
+        compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: "PRECOMPUTED")
+        # mutate a message inside the covered prefix: the cache no longer matches
+        agent.llmclient.backend.history[0]["content"] = _text("EDITED PREFIX")
+        seen = []
+        result = compact_context.compact_agent_context(
+            agent, summarize_fn=lambda src, ins: seen.append(src) or "FRESH SUMMARY",
+            instructions=compact_context.AUTO_COMPACT_INSTRUCTIONS,)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.precomputed_reused)
+        self.assertEqual(1, len(seen))
+        self.assertIn("FRESH SUMMARY", _dump(agent.llmclient.backend.history))
+
+    def test_the_cache_is_cleared_after_use(self):
+        agent = self._agent()
+        compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: "PRECOMPUTED")
+        compact_context.compact_agent_context(agent, summarize_fn=lambda src, ins: "X")
+        self.assertIsNone(getattr(agent, "_precomputed_compact", None))
+
+    def test_a_single_turn_precomputes_the_whole_history(self):
+        # With one turn there is no separate tail: the summary covers everything,
+        # which is exactly what a normal compaction of that history would do.
+        agent = FakeAgent(_conversation()[:4])
+        backend = agent.llmclient.backend
+        backend.auto_compact_tokens = 10
+        backend.last_usage_tokens = {"total_tokens": 900_000}
+        record = compact_context.precompute_compaction(agent, summarize_fn=lambda s, i: "S")
+        self.assertIsNotNone(record)
+        self.assertEqual(4, record["coverage_len"])
+
+    def test_the_transcript_records_the_true_coverage(self):
+        agent = self._agent()
+        recorded = {}
+        compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: "PRECOMPUTED")
+        agent.session_path = "session.jsonl"
+        original = compact_context.record_compact_transcript
+
+        def fake_record(a, result, trigger):
+            recorded["summarized"] = result.summarized_messages
+            recorded["kept"] = result.kept_messages
+            recorded["reused"] = result.precomputed_reused
+
+        compact_context.record_compact_transcript = fake_record
+        try:
+            res = compact_context.compact_agent_context(
+                agent, summarize_fn=lambda s, i: "X", instructions=compact_context.AUTO_COMPACT_INSTRUCTIONS,)
+            compact_context.record_compact_transcript(agent, res, trigger="auto")
+        finally:
+            compact_context.record_compact_transcript = original
+        self.assertEqual(4, recorded["summarized"])
+        self.assertEqual(4, recorded["kept"])
+        self.assertTrue(recorded["reused"])
+
+
+class PrecomputeInstructionsTest(unittest.TestCase):
+    def test_custom_instructions_never_reuse_the_cache(self):
+        agent = FakeAgent(_conversation())
+        backend = agent.llmclient.backend
+        backend.auto_compact_tokens = 100_000
+        backend.last_usage_tokens = {"total_tokens": 900_000}
+        compact_context.precompute_compaction(agent, summarize_fn=lambda src, ins: "PRECOMPUTED")
+        seen = []
+        result = compact_context.compact_agent_context(
+            agent, instructions="keep only file names", summarize_fn=lambda src, ins: seen.append(ins) or "FRESH")
+        self.assertTrue(result.ok)
+        self.assertFalse(result.precomputed_reused)
+        self.assertEqual(1, len(seen))
+        self.assertIn("keep only file names", seen[0])
+        self.assertIn("FRESH", _dump(agent.llmclient.backend.history))
+
+
 class ContextUsageTest(unittest.TestCase):
     def _agent(self, used_total, auto=100000, hard=110000):
         agent = FakeAgent(_conversation())
@@ -580,3 +698,32 @@ class MicrocompactTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class PrecomputeEntryTest(unittest.TestCase):
+    def _agent(self, queued=False):
+        agent = FakeAgent(_conversation())
+        agent.task_queue = queue.Queue()
+        if queued:
+            agent.task_queue.put({"query": "pending"})
+        return agent
+
+    def test_precompute_runs_at_an_idle_turn_end(self):
+        agent = self._agent()
+        calls = []
+        original = compact_context.precompute_compaction
+        compact_context.precompute_compaction = lambda a, summarize_fn=None: calls.append(1) or {"summary": "S"}
+        try:
+            self.assertIsNotNone(GeneraticAgent._precompute_compaction(agent))
+        finally:
+            compact_context.precompute_compaction = original
+        self.assertEqual([1], calls)
+
+    def test_precompute_is_skipped_when_a_task_is_queued(self):
+        agent = self._agent(queued=True)
+        calls = []
+        original = compact_context.precompute_compaction
+        compact_context.precompute_compaction = lambda a, summarize_fn=None: calls.append(1) or {"summary": "S"}
+        try:
+            self.assertIsNone(GeneraticAgent._precompute_compaction(agent))
+        finally:
+            compact_context.precompute_compaction = original
+        self.assertEqual([], calls)

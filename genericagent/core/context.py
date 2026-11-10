@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,9 @@ class CompactResult:
     pre_tokens: int = 0
     post_tokens: int = 0
     duration_ms: int = 0
+    summarized_messages: int = 0
+    kept_turns: int = 0
+    precomputed_reused: bool = False
 
 
 def _soft_limit_tokens(backend: Any) -> int:
@@ -255,8 +259,12 @@ def record_compact_transcript(agent: Any, result: Any, trigger: str) -> None:
                 pre_tokens=int(getattr(result, "pre_tokens", 0) or 0),
                 post_tokens=int(getattr(result, "post_tokens", 0) or 0),
                 duration_ms=int(getattr(result, "duration_ms", 0) or 0),
-                messages_summarized=int(getattr(result, "original_messages", 0) or 0),
+                messages_summarized=int(
+                    getattr(result, "summarized_messages", 0)
+                    or getattr(result, "original_messages", 0) or 0
+                ),
                 turn_id=getattr(agent, "session_turn_id", None),
+                keep_recent_turns=int(getattr(result, "kept_turns", 0) or 1),
                 working_state=getattr(result, "working_state", None),
             )
         else:
@@ -268,6 +276,86 @@ def record_compact_transcript(agent: Any, result: Any, trigger: str) -> None:
             )
     except Exception:
         return
+
+
+# CC starts precomputing well before the compaction line so the swap itself is free.
+PRECOMPUTE_WATERMARK_RATIO = 0.8
+# The summary prompt a cached precompute was built with; reuse requires equality.
+AUTO_COMPACT_INSTRUCTIONS = "Automatic compact before the next user request."
+_PRECOMPUTED_KEY = "_precomputed_compact"
+
+
+def _history_fingerprint(messages: list[dict[str, Any]]) -> str:
+    blob = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _tail_turn_count(tail: list[dict[str, Any]]) -> int:
+    return max(1, sum(1 for message in tail if _is_real_user_prompt(message)))
+
+
+def _take_precomputed(agent: Any, history: list[dict[str, Any]],
+                    instructions: str = AUTO_COMPACT_INSTRUCTIONS) -> dict[str, Any] | None:
+    """Return the cached precomputed summary when it still matches the prefix.
+
+    The stored coverage point is a prefix of the history; as long as every message
+    before it is unchanged (history only appends), the summary describes the same
+    text. Anything else -- a compaction, a resume, an edit -- invalidates it.
+    """
+    cached = getattr(agent, _PRECOMPUTED_KEY, None)
+    if not isinstance(cached, dict):
+        return None
+    coverage = int(cached.get("coverage_len") or 0)
+    summary = str(cached.get("summary") or "")
+    if coverage <= 0 or not summary or len(history) < coverage:
+        setattr(agent, _PRECOMPUTED_KEY, None)
+        return None
+    if str(cached.get("instructions") or "") != str(instructions or ""):
+        setattr(agent, _PRECOMPUTED_KEY, None)
+        return None
+    if _history_fingerprint(history[:coverage]) != cached.get("fingerprint"):
+        print(f"[Compact] precomputed summary discarded: prefix changed (coverage={coverage}, history={len(history)}).")
+        setattr(agent, _PRECOMPUTED_KEY, None)
+        return None
+    return cached
+
+
+def precompute_compaction(agent: Any, summarize_fn: SummarizeFn | None = None,
+                          instructions: str = AUTO_COMPACT_INSTRUCTIONS) -> dict[str, Any] | None:
+    """Summarize the prefix ahead of time so the real compaction is a swap.
+
+    Runs at a turn boundary (history is stable); it never mutates history, never
+    writes a transcript boundary and never touches session state -- it only
+    produces text for a later swap.
+    """
+    backend = _backend(agent)
+    if backend is None or not bool(getattr(backend, "auto_compact_enabled", True)):
+        return None
+    history = getattr(backend, "history", []) or []
+    if not history:
+        return None
+    used = token_meter.estimate_context_tokens(history, getattr(backend, "last_usage_tokens", None))
+    if used < int(_soft_limit_tokens(backend) * PRECOMPUTE_WATERMARK_RATIO):
+        return None
+    kept_tail = _recent_turns_tail(history, 1)
+    coverage_len = len(history) - len(kept_tail)
+    if coverage_len <= 0:
+        return None
+    prefix = history[:coverage_len]
+    fingerprint = _history_fingerprint(prefix)
+    cached = getattr(agent, _PRECOMPUTED_KEY, None)
+    if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
+        return cached
+    source = _history_to_text(prefix, _source_char_budget(backend))
+    summarizer = summarize_fn or (lambda src, ins: _summarize_with_backend(backend, src, ins))
+    summary = _clean_summary(summarizer(source, instructions))
+    if not summary:
+        return None
+    print(f"[Precompute] summarized {coverage_len} messages ahead of time.")
+    record = {"summary": summary, "coverage_len": coverage_len, "fingerprint": fingerprint,
+              "instructions": str(instructions or "")}
+    setattr(agent, _PRECOMPUTED_KEY, record)
+    return record
 
 
 def maybe_auto_compact(
@@ -292,7 +380,7 @@ def maybe_auto_compact(
             return None
         result = compact_agent_context(
             agent,
-            instructions="Automatic compact before the next user request.",
+            instructions=AUTO_COMPACT_INSTRUCTIONS,
             summarize_fn=summarize_fn,
         )
     except Exception:  # never block the user's turn on compaction bookkeeping
@@ -312,6 +400,7 @@ def compact_agent_context(
     instructions: str = "",
     summarize_fn: SummarizeFn | None = None,
     keep_recent_turns: int = 1,
+    reuse_precomputed: bool = True,
 ) -> CompactResult:
     backend = _backend(agent)
     if backend is None or not hasattr(backend, "history"):
@@ -339,11 +428,29 @@ def compact_agent_context(
     )
 
     try:
-        source = _history_to_text(old_backend_history, _source_char_budget(backend))
-        summarizer = summarize_fn or (lambda src, ins: _summarize_with_backend(backend, src, ins))
-        summary = _clean_summary(summarizer(source, instructions))
+        kept_tail = _recent_turns_tail(old_backend_history, keep_recent_turns)
+        coverage_len = max(0, len(old_backend_history) - len(kept_tail))
+        reused = False
+        summary = ""
+        # The cache is only valid for the summary prompt it was built with: a
+        # /compact with its own instructions wants a different summary.
+        if reuse_precomputed:
+            cached = _take_precomputed(agent, old_backend_history, instructions)
+            if cached:
+                summary = str(cached["summary"])
+                coverage_len = int(cached["coverage_len"])
+                kept_tail = copy.deepcopy(old_backend_history[coverage_len:])
+                reused = True
+                print(f"[Compact] reused the precomputed summary for {coverage_len} messages.")
         if not summary:
-            raise RuntimeError("compact summary is empty")
+            source = _history_to_text(
+                old_backend_history[:coverage_len] or old_backend_history,
+                _source_char_budget(backend),
+            )
+            summarizer = summarize_fn or (lambda src, ins: _summarize_with_backend(backend, src, ins))
+            summary = _clean_summary(summarizer(source, instructions))
+            if not summary:
+                raise RuntimeError("compact summary is empty")
         summary = _append_invoked_skills(summary, invoked_skills)
         working_block = _working_state_block(compact_working_state)
         if working_block:
@@ -351,7 +458,6 @@ def compact_agent_context(
         # Keep the tail verbatim (CC's messagesToKeep): the summary alone loses the
         # request the model was in the middle of, the exact file it had just read,
         # and the command it had just run.
-        kept_tail = _recent_turns_tail(old_backend_history, keep_recent_turns)
         compact_history = _summary_history_pair(summary) + kept_tail
         backend.history = compact_history
         post_tokens = token_meter.estimate_context_tokens(compact_history, None)
@@ -363,6 +469,7 @@ def compact_agent_context(
         agent._compact_working_state = (
             compact_working_state if compact_working_state.get("handler_working") else None
         )
+        setattr(agent, _PRECOMPUTED_KEY, None)
         if hasattr(backend, "last_usage_tokens"):
             # The old usage described the pre-compaction history; keeping it would
             # make the very next estimate look over the soft line again and trigger
@@ -384,6 +491,9 @@ def compact_agent_context(
             pre_tokens=pre_tokens,
             post_tokens=post_tokens,
             duration_ms=duration_ms,
+            summarized_messages=coverage_len,
+            kept_turns=_tail_turn_count(kept_tail),
+            precomputed_reused=reused,
         )
     except Exception as exc:
         backend.history = old_backend_history
@@ -606,14 +716,28 @@ def _summary_history_pair(summary: str) -> list[dict[str, Any]]:
 
 
 def _summarize_with_backend(backend: Any, source: str, instructions: str) -> str:
+    """Summarize with the session's own model, holding the history lock.
+
+    ``ask`` appends to ``backend.history``, so the empty-history swap has to be
+    exclusive: otherwise a request starting concurrently (precompute runs at turn
+    boundaries) would append into the swap and be lost when the old history is
+    restored. The backend lock is an RLock for exactly this re-entry.
+    """
     prompt = _compact_prompt(source, instructions)
-    old_history = copy.deepcopy(getattr(backend, "history", []) or [])
+    lock = getattr(backend, "lock", None)
+    if lock is not None:
+        lock.acquire()
     try:
-        backend.history = []
-        ask_arg: Any = {"role": "user", "content": [{"type": "text", "text": prompt}]} if _is_native_backend(backend) else prompt
-        return "".join(str(chunk) for chunk in backend.ask(ask_arg))
+        old_history = copy.deepcopy(getattr(backend, "history", []) or [])
+        try:
+            backend.history = []
+            ask_arg: Any = {"role": "user", "content": [{"type": "text", "text": prompt}]} if _is_native_backend(backend) else prompt
+            return "".join(str(chunk) for chunk in backend.ask(ask_arg))
+        finally:
+            backend.history = old_history
     finally:
-        backend.history = old_history
+        if lock is not None:
+            lock.release()
 
 
 def _is_native_backend(backend: Any) -> bool:
