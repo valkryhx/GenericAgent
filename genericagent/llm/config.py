@@ -216,6 +216,10 @@ class ModelCfg(_Strict):
     # 不填则用默认；仅当 context_window 有值时 to_legacy_cfg 才派生出 token 阈值。
     auto_compact_ratio: float = 0.90
     hard_limit_ratio: float = 0.95
+    # Claude Code 口径的留白（token）：软线 = 窗口 − min(max_tokens,20000) − 13000，
+    # 硬线 = 窗口 − min(max_tokens,20000) − 3000。显式 ratio / token 仍优先（兼容旧配置）。
+    auto_compact_margin_tokens: int = 13000
+    blocking_margin_tokens: int = 3000
     # 直接写死绝对 token 阈值（对齐 Codex 的 model_auto_compact_token_limit）。
     # 若填了，优先级高于「窗口 × ratio」派生；两者都不填才走 Session 端默认。
     auto_compact_tokens: Optional[int] = None
@@ -273,10 +277,16 @@ class ModelCfg(_Strict):
                 f"auto_compact_ratio({self.auto_compact_ratio}) 必须小于 "
                 f"hard_limit_ratio({self.hard_limit_ratio})：软线应早于硬线触发"
             )
-        for name in ("auto_compact_tokens", "hard_limit_tokens"):
+        for name in ("auto_compact_tokens", "hard_limit_tokens",
+                     "auto_compact_margin_tokens", "blocking_margin_tokens"):
             v = getattr(self, name)
             if v is not None and v <= 0:
                 raise ValueError(f"model 的 {name}={v} 非法；须为正整数 token 数")
+        if self.blocking_margin_tokens >= self.auto_compact_margin_tokens:
+            raise ValueError(
+                f"blocking_margin_tokens({self.blocking_margin_tokens}) 必须小于 "
+                f"auto_compact_margin_tokens({self.auto_compact_margin_tokens})：软线应早于硬线触发"
+            )
         if (self.auto_compact_tokens is not None and self.hard_limit_tokens is not None
                 and self.auto_compact_tokens >= self.hard_limit_tokens):
             raise ValueError(
@@ -398,10 +408,21 @@ class ResolvedModel:
         put("auto_compact_enabled", m.auto_compact)
         auto_tok = m.auto_compact_tokens
         hard_tok = m.hard_limit_tokens
-        if auto_tok is None and m.context_window is not None:
-            auto_tok = round(m.context_window * m.auto_compact_ratio)
-        if hard_tok is None and m.context_window is not None:
-            hard_tok = round(m.context_window * m.hard_limit_ratio)
+        if m.context_window is not None:
+            # CC's margins (window - output reserve - 13000/3000) unless the model
+            # explicitly opted into a ratio: reserving room for the reply is what
+            # keeps a "just under the window" request from being rejected.
+            reserve = min(int(p.get("max_tokens") or m.max_tokens or 20000), 20000)
+            if auto_tok is None:
+                if "auto_compact_ratio" in m.model_fields_set:
+                    auto_tok = round(m.context_window * m.auto_compact_ratio)
+                else:
+                    auto_tok = max(1, m.context_window - reserve - m.auto_compact_margin_tokens)
+            if hard_tok is None:
+                if "hard_limit_ratio" in m.model_fields_set:
+                    hard_tok = round(m.context_window * m.hard_limit_ratio)
+                else:
+                    hard_tok = max(1, m.context_window - reserve - m.blocking_margin_tokens)
         put("auto_compact_tokens", auto_tok)
         put("hard_limit_tokens", hard_tok)
         put("max_retries", p.get("max_retries"))

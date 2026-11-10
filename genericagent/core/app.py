@@ -1137,6 +1137,35 @@ class GenericAgent:
         })
         return display_queue
 
+    def _recover_from_context_overflow(self, display_queue):
+        """Upstream rejected the request as too long: compress so the next try fits.
+
+        Local estimates can under-count (different tokenizer, tool results added after
+        the measurement). The hard trim is the last resort; this one keeps the summary.
+        """
+        backend = getattr(getattr(self, "llmclient", None), "backend", None)
+        error = str(getattr(backend, "last_provider_error", "") or "")
+        if not error:
+            return False
+        backend.last_provider_error = ""
+        from genericagent.core.context import (
+            compact_agent_context, is_context_overflow_error,
+        )
+        if not is_context_overflow_error(error):
+            return False
+        result = compact_agent_context(
+            self,
+            instructions="Context overflow recovery: keep the user task, decisions, files and latest state.",
+        )
+        if not result.ok:
+            display_queue.put({"done": f"上下文超限，自动压缩失败：{result.message}", "source": "system"})
+            return False
+        display_queue.put({
+            "done": "上下文超限（上游拒绝），已强制压缩并保留最近一轮；请重发刚才那条消息。",
+            "source": "system",
+        })
+        return True
+
     def _auto_compact_before_task(self, query, display_queue):
         """Core-level auto compaction, so CLI/TUI get it too (Ink did it alone).
 
@@ -2156,6 +2185,10 @@ class GenericAgent:
                         self._maybe_arm_goal_wake_after_turn(handler, self.last_turn_outcome)
                 except Exception:
                     pass
+                try:
+                    self._recover_from_context_overflow(display_queue)
+                except Exception as exc:
+                    print(f"[WARN] overflow recovery failed: {exc}")
                 self.is_running = self.stop_sig = False
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.cancel()

@@ -171,6 +171,16 @@ def auto_make_url(base, path):
     if b.endswith(p): return b
     return f"{b}/{p}" if re.search(r'/v\d+(/|$)', b) else f"{b}/v1/{p}"
 
+def _note_provider_error(sess, message):
+    """Remember the provider's last error so the turn can react (context overflow)."""
+    if sess is None or not message:
+        return
+    try:
+        sess.last_provider_error = str(message)
+    except Exception:
+        pass
+
+
 def _provider_error_message(evt):
     """Return a human-readable message when a stream/JSON payload is an error object.
 
@@ -234,6 +244,7 @@ def _parse_claude_sse(resp_lines, sess=None):
         if not evt_type:
             _perr = _provider_error_message(evt)
             if _perr:
+                _note_provider_error(sess, _perr)
                 warn = f"\n\n!!!Error: SSE {_perr}"; break
         if evt_type == "message_start":
             usage = evt.get("message", {}).get("usage", {})
@@ -323,6 +334,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             etype = evt.get("type", "")
             _perr = _provider_error_message(evt)
             if _perr:
+                _note_provider_error(sess, _perr)
                 msg = f"!!!Error: {_perr}"
                 content_text += msg; yield msg
                 break
@@ -379,6 +391,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             except: continue
             _perr = _provider_error_message(evt)
             if _perr:
+                _note_provider_error(sess, _perr)
                 msg = f"!!!Error: {_perr}"
                 content_text += msg; yield msg
                 break
@@ -496,6 +509,7 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     blocks = []
     _perr = _provider_error_message(data)
     if _perr:
+        _note_provider_error(sess, _perr)
         msg = f"!!!Error: {_perr}"
         blocks.append({"type": "text", "text": msg}); yield msg
         return blocks
