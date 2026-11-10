@@ -1048,6 +1048,10 @@ class GenericAgentBridge:
             self._replace_compact_log()
             self._record_compact_transcript(result, trigger="manual")
             self._rewind_snapshots.clear()
+            # The hint line only refreshes on a crossing; a manual /compact drops the
+            # level back to ok, and without this the stale "auto-compact coming up"
+            # line would sit there until the next turn.
+            self._emit_context_usage_if_changed()
             text = result.message
             if post.context_text:
                 text += chr(10) * 2 + '[Hook context] ' + post.context_text
@@ -3299,6 +3303,18 @@ class GenericAgentBridge:
         self._consume_thread.start()
         return True
 
+    def _await_agent_idle(self, timeout: float = 180.0) -> None:
+        """Wait until the agent's own turn finalization is done before reporting idle.
+
+        The ``done`` item reaches the UI before the agent's finally block finishes
+        (post-turn compaction and precompute still hold ``is_running``). Reporting
+        idle early makes the next command fail with "agent is running" -- observed
+        on a real TUI session right after a turn.
+        """
+        deadline = time.monotonic() + timeout
+        while getattr(self.agent, "is_running", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+
     def _consume_display_queue(self, task_id: int, display_queue: queue.Queue) -> None:
         last_usage = None
         def emit_usage_if_changed() -> None:
@@ -3326,11 +3342,13 @@ class GenericAgentBridge:
                     # boundary so the Ink agent panel observes the terminal
                     # state without waiting for an unrelated control command.
                     self._emit_agent_read_model()
+                    self._await_agent_idle()
                     self.emit({"type": "status", "status": "idle", "taskId": task_id})
                     return
         except Exception as exc:
             self.emit({"type": "error", "code": "consume_failed", "message": str(exc), "taskId": task_id})
             self._emit_agent_read_model()
+            self._await_agent_idle()
             self.emit({"type": "status", "status": "idle", "taskId": task_id})
 
 

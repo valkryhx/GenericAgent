@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -543,9 +544,18 @@ def compact_agent_context(
             client.last_tools = ""
         if hasattr(agent, "handler"):
             agent.handler = None
+        if pivot is not None:
+            # Partial compaction: say what was summarized and what was kept, so the
+            # user does not read "Compacted 4 messages" and think everything went.
+            message = (
+                f"Compacted {len(summarized)} of {len(old_backend_history)} messages into "
+                f"summary context (kept {len(kept_tail)})."
+            )
+        else:
+            message = f"Compacted {len(old_backend_history)} messages into summary context."
         return CompactResult(
             True,
-            f"Compacted {len(old_backend_history)} messages into summary context.",
+            message,
             summary=summary,
             original_messages=len(old_backend_history),
             compacted_messages=len(compact_history),
@@ -613,7 +623,33 @@ def parse_compact_command(text: str) -> dict[str, Any]:
     return parsed
 
 
-def describe_history_for_compact(agent: Any, max_preview: int = 60) -> str:
+def _display_width(text: str) -> int:
+    """Terminal columns for ``text``: CJK wide glyphs take two columns."""
+    width = 0
+    for char in str(text or ""):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def _truncate_display(text: str, max_cols: int) -> str:
+    """Truncate to ``max_cols`` terminal columns (character count lies for CJK)."""
+    text = str(text or "")
+    if _display_width(text) <= max_cols:
+        return text
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        step = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if used + step > max_cols - 3:
+            break
+        kept.append(char)
+        used += step
+    return "".join(kept).rstrip() + "..."
+
+
+def describe_history_for_compact(agent: Any, max_preview: int = 40) -> str:
     """Index table for choosing a partial-compaction pivot."""
     backend = _backend(agent)
     history = list(getattr(backend, "history", []) or []) if backend is not None else []
@@ -627,11 +663,11 @@ def describe_history_for_compact(agent: Any, max_preview: int = 60) -> str:
             tokens = token_meter.estimate_msg_tokens(message, cpt)
         except Exception:
             tokens = 0
-        preview = _one_line(_content_to_text(message.get("content")), max_preview)
+        preview = _truncate_display(
+            _one_line(_content_to_text(message.get("content")), 400), max_preview)
         lines.append(f"{idx:>4}  {role:<10} {tokens:>6}  {preview}")
     lines.append("")
-    lines.append("Use /compact --upto N (summarize 0..N-1, keep N..) or "
-                 "/compact --from N (keep 0..N-1, summarize N..).")
+    lines.append("Use /compact --upto N (summarize before) or --from N (summarize after).")
     return chr(10).join(lines)
 
 
