@@ -94,7 +94,10 @@ class CompactContextTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(4, result.original_messages)
-        self.assertEqual(2, len(agent.llmclient.backend.history))
+        # Summary pair, then the most recent turn kept verbatim (messagesToKeep).
+        self.assertEqual(4, len(agent.llmclient.backend.history))
+        self.assertEqual(2, result.kept_messages)
+        self.assertEqual(2, len(agent.llmclient.backend.history[:2]))
         compacted = agent.llmclient.backend.history[0]
         self.assertEqual("user", compacted["role"])
         self.assertIn("Summary keeps alpha", compacted["content"][0]["text"])

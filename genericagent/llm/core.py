@@ -53,38 +53,63 @@ def __getattr__(name):  # once guard in PEP 562
     if name == 'mykeys': return reload_mykeys()[0]
     raise AttributeError(f"module 'llmcore' has no attribute {name}")
 
-def compress_history_tags(messages, keep_recent=10, max_len=800, force=False):
-    """Compress <thinking>/<tool_use>/<tool_result> tags in older messages to save tokens."""
-    compress_history_tags._cd = getattr(compress_history_tags, '_cd', 0) + 1
-    if force: compress_history_tags._cd = 0
-    if compress_history_tags._cd % 5 != 0: return messages
-    _before = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
-    _pats = {tag: re.compile(rf'(<{tag}>)([\s\S]*?)(</{tag}>)') for tag in ('thinking', 'think', 'tool_use', 'tool_result')}
-    _hist_pat = re.compile(r'<(history|key_info|earlier_context)>[\s\S]*?</\1>')
-    def _trunc_str(s): return s[:max_len//2] + '\n...[Truncated]...\n' + s[-max_len//2:] if isinstance(s, str) and len(s) > max_len else s
-    def _trunc(text):
-        text = _hist_pat.sub(lambda m: f'<{m.group(1)}>[...]</{m.group(1)}>', text)
-        for pat in _pats.values(): text = pat.sub(lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3), text)
-        return text
-    for i, msg in enumerate(messages):
-        if i >= len(messages) - keep_recent: break
-        c = msg['content']
-        if isinstance(c, str): msg['content'] = _trunc(c)
-        elif isinstance(c, list):
-            for b in c:
-                if not isinstance(b, dict): continue
-                t = b.get('type')
-                if t == 'text' and isinstance(b.get('text'), str): b['text'] = _trunc(b['text'])
-                elif t == 'tool_result':
-                    tc = b.get('content')
-                    if isinstance(tc, str): b['content'] = _trunc_str(tc)
-                    elif isinstance(tc, list):
-                        for sub in tc:
-                            if isinstance(sub, dict) and sub.get('type') == 'text': sub['text'] = _trunc_str(sub.get('text'))
-                elif t == 'tool_use' and isinstance(b.get('input'), dict):
-                    for k, v in b['input'].items(): b['input'][k] = _trunc_str(v)
-    print(f"[Cut] {_before} -> {sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)}")
+MICROCOMPACT_CLEAR_MARKER = "[old tool result cleared]"
+MICROCOMPACT_MIN_SAVINGS_TOKENS = 20000
+
+
+def _tool_result_text(block):
+    """Flatten a tool_result block's content to text (str or text blocks)."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for sub in content:
+            if isinstance(sub, dict) and sub.get("type") == "text":
+                parts.append(str(sub.get("text") or ""))
+        return "".join(parts)
+    return ""
+
+
+def compress_history_tags(messages, keep_recent=10, max_len=800, force=False,
+                          min_savings_tokens=MICROCOMPACT_MIN_SAVINGS_TOKENS):
+    """Clear old tool results instead of blindly truncating every block.
+
+    Claude Code's microcompact empties old ``tool_result`` bodies (keeping the
+    newest ones) and only when it can free at least 20K tokens; it never touches
+    ``tool_use`` arguments or thinking. GA used to truncate all three to 800
+    chars on every fifth request -- which made the model retry with half a
+    command -- and had no "is this worth it" gate at all.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    limit = max(0, len(messages) - max(0, int(keep_recent)))
+    candidates = []
+    for index, message in enumerate(messages):
+        if index >= limit:
+            break
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            text = _tool_result_text(block)
+            if not text or MICROCOMPACT_CLEAR_MARKER in text:
+                continue
+            candidates.append((block, text))
+    if not candidates:
+        return messages
+    estimated_savings = int(sum(len(text) for _, text in candidates) / token_meter.CHARS_PER_TOKEN_FALLBACK)
+    if not force and estimated_savings < int(min_savings_tokens):
+        return messages
+    for block, _text in candidates:
+        block["content"] = MICROCOMPACT_CLEAR_MARKER
+    print(f"[Microcompact] cleared {len(candidates)} old tool results, ~{estimated_savings} tokens freed.")
     return messages
+
 
 def _sanitize_leading_user_msg(msg):
     """把 user 消息里的 tool_result 块改写成纯文本，避免孤立引用。

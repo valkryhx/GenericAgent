@@ -30,6 +30,7 @@ class CompactResult:
     compacted_messages: int = 0
     invoked_skills: list[dict[str, Any]] = field(default_factory=list)
     working_state: dict[str, Any] = field(default_factory=dict)
+    kept_messages: int = 0
 
 
 def _soft_limit_tokens(backend: Any) -> int:
@@ -66,10 +67,192 @@ def should_auto_compact_agent(agent: Any, pending_text: str = "") -> bool:
     return current + pending_tokens > _soft_limit_tokens(backend)
 
 
+MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+
+
+def _is_real_user_prompt(message: Any) -> bool:
+    """A user message that carries an actual request, not a tool result.
+
+    Claude Code splits turns on real user prompts (messagesToKeep); a user-role
+    message whose blocks are only ``tool_result`` belongs to the previous turn.
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return True
+    return not any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+
+
+def _recent_turns_tail(history: list[dict[str, Any]], keep_turns: int) -> list[dict[str, Any]]:
+    """The last ``keep_turns`` turns, kept verbatim across compaction.
+
+    Compaction used to replace the whole history with a summary, so the model lost
+    the request it was in the middle of. CC keeps a tail of recent messages; GA
+    does the same, starting at the last real user prompt.
+    """
+    if keep_turns <= 0:
+        return []
+    starts = [index for index, message in enumerate(history or []) if _is_real_user_prompt(message)]
+    if len(starts) <= keep_turns:
+        return []
+    tail = copy.deepcopy(list(history[starts[-keep_turns]:]))
+    while tail and not _is_real_user_prompt(tail[0]):
+        tail.pop(0)
+    return tail
+
+
+def _working_state_block(working_state: dict[str, Any] | None) -> str:
+    """Render saved handler state so it survives compaction.
+
+    GA tells the model to call ``update_working_checkpoint`` and keeps ``key_info``
+    in ``handler.working`` -- but compaction nulled the handler, so that checkpoint
+    vanished. CC rebuilds a whole attachment list after compacting; GA starts with
+    the state it already tracks.
+    """
+    handler_working = dict((working_state or {}).get("handler_working") or {})
+    if not handler_working:
+        return ""
+    labels = (
+        ("key_info", "key_info"),
+        ("related_sop", "related_sop"),
+        ("active_skill", "active_skill"),
+        ("active_skill_allowed_tools", "allowed_tools"),
+        ("in_plan_mode", "plan_mode_file"),
+        ("passed_sessions", "passed_sessions"),
+    )
+    lines = [
+        "<working_state>",
+        "State saved before compaction. Keep following it instead of re-deriving it.",
+    ]
+    for key, label in labels:
+        value = handler_working.get(key)
+        if value is None or value == "":
+            continue
+        lines.append(f"- {label}: {_one_line(str(value), 800)}")
+    last_tools = str((working_state or {}).get("last_tools") or "").strip()
+    if last_tools:
+        lines.append(f"- last_tool_list: {_one_line(last_tools, 300)}")
+    lines.append("</working_state>")
+    return chr(10).join(lines)
+
+
+_WORKING_STATE_RESTORE_KEYS = (
+    "key_info",
+    "related_sop",
+    "passed_sessions",
+    "active_skill",
+    "active_skill_allowed_tools",
+    "in_plan_mode",
+)
+
+
+def restore_compact_working_state(agent: Any, handler: Any) -> None:
+    """Apply the snapshot stashed by the last compaction to a freshly built handler.
+
+    One-shot: the snapshot is consumed so a later turn does not inherit stale state.
+    """
+    state = getattr(agent, "_compact_working_state", None)
+    if not isinstance(state, dict):
+        return
+    agent._compact_working_state = None
+    working = getattr(handler, "working", None)
+    if not isinstance(working, dict):
+        return
+    saved = state.get("handler_working")
+    if isinstance(saved, dict):
+        for key in _WORKING_STATE_RESTORE_KEYS:
+            if key in saved:
+                working[key] = copy.deepcopy(saved[key])
+        records = saved.get("_loaded_skill_records")
+        if isinstance(records, dict):
+            working["_loaded_skill_records"] = copy.deepcopy(records)
+
+
+def _run_compact_hook(agent: Any, event: str, payload: dict[str, Any]) -> Any:
+    """Fire PreCompact/PostCompact for auto compaction (manual already did).
+
+    Returns the hook aggregate for PreCompact so a blocking hook can veto; any
+    failure is swallowed -- compaction bookkeeping must not break a user turn.
+    """
+    try:
+        from genericagent.hooks.runtime import run_hook_event
+        return run_hook_event(agent, event, payload, emit=getattr(agent, "hook_emit", None))
+    except Exception:
+        return None
+
+
+def record_compact_transcript(agent: Any, result: Any, trigger: str) -> None:
+    """Persist the compaction to the session transcript (CC-style boundary)."""
+    path = str(getattr(agent, "session_path", "") or "")
+    if not path:
+        return
+    try:
+        from genericagent.core import transcripts as session_transcript
+        session_id = str(getattr(agent, "session_id", "") or "")
+        if session_transcript._detect_session_version(path) == 2:
+            session_transcript.record_compact_v2(
+                path,
+                session_id=session_id,
+                summary=str(getattr(result, "summary", "") or getattr(result, "message", "")),
+                trigger=trigger,
+                messages_summarized=int(getattr(result, "original_messages", 0) or 0),
+                turn_id=getattr(agent, "session_turn_id", None),
+                working_state=getattr(result, "working_state", None),
+            )
+        else:
+            session_transcript.record_compact(
+                path,
+                session_id=session_id,
+                message=str(getattr(result, "message", "") or ""),
+                backend_history_after=copy.deepcopy(getattr(_backend(agent), "history", []) or []),
+            )
+    except Exception:
+        return
+
+
+def maybe_auto_compact(
+    agent: Any,
+    pending_text: str = "",
+    summarize_fn: SummarizeFn | None = None,
+) -> str | None:
+    """Core-level auto compaction, shared by every frontend.
+
+    Returns the user-visible message on success, ``None`` otherwise. Consecutive
+    failures open a circuit breaker (aligned with CC's ``bfr = 3``) so a broken
+    summarizer is not retried on every single request.
+    """
+    failures = int(getattr(agent, "_auto_compact_failures", 0) or 0)
+    if failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        return None
+    try:
+        if not should_auto_compact_agent(agent, pending_text=pending_text):
+            return None
+        pre = _run_compact_hook(agent, "PreCompact", {"trigger": "auto", "custom_instructions": ""})
+        if getattr(pre, "blocked", False):
+            return None
+        result = compact_agent_context(
+            agent,
+            instructions="Automatic compact before the next user request.",
+            summarize_fn=summarize_fn,
+        )
+    except Exception:  # never block the user's turn on compaction bookkeeping
+        agent._auto_compact_failures = failures + 1
+        return None
+    if result.ok:
+        agent._auto_compact_failures = 0
+        _run_compact_hook(agent, "PostCompact", {"trigger": "auto", "compact_summary": result.message})
+        record_compact_transcript(agent, result, trigger="auto")
+        return "Auto " + result.message
+    agent._auto_compact_failures = failures + 1
+    return None
+
+
 def compact_agent_context(
     agent: Any,
     instructions: str = "",
     summarize_fn: SummarizeFn | None = None,
+    keep_recent_turns: int = 1,
 ) -> CompactResult:
     backend = _backend(agent)
     if backend is None or not hasattr(backend, "history"):
@@ -99,10 +282,27 @@ def compact_agent_context(
         if not summary:
             raise RuntimeError("compact summary is empty")
         summary = _append_invoked_skills(summary, invoked_skills)
-        compact_history = _summary_history_pair(summary)
+        working_block = _working_state_block(compact_working_state)
+        if working_block:
+            summary = summary.rstrip() + chr(10) + chr(10) + working_block
+        # Keep the tail verbatim (CC's messagesToKeep): the summary alone loses the
+        # request the model was in the middle of, the exact file it had just read,
+        # and the command it had just run.
+        kept_tail = _recent_turns_tail(old_backend_history, keep_recent_turns)
+        compact_history = _summary_history_pair(summary) + kept_tail
         backend.history = compact_history
         if hasattr(agent, "history"):
             agent.history = [f"[Agent] Compacted context: {_one_line(summary, 160)}"]
+        # Hand the saved working state to the next handler (app.build_main_handler
+        # restores it via restore_compact_working_state).
+        agent._compact_working_state = (
+            compact_working_state if compact_working_state.get("handler_working") else None
+        )
+        if hasattr(backend, "last_usage_tokens"):
+            # The old usage described the pre-compaction history; keeping it would
+            # make the very next estimate look over the soft line again and trigger
+            # a second compaction of the summary itself.
+            backend.last_usage_tokens = None
         if client is not None and hasattr(client, "last_tools"):
             client.last_tools = ""
         if hasattr(agent, "handler"):
@@ -115,6 +315,7 @@ def compact_agent_context(
             compacted_messages=len(compact_history),
             invoked_skills=invoked_skills,
             working_state=compact_working_state,
+            kept_messages=len(kept_tail),
         )
     except Exception as exc:
         backend.history = old_backend_history
