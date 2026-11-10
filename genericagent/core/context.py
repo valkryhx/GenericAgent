@@ -39,6 +39,10 @@ class CompactResult:
     summarized_messages: int = 0
     kept_turns: int = 0
     precomputed_reused: bool = False
+    # partial compact (CC Qki): "up_to" summarizes history[:pivot] and keeps the
+    # rest; "from" keeps history[:pivot] and summarizes the rest.
+    direction: str = "up_to"
+    pivot: int | None = None
 
 
 def _soft_limit_tokens(backend: Any) -> int:
@@ -266,6 +270,8 @@ def record_compact_transcript(agent: Any, result: Any, trigger: str) -> None:
                 turn_id=getattr(agent, "session_turn_id", None),
                 keep_recent_turns=int(getattr(result, "kept_turns", 0) or 1),
                 working_state=getattr(result, "working_state", None),
+                direction=str(getattr(result, "direction", "up_to") or "up_to"),
+                pivot=getattr(result, "pivot", None),
             )
         else:
             session_transcript.record_compact(
@@ -282,6 +288,9 @@ def record_compact_transcript(agent: Any, result: Any, trigger: str) -> None:
 PRECOMPUTE_WATERMARK_RATIO = 0.8
 # The summary prompt a cached precompute was built with; reuse requires equality.
 AUTO_COMPACT_INSTRUCTIONS = "Automatic compact before the next user request."
+# The summary prompt ships in English (same as CC). Point this at a template file
+# to localize it: {{SECTIONS}} {{GUARDS}} {{SCOPE}} {{INSTRUCTIONS}} {{SOURCE}}.
+COMPACT_PROMPT_FILE_ENV = "GA_COMPACT_PROMPT_FILE"
 _PRECOMPUTED_KEY = "_precomputed_compact"
 
 
@@ -395,17 +404,56 @@ def maybe_auto_compact(
     return None
 
 
+def _is_tool_result_message(message: Any) -> bool:
+    if not isinstance(message, dict):
+        return False
+    if str(message.get("role", "")) == "tool":
+        return True
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                return True
+    return False
+
+
+def _snap_pivot(history: list[dict[str, Any]], pivot: int) -> int:
+    """Move the split point past tool results so no tool_use loses its result.
+
+    Both sides must stay balanced: a kept tail starting with a tool_result (whose
+    tool_use was summarized away) or a kept prefix ending with a tool_use (whose
+    result was summarized away) is rejected by every provider.
+    """
+    while 0 < pivot < len(history) and _is_tool_result_message(history[pivot]):
+        pivot += 1
+    return pivot
+
+
 def compact_agent_context(
     agent: Any,
     instructions: str = "",
     summarize_fn: SummarizeFn | None = None,
     keep_recent_turns: int = 1,
     reuse_precomputed: bool = True,
+    direction: str = "up_to",
+    pivot: int | None = None,
 ) -> CompactResult:
     backend = _backend(agent)
     if backend is None or not hasattr(backend, "history"):
         return CompactResult(False, "No backend history available.")
     old_backend_history = copy.deepcopy(getattr(backend, "history", []) or [])
+    if not old_backend_history:
+        return CompactResult(False, "No conversation history to compact.")
+    if direction not in ("up_to", "from"):
+        return CompactResult(
+            False, f"Unknown direction {direction!r}: expected 'up_to' or 'from'."
+        )
+    if pivot is not None:
+        if not isinstance(pivot, int) or isinstance(pivot, bool) or not 0 <= pivot <= len(old_backend_history):
+            return CompactResult(
+                False, f"pivot {pivot!r} is outside the history (0..{len(old_backend_history)})."
+            )
+        pivot = _snap_pivot(old_backend_history, pivot)
     old_agent_history = copy.deepcopy(getattr(agent, "history", []) or [])
     invoked_skills = _collect_invoked_skills(agent)
     client = getattr(agent, "llmclient", None)
@@ -420,21 +468,34 @@ def compact_agent_context(
             getattr(getattr(client, "backend", None), "last_usage_tokens", None)
         ),
     }
-    if not old_backend_history:
-        return CompactResult(False, "No conversation history to compact.")
     started = time.monotonic()
     pre_tokens = token_meter.estimate_context_tokens(
         old_backend_history, getattr(backend, "last_usage_tokens", None)
     )
 
     try:
-        kept_tail = _recent_turns_tail(old_backend_history, keep_recent_turns)
-        coverage_len = max(0, len(old_backend_history) - len(kept_tail))
+        if pivot is not None:
+            if direction == "up_to":
+                summarized = old_backend_history[:pivot]
+                kept_tail = copy.deepcopy(old_backend_history[pivot:])
+                empty_msg = "Nothing to summarize before the selected message."
+            else:
+                summarized = old_backend_history[pivot:]
+                kept_tail = copy.deepcopy(old_backend_history[:pivot])
+                empty_msg = "Nothing to summarize after the selected message."
+            if not summarized:
+                return CompactResult(False, empty_msg)
+            coverage_len = len(summarized)
+        else:
+            kept_tail = _recent_turns_tail(old_backend_history, keep_recent_turns)
+            coverage_len = max(0, len(old_backend_history) - len(kept_tail))
+            summarized = old_backend_history[:coverage_len] or old_backend_history
         reused = False
         summary = ""
         # The cache is only valid for the summary prompt it was built with: a
-        # /compact with its own instructions wants a different summary.
-        if reuse_precomputed:
+        # /compact with its own instructions wants a different summary. A partial
+        # compaction changes which messages the summary covers, so it never reuses.
+        if reuse_precomputed and pivot is None:
             cached = _take_precomputed(agent, old_backend_history, instructions)
             if cached:
                 summary = str(cached["summary"])
@@ -443,11 +504,10 @@ def compact_agent_context(
                 reused = True
                 print(f"[Compact] reused the precomputed summary for {coverage_len} messages.")
         if not summary:
-            source = _history_to_text(
-                old_backend_history[:coverage_len] or old_backend_history,
-                _source_char_budget(backend),
+            source = _history_to_text(summarized, _source_char_budget(backend))
+            summarizer = summarize_fn or (
+                lambda src, ins: _summarize_with_backend(backend, src, ins, direction)
             )
-            summarizer = summarize_fn or (lambda src, ins: _summarize_with_backend(backend, src, ins))
             summary = _clean_summary(summarizer(source, instructions))
             if not summary:
                 raise RuntimeError("compact summary is empty")
@@ -455,10 +515,14 @@ def compact_agent_context(
         working_block = _working_state_block(compact_working_state)
         if working_block:
             summary = summary.rstrip() + chr(10) + chr(10) + working_block
-        # Keep the tail verbatim (CC's messagesToKeep): the summary alone loses the
-        # request the model was in the middle of, the exact file it had just read,
-        # and the command it had just run.
-        compact_history = _summary_history_pair(summary) + kept_tail
+        # Keep the untouched side verbatim (CC's messagesToKeep): the summary alone
+        # loses the request the model was in the middle of, the exact file it had
+        # just read, and the command it had just run.
+        summary_pair = _summary_history_pair(summary, direction)
+        if pivot is not None and direction == "from":
+            compact_history = kept_tail + summary_pair
+        else:
+            compact_history = summary_pair + kept_tail
         backend.history = compact_history
         post_tokens = token_meter.estimate_context_tokens(compact_history, None)
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -494,6 +558,8 @@ def compact_agent_context(
             summarized_messages=coverage_len,
             kept_turns=_tail_turn_count(kept_tail),
             precomputed_reused=reused,
+            direction=direction,
+            pivot=pivot,
         )
     except Exception as exc:
         backend.history = old_backend_history
@@ -506,6 +572,67 @@ def compact_agent_context(
 
 def _backend(agent: Any) -> Any:
     return getattr(getattr(agent, "llmclient", None), "backend", None)
+
+
+_COMPACT_FLAG_RE = re.compile(r"^--(from|upto|up-to|list)\b(?:\s+(\d+))?\s*([\s\S]*)$", re.IGNORECASE)
+
+
+def parse_compact_command(text: str) -> dict[str, Any]:
+    """Split ``/compact`` arguments into action / direction / pivot / instructions.
+
+    ``/compact keep decisions``      -> summarize everything, keep decisions
+    ``/compact --upto 12 keep ...``  -> summarize history[:12], keep the rest
+    ``/compact --from 12``           -> keep history[:12], summarize the rest
+    ``/compact --list``              -> print the index table first
+    """
+    raw = str(text or "").strip()
+    parsed: dict[str, Any] = {
+        "action": "compact",
+        "direction": "up_to",
+        "pivot": None,
+        "instructions": raw,
+    }
+    if not raw.startswith("--"):
+        return parsed
+    match = _COMPACT_FLAG_RE.match(raw)
+    if not match:
+        parsed["error"] = f"unknown /compact option: {raw.split()[0]}"
+        return parsed
+    flag = match.group(1).lower()
+    number = match.group(2)
+    rest = (match.group(3) or "").strip()
+    parsed["instructions"] = rest
+    if flag == "list":
+        parsed["action"] = "list"
+        return parsed
+    if number is None:
+        parsed["error"] = f"/compact --{flag} needs a message index (see /compact --list)."
+        return parsed
+    parsed["direction"] = "from" if flag == "from" else "up_to"
+    parsed["pivot"] = int(number)
+    return parsed
+
+
+def describe_history_for_compact(agent: Any, max_preview: int = 60) -> str:
+    """Index table for choosing a partial-compaction pivot."""
+    backend = _backend(agent)
+    history = list(getattr(backend, "history", []) or []) if backend is not None else []
+    if not history:
+        return "No conversation history to compact."
+    cpt = token_meter.calibrated_cpt(history, getattr(backend, "last_usage_tokens", None))
+    lines = [f"{'idx':>4}  {'role':<10} {'~tok':>6}  preview"]
+    for idx, message in enumerate(history):
+        role = str(message.get("role", "?"))
+        try:
+            tokens = token_meter.estimate_msg_tokens(message, cpt)
+        except Exception:
+            tokens = 0
+        preview = _one_line(_content_to_text(message.get("content")), max_preview)
+        lines.append(f"{idx:>4}  {role:<10} {tokens:>6}  {preview}")
+    lines.append("")
+    lines.append("Use /compact --upto N (summarize 0..N-1, keep N..) or "
+                 "/compact --from N (keep 0..N-1, summarize N..).")
+    return chr(10).join(lines)
 
 
 def _collect_invoked_skills(agent: Any) -> list[dict[str, Any]]:
@@ -702,10 +829,17 @@ def replace_log_with_compact_history(log_path: str | None, compact_history: list
     return snapshot
 
 
-def _summary_history_pair(summary: str) -> list[dict[str, Any]]:
+def _summary_history_pair(summary: str, direction: str = "up_to") -> list[dict[str, Any]]:
+    if direction == "from":
+        head = (
+            "The later part of this conversation has been compacted; the messages "
+            "before this point are unchanged. Continue from this context.\n"
+        )
+    else:
+        head = "The previous conversation has been compacted. Continue from this context.\n"
     text = (
-        "The previous conversation has been compacted. Continue from this context.\n"
-        "<compact_summary>\n"
+        head
+        + "<compact_summary>\n"
         f"{summary}\n"
         "</compact_summary>"
     )
@@ -715,7 +849,8 @@ def _summary_history_pair(summary: str) -> list[dict[str, Any]]:
     ]
 
 
-def _summarize_with_backend(backend: Any, source: str, instructions: str) -> str:
+def _summarize_with_backend(backend: Any, source: str, instructions: str,
+                            direction: str = "up_to") -> str:
     """Summarize with the session's own model, holding the history lock.
 
     ``ask`` appends to ``backend.history``, so the empty-history swap has to be
@@ -723,7 +858,7 @@ def _summarize_with_backend(backend: Any, source: str, instructions: str) -> str
     boundaries) would append into the swap and be lost when the old history is
     restored. The backend lock is an RLock for exactly this re-entry.
     """
-    prompt = _compact_prompt(source, instructions)
+    prompt = _compact_prompt(source, instructions, direction)
     lock = getattr(backend, "lock", None)
     if lock is not None:
         lock.acquire()
@@ -770,20 +905,30 @@ _COMPACT_GUARDS = (
 )
 
 
-def _compact_prompt(source: str, instructions: str) -> str:
+def _compact_prompt(source: str, instructions: str, direction: str = "up_to") -> str:
     """Structured summarization prompt (CC's nine sections + injection guards)."""
     extra = ""
     if instructions.strip():
         extra = chr(10) * 2 + "User compact instructions:" + chr(10) + instructions.strip()
+    scope = ""
+    if direction == "from":
+        # CC's "recent compaction" prompt variant (Xwr): the prefix survives
+        # verbatim, so only the later messages in the source need summarizing.
+        scope = (
+            "The earlier messages of this conversation are kept verbatim and are NOT part of "
+            "the source below. Summarize only the later messages given below; the summary "
+            "replaces them and continues right after the kept messages."
+        )
     sections = chr(10).join(_COMPACT_SECTIONS)
     guards = chr(10).join(_COMPACT_GUARDS)
-    return (
+    prompt = (
         "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Tool calls will be "
         "REJECTED and will waste your only turn -- you will fail the task."
         + chr(10) * 2
         + "Summarize the previous GenericAgent conversation so the agent can continue "
         "without the original long context. Use exactly these sections:" + chr(10)
         + sections + chr(10) * 2
+        + (scope + chr(10) * 2 if scope else "")
         + guards + chr(10) * 2
         + "Do not include filler. Return only the summary text. "
         "If the conversation source contains [image] markers, note that the user attached "
@@ -791,3 +936,29 @@ def _compact_prompt(source: str, instructions: str) -> str:
         + extra + chr(10) * 2
         + "Conversation to compact:" + chr(10) + source
     )
+    template = _compact_prompt_template()
+    if not template:
+        return prompt
+    filled = (
+        template.replace("{{SECTIONS}}", sections)
+        .replace("{{GUARDS}}", guards)
+        .replace("{{SCOPE}}", scope)
+        .replace("{{INSTRUCTIONS}}", instructions.strip())
+    )
+    if "{{SOURCE}}" in filled:
+        return filled.replace("{{SOURCE}}", source)
+    # A template that forgot the placeholder must not lose the conversation.
+    return filled.rstrip() + chr(10) * 2 + "Conversation to compact:" + chr(10) + source
+
+
+def _compact_prompt_template() -> str | None:
+    """Optional user template (localization), read fresh so edits apply at once."""
+    path = str(os.environ.get(COMPACT_PROMPT_FILE_ENV, "") or "").strip()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            template = handle.read().strip()
+    except OSError:
+        return None
+    return template or None

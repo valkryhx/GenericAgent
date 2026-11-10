@@ -1924,6 +1924,40 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "activity", "label": None}, events[-2])
         self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
+    def test_compact_forwards_partial_flags_to_core(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "old"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+            {"role": "user", "content": [{"type": "text", "text": "new"}]},
+        ]
+        with patch("frontends.ink.bridge.compact_agent_context") as compact:
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted partially."
+            compact.return_value.summary = "summary"
+            bridge.compact("--upto 2")
+        compact.assert_called_once()
+        self.assertEqual("up_to", compact.call_args.kwargs.get("direction"))
+        self.assertEqual(2, compact.call_args.kwargs.get("pivot"))
+
+    def test_compact_list_prints_indexes_without_compacting(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "alpha"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "beta"}]},
+        ]
+        with patch("frontends.ink.bridge.compact_agent_context") as compact:
+            bridge.compact("--list")
+        compact.assert_not_called()
+        outputs = [e for e in events if e.get("type") == "local_command_output"]
+        self.assertTrue(outputs)
+        self.assertIn("idx", outputs[-1]["text"])
+        self.assertIn("alpha", outputs[-1]["text"])
+
     def test_compact_records_transcript_compact_event(self):
         from genericagent.core import transcripts as session_transcript
 

@@ -791,6 +791,8 @@ export function helpText(): string {
     '/resume N, /continue N - resume by index',
     '/rewind, /checkpoint - restore conversation to before a user message',
     '/compact [instructions] - summarize and replace long conversation context',
+    '/compact --list - list history indexes for a partial compact',
+    '/compact --upto N | --from N - summarize only before (or after) message N',
     '/workflows - list workflow runs',
     '/skills - show skills and context cost',
     '/team, /agents - show team roster and shared task board',

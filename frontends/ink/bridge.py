@@ -1006,6 +1006,18 @@ class GenericAgentBridge:
         if compact_agent_context is None:
             self.emit({"type": "error", "code": "compact_unavailable", "message": "/compact is unavailable"})
             return
+        from genericagent.core.context import (
+            describe_history_for_compact,
+            parse_compact_command,
+        )
+        parsed = parse_compact_command(instructions)
+        if parsed.get("error"):
+            self.emit({"type": "local_command_output", "text": parsed["error"]})
+            return
+        if parsed.get("action") == "list":
+            self.emit({"type": "local_command_output", "text": describe_history_for_compact(self.agent)})
+            return
+        instructions = parsed["instructions"]
         self.emit({"type": "status", "status": "running"})
         self.emit({"type": "activity", "label": "Compacting conversation"})
         try:
@@ -1013,12 +1025,19 @@ class GenericAgentBridge:
             pre = run_hook_event(self.agent, 'PreCompact', {
                 'trigger': 'manual',
                 'custom_instructions': str(instructions or ''),
+                'direction': parsed["direction"],
+                'pivot': parsed["pivot"],
             }, emit=self.emit)
             if pre.blocked:
                 self.emit({"type": "error", "code": "compact_hook_blocked", "message": pre.reason or "PreCompact hook blocked compaction"})
                 return
             with backend_output_redirect():
-                result = compact_agent_context(self.agent, instructions=str(instructions or ""))
+                result = compact_agent_context(
+                    self.agent,
+                    instructions=str(instructions or ""),
+                    direction=parsed["direction"],
+                    pivot=parsed["pivot"],
+                )
             if not result.ok:
                 self.emit({"type": "local_command_output", "text": f"Compact failed: {result.message}"})
                 return

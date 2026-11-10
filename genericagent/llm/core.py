@@ -158,6 +158,13 @@ def trim_messages_history(history, hard_limit_tokens, last_usage=None, owner=Non
         # 裁剪过程中无新 API 调用，用校准比率把消息折成 token 来收敛。
         cpt = token_meter.calibrated_cpt(history, last_usage)
         target = hard_limit_tokens * _HARD_TRIM_RECOVER_RATIO
+        # Stop at the soft line instead of 60% of the hard line: the soft line is
+        # already below the hard line, so the request fits, and the compaction that
+        # follows turns what was dropped into a summary. Trimming further only
+        # throws away twice the context for no benefit.
+        soft = int(getattr(owner, "auto_compact_tokens", 0) or 0) if owner is not None else 0
+        if target < soft < hard_limit_tokens:
+            target = soft
         cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
         while len(history) > 5 and cost > target:
             history.pop(0)

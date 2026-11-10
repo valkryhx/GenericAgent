@@ -368,6 +368,8 @@ def append_compact_boundary(
     preserved_uuids=None,
     preserved_segment=None,
     summary_uuid=None,
+    direction="up_to",
+    pivot=None,
 ):
     """Append a compact boundary without copying the pre-compact history."""
     boundary_uuid = _event_uuid("b")
@@ -385,6 +387,8 @@ def append_compact_boundary(
         "duration_ms": int(duration_ms or 0),
         "messages_summarized": int(messages_summarized or 0),
         "summary_uuid": summary_uuid,
+        "compact_direction": str(direction or "up_to"),
+        "compact_pivot": (int(pivot) if pivot is not None else None),
         "preserved_uuids": preserved,
         "created_at": _now_iso(),
     }
@@ -435,6 +439,8 @@ def record_compact_v2(
     turn_id=None,
     keep_recent_turns=1,
     working_state=None,
+    direction="up_to",
+    pivot=None,
 ):
     """Persist the CC-style boundary + summary pair for a v2 transcript."""
     if preserved_uuids is None:
@@ -456,6 +462,8 @@ def record_compact_v2(
         preserved_uuids=preserved_uuids,
         preserved_segment=preserved_segment,
         summary_uuid=summary_uuid,
+        direction=direction,
+        pivot=pivot,
     )
     append_compact_summary(
         path,
