@@ -115,6 +115,8 @@ class PartialCompactTest(unittest.TestCase):
         self.assertIn("ALPHA", seen[0][0])
         self.assertNotIn("LAMBDA", seen[0][0])
         self.assertEqual(result.kept_messages, 4)
+        self.assertIn("4 of 8", result.message)
+        self.assertIn("kept 4", result.message)
 
     def test_pivot_snaps_forward_over_tool_results(self):
         agent = FakeAgent(_conversation())
@@ -214,6 +216,19 @@ class CompactCommandParseTest(unittest.TestCase):
         self.assertIn("user", table)
         self.assertIn("assistant", table)
         self.assertIn("ALPHA", table)
+
+    def test_describe_history_rows_fit_an_eighty_column_terminal(self):
+        """CJK 预览按显示宽度截断：60 个汉字按字符数算是 60，占屏却是 120 列。"""
+        agent = FakeAgent([
+            {"role": "user", "content": _text("先把这段很长很长的中文需求完整记录下来：" + "需求" * 60)},
+            {"role": "assistant", "content": _text("收到，" + "已经理解" * 40)},
+        ])
+        table = compact_context.describe_history_for_compact(agent)
+        rows = [line for line in table.splitlines() if line.strip()[:1].isdigit()]
+        self.assertEqual(2, len(rows))
+        for line in rows:
+            self.assertLessEqual(compact_context._display_width(line), 80, line)
+            self.assertIn("...", line)
 
 
 if __name__ == "__main__":

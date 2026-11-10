@@ -1958,6 +1958,45 @@ class InkBridgeTest(unittest.TestCase):
         self.assertIn("idx", outputs[-1]["text"])
         self.assertIn("alpha", outputs[-1]["text"])
 
+    def test_idle_status_waits_for_post_turn_work(self):
+        """答案已落地但 agent 还在收尾（压缩/预计算）时，不能报 idle。
+
+        否则 UI 显示 idle、下一条命令却被 "agent is running" 拒掉——真机 TUI 实测撞到过。
+        """
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        display_queue = queue.Queue()
+        display_queue.put({"done": "answer", "source": "agent"})
+        agent.is_running = True
+        worker = threading.Thread(
+            target=bridge._consume_display_queue, args=(1, display_queue), daemon=True)
+        worker.start()
+        time.sleep(0.4)
+        statuses = [e.get("status") for e in events if e.get("type") == "status"]
+        self.assertNotIn("idle", statuses)
+        agent.is_running = False
+        worker.join(timeout=3)
+        statuses = [e.get("status") for e in events if e.get("type") == "status"]
+        self.assertIn("idle", statuses)
+
+    def test_compact_refreshes_the_context_hint(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "old"}]},
+        ]
+        bridge._last_context_level = "warn"
+        with patch("frontends.ink.bridge.compact_agent_context") as compact:
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted."
+            compact.return_value.summary = "summary"
+            bridge.compact("")
+        usage = [e for e in events if e.get("type") == "context_usage"]
+        self.assertTrue(usage, "a manual /compact must refresh the context hint")
+        self.assertEqual("ok", usage[-1]["level"])
+
     def test_compact_records_transcript_compact_event(self):
         from genericagent.core import transcripts as session_transcript
 
