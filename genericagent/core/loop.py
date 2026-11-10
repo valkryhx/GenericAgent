@@ -1,4 +1,5 @@
 import json, re, os, queue, threading
+from genericagent.core.errors import ContextOverflowError
 
 from genericagent.core.tool_results.budget import budget_tool_result
 from dataclasses import dataclass
@@ -324,6 +325,49 @@ def _consume_queued_prompts(handler):
     return render_queued_prompts(drained)
 
 
+def _history_list(client):
+    """The session history this client appends to (None for text-only fakes)."""
+    backend = getattr(client, "backend", None)
+    history = getattr(backend, "history", None)
+    return history if isinstance(history, list) else None
+
+
+def _rollback_overflow(client, history_len, last_tools, pending_ids):
+    """Undo everything a failed attempt wrote, so a retry starts clean.
+
+    ``BaseSession.ask`` appends the user message before the request is made; an
+    overflow rejection must not leave that message (or a half-set tool-id state)
+    behind, or the retry would send it twice.
+    """
+    history = _history_list(client)
+    if history is not None and len(history) > history_len:
+        del history[history_len:]
+    if hasattr(client, "last_tools"):
+        client.last_tools = last_tools
+    if hasattr(client, "_pending_tool_ids"):
+        client._pending_tool_ids = list(pending_ids)
+    backend = getattr(client, "backend", None)
+    if hasattr(backend, "last_provider_error"):
+        backend.last_provider_error = ""
+
+
+def _compact_after_overflow(handler):
+    """Summarize the conversation so the retried request fits."""
+    agent = getattr(handler, "parent", None)
+    if agent is None:
+        return False
+    try:
+        from genericagent.core.context import compact_agent_context
+        result = compact_agent_context(
+            agent,
+            instructions=("Context overflow recovery inside a turn: keep the user task, "
+                          "decisions, files and the latest tool results."),
+        )
+    except Exception:
+        return False
+    return bool(getattr(result, "ok", False))
+
+
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=40, verbose=True, initial_user_content=None):
     messages = [
         {"role": "system", "content": system_prompt},
@@ -341,14 +385,30 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         if verbose: turnstr = f'**{turnstr}**'
         yield f"\n\n{turnstr}\n\n"
         if turn%10 == 0: client.last_tools = ''  # 每10轮重置一次工具描述，避免上下文过大导致的模型性能下降
-        response_gen = client.chat(messages=messages, tools=tools_schema)
-        if verbose:
-            response = yield from response_gen
-            yield '\n\n'
-        else:
-            response = exhaust(response_gen)
-            cleaned = _clean_content(response.content)
-            if cleaned: yield cleaned + '\n'
+        response = None
+        history_len = len(_history_list(client) or [])
+        saved_last_tools = getattr(client, "last_tools", "")
+        saved_pending_ids = list(getattr(client, "_pending_tool_ids", []) or [])
+        # Retryable request boundary: an upstream prompt-too-long rejection unwinds
+        # to this point, compacts, and re-issues only the model call -- the user
+        # message, executed tools and hooks are untouched.
+        for attempt in (1, 2):
+            try:
+                response_gen = client.chat(messages=messages, tools=tools_schema)
+                if verbose:
+                    response = yield from response_gen
+                    yield chr(10) * 2
+                else:
+                    response = exhaust(response_gen)
+                    cleaned = _clean_content(response.content)
+                    if cleaned: yield cleaned + chr(10)
+                break
+            except ContextOverflowError:
+                _rollback_overflow(client, history_len, saved_last_tools, saved_pending_ids)
+                if attempt == 2 or not _compact_after_overflow(handler):
+                    raise
+                yield (chr(10) * 2 + '[context overflow] upstream rejected the request as too long: '
+                       'compacted the conversation and retrying this step.' + chr(10) * 2)
         # The messages handed to this chat() -- including any notification text a
         # previous fold point prepended -- have now been read by the model, so the
         # cursor can move. Acking before the call would drop the notices whenever

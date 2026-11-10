@@ -3,6 +3,7 @@ from datetime import datetime
 from genericagent import paths
 from genericagent.core import tokens as token_meter
 from genericagent.core.cache_stats import format_trace, record_usage as record_cache_usage
+from genericagent.core.errors import ContextOverflowError, is_context_overflow_error
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
 DEFAULT_CONTEXT_WIN = 400_000
@@ -245,6 +246,8 @@ def _parse_claude_sse(resp_lines, sess=None):
             _perr = _provider_error_message(evt)
             if _perr:
                 _note_provider_error(sess, _perr)
+                if is_context_overflow_error(_perr):
+                    raise ContextOverflowError(_perr)
                 warn = f"\n\n!!!Error: SSE {_perr}"; break
         if evt_type == "message_start":
             usage = evt.get("message", {}).get("usage", {})
@@ -335,6 +338,8 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             _perr = _provider_error_message(evt)
             if _perr:
                 _note_provider_error(sess, _perr)
+                if is_context_overflow_error(_perr):
+                    raise ContextOverflowError(_perr)
                 msg = f"!!!Error: {_perr}"
                 content_text += msg; yield msg
                 break
@@ -392,6 +397,8 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             _perr = _provider_error_message(evt)
             if _perr:
                 _note_provider_error(sess, _perr)
+                if is_context_overflow_error(_perr):
+                    raise ContextOverflowError(_perr)
                 msg = f"!!!Error: {_perr}"
                 content_text += msg; yield msg
                 break
@@ -510,6 +517,8 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
     _perr = _provider_error_message(data)
     if _perr:
         _note_provider_error(sess, _perr)
+        if is_context_overflow_error(_perr):
+            raise ContextOverflowError(_perr)
         msg = f"!!!Error: {_perr}"
         blocks.append({"type": "text", "text": msg}); yield msg
         return blocks
