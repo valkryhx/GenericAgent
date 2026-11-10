@@ -1699,22 +1699,42 @@ class GenericAgent:
         )
 
     def _manual_compact(self, instructions, display_queue):
-        """手动 /compact：用 LLM 摘要替换长历史。CLI/TUI 复用与 ink 相同的核心。"""
+        """手动 /compact：用 LLM 摘要替换长历史。CLI/TUI 复用与 ink 相同的核心。
+
+        partial compact：`/compact --list` 先看索引，`--upto N` 压前段、`--from N`
+        压后段（对齐 CC Qki 的两个 direction）。
+        """
         if compact_agent_context is None:
             display_queue.put({'done': "/compact 不可用（compact_context 未加载）", 'source': 'system'})
             return
+        from genericagent.core.context import describe_history_for_compact, parse_compact_command
+        parsed = parse_compact_command(instructions)
+        if parsed.get("error"):
+            display_queue.put({'done': parsed["error"], 'source': 'system'})
+            return
+        if parsed.get("action") == "list":
+            display_queue.put({'done': describe_history_for_compact(self), 'source': 'system'})
+            return
+        instructions = parsed["instructions"]
         from genericagent.hooks.runtime import run_hook_event as _run_compact_hook
         try:
             pre = _run_compact_hook(self, 'PreCompact', {
                 'trigger': 'manual',
                 'custom_instructions': str(instructions or ''),
+                'direction': parsed["direction"],
+                'pivot': parsed["pivot"],
             }, emit=getattr(self, 'hook_emit', None))
             if pre.blocked:
                 display_queue.put({'done': pre.reason or 'PreCompact hook blocked compaction', 'source': 'system'})
                 return
         except Exception as e:
             print(f"[WARN] PreCompact hooks failed: {e}")
-        result = compact_agent_context(self, instructions=str(instructions or ""))
+        result = compact_agent_context(
+            self,
+            instructions=str(instructions or ""),
+            direction=parsed["direction"],
+            pivot=parsed["pivot"],
+        )
         if not result.ok:
             display_queue.put({'done': f"压缩失败：{result.message}", 'source': 'system'})
             return

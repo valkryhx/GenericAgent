@@ -413,6 +413,18 @@ class HardTrimSignalTest(unittest.TestCase):
         trim_messages_history(self._history(size=10), 1_000_000, None, owner=owner)
         self.assertIsNone(getattr(owner, "last_trim", None))
 
+    def test_trim_targets_the_soft_line_not_sixty_percent_of_hard(self):
+        """软线（3000）在硬线（4000）之下、又高于旧目标 60%（2400）：
+        压到软线即可让请求装得下，后续压缩会把丢掉的内容变成摘要。"""
+        from genericagent.llm.core import trim_messages_history
+
+        owner = types.SimpleNamespace(auto_compact_tokens=3000)
+        history = self._history(count=60, size=400)
+        trim_messages_history(history, 4000, None, owner=owner)
+        self.assertIsNotNone(getattr(owner, "last_trim", None))
+        self.assertLessEqual(owner.last_trim["post_tokens"], 3000)
+        self.assertGreater(owner.last_trim["post_tokens"], 2400)
+
     def test_the_turn_compacts_once_after_a_trim(self):
         agent = FakeAgent(_conversation())
         agent.llmclient.backend.last_trim = {"pre_tokens": 900, "post_tokens": 500, "dropped": 6}

@@ -106,6 +106,40 @@ class ManualCompactRoutingTest(unittest.TestCase):
         # 不崩溃，给出提示
         self.assertTrue(any("/compact" in str(it.get("done", "")) for it in q.items))
 
+    def test_manual_compact_routes_partial_flags_to_core(self):
+        agent = _make_agent()
+        q = _Q()
+
+        class _Result:
+            ok = True
+            message = "Compacted paritally."
+
+        with patch.object(_AGENTMAIN, "compact_agent_context", return_value=_Result()) as core:
+            agent._manual_compact("--from 2 keep X", q)
+
+        core.assert_called_once()
+        self.assertEqual("from", core.call_args.kwargs.get("direction"))
+        self.assertEqual(2, core.call_args.kwargs.get("pivot"))
+        self.assertEqual("keep X", core.call_args.kwargs.get("instructions"))
+
+    def test_manual_compact_list_prints_indexes_without_compacting(self):
+        agent = _make_agent()
+        q = _Q()
+        with patch.object(_AGENTMAIN, "compact_agent_context") as core:
+            agent._manual_compact("--list", q)
+        core.assert_not_called()
+        text = chr(10).join(str(it.get("done", "")) for it in q.items)
+        self.assertIn("idx", text)
+        self.assertIn("assistant", text)
+
+    def test_manual_compact_rejects_unknown_flag(self):
+        agent = _make_agent()
+        q = _Q()
+        with patch.object(_AGENTMAIN, "compact_agent_context") as core:
+            agent._manual_compact("--nonsense", q)
+        core.assert_not_called()
+        self.assertTrue(any("unknown" in str(it.get("done", "")).lower() for it in q.items))
+
 
 if __name__ == "__main__":
     unittest.main()

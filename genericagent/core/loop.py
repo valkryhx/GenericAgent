@@ -52,9 +52,25 @@ class BaseHandler:
 
 def json_default(o): return list(o) if isinstance(o, set) else str(o)
 def exhaust(g):
-    try: 
+    try:
         while True: next(g)
     except StopIteration as e: return e.value
+
+
+def _counted_stream(gen, counter):
+    """Pass a chat stream through while counting what reached the display.
+
+    The retry boundary can re-issue the request silently only while nothing has
+    been shown; once a chunk is out, the user is told the partial reply is
+    discarded (an upstream rejection that arrives mid-stream cannot be retracted).
+    """
+    while True:
+        try:
+            chunk = next(gen)
+        except StopIteration as stop:
+            return stop.value
+        counter[0] += 1
+        yield chunk
 
 def get_pretty_json(data):
     # Keep the args payload valid JSON and semantically identical. The earlier
@@ -393,8 +409,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         # to this point, compacts, and re-issues only the model call -- the user
         # message, executed tools and hooks are untouched.
         for attempt in (1, 2):
+            shown = [0]
             try:
-                response_gen = client.chat(messages=messages, tools=tools_schema)
+                response_gen = _counted_stream(
+                    client.chat(messages=messages, tools=tools_schema), shown)
                 if verbose:
                     response = yield from response_gen
                     yield chr(10) * 2
@@ -408,7 +426,9 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 if attempt == 2 or not _compact_after_overflow(handler):
                     raise
                 yield (chr(10) * 2 + '[context overflow] upstream rejected the request as too long: '
-                       'compacted the conversation and retrying this step.' + chr(10) * 2)
+                       'compacted the conversation and retrying this step.'
+                       + (' The partial reply above is discarded.' if shown[0] else '')
+                       + chr(10) * 2)
         # The messages handed to this chat() -- including any notification text a
         # previous fold point prepended -- have now been read by the model, so the
         # cursor can move. Acking before the call would drop the notices whenever

@@ -49,6 +49,9 @@ class FakeClient:
         if isinstance(outcome, Exception):
             self.backend.last_provider_error = str(outcome)
             raise outcome
+        if outcome == "partial":
+            yield "half an answer"
+            raise ContextOverflowError("prompt is too long")
         yield "answer text"
         return _Response()
 
@@ -137,6 +140,15 @@ class OverflowRetryTest(unittest.TestCase):
         self._run(client, self._agent())
         self.assertEqual(1, client.calls)
         self.assertEqual([], self.compactions)
+
+    def test_partial_output_is_marked_discarded_before_the_retry(self):
+        client = FakeClient(["partial", None])
+        out = self._run(client, self._agent())
+        self.assertEqual(2, client.calls)
+        self.assertIn("half an answer", out)
+        self.assertIn("discarded", out)
+        # the retry's own answer is what the turn commits
+        self.assertIn("answer text", out)
 
 
 class ParserRaisesOverflowTest(unittest.TestCase):
