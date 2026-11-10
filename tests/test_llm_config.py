@@ -276,12 +276,46 @@ class LegacyCfgTest(unittest.TestCase):
         legacy = cfg.resolve("fast").to_legacy_cfg()
         self.assertEqual(legacy["model"], "gpt-5.4-2026-01-01")
 
-    def test_compaction_tokens_derived_from_window_and_ratios(self):
-        # claude 有 context_window=400000，默认 ratio 0.90/0.95 → 派生软/硬线。
+    def test_compaction_tokens_derived_with_cc_margins(self):
+        # 默认走 CC 口径：窗口 − min(max_tokens,20000) − 13000 / 3000。
+        # 该 profile 的 max_tokens=8192（<20000），所以保留的就是 8192。
         cfg = _parse(BASE_YAML)
         legacy = cfg.resolve("default").to_legacy_cfg()
-        self.assertEqual(legacy["auto_compact_tokens"], 360000)
-        self.assertEqual(legacy["hard_limit_tokens"], 380000)
+        self.assertEqual(legacy["auto_compact_tokens"], 400000 - 8192 - 13000)
+        self.assertEqual(legacy["hard_limit_tokens"], 400000 - 8192 - 3000)
+        self.assertLess(legacy["auto_compact_tokens"], legacy["hard_limit_tokens"])
+
+    def test_output_reserve_is_capped_at_20000(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000" + chr(10) + "    max_tokens: 64000",
+        )
+        cfg = _parse(text)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        # only 20000 is reserved, not 64000
+        self.assertEqual(legacy["auto_compact_tokens"], 400000 - 20000 - 13000)
+
+    def test_margins_are_customizable(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000" + chr(10)
+            + "    auto_compact_margin_tokens: 50000" + chr(10)
+            + "    blocking_margin_tokens: 10000",
+        )
+        cfg = _parse(text)
+        legacy = cfg.resolve("default").to_legacy_cfg()
+        self.assertEqual(legacy["auto_compact_tokens"], 400000 - 8192 - 50000)
+        self.assertEqual(legacy["hard_limit_tokens"], 400000 - 8192 - 10000)
+
+    def test_blocking_margin_must_stay_smaller_than_auto_margin(self):
+        text = BASE_YAML.replace(
+            "    context_window: 400000",
+            "    context_window: 400000" + chr(10)
+            + "    auto_compact_margin_tokens: 3000" + chr(10)
+            + "    blocking_margin_tokens: 13000",
+        )
+        with self.assertRaises(ValidationError):
+            _parse(text)
 
     def test_compaction_ratios_customizable(self):
         text = BASE_YAML.replace(

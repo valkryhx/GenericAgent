@@ -2709,10 +2709,15 @@ class GenericAgentBridge:
         try:
             if not should_auto_compact_agent(self.agent, pending_text=pending_text):
                 return True
+            from genericagent.core.context import _run_compact_hook
+            pre = _run_compact_hook(self.agent, "PreCompact", {"trigger": "auto", "custom_instructions": ""})
+            if getattr(pre, "blocked", False):
+                return True
             with backend_output_redirect():
                 result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
             if result.ok:
                 self._auto_compact_failures = 0
+                _run_compact_hook(self.agent, "PostCompact", {"trigger": "auto", "compact_summary": result.message})
                 self._replace_compact_log()
                 self._record_compact_transcript(result, trigger="auto")
                 self._rewind_snapshots.clear()
@@ -2747,28 +2752,15 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "compact_log_failed", "message": str(exc)})
 
     def _record_compact_transcript(self, result: Any, *, trigger: str) -> None:
-        if session_transcript is None or not getattr(self.agent, "session_path", None):
-            return
-        path = self.agent.session_path
-        message = str(getattr(result, "message", "") or "")
+        """Persist the boundary + summary through the shared recorder.
+
+        Core auto compaction records itself; this covers the Ink submit path and
+        /compact, which both still compact here. One implementation means the
+        telemetry (pre/post tokens, duration) is identical everywhere.
+        """
         try:
-            if session_transcript._detect_session_version(path) == 2:
-                session_transcript.record_compact_v2(
-                    path,
-                    session_id=getattr(self.agent, "session_id", ""),
-                    summary=str(getattr(result, "summary", "") or message),
-                    trigger=trigger,
-                    messages_summarized=int(getattr(result, "original_messages", 0) or 0),
-                    turn_id=getattr(self.agent, "session_turn_id", None),
-                    working_state=getattr(result, "working_state", None),
-                )
-            else:
-                session_transcript.record_compact(
-                    path,
-                    session_id=getattr(self.agent, "session_id", ""),
-                    message=message,
-                    backend_history_after=copy.deepcopy(self._backend_history()),
-                )
+            from genericagent.core.context import record_compact_transcript
+            record_compact_transcript(self.agent, result, trigger=trigger)
         except Exception as exc:
             self.emit({"type": "error", "code": "compact_transcript_failed", "message": str(exc)})
 
