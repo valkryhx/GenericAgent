@@ -435,6 +435,33 @@ class GenericAgentBridge:
                 gruntime.set_emit(self.emit)
         except Exception:
             pass
+        # LLM 重试横幅（对齐 CC 的 onRetryStatus）：断链期间底部活动行显示
+        # "Retrying in Ns · attempt n/m"，重连成功后自动消失，绝不往对话区写报错。
+        self._bind_retry_status(agent)
+
+    def _bind_retry_status(self, agent: Any) -> None:
+        backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+        if backend is None:
+            return
+        backend.on_retry_status = self._on_llm_retry_status
+
+    def _on_llm_retry_status(self, payload: dict) -> None:
+        kind = str(payload.get("kind") or "")
+        if kind == "retrying":
+            status = int(payload.get("status") or 0)
+            self.emit({
+                "type": "retry_status",
+                "kind": "retrying",
+                "status": status,
+                "attempt": int(payload.get("attempt") or 0),
+                "maxRetries": int(payload.get("max_retries") or 0),
+                "delayMs": int(payload.get("delay_ms") or 0),
+                "error": str(payload.get("error") or ""),
+            })
+            return
+        # ``recovered``：清掉横幅。即使前端漏收，下一个 token_usage/status 也会覆盖。
+        self.emit({"type": "retry_status", "kind": "recovered", "status": 0,
+                   "attempt": 0, "maxRetries": 0, "delayMs": 0, "error": ""})
 
     def _goal_data_root(self) -> str | None:
         root = getattr(self.agent, "data_root", None)
@@ -843,6 +870,8 @@ class GenericAgentBridge:
                 self.emit({"type": "model_switch_result", "ok": True, "message": message})
             else:
                 self.emit({"type": "model_switch_result", "ok": False, "message": str(result.get("message") or "model switch failed")})
+            # 换模型 = 换 backend：新的 backend 上没有重试回调，不重绑就再也收不到横幅。
+            self._bind_retry_status(self.agent)
         except Exception as exc:
             self.emit({"type": "error", "code": "model_switch_failed", "message": str(exc)})
         self.model_status()

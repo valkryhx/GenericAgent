@@ -414,6 +414,7 @@ export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
   | { type: 'activity'; label: string | null }
+  | { type: 'retry_status'; kind: 'retrying' | 'recovered'; status: number; attempt: number; maxRetries: number; delayMs: number; error: string }
   | ({ type: 'token_usage'; taskId?: number } & TokenUsage)
   | { type: 'context_usage'; used_tokens: number; limit_tokens: number; hard_tokens: number; level: 'ok' | 'warn' | 'compact' | 'blocked' }
   | { type: 'user'; taskId: number; text: string }

@@ -631,6 +631,28 @@ def close_http_session(sess):
         pass
 
 
+def _notify_retry_status(sess, payload):
+    """Tell the frontend about a retry without putting it into the conversation.
+
+    Mirrors CC's ``onRetryStatus`` (m0591:132618): the banner is transient UI, the
+    transcript only ever sees the final error. A frontend that does not set the
+    callback keeps the old behaviour.
+    """
+    callback = getattr(sess, "on_retry_status", None)
+    if not callable(callback):
+        return
+    try:
+        callback(payload)
+    except Exception:
+        pass
+
+
+def _short_error_body(body, limit=160):
+    """First line of an error body, capped — a raw nginx HTML page is not a message."""
+    text = " ".join(str(body or "").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 def _stream_with_retry(sess, url, headers, payload, parse_fn):
     cancel_event = getattr(sess, "_cancel_event", None)
     _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
@@ -662,10 +684,13 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
                 if r.status_code >= 400:
                     if r.status_code in _RETRYABLE and attempt < sess.max_retries:
                         outq.put(("retry_http", r.status_code, dict(r.headers or {}))); return
-                    try: body = r.text.strip()[:500]
+                    try: body = _short_error_body(r.text)
                     except: body = ""
                     err = f"!!!Error: HTTP {r.status_code}" + (f": {body}" if body else "")
-                    outq.put(("chunk", err)); outq.put(("done", [{"type": "text", "text": err}])); return
+                    # Fatal, not a stream chunk: the loop must not mistake this for
+                    # the reconnected stream's first token (that would clear the
+                    # retry banner and then dump the error under it).
+                    outq.put(("fatal", err)); return
                 gen = parse_fn(r)
                 try:
                     while True:
@@ -683,6 +708,7 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
         finally:
             clear_active = getattr(sess, "_clear_active_response", None)
             if clear_active and active is not None: clear_active(active)
+    retried = False
     for attempt in range(sess.max_retries + 1):
         if _cancelled(): return []
         outq = queue.Queue()
@@ -697,15 +723,26 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
             if kind == "chunk":
                 if _cancelled():
                     _close_active(); return []
+                if retried:
+                    retried = False
+                    _notify_retry_status(sess, {"kind": "recovered"})
                 yield item[1]
             elif kind == "done":
+                if retried:
+                    _notify_retry_status(sess, {"kind": "recovered"})
                 return item[1]
             elif kind == "cancelled":
                 return []
             elif kind == "retry_http":
                 _, status, retry_headers = item
                 d = _delay(retry_headers, attempt)
+                retried = True
                 print(f"[LLM Retry] HTTP {status}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
+                _notify_retry_status(sess, {
+                    "kind": "retrying", "status": int(status),
+                    "attempt": attempt + 1, "max_retries": int(sess.max_retries),
+                    "delay_ms": int(d * 1000),
+                })
                 if _cancel_wait(d): _close_active(); return []
                 break
             elif kind == "retry_error":
@@ -713,10 +750,18 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
                 err = f"!!!Error: {type(exc).__name__}"
                 if attempt < sess.max_retries:
                     d = _delay(None, attempt)
+                    retried = True
                     print(f"[LLM Retry] {type(exc).__name__}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
-                    yield err
+                    _notify_retry_status(sess, {
+                        "kind": "retrying", "status": 0,
+                        "attempt": attempt + 1, "max_retries": int(sess.max_retries),
+                        "delay_ms": int(d * 1000), "error": type(exc).__name__,
+                    })
                     if _cancel_wait(d): _close_active(); return []
                     break
+                yield err; return [{"type": "text", "text": err}]
+            elif kind == "fatal":
+                err = item[1]
                 yield err; return [{"type": "text", "text": err}]
             elif kind == "error":
                 _, exc, streamed = item
@@ -905,6 +950,9 @@ class BaseSession:
         # Session-level cumulative OUTPUT tokens (mirrors CC costLedger
         # totalOutputTokens -> Th()); used by goal metadata "tokens spent".
         self.session_output_tokens = 0
+        # Frontend hook for the transient "retrying n/m" banner (CC onRetryStatus).
+        # None means "no UI attached": retries stay invisible, as before.
+        self.on_retry_status = None
         self._init_cancel_state()
     def _init_cancel_state(self):
         self._cancel_event = threading.Event()
@@ -1397,7 +1445,7 @@ class MixinSession:
         self.model = getattr(self._sessions[0], 'model', None)
         self._cur_idx, self._switched_at = 0, 0.0
     def __getattr__(self, name): return getattr(self._sessions[0], name)
-    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort', 'history'})
+    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort', 'history', 'on_retry_status'})
     def __setattr__(self, name, value):
         if name in self._BROADCAST_ATTRS:
             for s in self._sessions:

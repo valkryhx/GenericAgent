@@ -70,6 +70,12 @@ function makeDecision(
 const RUNNING_GOAL_CLEAR_WORDS = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
 
 /**
+ * Shape of a local slash command: "/name" or "/name:sub", optionally followed by
+ * arguments. A bare "/" (or "/ path"-like text) is ordinary content, not a command.
+ */
+const SLASH_COMMAND_SHAPE = /^\/[a-zA-Z][\w:-]*(?:\s|$)/
+
+/**
  * Slash commands that must run even while a turn is in flight.
  *
  * Only `/goal` reaches this point: every other local command is already parsed
@@ -436,7 +442,11 @@ export function handleInput(
       // Slash commands are not drafts: queueing one hands the model the literal text
       // "/goal clear" and leaves the user thinking it ran. Control commands that need
       // no turn run now; everything else keeps the draft and explains why.
-      if (expanded.startsWith('/')) {
+      //
+      // Only command-shaped input counts ("/goal x", "/foobar"), otherwise a pasted
+      // path such as "/usr/bin/python" or a line starting with "/ " would be refused
+      // instead of queued like ordinary text.
+      if (SLASH_COMMAND_SHAPE.test(expanded.trim())) {
         const control = parseRunningControlCommand(expanded)
         if (control) return decision('', 0, control)
         return decision(value, offset, { action: { type: 'slash_blocked_while_running' } })

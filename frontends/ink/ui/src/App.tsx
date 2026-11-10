@@ -131,7 +131,7 @@ import {
   type InputLinePart,
   type InputViewport,
 } from './promptChrome.js'
-import { completedStatusSegments, pickRunningVerb, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
+import { completedStatusSegments, pickRunningVerb, retryStatusText, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { agentNoticeFromRecord, agentNoticeLine, type AgentNotice } from './agentNotice.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
@@ -780,6 +780,20 @@ function ActivityPlaceholder() {
   return (
     <Box height={1}>
       <Text> </Text>
+    </Box>
+  )
+}
+
+/**
+ * 重试横幅单独一行，**不套** `✻ {verb} ({seconds})` 那套运行骨架 ——
+ * 套进去会渲染成 `✻ · Retrying in 2s … (0s)`，尾巴上的 `(0s)` 是假的
+ * （重试期间没有"运行了多久"这回事）。CC 的横幅只有中间那段。
+ * 高度仍是 1 行，和 ActivityView 同高，布局不跳。
+ */
+function RetryBannerView({ text, theme }: { text: string; theme: InkTheme }) {
+  return (
+    <Box paddingX={1} height={1}>
+      <Text color={theme.warning} wrap="truncate-end">{text}</Text>
     </Box>
   )
 }
@@ -2169,7 +2183,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }), [canvasColumns, cursorOffset, input])
   const inputRows = promptViewport.lines.length
   const errorRows = state.error ? 1 : 0
-  const hasActivity = showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage, completedTurnActivity !== null)
+  // 上游重试期间，底部活动行换成 CC 式 "· Retrying in 3s (HTTP 502) · attempt 1/10"。
+  // 它占用既有的 activity 行、不新增行数 —— 少一行/多一行都会让提示行与输入框跳一下，
+  // 而断链恰好是最不该抖动的时刻。
+  const retryBanner = state.retryStatus
+    ? retryStatusText(
+        state.retryStatus.status,
+        Math.max(0, Math.ceil((state.retryStatus.resumeAt - now) / 1000)),
+        state.retryStatus.attempt,
+        state.retryStatus.maxRetries,
+      )
+    : null
+  const hasActivity = Boolean(retryBanner) || showWorkflowStatusBar || shouldShowActivityStatus(state.status, runningStartedAt !== null, state.tokenUsage, completedTurnActivity !== null)
   const workflowPanelLines = useMemo(
     () => (workflowPanel ? workflowPanelRows(workflowPanel).slice(0, WORKFLOW_PANEL_MAX_ROWS) : []),
     [workflowPanel],
@@ -2579,7 +2604,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
           {showGoalCard ? <GoalStatusCardView lines={goalCardLinesOut} terminal={goalTerminalLinesOut} theme={theme} /> : null}
-          {showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : compactGoalLine ? <Box paddingX={1}><Text color={compactGoalLine.startsWith('✓') ? theme.success : compactGoalLine.startsWith('✗') ? theme.error : theme.accent} wrap="truncate-end">{compactGoalLine}</Text></Box> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
+          {retryBanner ? <RetryBannerView text={retryBanner} theme={theme} /> : showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : compactGoalLine ? <Box paddingX={1}><Text color={compactGoalLine.startsWith('✓') ? theme.success : compactGoalLine.startsWith('✗') ? theme.error : theme.accent} wrap="truncate-end">{compactGoalLine}</Text></Box> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>
       </Box>

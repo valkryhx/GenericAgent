@@ -5141,5 +5141,69 @@ class InkBridgeTeamListTest(unittest.TestCase):
         self.assertEqual([t["subject"] for t in payload["tasks"]], ["Add parser"])
 
 
+class InkBridgeRetryStatusTest(unittest.TestCase):
+    """断链横幅的 wire 契约：重试中继 + 恢复清除。
+
+    用户在 UX 上的原话是「不要让这些报错很突兀地显示在对话区」，
+    所以这里断言的核心是：重试**只**产生 retry_status 事件，
+    不会同时产生 error / system / assistant_delta 之类会留在转录里的事件。
+    """
+
+    def setUp(self):
+        bridge_patch = patch(f"{__name__}.GenericAgentBridge", new=make_isolated_bridge)
+        bridge_patch.start()
+        self.addCleanup(bridge_patch.stop)
+
+    def _bridge(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        return agent, events, bridge
+
+    def test_binding_installs_the_callback_on_the_backend(self):
+        agent, _events, _bridge = self._bridge()
+        self.assertTrue(callable(getattr(agent.llmclient.backend, "on_retry_status", None)))
+
+    def test_retrying_and_recovered_reach_the_ui_as_retry_status_only(self):
+        agent, events, _bridge = self._bridge()
+        backend = agent.llmclient.backend
+        events.clear()
+
+        backend.on_retry_status({
+            "kind": "retrying", "status": 502, "attempt": 2,
+            "max_retries": 10, "delay_ms": 3000,
+        })
+        backend.on_retry_status({"kind": "recovered"})
+
+        retry_events = [event for event in events if event.get("type") == "retry_status"]
+        self.assertEqual(["retrying", "recovered"], [event["kind"] for event in retry_events])
+        first = retry_events[0]
+        self.assertEqual(502, first["status"])
+        self.assertEqual(2, first["attempt"])
+        self.assertEqual(10, first["maxRetries"])
+        self.assertEqual(3000, first["delayMs"])
+        # Nothing else may be emitted: no error line, no system message, no delta.
+        others = [event for event in events if event.get("type") not in {"retry_status", "agent_snapshot"}]
+        self.assertEqual([], others, f"retry leaked into the transcript: {others}")
+
+    def test_model_switch_rebinds_the_new_backend(self):
+        agent, _events, bridge = self._bridge()
+        old_backend = agent.llmclient.backend
+
+        class OtherBackend:
+            def __init__(self):
+                self.history = []
+
+        new_backend = OtherBackend()
+        agent.select_llm = lambda selector: {"ok": True, "index": 0, "name": "switched"}
+        agent.llmclient = type("C", (), {"backend": new_backend, "last_tools": ""})()
+
+        bridge.model_switch("switched")
+
+        self.assertTrue(callable(getattr(new_backend, "on_retry_status", None)),
+                        "switching models must not silently disable the retry banner")
+        self.assertTrue(callable(getattr(old_backend, "on_retry_status", None)))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ import {
   formatRunningStatus,
   formatTokenCount,
   pickRunningVerb,
+  retryStatusText,
   runningStatusSegments,
   RUNNING_VERBS,
   shouldShowActivityStatus,
@@ -145,4 +146,19 @@ test('completedStatusSegments keeps the trailing separator and emphasises only u
   )
   const emphasised = segments.filter(segment => segment.emphasis).map(segment => segment.text)
   assert.deepEqual(emphasised, ['↑12k ↓1k Σ13k'])
+})
+
+test('retryStatusText reads like CC and carries the status code', () => {
+  // CC 原文（m1795）：`· Retrying in 3s · attempt 1/10`。GA 多带状态码，
+  // 因为 502 和"网络断了"在用户眼里是两件事。
+  assert.equal(retryStatusText(502, 3, 1, 10), '· Retrying in 3s (HTTP 502) · attempt 1/10 · esc to interrupt')
+})
+
+test('retryStatusText omits the code for transport errors', () => {
+  assert.equal(retryStatusText(0, 5, 2, 10), '· Retrying in 5s · attempt 2/10 · esc to interrupt')
+})
+
+test('retryStatusText never prints a denominator below the attempt', () => {
+  // 配置 max_retries=0 时 attempt 仍会推进到 1，分母不能倒挂成 1/0。
+  assert.equal(retryStatusText(503, 1, 1, 0), '· Retrying in 1s (HTTP 503) · attempt 1/1 · esc to interrupt')
 })

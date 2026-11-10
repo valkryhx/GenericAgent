@@ -132,6 +132,18 @@ export function formatCompletedStatus(seconds: number, completedAt: Date, usage?
   return completedStatusSegments(seconds, completedAt, usage).map(segment => segment.text).join('')
 }
 
+/**
+ * CC 的重试横幅文案（m1795）：`· Retrying in 3s · attempt 1/10`。
+ *
+ * GA 这里多带一个状态码，因为 zhanlu-ds 这类网关的 502 和传输层超时在用户眼里
+ * 是两件事（"服务端 502" vs "网络断了"）。`status === 0` 表示没拿到 HTTP 响应。
+ */
+export function retryStatusText(status: number, secondsLeft: number, attempt: number, maxRetries: number): string {
+  const reason = status > 0 ? ` (HTTP ${status})` : ''
+  const total = Math.max(attempt, maxRetries)
+  return `· Retrying in ${formatElapsed(secondsLeft)}${reason} · attempt ${attempt}/${total} · esc to interrupt`
+}
+
 export function shouldShowActivityStatus(
   status: 'connecting' | 'idle' | 'running' | 'stopping',
   hasRunningTimer: boolean,

@@ -347,7 +347,9 @@ class DefaultsCfg(_Strict):
     max_tokens: Optional[int] = 8192
     temperature: Optional[float] = 1.0
     stream: bool = True
-    max_retries: Optional[int] = None
+    # 对齐 CC 的 FDr=10（m0591:125212）：网关 5xx / 超时这类偶发故障默认给 10 次
+    # 退避重试。只对 _RETRYABLE 生效（408/409/425/429/5xx/529），4xx 一次就报错。
+    max_retries: Optional[int] = 10
     timeout: Optional[int] = None
     read_timeout: Optional[int] = None
     context_window: Optional[int] = None

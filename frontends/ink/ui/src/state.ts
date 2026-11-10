@@ -6,9 +6,26 @@ import {
 } from './streamCommit.js'
 import type { GoalMetadata, GoalTerminal } from './goalCard.js'
 
+export type RetryStatus = {
+  /** HTTP status that triggered the retry; 0 means a transport error (timeout / reset). */
+  status: number
+  /** 1-based attempt number now starting. */
+  attempt: number
+  maxRetries: number
+  /** Wall-clock deadline of this backoff window; the banner counts down to it. */
+  resumeAt: number
+  error: string
+}
+
 export type AppState = {
   status: 'connecting' | 'idle' | 'running' | 'stopping'
   activityLabel: string | null
+  /**
+   * Transient upstream-retry banner. Mirrors CC's `onRetryStatus` (m0591:132618):
+   * it lives in the chrome, never in the transcript, and is cleared the moment a
+   * token arrives — a 502 that heals itself must not leave a scar in the scrollback.
+   */
+  retryStatus: RetryStatus | null
   tokenUsage: TokenUsage | null
   goalMetadata: GoalMetadata | null
   goalTerminal: GoalTerminal | null
@@ -34,6 +51,7 @@ export type AppState = {
 export const initialState: AppState = {
   status: 'connecting',
   activityLabel: null,
+  retryStatus: null,
   tokenUsage: null,
   goalMetadata: null,
   goalTerminal: null,
@@ -55,7 +73,7 @@ export const initialState: AppState = {
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
   if (event.type === 'ready') {
-    return { ...state, status: 'idle', activityLabel: null, tokenUsage: null, error: null }
+    return { ...state, status: 'idle', activityLabel: null, retryStatus: null, tokenUsage: null, error: null }
   }
   if (event.type === 'status') {
     const nextStatus = event.status
@@ -67,6 +85,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       ...state,
       status: nextStatus,
       activityLabel: nextStatus === 'idle' ? null : state.activityLabel,
+      retryStatus: nextStatus === 'idle' ? null : state.retryStatus,
       goalNudge: nextStatus === 'running' ? null : state.goalNudge,
       tokenUsage: nextStatus === 'running' ? null : state.tokenUsage,
       messages,
@@ -75,6 +94,25 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   }
   if (event.type === 'activity') {
     return { ...state, activityLabel: event.label, error: null }
+  }
+  if (event.type === 'retry_status') {
+    // `recovered` arrives with the first chunk of the reconnected stream. Clearing
+    // on it (rather than on the next status event) is what makes the banner feel
+    // like it "turns back into normal output" instead of lingering over it.
+    if (event.kind === 'recovered') return state.retryStatus === null ? state : { ...state, retryStatus: null, error: null }
+    return {
+      ...state,
+      retryStatus: {
+        status: event.status,
+        attempt: event.attempt,
+        maxRetries: event.maxRetries,
+        resumeAt: Date.now() + Math.max(0, event.delayMs),
+        error: event.error,
+      },
+      // A retry is not a turn failure: the error slot must not keep painting while
+      // the request is transparently reissued.
+      error: null,
+    }
   }
   if (event.type === 'token_usage') {
     return {
@@ -253,7 +291,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     }
   }
   if (event.type === 'clear') {
-    return { ...state, messages: [], error: null, goalMetadata: null, goalTerminal: null, goalNudge: null }
+    return { ...state, messages: [], error: null, goalMetadata: null, goalTerminal: null, goalNudge: null, retryStatus: null }
   }
   if (event.type === 'history_replace') {
     // ``/new`` starts a new backend session. Workflow runs are session-scoped UI
@@ -272,6 +310,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       goalMetadata: startsNewSession ? null : state.goalMetadata,
       goalTerminal: startsNewSession ? null : state.goalTerminal,
       goalNudge: startsNewSession ? null : state.goalNudge,
+      retryStatus: startsNewSession ? null : state.retryStatus,
       messages: event.messages.map((message, index) => {
         let id = `h-${index}`
         if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`

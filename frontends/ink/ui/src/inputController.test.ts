@@ -712,3 +712,66 @@ test('isUsableImagePath rejects missing file and accepts real file', async () =>
   const real = mkImg('usable-check.png')
   assert.equal(isUsableImagePath(real), true)
 })
+
+test('handleInput runs /goal status and clear even while a turn is running', () => {
+  const store = createPasteStore()
+
+  // 纯状态变更，不应排进队列等工具边界
+  assert.deepEqual(handleInput('/goal', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'goal_command', text: '/goal' },
+  })
+  assert.deepEqual(handleInput('/goal clear', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'goal_command', text: '/goal clear' },
+  })
+  // clear 的同义词与大小写都走同一条即时通道
+  assert.deepEqual(handleInput('/goal STOP', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'goal_command', text: '/goal STOP' },
+  })
+  // stopping（已按 Esc、仍在收尾）同样成立
+  assert.deepEqual(handleInput('/goal clear', '', { return: true }, 'stopping', store), {
+    value: '',
+    command: { type: 'goal_command', text: '/goal clear' },
+  })
+})
+
+test('handleInput refuses a turn-starting slash command mid-turn but keeps the draft', () => {
+  const store = createPasteStore()
+
+  const decision = handleInput('/goal 写完测试再停', '', { return: true }, 'running', store)
+  assert.equal(decision.command, undefined, 'mid-turn /goal <condition> must not start a turn')
+  assert.deepEqual(decision.action, { type: 'slash_blocked_while_running' })
+  assert.equal(decision.value, '/goal 写完测试再停', 'the draft must survive for after the turn')
+})
+
+test('handleInput never queues an unknown slash command as chat text', () => {
+  const store = createPasteStore()
+
+  const decision = handleInput('/foobar', '', { return: true }, 'running', store)
+  assert.equal(decision.command, undefined, 'a slash command must not become a model message')
+  assert.deepEqual(decision.action, { type: 'slash_blocked_while_running' })
+  assert.equal(decision.value, '/foobar')
+})
+
+test('handleInput still queues ordinary text while running', () => {
+  const store = createPasteStore()
+  assert.deepEqual(handleInput('/ 半句', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'queue_prompt', text: '/ 半句' },
+  })
+})
+
+test('handleInput queues a pasted absolute path while running instead of treating it as a command', () => {
+  const store = createPasteStore()
+  // 真实用法：跑批中把路径贴进输入框排给下一轮，不能因为以 "/" 开头就被拒
+  assert.deepEqual(handleInput('/usr/bin/python3 跑一下这个', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'queue_prompt', text: '/usr/bin/python3 跑一下这个' },
+  })
+  assert.deepEqual(handleInput('/', '', { return: true }, 'running', store), {
+    value: '',
+    command: { type: 'queue_prompt', text: '/' },
+  })
+})

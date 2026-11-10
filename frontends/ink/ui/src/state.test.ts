@@ -584,3 +584,47 @@ test('applyBridgeEvent clears goal card, badge and nudge when history replacemen
   assert.equal(state.goalTerminal, null)
   assert.equal(state.goalNudge, null)
 })
+
+test('applyBridgeEvent paints a retry banner and clears it when the stream recovers', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  state = applyBridgeEvent(state, {
+    type: 'retry_status', kind: 'retrying', status: 502,
+    attempt: 2, maxRetries: 10, delayMs: 3000, error: '',
+  })
+
+  assert.equal(state.retryStatus?.status, 502)
+  assert.equal(state.retryStatus?.attempt, 2)
+  assert.equal(state.retryStatus?.maxRetries, 10)
+  assert.ok((state.retryStatus?.resumeAt ?? 0) > Date.now() + 2000, 'banner counts down to the backoff deadline')
+
+  state = applyBridgeEvent(state, {
+    type: 'retry_status', kind: 'recovered', status: 0,
+    attempt: 0, maxRetries: 0, delayMs: 0, error: '',
+  })
+  assert.equal(state.retryStatus, null)
+  // 恢复后 must not leave an error line behind: the transcript stays clean.
+  assert.equal(state.error, null)
+})
+
+test('applyBridgeEvent retry banner never doubles as a turn error', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'error', code: 'boom', message: 'old failure' })
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  state = applyBridgeEvent(state, {
+    type: 'retry_status', kind: 'retrying', status: 504,
+    attempt: 1, maxRetries: 10, delayMs: 500, error: '',
+  })
+  assert.equal(state.error, null)
+})
+
+test('applyBridgeEvent drops the retry banner when the turn ends', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'status', status: 'running' })
+  state = applyBridgeEvent(state, {
+    type: 'retry_status', kind: 'retrying', status: 502,
+    attempt: 1, maxRetries: 10, delayMs: 500, error: '',
+  })
+  state = applyBridgeEvent(state, { type: 'status', status: 'idle' })
+  assert.equal(state.retryStatus, null)
+})
