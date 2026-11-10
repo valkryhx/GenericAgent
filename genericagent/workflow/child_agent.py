@@ -22,6 +22,19 @@ from genericagent.workflow.tool_profiles import (
 _PRUNE_INTERVAL_SECONDS = 600.0
 _last_prune_at = 0.0
 
+# Artifact detection diffs two workspace snapshots. The cap bounds the scan on a
+# huge checkout; when it bites, the job result says so (artifactScanTruncated).
+DEFAULT_SNAPSHOT_MAX_ENTRIES = 20_000
+
+
+def _snapshot_max_entries() -> int:
+    raw = os.environ.get("GA_WORKFLOW_SNAPSHOT_MAX_ENTRIES", "")
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_SNAPSHOT_MAX_ENTRIES
+    return value if value > 0 else DEFAULT_SNAPSHOT_MAX_ENTRIES
+
 DEFAULT_CHILD_MAX_TURNS = 80
 MAX_CHILD_MAX_TURNS = 80
 # Per-turn output budget for real workflow/child agents. Overrides the
@@ -994,7 +1007,9 @@ class NativeGPTChildAgentRunner:
         from genericagent.workflow.workspace import diff_workspace, snapshot_workspace
 
         workspace_root = self._child_cwd(job)
-        workspace_before = snapshot_workspace(workspace_root)
+        max_entries = _snapshot_max_entries()
+        before_meta: dict = {}
+        workspace_before = snapshot_workspace(workspace_root, max_entries=max_entries, meta=before_meta)
         try:
             chunks = []
             loop_result = None
@@ -1039,11 +1054,20 @@ class NativeGPTChildAgentRunner:
             state["structuredOutput"] = getattr(handler, "workflow_structured_output", None)
         usage = copy.deepcopy(getattr(client, "last_usage_tokens", None) or getattr(getattr(client, "backend", None), "last_usage_tokens", None) or {})
         tool_summary = self._build_tool_summary(transcript_events)
-        written = diff_workspace(workspace_before, snapshot_workspace(workspace_root))
+        after_meta: dict = {}
+        written = diff_workspace(
+            workspace_before,
+            snapshot_workspace(workspace_root, max_entries=max_entries, meta=after_meta),
+        )
         if written and self._job_isolation(job) == "worktree":
             self._collect_isolated_artifacts(job, workspace_root, written)
         if written:
             tool_summary["writtenPaths"] = written[:64]
+        if before_meta.get("truncated") or after_meta.get("truncated"):
+            # The scan was capped, so "which files this child produced" is best-effort:
+            # say so instead of letting the parent trust an incomplete list.
+            tool_summary["artifactScanTruncated"] = True
+            tool_summary["artifactScanLimit"] = max_entries
         return output, usage, tool_summary
 
     def _live_update(self, handler, *, tool_name=None, tool_data=None, force: bool = False) -> None:
