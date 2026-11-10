@@ -138,7 +138,7 @@ def safeprint(*argv):
     except (OSError, ValueError): pass
 print = safeprint
 
-def trim_messages_history(history, hard_limit_tokens, last_usage=None):
+def trim_messages_history(history, hard_limit_tokens, last_usage=None, owner=None):
     """硬裁剪兜底：估算当前上下文 token 超硬线时，丢最旧消息压回目标水位。
 
     token 化后（对齐 Codex/CC）：
@@ -165,6 +165,17 @@ def trim_messages_history(history, hard_limit_tokens, last_usage=None):
             if history and history[0].get('role') == 'user': history[0] = _sanitize_leading_user_msg(history[0])
             cost = sum(token_meter.estimate_msg_tokens(m, cpt) for m in history)
         print(f'[Debug] Trimmed context, current: ~{cost} tokens, {len(history)} messages.')
+        if owner is not None:
+            # The trim is a per-request projection (history is a deepcopy); record
+            # it so the turn can compact afterwards and keep the dropped free.
+            try:
+                owner.last_trim = {
+                    "pre_tokens": int(tokens),
+                    "post_tokens": int(cost),
+                    "dropped": int(len(history)),
+                }
+            except Exception:
+                pass
 
 def auto_make_url(base, path):
     b, p = base.rstrip('/'), path.strip('/')
@@ -928,7 +939,7 @@ class BaseSession:
                 self.history.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
                 request_history = copy.deepcopy(self.history)
             if self.auto_compact_enabled:
-                trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens)
+                trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens, owner=self)
             messages = self.make_messages(request_history)
             content_blocks = None; content = ''
             gen = self.raw_ask(messages)
@@ -1071,7 +1082,7 @@ class NativeClaudeSession(BaseSession):
             self.history.append(msg)
             request_history = copy.deepcopy(self.history)
         if self.auto_compact_enabled:
-            trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens)
+            trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens, owner=self)
         messages = [{"role": m["role"], "content": _content_blocks(m["content"])} for m in request_history]
         content_blocks = None
         gen = self.raw_ask(messages)

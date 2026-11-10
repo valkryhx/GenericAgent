@@ -1696,3 +1696,44 @@ test('App wheel scrolling pages the transcript, not the composer history', async
     delete process.env.GA_INK_FULLSCREEN
   }
 })
+
+test('App shows the context warning in the hint line and clears it on ok', async () => {
+  let emit: ((event: BridgeEvent) => void) | null = null
+  const startBridgeClient = (
+    _python: string,
+    _bridgeScript: string,
+    onEvent: (event: BridgeEvent) => void,
+  ): BridgeClient => {
+    emit = onEvent
+    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    return { send() {}, stop() {} }
+  }
+  const stdout = new CaptureWriteStream()
+  const stderr = new CaptureWriteStream()
+  const stdin = new FakeReadStream()
+  const instance = render(React.createElement(App, {
+    python: 'python',
+    bridgeScript: 'bridge.py',
+    startBridgeClient,
+  }), {
+    ...inkRenderOptions,
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+
+  try {
+    await waitForFrame(stdout, frame => frame.includes('Enter send'))
+    const eventSink = emit as unknown as (event: BridgeEvent) => void
+    eventSink({ type: 'context_usage', level: 'warn', used_tokens: 93_000, limit_tokens: 100_000, hard_tokens: 110_000 })
+    const warned = await waitForFrame(stdout, frame => frame.includes('Context 93%'))
+    assert.ok(warned.includes('auto-compact coming up'), `hint should explain the level; frame=\n${warned}`)
+
+    eventSink({ type: 'context_usage', level: 'ok', used_tokens: 1_000, limit_tokens: 100_000, hard_tokens: 110_000 })
+    const cleared = await waitForFrame(stdout, frame => frame.includes('Enter send') && !frame.includes('Context 93%'))
+    assert.ok(!cleared.includes('Context 93%'))
+  } finally {
+    instance.unmount()
+  }
+})

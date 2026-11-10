@@ -1868,6 +1868,27 @@ class InkBridgeTest(unittest.TestCase):
         t.join(timeout=2)
         self.assertEqual("accept", result.get("d"))
 
+    def test_context_usage_event_fires_only_on_level_change(self):
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        from genericagent.core import context as compact_context
+
+        levels = iter(["warn", "warn", "ok"])
+        original = compact_context.context_usage
+        compact_context.context_usage = lambda a: {
+            "level": next(levels), "used_tokens": 10, "limit_tokens": 20, "hard_tokens": 30,
+        }
+        try:
+            for _ in range(3):
+                bridge._emit_context_usage_if_changed()
+        finally:
+            compact_context.context_usage = original
+        self.assertEqual(["context_usage", "context_usage"], [e["type"] for e in events])
+        self.assertEqual("warn", events[0]["level"])
+        self.assertEqual("ok", events[1]["level"])
+        self.assertEqual(10, events[0]["used_tokens"])
+
     def test_compact_replaces_backend_history_and_clears_rewind_checkpoints(self):
         agent = FakeAgent()
         events = []

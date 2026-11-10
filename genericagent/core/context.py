@@ -71,6 +71,58 @@ def should_auto_compact_agent(agent: Any, pending_text: str = "") -> bool:
     return current + pending_tokens > _soft_limit_tokens(backend)
 
 
+# CC's early warning sits 7k tokens before the compaction line (warn at S-20000,
+# compact at S-13000). GA has no separate blocked tier input, so blocked == hard line.
+CONTEXT_WARN_MARGIN_TOKENS = 7000
+
+
+def context_usage(agent: Any) -> dict[str, Any]:
+    """Used / limit / level for the four water marks (ok, warn, compact, blocked).
+
+    Read-only: it estimates from the real-usage anchor and never touches history, so it
+    is safe to call from a UI status line.
+    """
+    backend = _backend(agent)
+    if backend is None:
+        return {"used_tokens": 0, "limit_tokens": 0, "hard_tokens": 0, "level": "ok"}
+    history = getattr(backend, "history", []) or []
+    used = token_meter.estimate_context_tokens(history, getattr(backend, "last_usage_tokens", None))
+    limit = _soft_limit_tokens(backend)
+    hard = int(getattr(backend, "hard_limit_tokens", 0) or 0)
+    if hard <= 0:
+        hard = limit
+    warn = max(0, limit - CONTEXT_WARN_MARGIN_TOKENS)
+    level = "ok"
+    if used >= hard:
+        level = "blocked"
+    elif used >= limit:
+        level = "compact"
+    elif used >= warn:
+        level = "warn"
+    return {"used_tokens": int(used), "limit_tokens": int(limit), "hard_tokens": int(hard), "level": level}
+
+
+def note_context_usage(agent: Any) -> str | None:
+    """One user-visible line per level crossing; silent otherwise.
+
+    Compaction resets the estimate (the usage anchor is dropped), so the level falls
+    back to ok on its own -- that reset is silent; the next crossing speaks again.
+    """
+    usage = context_usage(agent)
+    level = usage["level"]
+    previous = getattr(agent, "_context_warn_level", None)
+    agent._context_warn_level = level
+    if level == "ok" or level == previous:
+        return None
+    used, limit = usage["used_tokens"], usage["limit_tokens"]
+    percent = int(round(used * 100 / limit)) if limit else 0
+    if level == "blocked":
+        return f"Context at {percent}% ({level}): {used:,} / {limit:,} tokens; the next request may be rejected."
+    if level == "compact":
+        return f"Context at {percent}% ({level}): {used:,} / {limit:,} tokens; auto-compaction fires on the next request."
+    return f"Context at {percent}% ({level}): {used:,} / {limit:,} tokens; auto-compaction is coming up."
+
+
 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 

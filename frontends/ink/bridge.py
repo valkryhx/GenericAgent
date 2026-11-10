@@ -2994,6 +2994,23 @@ class GenericAgentBridge:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
         return getattr(backend, "history", [])
 
+    def _emit_context_usage_if_changed(self) -> None:
+        """Tell the UI about ok/warn/compact/blocked crossings (CC warn tier).
+
+        Emitted on crossing, including the drop back to ok after compaction, so the
+        hint can clear itself.
+        """
+        try:
+            from genericagent.core.context import context_usage
+            usage = context_usage(self.agent)
+        except Exception:
+            return
+        level = usage.get("level")
+        if level == getattr(self, "_last_context_level", "ok"):
+            return
+        self._last_context_level = level
+        self.emit({"type": "context_usage", **usage})
+
     def _backend_token_usage(self) -> dict[str, int] | None:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
         usage = getattr(backend, "last_usage_tokens", None)
@@ -3276,6 +3293,7 @@ class GenericAgentBridge:
             while True:
                 item = display_queue.get()
                 emit_usage_if_changed()
+                self._emit_context_usage_if_changed()
                 if "system" in item:
                     # Non-terminal system notice emitted mid-turn (e.g. "Goal set").
                     self.emit({"type": "system", "text": str(item.get("system") or "")})

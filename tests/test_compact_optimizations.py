@@ -9,6 +9,7 @@
 import json
 import queue
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -386,6 +387,104 @@ class ContextOverflowRecoveryTest(unittest.TestCase):
         self.assertFalse(GeneraticAgent._recover_from_context_overflow(agent, out))
         self.assertEqual(before, _dump(agent.llmclient.backend.history))
         self.assertTrue(out.empty())
+
+
+class HardTrimSignalTest(unittest.TestCase):
+    def _history(self, count=8, size=400):
+        rows = []
+        for index in range(count):
+            role = "user" if index % 2 == 0 else "assistant"
+            rows.append({"role": role, "content": _text("m%d " % index + "x" * size)})
+        return rows
+
+    def test_a_trim_records_what_it_dropped(self):
+        from genericagent.llm.core import trim_messages_history
+
+        owner = types.SimpleNamespace()
+        history = self._history()
+        trim_messages_history(history, 100, None, owner=owner)
+        self.assertTrue(getattr(owner, "last_trim", None))
+        self.assertGreater(owner.last_trim["pre_tokens"], owner.last_trim["post_tokens"])
+
+    def test_no_marker_when_under_the_limit(self):
+        from genericagent.llm.core import trim_messages_history
+
+        owner = types.SimpleNamespace()
+        trim_messages_history(self._history(size=10), 1_000_000, None, owner=owner)
+        self.assertIsNone(getattr(owner, "last_trim", None))
+
+    def test_the_turn_compacts_once_after_a_trim(self):
+        agent = FakeAgent(_conversation())
+        agent.llmclient.backend.last_trim = {"pre_tokens": 900, "post_tokens": 500, "dropped": 6}
+        out = queue.Queue()
+        calls = []
+        original = compact_context.maybe_auto_compact
+        compact_context.maybe_auto_compact = lambda a, pending_text="", **kw: calls.append(pending_text) or "Auto Compacted 6 messages into summary context."
+        try:
+            self.assertTrue(GeneraticAgent._compact_after_hard_trim(agent, out))
+            self.assertFalse(GeneraticAgent._compact_after_hard_trim(agent, out))
+        finally:
+            compact_context.maybe_auto_compact = original
+        self.assertEqual([""], calls)
+        self.assertIn("hard-limit trim", out.get_nowait().get("system", ""))
+
+
+class InTurnHandlerStateTest(unittest.TestCase):
+    def test_compaction_keeps_the_live_handler_reference(self):
+        # An in-turn compaction sets agent.handler = None, but the loop keeps its
+        # own handler object: key_info must still be readable by later tool steps.
+        live = FakeHandler({"key_info": "LIVE-STATE"})
+        agent = FakeAgent(_conversation(), working={"key_info": "LIVE-STATE"})
+        agent.handler = live
+        compact_context.compact_agent_context(agent, summarize_fn=lambda src, ins: "SUMMARY")
+        self.assertEqual("LIVE-STATE", live.working["key_info"])
+        self.assertIsNone(agent.handler)
+        self.assertEqual("LIVE-STATE", agent._compact_working_state["handler_working"]["key_info"])
+
+
+class ContextUsageTest(unittest.TestCase):
+    def _agent(self, used_total, auto=100000, hard=110000):
+        agent = FakeAgent(_conversation())
+        backend = agent.llmclient.backend
+        backend.auto_compact_tokens = auto
+        backend.hard_limit_tokens = hard
+        backend.last_usage_tokens = {"total_tokens": used_total}
+        backend.history = [{"role": "user", "content": _text("x")}, {"role": "assistant", "content": _text("y")}]
+        return agent
+
+    def test_levels_follow_the_four_water_marks(self):
+        cases = (
+            (50000, "ok"),
+            (100000 - 7000, "warn"),
+            (100000, "compact"),
+            (110000, "blocked"),
+        )
+        for used, level in cases:
+            with self.subTest(used=used):
+                agent = self._agent(used)
+                usage = compact_context.context_usage(agent)
+                self.assertEqual(level, usage["level"])
+                self.assertEqual(used, usage["used_tokens"])
+                self.assertEqual(100000, usage["limit_tokens"])
+
+    def test_the_warning_is_emitted_once_per_level(self):
+        agent = self._agent(100000 - 1000)  # warn
+        first = compact_context.note_context_usage(agent)
+        self.assertTrue(first)
+        self.assertIn("warn", first.lower())
+        self.assertIsNone(compact_context.note_context_usage(agent))  # same level: silent
+        agent.llmclient.backend.last_usage_tokens = {"total_tokens": 100000}  # compact
+        second = compact_context.note_context_usage(agent)
+        self.assertTrue(second)
+        self.assertNotEqual(first, second)
+
+    def test_dropping_back_to_ok_resets_silently(self):
+        agent = self._agent(100000)
+        self.assertTrue(compact_context.note_context_usage(agent))
+        agent.llmclient.backend.last_usage_tokens = {"total_tokens": 1000}
+        self.assertIsNone(compact_context.note_context_usage(agent))
+        agent.llmclient.backend.last_usage_tokens = {"total_tokens": 100000}
+        self.assertTrue(compact_context.note_context_usage(agent))
 
 
 class CompactPromptTest(unittest.TestCase):
