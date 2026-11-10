@@ -108,9 +108,9 @@ Worked for 1m 18s
    （pyte 在 chunk 边界按字节处理），不是应用输出。
 3. **502 的整段 HTML 原样进入对话区**：有 `!!!Error:` 前缀，但读起来很吵，可考虑只留首行。
 
-另：MCP 横幅在 `MCP ready` 之后计数仍可能继续变化（6 servers/25 tools → 7/37），
-“ready”这个词偏早；已有 “connecting in the background … you can type now” 分支，但收敛后
-再失败仍会改回 “MCP ready with failures”。
+另：MCP 横幅的**连接中**分支是准确的（`MCP connecting in the background … 5/7 connected … you can type now`），
+但收敛成 `MCP ready` 之后再掉线会退回 `MCP ready with failures`，计数也会继续变化（6/25 → 7/37）——
+措辞上“ready”仍偏绝对，属观感问题。
 
 ## 8. 本轮没覆盖
 
@@ -118,3 +118,45 @@ Worked for 1m 18s
 - 真开 teammate（`/team` 只看了面板；子代理是 Agent 工具，不是 teammate）。
 - `/resume`、`/rewind`、goal 模式、hooks 的真实触发。
 - 长会话压力（压缩只做了一次手动 partial）。
+
+## 9. 第二轮：/rewind、/resume、/goal（`temp/ga_ux2_probe.py`）
+
+| 命令 | 屏幕 | 判定 |
+| --- | --- | --- |
+| `/rewind` | `Rewind Conversation` + 用户消息行 + `Enter select - Up/Down move - Esc cancel` | ✅ |
+| `/resume` | `No resumable sessions found.`（隔离数据目录，确实没有） | ✅ |
+| `/goal <条件>` | `Goal: 代码改完后用一句话总结改动`，随即起一轮（`✻ Tinkering (2s …)`） | ✅ |
+| `/goal` / `/goal clear` | 跑批中 → `Queued 2 messages · sends at the next tool boundary` | ⚠️ 见下 |
+
+**排队语义**：running 状态下输入的任何斜杠命令都不会立即执行，会作为用户消息排队
+（`queued — will be sent at the next tool boundary`）。这和「执行中继续输入」的设计一致，
+但意味着一件事：**`/goal clear` 在跑批时不能立刻生效**，要等下一个工具边界。想“现在停”只能按 Esc。
+（是否要让 `/goal clear`、`/stop` 一类控制命令走即时通道，值得单独决定。）
+
+**MCP 横幅文案**在本轮反而验证是准确的：
+
+```text
+ MCP connecting in the background · exa ◌ context7 ◌ · 5/7 connected · 33 tools · you can type now
+```
+
+§7 里“ready 偏早”的说法据此修正：连接中会明确说 connecting + 可输入，收敛后才变 ready。
+
+## 10. 两 child 并行 workflow（`temp/ga_workflow_probe2.py`）
+
+```text
+ ● workflow(script: export const meta = { name: 'count-py-files', … })
+   [Workflow] launched count-py-files (wf_199cd31e7bcd483e90c03e92a4cca476) in the background.
+ …通知唤醒新一轮…
+ ├───────────────┼──────────────┤
+ │ tests/        │ 321          │
+ │ genericagent/ │ 125          │
+ │ 合计          │ 446          │
+ └───────────────┴──────────────┘
+ ▸ ✓ count-py-files  2/2 agents done · 54.4k tok · integration accepted · audit passed
+```
+
+两个 child 真并行、结果经 schema 回传、脚本汇总、集成审计通过。
+
+顺带一个**能力观察（不是 bug）**：`file_glob` 有 100 条硬上限，两个 child 都被截到 100，
+脚本里的约定让它们改用 `code_run` + `pathlib.rglob` 复核，模型在最终回答里主动说明了这一点，
+并自己又独立跑了一次计数（321 / 125 两次一致）。
