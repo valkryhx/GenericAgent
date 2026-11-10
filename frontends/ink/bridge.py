@@ -918,6 +918,40 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
 
+    def goal_command(self, text: str) -> None:
+        """Run ``/goal`` status/clear immediately, even while a turn is running.
+
+        ``/goal <condition>`` starts a model turn of its own, so it is refused while
+        busy (the frontend does not even route it here). Status and clear are pure
+        state changes -- queueing them as chat text would hand the model a literal
+        "/goal clear" and leave the user thinking the goal was cleared.
+        """
+        raw = str(text or "").strip()
+        arg = raw[len("/goal"):].strip() if raw.startswith("/goal") else raw
+        from genericagent.core import goal as goal_core
+        parsed = goal_core.parse_goal_command(arg)
+        if parsed.kind == "set":
+            self.emit({
+                "type": "error",
+                "code": "goal_busy",
+                "message": "A turn is running: press Esc to stop before setting a goal.",
+            })
+            return
+        results = queue.Queue()
+        try:
+            self.agent._handle_goal_command(arg, results)
+        except Exception as exc:
+            self.emit({"type": "error", "code": "goal_command_failed", "message": str(exc)})
+            return
+        while True:
+            try:
+                item = results.get_nowait()
+            except queue.Empty:
+                break
+            message = item.get("done") or item.get("system")
+            if message:
+                self.emit({"type": "local_command_output", "text": str(message)})
+
     def goal_proposal_response(self, request_id: str, decision: str) -> None:
         """UI 对 goal_proposal_request 的应答：approve | reject。"""
         try:
@@ -3447,6 +3481,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
                 str(command.get("requestId") or command.get("request_id") or ""),
                 str(command.get("decision") or ""),
             )
+        elif cmd_type == "goal_command":
+            bridge.goal_command(str(command.get("text") or ""))
         elif cmd_type == "goal_proposal_response":
             bridge.goal_proposal_response(
                 str(command.get("requestId") or command.get("request_id") or ""),

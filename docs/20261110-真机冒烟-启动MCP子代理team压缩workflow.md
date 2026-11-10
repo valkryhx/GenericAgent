@@ -160,3 +160,51 @@ Worked for 1m 18s
 顺带一个**能力观察（不是 bug）**：`file_glob` 有 100 条硬上限，两个 child 都被截到 100，
 脚本里的约定让它们改用 `code_run` + `pathlib.rglob` 复核，模型在最终回答里主动说明了这一点，
 并自己又独立跑了一次计数（321 / 125 两次一致）。
+
+## 11. 修掉「控制类斜杠命令被当聊天文本排队」
+
+### 11.1 问题
+
+真机里 `/goal clear` 在跑批时显示 `(queued — will be sent at the next tool boundary)`，
+随后经 `render_queued_prompts` 变成一段模型输入文本——既没生效，模型还会读到字面量
+“/goal clear”。CC 不会这么干：忙碌时只有 `prompt` / `bash` 可入队，其它模式直接拒绝
+（`m1635:71938`，`mode_not_queueable`）。
+
+### 11.2 改法（控制类即时 + 其余保留草稿）
+
+- **即时**：`/goal`（看状态）、`/goal clear|stop|off|reset|none|cancel` —— 纯状态变更，
+  新增 `goal_command` 命令，走 `InkBridge.goal_command()` 直接调
+  `agent._handle_goal_command()`，不排轮次。
+- **拒绝但保留草稿**：其它斜杠命令在跑批时不入队，输入框内容保持原样，并提示
+  `运行中：斜杠命令不会排队，请等回合结束或先 Esc 停止（/goal clear 可直接执行）`。
+- **普通文本行为不变**：仍然折叠进当前回合（这是“边跑边收”的核心能力）。
+- `/goal <条件>` 自身要起一轮，跑批中拒绝（`goal_busy`），不会变成模型文本。
+
+### 11.3 自测
+
+- `frontends/ink/ui/src/composerDuringRun.test.ts` 新增两条（真实 Ink 渲染 + 假 bridge）：
+  `/goal clear` 必须发 `goal_command` 且不出现 `queue_prompt`；`/goal 条件` 必须保留草稿、
+  不发任何命令。stash 掉实现后两条都变红。
+- `tests/test_ink_bridge.py` 新增两条：`goal_command` 立即执行 status/clear；
+  `/goal <条件>` 返回 `goal_busy` 且不调底层。stash 后变红。
+- 全量：UI 649 passed；Python 见下。
+
+### 11.4 真机复核（`temp/ga_goal_running_probe.py`，zhanlu-ds）
+
+跑批中发 `/goal clear`：
+
+```text
+ GenericAgent                            running
+ LLM Running (Step 1) ...
+   No goal set.                     ← 立刻执行，没进队列
+```
+
+紧接着发 `/goal 写完这段总结再停`：
+
+```text
+ > /goal 写完这段总结再停             ← 草稿保留，可以等回合结束再发
+ 运行中：斜杠命令不会排队，请等回合结束或先 Esc 停止（/goal clear 可直接执行）
+```
+
+提示 2 秒后自动消失，恢复常规 hint 行。五项断言全过（boot / turn_started /
+goal_clear_immediate / goal_set_kept_draft / goal_set_notified）。

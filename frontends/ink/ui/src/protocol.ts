@@ -45,6 +45,7 @@ export type TeamTask = {
 export type BridgeCommand =
   | { type: 'submit'; text: string; images?: BridgeImageAttachment[] }
   | { type: 'queue_prompt'; text: string }
+  | { type: 'goal_command'; text: string }
   | { type: 'stop' }
   | { type: 'new_session' }
   | { type: 'list_resume_sessions'; includeLegacy?: boolean }

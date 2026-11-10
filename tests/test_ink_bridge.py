@@ -1980,6 +1980,36 @@ class InkBridgeTest(unittest.TestCase):
         statuses = [e.get("status") for e in events if e.get("type") == "status"]
         self.assertIn("idle", statuses)
 
+    def test_goal_clear_runs_immediately_while_running(self):
+        """/goal clear 是纯状态变更：跑批中也要立刻生效，不能排成聊天文本。"""
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        calls = []
+
+        def handle(arg, out_queue):
+            calls.append(arg)
+            out_queue.put({"done": "Goal cleared: keep tests green", "source": "system"})
+
+        agent._handle_goal_command = handle
+        bridge.goal_command("/goal clear")
+        self.assertEqual(["clear"], calls)
+        outputs = [e for e in events if e.get("type") == "local_command_output"]
+        self.assertTrue(outputs)
+        self.assertIn("Goal cleared", outputs[-1]["text"])
+
+    def test_goal_set_is_refused_while_running(self):
+        """``/goal <condition>`` 要起一轮，跑批中拒绝；绝不能落到模型上下文里。"""
+        agent = FakeAgent()
+        events = []
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        calls = []
+        agent._handle_goal_command = lambda arg, out_queue: calls.append(arg)
+        bridge.goal_command("/goal 写完测试再停")
+        self.assertEqual([], calls)
+        errors = [e for e in events if e.get("type") == "error"]
+        self.assertEqual("goal_busy", errors[-1]["code"])
+
     def test_compact_refreshes_the_context_hint(self):
         agent = FakeAgent()
         events = []

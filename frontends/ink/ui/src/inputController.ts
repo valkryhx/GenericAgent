@@ -42,7 +42,7 @@ export type InputDecision = {
   value: string
   cursorOffset?: number
   command?: BridgeCommand
-  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills'; includeLegacy?: boolean }
+  action?: { type: 'open_resume' | 'open_rewind' | 'open_mcp' | 'open_model' | 'open_permissions' | 'open_theme' | 'clear' | 'help' | 'status' | 'skills' | 'slash_blocked_while_running'; includeLegacy?: boolean }
   /** 异步贴图进行中：App 侧应吞掉快捷键并 await capture，不阻塞 stdin 循环。 */
   pendingImagePaste?: boolean
   /** 本次贴图快捷键的语义：只贴图 / 先贴图再回退文本。 */
@@ -65,6 +65,30 @@ function makeDecision(
   const decision: InputDecision = { value, ...extra }
   if (includeCursorOffset) decision.cursorOffset = clampCursorOffset(value, cursorOffset)
   return decision
+}
+
+const RUNNING_GOAL_CLEAR_WORDS = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
+
+/**
+ * Slash commands that must run even while a turn is in flight.
+ *
+ * Only `/goal` reaches this point: every other local command is already parsed
+ * before the running branch. Status and clear are pure state changes, so they
+ * should not wait for a tool boundary -- and a queued one would be handed to the
+ * model as the literal text "/goal clear".
+ */
+function parseRunningControlCommand(text: string): Pick<InputDecision, 'command'> | null {
+  const trimmed = text.trim()
+  if (trimmed === '/goal') return { command: { type: 'goal_command', text: '/goal' } }
+  const goal = /^\/goal\s+([\s\S]+)$/.exec(trimmed)
+  if (!goal) return null
+  const arg = goal[1]!.trim()
+  if (!arg) return { command: { type: 'goal_command', text: '/goal' } }
+  if (RUNNING_GOAL_CLEAR_WORDS.has(arg.toLowerCase())) {
+    return { command: { type: 'goal_command', text: trimmed } }
+  }
+  // `/goal <condition>` kicks off a turn of its own; mid-turn it has to wait.
+  return null
 }
 
 function insertFoldedTextAtCursor(value: string, cursorOffset: number, text: string, pasteStore: PasteStore) {
@@ -408,6 +432,15 @@ export function handleInput(
       // message, no state change. CC queues it and the message is folded into the
       // running turn at the next tool boundary, so the intent is preserved rather than
       // silently parked in a text box the user cannot be sure is even alive.
+      //
+      // Slash commands are not drafts: queueing one hands the model the literal text
+      // "/goal clear" and leaves the user thinking it ran. Control commands that need
+      // no turn run now; everything else keeps the draft and explains why.
+      if (expanded.startsWith('/')) {
+        const control = parseRunningControlCommand(expanded)
+        if (control) return decision('', 0, control)
+        return decision(value, offset, { action: { type: 'slash_blocked_while_running' } })
+      }
       return decision('', 0, { command: { type: 'queue_prompt', text: expanded } })
     }
     // ``connecting`` still swallows: there is no turn to queue into and no bridge

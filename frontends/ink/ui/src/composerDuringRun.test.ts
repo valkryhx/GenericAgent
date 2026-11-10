@@ -292,3 +292,57 @@ test('the composer says the input was queued', async () => {
     app.instance.unmount()
   }
 })
+
+test('/goal clear typed during a run executes immediately instead of queueing', async () => {
+  const app = mountApp(false)
+  try {
+    await waitUntil(() => app.framesSince(0).length > 0)
+    await app.setRunning()
+    await app.stdin.send('/goal clear')
+    await delay(40)
+    await app.stdin.send('\r')
+    await delay(80)
+
+    assert.equal(
+      app.sent.filter(command => command.includes('"type":"queue_prompt"')).length,
+      0,
+      'a /goal control command must never be queued as chat text',
+    )
+    const goals = app.sent.filter(command => command.includes('"type":"goal_command"'))
+    assert.equal(goals.length, 1, '/goal clear did not reach the bridge immediately')
+    assert.ok(goals[0]!.includes('/goal clear'), 'the command text was rewritten')
+  } finally {
+    app.instance.unmount()
+  }
+})
+
+test('a slash command that needs a turn keeps the draft while running', async () => {
+  const app = mountApp(false)
+  try {
+    await waitUntil(() => app.framesSince(0).length > 0)
+    await app.setRunning()
+    const start = app.stdout.chunks.length
+    await app.stdin.send('/goal 写完测试再停')
+    await delay(40)
+    await app.stdin.send('\r')
+    await delay(80)
+
+    assert.equal(
+      app.sent.filter(command => command.includes('"type":"queue_prompt"')).length,
+      0,
+      'an unrecognised slash command was queued and handed to the model as text',
+    )
+    assert.equal(
+      app.sent.filter(command => command.includes('"type":"goal_command"')).length,
+      0,
+      '/goal <condition> needs a turn and must not run mid-turn',
+    )
+    const tail = app.framesSince(start)
+    assert.ok(
+      tail.includes('/goal 写完测试再停'),
+      'the draft was discarded instead of being kept for after the turn',
+    )
+  } finally {
+    app.instance.unmount()
+  }
+})

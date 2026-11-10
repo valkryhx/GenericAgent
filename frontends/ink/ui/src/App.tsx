@@ -1059,6 +1059,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // 立即同步快照：避免 React 重绘前二次 stdin 仍读到旧的 `/stop` 再提交一次。
     inputSnapshotRef.current = { value: decision.value, cursorOffset: nextOffset }
     const localCommandText = commandTextForLocalDecision(decision)
+    if (decision.action?.type === 'slash_blocked_while_running') {
+      // The draft stays in the composer so the user can resend after the turn; the
+      // notice explains why Enter did not submit (silence would look like a hang).
+      showNotice('运行中：斜杠命令不会排队，请等回合结束或先 Esc 停止（/goal clear 可直接执行）')
+      return
+    }
     if (decision.action?.type === 'clear') {
       setFooterPanel(null)
       setTranscriptScrollOffset(0)
