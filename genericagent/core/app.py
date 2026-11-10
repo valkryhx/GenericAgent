@@ -1137,6 +1137,28 @@ class GenericAgent:
         })
         return display_queue
 
+    def _auto_compact_before_task(self, query, display_queue):
+        """Core-level auto compaction, so CLI/TUI get it too (Ink did it alone).
+
+        Called from the task consumer thread just before the turn starts, so the
+        summarizer call never blocks the UI thread and every frontend (CLI, TUI,
+        bots, ACP) gets auto compaction -- previously only Ink did. Slash commands
+        and internal sources are left alone.
+        """
+        raw = str(query or "").strip()
+        if not raw or raw.startswith("/"):
+            return
+        if bool(getattr(self, "is_running", False)):
+            return
+        try:
+            from genericagent.core.context import maybe_auto_compact
+            note = maybe_auto_compact(self, pending_text=raw)
+        except Exception as exc:
+            print(f"[WARN] auto compact failed: {exc}")
+            return
+        if note:
+            display_queue.put({"done": f"{note} (auto, before this request)", "source": "system"})
+
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
     def _expand_prompt(self, expansion_type, command_name, command_args, prompt):
         """Run UserPromptExpansion for a slash-command -> prompt expansion.
@@ -1641,21 +1663,8 @@ class GenericAgent:
                 replace_log_with_compact_history(getattr(self, "log_path", None), copy.deepcopy(self.llmclient.backend.history))
         except Exception: pass
         try:
-            if session_transcript is not None and getattr(self, "session_path", None):
-                if session_transcript._detect_session_version(self.session_path) == 2:
-                    session_transcript.record_compact_v2(
-                        self.session_path,
-                        session_id=getattr(self, "session_id", ""),
-                        summary=result.summary or result.message,
-                        trigger="manual",
-                        messages_summarized=result.original_messages,
-                        turn_id=getattr(self, "session_turn_id", None),
-                        working_state=getattr(result, "working_state", None),
-                    )
-                else:
-                    session_transcript.record_compact(
-                        self.session_path, session_id=getattr(self, "session_id", ""),
-                        message=result.message, backend_history_after=copy.deepcopy(self.llmclient.backend.history))
+            from genericagent.core.context import record_compact_transcript
+            record_compact_transcript(self, result, trigger="manual")
         except Exception: pass
         display_queue.put({'done': smart_format(result.message, max_str_len=500), 'source': 'system'})
 
@@ -1813,6 +1822,8 @@ class GenericAgent:
                 break
             raw_query, source, images, display_queue = task["query"], task["source"], task.get("images") or [], task["output"]
             model_prefix = str(task.get("model_prefix") or "")
+            if source == "user" and not str(raw_query or "").strip().startswith("/"):
+                self._auto_compact_before_task(raw_query, display_queue)
             raw_query = self._prepare_model_query(raw_query, model_prefix, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
@@ -1879,6 +1890,11 @@ class GenericAgent:
             # workflow child: tool_cwd anchors relative paths, absolute paths may
             # point anywhere the OS permits.
             handler = build_main_handler(self, self.history, tool_cwd)
+            try:
+                from genericagent.core.context import restore_compact_working_state
+                restore_compact_working_state(self, handler)
+            except Exception as exc:
+                print(f"[WARN] restore compact working state failed: {exc}")
             handler.hook_runtime = self.hook_runtime
             handler.tool_event_callback = getattr(self, 'tool_event_callback', None)
             resumed_state = getattr(self, "_resumed_working_state", None)
