@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from genericagent.core import tokens as token_meter
+from genericagent.core.errors import is_context_overflow_error  # re-exported
 
 
 SummarizeFn = Callable[[str, str], str]
@@ -68,21 +69,6 @@ def should_auto_compact_agent(agent: Any, pending_text: str = "") -> bool:
     current = token_meter.estimate_context_tokens(history, last_usage)
     pending_tokens = int(len(str(pending_text or "")) / token_meter.CHARS_PER_TOKEN_FALLBACK)
     return current + pending_tokens > _soft_limit_tokens(backend)
-
-
-_CONTEXT_OVERFLOW_RE = re.compile(
-    r"context_length|maximum context length|context window exceeded|prompt is too long|input is too long|too many tokens|exceeds? the (maximum )?context|request entity too large|reduce the length of the messages",
-    re.IGNORECASE,
-)
-
-
-def is_context_overflow_error(message: Any) -> bool:
-    """True when a provider error means the prompt did not fit.
-
-    GA already compacts from local estimates; this is the safety net for the case
-    where the estimate under-counts and the upstream rejects the request.
-    """
-    return bool(_CONTEXT_OVERFLOW_RE.search(str(message or "")))
 
 
 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
