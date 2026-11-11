@@ -32,8 +32,23 @@ DEFAULT_PERMISSION_MODE = FULL_ACCESS
 
 # 与 workflow_permissions.ALLOWED_READ_ONLY_STATIC_TOOLS 同源的静态只读白名单。
 # 这些工具即便名字不带 read/list 前缀也应归为读类。
+#
+# `file_glob` / `file_grep` 必须在这里：它们是纯读操作（列目录 / 匹配内容），
+# 名字里的 glob/grep 不匹配下面任何 read 前缀，漏登记就会被判成 unknown →
+# 只读档拒绝，而 reason 写作 "static_unknown"，看起来像"工具不存在"。这个白名单
+# 与 workflow 那份必须同步增删，见 tests/test_read_tool_classification.py。
 _STATIC_READ_TOOLS = frozenset(
-    {"file_read", "web_scan", "web_fetch", "no_tool", "ask_user", "load_skill", "propose_goal"}
+    {
+        "file_read",
+        "file_glob",
+        "file_grep",
+        "web_scan",
+        "web_fetch",
+        "no_tool",
+        "ask_user",
+        "load_skill",
+        "propose_goal",
+    }
 )
 
 

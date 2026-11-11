@@ -37,7 +37,12 @@ EVIDENCE_CAPABILITIES = ("web_search", "web_fetch", "file_write", "file_read", "
 
 MUTATING_TOOL_NAMES = frozenset({"file_write", "file_patch"})
 EXECUTE_TOOL_NAMES = frozenset({"code_run", "web_execute_js"})
-READ_TOOL_NAMES = frozenset({"file_read"})
+# Every tool that only reads the workspace. `file_glob` / `file_grep` are pure
+# reads too -- they list paths and match content. Leaving them out gave them an
+# EMPTY capability set, which is the worst outcome: no profile denies them (nothing
+# intersects), and `capability_coverage` cannot see them, so a research profile's
+# evidence report claims `file_read` is unavailable while the child reads happily.
+READ_TOOL_NAMES = frozenset({"file_read", "file_glob", "file_grep"})
 
 _SEARCH_TOKENS = ("search", "query", "find", "lookup", "research")
 _FETCH_TOKENS = ("fetch", "extract", "crawl", "read", "get", "open", "download", "browse", "map")

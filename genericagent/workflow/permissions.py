@@ -37,7 +37,13 @@ TEAM_CONTROL_PLANE_TOOLS = frozenset({
     "team_status",
 })
 ALLOWED_READ_ONLY_STATIC_TOOLS = frozenset({
-    "file_read", "web_scan", "web_fetch", "no_tool", "ask_user", "load_skill", "structured_output",
+    # `file_glob` / `file_grep` are pure reads. Their names carry no read/list
+    # prefix, so leaving them out of this set made a read-only profile refuse a
+    # directory listing with reason="read_only_static_unknown" -- which reads like
+    # "no such tool" from the model's side. Keep in sync with
+    # `core/permissions/policy.py::_STATIC_READ_TOOLS`.
+    "file_read", "file_glob", "file_grep",
+    "web_scan", "web_fetch", "no_tool", "ask_user", "load_skill", "structured_output",
 }) | TEAM_CONTROL_PLANE_TOOLS
 READ_ONLY_NAME_PREFIXES = ("read", "list", "get", "scan", "search", "show", "status", "inspect", "query", "fetch")
 READ_ONLY_NAME_PARTS = ("_read", "_list", "_get", "_scan", "_search", "_show", "_status", "_query", "_fetch")
