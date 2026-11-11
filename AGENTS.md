@@ -100,11 +100,15 @@ stripAnsi 后切帧 / 正则批量改同名键），写 UI 断言前必读。
 
 Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
 
-### Ink UI 瞬时帧 / 一闪而过的面板：先定位运行体，再抓帧
+### Ink UI 瞬时帧 / 一闪而过 / 偶发显示：先定位运行体，再抓帧，画时间线
 
-「面板一闪而过」「来不及看」「偶发」这类现象，本质是**跨多次 render 的状态时序 bug**：纯函数单测看不见它，人眼也读不完它。此时**不要直接从现象推断代码位置**，按下面顺序做，否则极易「修对了代码、修错了问题」：
+「一闪而过」「来不及看」「偶发」「明明已经结束却还显示」这类现象，本质是**跨多次 render
+的状态时序 bug**：纯函数单测看不见它，人眼也读不完它，截图来不及。**不要从现象直接推断
+代码位置**，按下面顺序做，否则极易「修对了代码、修错了问题」。
 
-1. **先定位运行体**。本仓库 `ga` 走 `C:\anaconda3\Scripts\ga.exe` → site-packages 的 wheel，**在源码目录执行 `ga` 跑的仍是安装版**。用 `psutil` 看 cmdline/cwd 确认实际加载路径，再去那个目录搜代码：
+1. **先定位运行体**。本仓库 `ga` 走 `C:\anaconda3\Scripts\ga.exe` → site-packages 的
+   wheel，**在源码目录执行 `ga` 跑的仍是安装版**。用 `psutil` 看 cmdline/cwd 确认实际
+   加载路径，再去那个目录搜代码：
    ```bash
    python -c "import psutil; [print(p.info['pid'], p.info['cwd'], ' '.join(p.info['cmdline'])[:160]) for p in psutil.process_iter(['cmdline','cwd']) if p.info['cmdline'] and any(k in ' '.join(p.info['cmdline']) for k in ('main.tsx','bridge.py','genericagent.core.app'))]"
    ```
@@ -116,16 +120,37 @@ Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + ts
      python scripts/probe_ink_frames.py --grep "用户看到的文字"
      ```
      产出 `temp/ink_frames/<stamp>/{stdout.bin,frames.txt}`，可反复 grep。
-   - **不能**（依赖活的 agent-team / workflow 上下文，只有用户真实会话才有）→ **直接上挂机模式**，让用户在自己终端操作、你来记录。它是 `--import` 预加载 tee stdout，**不改 UI 源码，所以对安装版同样生效**：
+   - **不能**（依赖活的 agent-team / workflow 上下文，只有用户真实会话才有）→ **直接上
+     挂机模式**，让用户在自己终端操作、你来记录。它是 `--import` 预加载 tee stdout，
+     **不改 UI 源码，所以对安装版同样生效**：
      ```bash
-     python scripts/probe_ink_frames.py --attach --grep "Waiting" --idle-exit 120
+     python scripts/probe_ink_frames.py --attach --grep "Waiting" --idle-exit 180
      ```
      该命令会打印一行给用户在另一个终端粘贴（`GA_UI_TRACE=... NODE_OPTIONS='--import "file:///.../scripts/ga_frame_trace.mjs"' ga`）。产出 `temp/ink_trace/frames-<pid>.log`。
-     在空会话里跑驱动模式抓到的全是 `idle` 帧，浪费一轮——先判断能不能复现，再选模式。
-3. **复刻后端 payload**。前端可疑时，用真实数据直接跑 `bridge._team_roster_payload()` 那套组包逻辑，确认界面内容的数据来源，别读代码猜。
-4. **只有 2/3 都指向同一处时才改代码。**
+     在空会话里跑驱动模式抓到的全是 `idle` 帧——先判断能不能复现，再选模式。
+3. **画出现 / 消失时间线**，这是结案的关键一步。不要只看「第一帧命中」，要看连续区块
+   （跳过剥掉 ANSI 后为空的纯 cursor-park 写入）。`存在 → 消失 → 又出现` 这个形态本身
+   就排除了「一直没清掉」「第一次画错」等假设，把问题精确转成「**为什么清空之后会重播**」。
+4. **dump 转折帧**，记下同时刻的其他 UI 状态（当前回合是什么、输入框内容）。本次靠帧里
+   输入框是 `/agent` 而播报内容是上一轮 workflow，才确认「两者对不上」。
+5. **复刻后端 payload 对账**：用真实数据直接跑 bridge 的组包逻辑（如
+   `WorkflowChildAdapter.list_records`、`bridge._team_roster_payload()`），别读代码猜。
+   判据是 **帧里的文字 == 复刻 payload 的 output**。
+6. **只有 3~5 都指向同一处时才改代码。**
+7. 修完做**三重验证**：真实 trace 回放（用用户机器上那份 store，不要手写 fixture）+
+   **变异测试**（去掉修复那一行，确认对应用例失败，否则测试可能是恒真的）+
+   **在安装版上验**（确认修复在 wheel 里，且直接 import site-packages 里的模块跑回放）。
+   最后重新打包安装再验一次。
 
-命名/字符串形态**不是**来源证据（本仓库 `wf_` 前缀同时被 workflow runId、`.claude/worktrees` 命名、用户手写复述使用过），要去数据里找那条记录本身。完整案例、失败路径与教训见 `docs/ga_ink_transient_frame_debug_2026-11-11.md`。
+**高频根因模式：把「全量状态快照」当成「增量事件流」来消费。** 事件流可以「收到就播报」；
+全量快照不行——它每次都在陈述「这些记录*存在*」，而不是「刚刚*发生*」。任何由全量快照驱动
+的通知，都必须自带**跨快照存活的幂等集合**，不能从当前显示状态反推（显示会在回合结束时被
+清空，记忆不能）。本仓库另见 team roster 过滤，同族缺陷：消费方按自己的假设重新推导，而不是
+问唯一权威来源。
+
+命名/字符串形态**不是**来源证据（`wf_` 前缀同时被 workflow runId、`.claude/worktrees` 命名、
+用户手写复述使用过），要去数据里找那条记录本身。
+完整方法论、根因分析、失败路径与教训见 `docs/ga_ink_transient_frame_debug_2026-11-11.md`。
 
 ### GA ink 真实 LLM API e2e 自测：先读 SOP
 
