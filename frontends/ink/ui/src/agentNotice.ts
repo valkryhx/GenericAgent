@@ -135,6 +135,20 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
     || (sourceStatus && !PROCESS_LIFECYCLE_STATUSES.has(sourceStatus) ? sourceStatus : '')
     || status
 
+  // "No verdict yet" is not a verdict. A child that has not finished a turn carries
+  // `completionStatus: pending` (and `turnStatus: running`, which `_refresh_state`
+  // rewrites from a pending turn when the process is gone). The chain below is a
+  // POSITIVE check on COMPLETED_STATUSES, so every unrecognised word -- `pending`
+  // included -- would fall through to `failed` and flash a red
+  // `✗ Subagent <name> failed` the instant a child starts.
+  //
+  // Staying silent is the correct answer here: there is nothing to tell the user
+  // yet, and a later snapshot carries the real verdict. Announcing a verdict the
+  // record does not have is worse than announcing nothing.
+  if (workStatus === 'pending' || workStatus === 'running' || workStatus === 'queued') {
+    return null
+  }
+
   const fromMeta =
     (typeof meta.taskName === 'string' && meta.taskName) ||
     (typeof meta.task_name === 'string' && meta.task_name) ||

@@ -216,5 +216,122 @@ class ProcessSubagentAdapterTest(unittest.TestCase):
         )
 
 
+class ProcessStatusProjectionWithoutWorkVerdictTest(unittest.TestCase):
+    """A child that has no work verdict must not look like it produced one.
+
+    The reported symptom: in `ga`, a subagent occasionally flashes a red
+    `✗ Subagent <name> failed` the moment it starts. The chain:
+
+      * `_refresh_state` rewrites a `pending` turn to `running` when the child is not
+        alive, and `_project_status` sees `process_status == 'exited'` and returns
+        `closed`;
+      * `completion_status` was never assigned a work verdict, so it stays `pending`;
+      * the UI's verdict chain is a positive check on success words, so `pending`
+        fell through to `failed`.
+
+    `closed` has to stay terminal -- `list_records(include_terminal=False)` filters on
+    `_TERMINAL_STATUSES`, and a dead child must not linger in the live list. So the
+    contract this class pins is narrower: the record must *carry* the absence of a
+    verdict, so consumers can tell "closed after failing" from "closed before it
+    ever ran". `metadata.completionStatus`/`turnStatus` are that channel, and the UI
+    reads them (`subagentPendingVerdict.test.ts`).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def make_state(self, *, turn_status, process_status, completion_status=None):
+        return AgentState(
+            task_name="sub1",
+            agent_path="/root/sub1",
+            pid=None,
+            task_dir=str(Path(self.tmp.name) / "temp" / "sub1"),
+            turn_status=turn_status,
+            process_status=process_status,
+            round=0,
+            output_path=None,
+            final_output_path=None,
+            completion_status=completion_status,
+            run_id="run_flicker",
+        )
+
+    def project(self, state):
+        from genericagent.core.control.process import ProcessSubagentAdapter
+
+        return ProcessSubagentAdapter._project_status(state)
+
+    def record_for(self, state):
+        from genericagent.core.control.process import ProcessSubagentAdapter
+
+        return ProcessSubagentAdapter(FakeManager([state], temp_dir=self.tmp.name)).list_records(
+            include_terminal=True
+        )[0]
+
+    def test_child_that_exited_before_a_verdict_carries_no_verdict(self):
+        """The reproduced shape must be readable as "no verdict", not as a failure.
+
+        `_refresh_state` had rewritten the turn to `running`, which downstream reads as
+        work-in-progress. What the record must preserve is that no verdict exists.
+        """
+        state = self.make_state(turn_status="running", process_status="exited")
+        record = self.record_for(state)
+        completion = (record.metadata or {}).get("completionStatus")
+        self.assertIn(
+            completion,
+            (None, "pending"),
+            f"a child with no work verdict claimed completionStatus={completion!r}",
+        )
+
+    def test_a_dead_child_still_counts_as_terminal_so_it_does_not_linger(self):
+        """The invariant the fix must NOT break: `closed` is filtered out of the live list."""
+        from genericagent.core.control.process import ProcessSubagentAdapter, _TERMINAL_STATUSES
+
+        state = self.make_state(turn_status="running", process_status="exited")
+        status = self.project(state)
+        self.assertIn(status, _TERMINAL_STATUSES, f"{status} would linger in the live agent list")
+
+        live = ProcessSubagentAdapter(FakeManager([state], temp_dir=self.tmp.name)).list_records()
+        self.assertEqual([], live, "a child with no verdict must not be reported as live work")
+
+    def test_real_verdicts_still_project_to_their_statuses(self):
+        """The fix must not make the projection blind to real outcomes."""
+        cases = [
+            # (turn_status, process_status, completion_status, expected)
+            ("completed", "exited", "completed", "succeeded"),
+            ("errored", "exited", "failed", "failed"),
+            ("errored", "exited", None, "failed"),
+            ("interrupted", "exited", None, "interrupted"),
+            ("running", "killed", None, "killed"),
+        ]
+        for turn_status, process_status, completion, expected in cases:
+            with self.subTest(turn_status=turn_status, process_status=process_status, completion=completion):
+                status = self.project(self.make_state(
+                    turn_status=turn_status,
+                    process_status=process_status,
+                    completion_status=completion,
+                ))
+                self.assertEqual(expected, status)
+
+    def test_completion_verdict_beats_a_live_process_status(self):
+        status = self.project(self.make_state(
+            turn_status="completed",
+            process_status="waiting_reply",
+            completion_status="completed",
+        ))
+        self.assertEqual("succeeded", status)
+
+    def test_an_exited_child_with_no_verdict_does_not_report_a_completed_turn(self):
+        """`turnStatus` is the field the UI trusts second. It must not claim a turn
+        completed when the child produced no output."""
+        state = self.make_state(turn_status="running", process_status="exited")
+        record = self.record_for(state)
+        self.assertNotEqual(
+            "completed",
+            (record.metadata or {}).get("turnStatus"),
+            "a child with no output reported a completed turn",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
