@@ -280,7 +280,7 @@ test('App keeps workflow panel keys out of the composer', async () => {
   }
 })
 
-test('App opens the workflow panel with Enter while a running turn holds a draft', async () => {
+test('App keeps Enter for a draft during a running workflow, and opens the panel when empty', async () => {
   const timers: NodeJS.Timeout[] = []
   const sent: BridgeCommand[] = []
   const stdin = new FakeReadStream()
@@ -300,7 +300,6 @@ test('App opens the workflow panel with Enter while a running turn holds a draft
         jobs: [{ jobId: 'agent_1', status: 'running' }],
       },
     }), 10))
-    // A turn is running, so Enter would otherwise just "keep the draft".
     timers.push(setTimeout(() => onEvent({ type: 'status', status: 'running' }), 20))
     return {
       send(command: BridgeCommand) {
@@ -343,14 +342,32 @@ test('App opens the workflow panel with Enter while a running turn holds a draft
     const bar = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('agents done'))
     assert.match(bar, /Enter · \/workflows · x stop/)
 
-    // Type a draft. While a turn is running Enter never submits, so the status
-    // bar must claim it to open the panel instead of silently doing nothing.
+    // A draft owns Enter even while a turn runs. `inputController.ts` queues the
+    // draft during a turn (`queue_prompt`), so lending Enter to the status bar
+    // would make a steering message impossible to submit. The old version of this
+    // test asserted the opposite; its premise ("Enter never submits while running")
+    // was true before queued prompts landed and is now obsolete.
     stdin.push('d')
     await delay(60)
     stdin.push('\r')
+    await delay(120)
+    assert.equal(
+      sent.some(command => command.type === 'workflow_detail'),
+      false,
+      `the status bar stole Enter from a steering draft: ${JSON.stringify(sent)}`,
+    )
+    assert.equal(
+      sent.some(command => command.type === 'queue_prompt' || command.type === 'submit'),
+      true,
+      `the draft was never sent: ${JSON.stringify(sent)}`,
+    )
+
+    // With the composer empty, Enter still opens the panel -- the status bar stays
+    // a reachable background-workflow entry point.
+    sent.length = 0
+    stdin.push('\r')
     const panel = await waitForFrame(stdout, frame => frame.includes('busy-demo') && frame.includes('◌ One'))
     assert.match(panel, /› (?:├|└)─ ◌ One/)
-    assert.equal(sent.some(command => command.type === 'submit'), false)
     assert.equal(sent.some(command => command.type === 'workflow_detail' && command.runId === 'wf_busy'), true)
   } finally {
     instance.unmount()

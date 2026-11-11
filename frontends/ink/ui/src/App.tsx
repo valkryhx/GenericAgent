@@ -2082,15 +2082,19 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       const command = workflowStatusBarCommandForKey(workflowStatusBar, key, rawInput)
       if (command) {
         // The status bar is a background-workflow entry point, so it must stay
-        // reachable while the run is in flight:
-        //  - empty composer: Enter opens the panel, `x` stops the run (as before);
-        //  - composer has a draft AND a turn is running/stopping: Enter would be a
-        //    no-op ("keeps draft"), so use it to open the panel instead of doing
-        //    nothing;
-        //  - composer has a draft and the session is idle: Enter submits the draft,
-        //    and single-letter keys are ordinary text — never steal them.
-        const statusBusy = state.status === 'running' || state.status === 'stopping'
-        if (input.trim() === '' || (key.return && statusBusy)) {
+        // reachable while the run is in flight. It owns a key only when the composer
+        // is empty:
+        //
+        //  - empty composer: Enter opens the panel, `x` stops the run;
+        //  - composer has a draft: the composer owns Enter and the letters. It used
+        //    to be lent to the status bar while a turn was running, on the premise
+        //    that Enter was a no-op there ("keeps draft") -- but `inputController.ts`
+        //    now QUEUES the draft (`queue_prompt`), so lending Enter meant a steering
+        //    follow-up typed during a workflow could never be submitted.
+        //
+        // Single-letter keys are never stolen from a draft either: `x` must be
+        // typeable inside a message.
+        if (input.trim() === '') {
           bridgeRef.current?.send(command)
           return
         }
