@@ -69,6 +69,18 @@
       <span class="tag">文档</span>
     </a>
 
+    <a class="card" href="./ga-workflow-diagram.html">
+      <h2>动态工作流机制图解</h2>
+      <p>可交互架构图：主代理写一段确定性 JS 脚本，脚本在 Node 沙箱里通过 agent() 派出多个子 agent，调度器按 dependsOn 分波次并发执行。点「动态」看信号流动。</p>
+      <span class="tag">架构图</span>
+    </a>
+
+    <a class="card" href="./ga-workflow-mechanism.html">
+      <h2>动态工作流机制说明</h2>
+      <p>配套文字说明：和 subagent / Agent Team 的根本区别（线程 vs 进程）、为什么非要确定性、缓存与 resume 的原理、五个容易误解的点。</p>
+      <span class="tag">文档</span>
+    </a>
+
     <a class="card" href="./ga-acp-architecture.html">
       <h2>ACP 架构图：GA 作为 Server，Hlaudz 作为 Client</h2>
       <p>可交互组件图：Hlaudz 服务进程、GA 子进程、JSON-RPC stdio、两套模型与共享 workspace 的边界。点「动态」看请求如何从网页一路流到 GA 进程。</p>
