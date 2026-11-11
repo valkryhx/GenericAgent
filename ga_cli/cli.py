@@ -342,7 +342,7 @@ def main():
     args, unknown = parser.parse_known_args()
 
     if args.version:
-        print("GenericAgent v0.4.6")
+        print("GenericAgent v0.4.7")
         return
 
     cmd = args.command
