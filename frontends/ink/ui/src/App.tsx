@@ -1762,24 +1762,37 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
     }
     if (workflowPanel) {
-      const decision = workflowPanelCommandForKey(workflowPanel, key, rawInput)
-      if (decision?.panel) {
-        setWorkflowPanel(decision.panel)
-        return
+      // Steering guard, before the panel gets to interpret the key at all.
+      //
+      // `workflowPanelCommandForKey` answers Enter with `{panel}` (list -> detail,
+      // overview -> agent detail), so `workflowPanelCapturesKey` below never sees it.
+      // While a workflow runs the user queues a follow-up in the composer and presses
+      // Enter to send it; without this guard every Enter re-opened or re-collapsed the
+      // overlay and the queued message could never be submitted. `rawInput` is the
+      // character from THIS key, not the draft, so the decision has to read `input`
+      // here. Same rule the workflow status bar uses below: empty composer means the
+      // overlay owns Enter, a draft means the composer does.
+      const composerHasDraft = input.trim() !== ''
+      if (!(key.return && composerHasDraft)) {
+        const decision = workflowPanelCommandForKey(workflowPanel, key, rawInput)
+        if (decision?.panel) {
+          setWorkflowPanel(decision.panel)
+          return
+        }
+        if (decision?.command) {
+          bridgeRef.current?.send(decision.command)
+          return
+        }
+        if (key.escape) {
+          setWorkflowPanel(null)
+          dismissPendingLocalCommand()
+          return
+        }
+        // The overlay owns its keys: an unhandled `r`/`x`/`j` must not be typed
+        // into the composer, which would then disable the status-bar shortcut
+        // (it only runs while the composer is empty).
+        if (workflowPanelCapturesKey(workflowPanel, key, rawInput)) return
       }
-      if (decision?.command) {
-        bridgeRef.current?.send(decision.command)
-        return
-      }
-      if (key.escape) {
-        setWorkflowPanel(null)
-        dismissPendingLocalCommand()
-        return
-      }
-      // The overlay owns its keys: an unhandled `r`/`x`/`j` must not be typed
-      // into the composer, which would then disable the status-bar shortcut
-      // (it only runs while the composer is empty).
-      if (workflowPanelCapturesKey(workflowPanel, key, rawInput)) return
     }
     if (hooksPanel) {
       if (key.escape) {

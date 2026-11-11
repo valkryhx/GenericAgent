@@ -733,6 +733,11 @@ const WORKFLOW_PANEL_LETTER_KEYS = new Set(['j', 'k', 'g', 'x', 'r', 's'])
  * example) fell through to the composer and was typed as text -- which then
  * made the status-bar shortcut stop working, because that path only runs while
  * the composer is empty.
+ *
+ * `rawInput` is the character produced by THIS key, not the composer's contents,
+ * so this function cannot know whether the user is typing. The steering case
+ * (a queued follow-up whose Enter must submit, not drive the overlay) is decided
+ * in `App.tsx`, which holds the composer state.
  */
 export function workflowPanelCapturesKey(
   panel: WorkflowPanelState,
