@@ -109,12 +109,19 @@ Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + ts
    python -c "import psutil; [print(p.info['pid'], p.info['cwd'], ' '.join(p.info['cmdline'])[:160]) for p in psutil.process_iter(['cmdline','cwd']) if p.info['cmdline'] and any(k in ' '.join(p.info['cmdline']) for k in ('main.tsx','bridge.py','genericagent.core.app'))]"
    ```
    **任何「代码里搜不到用户描述的文字」的情况，第一反应都应该是「我搜的是不是正在运行的那份」。**
-2. **抓帧**。用 `scripts/probe_ink_frames.py`，喂用户的按键序列，把一次性现象变成磁盘文件：
-   ```bash
-   python scripts/probe_ink_frames.py --keys "nnndadadad|\r|\x1b" --wait 7
-   python scripts/probe_ink_frames.py --grep "用户看到的文字"
-   ```
-   产出 `temp/ink_frames/<stamp>/{stdout.bin,frames.txt}`，可反复 grep。
+2. **抓帧**。先判断**你能不能自己复现**：
+   - **能** → 驱动模式，喂用户的按键序列，把一次性现象变成磁盘文件：
+     ```bash
+     python scripts/probe_ink_frames.py --keys "nnndadadad|\r|\x1b" --wait 7
+     python scripts/probe_ink_frames.py --grep "用户看到的文字"
+     ```
+     产出 `temp/ink_frames/<stamp>/{stdout.bin,frames.txt}`，可反复 grep。
+   - **不能**（依赖活的 agent-team / workflow 上下文，只有用户真实会话才有）→ **直接上挂机模式**，让用户在自己终端操作、你来记录。它是 `--import` 预加载 tee stdout，**不改 UI 源码，所以对安装版同样生效**：
+     ```bash
+     python scripts/probe_ink_frames.py --attach --grep "Waiting" --idle-exit 120
+     ```
+     该命令会打印一行给用户在另一个终端粘贴（`GA_UI_TRACE=... NODE_OPTIONS='--import "file:///.../scripts/ga_frame_trace.mjs"' ga`）。产出 `temp/ink_trace/frames-<pid>.log`。
+     在空会话里跑驱动模式抓到的全是 `idle` 帧，浪费一轮——先判断能不能复现，再选模式。
 3. **复刻后端 payload**。前端可疑时，用真实数据直接跑 `bridge._team_roster_payload()` 那套组包逻辑，确认界面内容的数据来源，别读代码猜。
 4. **只有 2/3 都指向同一处时才改代码。**
 

@@ -87,6 +87,30 @@ temp/ink_frames/<stamp>/stderr.txt
 
 这个方法的适用面很广：任何「一闪而过」「来不及看」「偶发」的终端 UI 问题，都能用它把一次性现象变成可反复检查的文件。
 
+### 2.2b 挂机模式：用户操作，我来记录（`--attach`）
+
+2.2 的驱动模式有个前提——**你得能自己复现**。当 bug 依赖活的 agent-team / workflow 上下文，而这个上下文只有用户的真实会话才有时，驱动模式抓不到东西（本次就撞了这堵墙：抓了 29 帧，全是 `idle`）。
+
+挂机模式反过来：用户在**自己的终端**里正常跑 `ga` 并复现，我们只负责记录。关键是**不改 UI 源码**——`ga` 跑的是安装版，改源码对它无效，重装又太重。
+
+做法是 Node 的 `--import` 预加载（`scripts/ga_frame_trace.mjs`）：在 `main.tsx` 执行前接管 `process.stdout`，把每次 write 按**字节长度定帧**追加到文件。与 UI 版本完全解耦。
+
+```bash
+# 一个终端：起记录器，它会把下面那行命令打印出来
+python scripts/probe_ink_frames.py --attach --grep Waiting --idle-exit 120
+
+# 另一个终端：粘贴它打印的那行（PowerShell 示例）
+$env:GA_UI_TRACE="D:\...\temp\ink_trace"; `
+  $env:NODE_OPTIONS='--import "file:///D:/.../scripts/ga_frame_trace.mjs"'; ga
+```
+
+复现完退出 ga，第一个终端会把帧汇总打出来。产物 `temp/ink_trace/frames-<pid>.log`。
+
+两个坑，都是实测踩出来的：
+
+- **`NODE_OPTIONS` 会传染给所有子 node 进程**（MCP server、npm 助手、workflow 校验）。第一版没过滤，一次运行产出 11 份 trace，真正的 UI 淹在噪音里。现在默认只记录 argv 里含 `main.tsx` 的进程（`GA_UI_TRACE_ALL=1` 可放开）。
+- **必须用 Proxy 包裹 stdout，不能替换成普通对象**。ink 要读 `isTTY` / `columns` / `on('resize')`；换成普通对象会把 ink 切到非 TTY 渲染路径，录下来的帧和用户实际看到的**根本不是同一个东西**。
+
 ### 2.3 用真实数据复刻后端 payload
 
 前端可疑时，先确认后端到底发出了什么。不要读代码猜，直接把 bridge 的组包逻辑跑一遍：
@@ -171,8 +195,10 @@ print([m['name'] for m in team.view()['members']])
 ## 5. 下次遇到同类问题的推荐顺序
 
 1. **定位运行体**：`psutil` 看 cmdline/cwd（2.1）。确认是源码还是 site-packages。
-2. **抓帧**：`scripts/probe_ink_frames.py`，用用户的按键序列（2.2）。把一次性现象变成文件。
-3. **在帧里搜**：`--grep <用户看到的文字>`。命中就拿到了确切文案与上下文；零命中说明文字不是这份代码产的。
+2. **判断能不能自己复现**。
+   - 能 → 驱动模式（2.2）：`--keys` 打用户的按键序列。
+   - 不能（依赖真实会话上下文）→ **直接上挂机模式（2.2b）**，不要在空会话里抓半天。本次的教训：驱动模式抓到 29 帧全是 `idle`，浪费了一轮。
+3. **在帧里搜**：`--grep <用户看到的文字>`。命中就拿到确切文案与上下文；零命中说明文字不是这份代码产的。
 4. **复刻后端 payload**：用真实数据跑一遍 bridge 的组包逻辑（2.3），确认界面内容的数据来源。
 5. **只有 2/3/4 都指向同一处时，才动代码。**
 
@@ -182,6 +208,8 @@ print([m['name'] for m in team.view()['members']])
 
 ## 6. 相关文件
 
-- `scripts/probe_ink_frames.py` —— 本方法 2.2 的实现
+- `scripts/probe_ink_frames.py` —— 2.2 驱动模式 + 2.2b 挂机模式的实现
+- `scripts/ga_frame_trace.mjs` —— 2.2b 的 `--import` 预加载记录器（零侵入 stdout tee）
+- `tests/test_probe_ink_frames.py` —— 按键解码 / 分帧 / trace 解析 / 预加载不变量
 - `docs/ga_ink_ui_testing_playbook_2026-07-16.md` —— Ink UI 测试总纲（纯函数、虚拟终端、字节断言等），本文是它在「瞬时帧」场景下的补充
 - `tests/test_subagent_team.py` —— 本次顺带补的 registry 归属过滤回归

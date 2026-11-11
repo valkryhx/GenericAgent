@@ -115,6 +115,118 @@ class FrameSplittingTest(unittest.TestCase):
         self.assertEqual([], probe.split_frames("   \n\n\n\n   \n"))
 
 
+class TraceFileParsingTest(unittest.TestCase):
+    """The --attach path reads traces written by scripts/ga_frame_trace.mjs.
+
+    Framing is byte-length based, so these tests pin the property that makes that
+    worth doing: a chunk containing newlines, ANSI sequences, or multi-byte UTF-8 must
+    come back exactly, and the frame after it must still line up.
+    """
+
+    def _write(self, directory, name, chunks, pid=4242):
+        path = Path(directory) / name
+        blob = f"=== GA_TRACE 2026-11-11T00:00:00.000Z pid={pid} cwd=/tmp out=/tmp ===\n".encode()
+        for seq, chunk in enumerate(chunks, start=1):
+            raw = chunk.encode("utf-8")
+            head = (
+                f"\n=== GA_FRAME 2026-11-11T00:00:0{seq}.000Z #{seq} "
+                f"cols=80 rows=24 bytes={len(raw)} ===\n"
+            ).encode()
+            blob += head + raw
+        path.write_bytes(blob)
+        return path
+
+    def test_frames_come_back_in_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "frames-1.log", ["first", "second"])
+            frames = probe.read_trace_file(path)
+        self.assertEqual([1, 2], [f["seq"] for f in frames])
+        self.assertEqual(["first", "second"], [f["raw"] for f in frames])
+
+    def test_newlines_and_ansi_inside_a_chunk_do_not_split_it(self):
+        # The naive "split on blank lines" approach fails here: this is ONE write that
+        # happens to contain a full screen.
+        chunk = "\x1b[2Jline one\n\n\n\nline five\n >\n"
+        with tempfile.TemporaryDirectory() as td:
+            frames = probe.read_trace_file(self._write(td, "frames-1.log", [chunk, "next"]))
+        self.assertEqual(2, len(frames))
+        self.assertEqual(chunk, frames[0]["raw"])
+
+    def test_multibyte_utf8_does_not_shift_later_frames(self):
+        # Byte counts, not character counts: '中文' is 6 bytes and 2 chars. Parsing the
+        # header against a decoded string would desync every following frame.
+        with tempfile.TemporaryDirectory() as td:
+            frames = probe.read_trace_file(
+                self._write(td, "frames-1.log", ["中文", "\x1b[1m面板 Waiting\x1b[0m"])
+            )
+        self.assertEqual("中文", frames[0]["raw"])
+        self.assertIn("面板 Waiting", frames[1]["raw"])
+
+    def test_a_partial_final_write_is_flagged_not_swallowed(self):
+        # Killing ga mid-write leaves a truncated tail; it must still surface the frames
+        # before it rather than discarding the whole file.
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "frames-1.log", ["complete", "will be cut"])
+            data = path.read_bytes()
+            path.write_bytes(data[:-5])
+            frames = probe.read_trace_file(path)
+        self.assertEqual("complete", frames[0]["raw"])
+        self.assertTrue(frames[1]["truncated"])
+
+    def test_a_file_with_no_frames_yields_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "frames-1.log"
+            path.write_bytes(b"=== GA_TRACE ... ===\nargv=[]\n")
+            self.assertEqual([], probe.read_trace_file(path))
+
+    def test_grep_matches_only_frames_with_the_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "frames-1.log", ["idle", "impl-b Waiting", "idle again"])
+            frames = probe.read_trace_file(path)
+        hits = [probe.render_frame(path, frame, "Waiting") for frame in frames]
+        printed = [text for text in hits if text]
+        self.assertEqual(1, len(printed))
+        self.assertIn("impl-b", printed[0])
+
+    def test_find_traces_ignores_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "notes.txt").write_text("x")
+            self._write(td, "frames-99.log", ["a"])
+            found = [p.name for p in probe.find_traces(Path(td))]
+        self.assertEqual(["frames-99.log"], found)
+
+
+class TracePreloadScriptTest(unittest.TestCase):
+    """Static checks on ga_frame_trace.mjs -- it has no Python-importable surface.
+
+    These pin the two decisions that were wrong on the first attempt and produced
+    unusable output: recording every child node process, and framing by blank lines.
+    """
+
+    def setUp(self):
+        self.source = (REPO_ROOT / "scripts" / "ga_frame_trace.mjs").read_text(encoding="utf-8")
+
+    def test_it_skips_non_ui_child_processes_by_default(self):
+        # NODE_OPTIONS leaks into MCP servers and npm helpers; each one wrote its own
+        # trace file, burying the real UI among 10+ stubs.
+        self.assertIn("looksLikeInkUi", self.source)
+        self.assertIn("GA_UI_TRACE_ALL", self.source)
+
+    def test_it_frames_by_byte_length(self):
+        # Blank-line framing shatters any screen containing an empty region.
+        self.assertIn("bytes=", self.source)
+        self.assertIn("Buffer.from", self.source)
+
+    def test_it_does_nothing_when_disabled(self):
+        self.assertIn("if (!raw || raw === '0') return", self.source)
+
+    def test_it_preserves_tty_transparency(self):
+        # Replacing stdout with a plain object would flip ink onto its non-TTY path,
+        # making the recorded frames differ from what the user actually sees.
+        self.assertIn("new Proxy", self.source)
+        self.assertIn("isTTY", self.source)
+
+
 class UiDirResolutionTest(unittest.TestCase):
     def test_explicit_valid_dir_is_used(self):
         resolved = probe.resolve_ui_dir(str(REPO_ROOT / "frontends" / "ink" / "ui"))
