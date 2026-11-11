@@ -1542,8 +1542,12 @@ class GenericAgentBridge:
             else roots.project_data_dir / "subagents"
         )
         registry = SubagentRegistry(registry_root)
-        team_name = team_name_for(self._current_session_id())
-        team = SubagentTeam(registry, "/root", team_name=team_name)
+        session_id = self._current_session_id()
+        team_name = team_name_for(session_id)
+        # Pass the session id so the roster can exclude rows spawned by other sessions
+        # and by workflow runs. Without it the panel lists the whole shared registry --
+        # which is how a live workflow's 3 children showed up as idle teammates.
+        team = SubagentTeam(registry, "/root", team_name=team_name, session_id=session_id)
         view = team.view()
         team_key = paths.team_key(roots.project_key, team_name)
         store = SubagentTaskStore(

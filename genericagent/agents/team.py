@@ -17,6 +17,10 @@ import os
 LEAD_AGENT_NAME = "team-lead"
 RESERVED_AGENT_NAMES = frozenset({"main", "team-lead", "user", "system", "root"})
 TEAM_NAME_ENV = "GA_TEAM_NAME"
+# The ``agent_type`` a workflow stamps on the children it spawns
+# (``genericagent/workflow/child_agent.py``). Rows carrying it are the workflow run's
+# children, not team members, even though they live in the same shared registry.
+WORKFLOW_CHILD_AGENT_TYPE = "workflow_child"
 
 
 def is_reserved_name(name) -> bool:
@@ -44,11 +48,15 @@ def team_name_for(session_id=None, env=None) -> str:
 class SubagentTeam:
     """A thin view over the registry that answers 'who is on my team'."""
 
-    def __init__(self, registry, self_agent_path, *, team_name=None, lead_name=LEAD_AGENT_NAME):
+    def __init__(self, registry, self_agent_path, *, team_name=None, lead_name=LEAD_AGENT_NAME, session_id=None):
         self.registry = registry
         self.self_agent_path = str(self_agent_path).rstrip("/") or "/root"
         self.team_name = team_name or "default"
         self.lead_name = lead_name
+        # The session that owns this team. Rows spawned by another session are that
+        # session's team; ``None`` disables the check (callers that only know the team
+        # name still get the workflow-child filter).
+        self.session_id = str(session_id) if session_id else None
 
     @property
     def lead_agent_id(self):
@@ -61,8 +69,43 @@ class SubagentTeam:
             raise ValueError("agent name %r is reserved" % name)
         return name
 
+    def _is_team_member(self, entry):
+        """Whether a registry row belongs to *this* team.
+
+        The registry is shared by everything a GA process spawns, so listing it
+        wholesale turns unrelated children into "teammates". Observed in a real run: a
+        workflow was started with 3 subagents and, while it was still running, the
+        agent-team overlay listed them as team members (their rows carried the workflow
+        runId, and the task board read ``[working]`` while the roster said every member
+        was idle).
+
+        Two ownership markers decide it:
+
+          * ``agent_type == "workflow_child"`` -- the row belongs to a workflow run.
+            This is the durable marker: it survives restarts, and it covers nested
+            children, because a workflow child that spawns further agents passes the
+            type down.
+          * ``parent_session_id`` -- the session that spawned the row. A row from a
+            different session is that session's team, not ours.
+
+        A row with neither field is a legacy entry written before ownership was
+        recorded. It stays visible: the roster is a report, and hiding a real member
+        is the worse error (``view`` already documents that rule for liveness).
+        """
+        agent_type = str(getattr(entry, "agent_type", "") or "").strip().lower()
+        if agent_type == WORKFLOW_CHILD_AGENT_TYPE:
+            return False
+        parent_session = getattr(entry, "parent_session_id", None)
+        if parent_session and self.session_id:
+            return str(parent_session) == str(self.session_id)
+        return True
+
     def members(self, include_closed=True):
-        return self.registry.list_agents(include_closed=include_closed)
+        return [
+            entry
+            for entry in self.registry.list_agents(include_closed=include_closed)
+            if self._is_team_member(entry)
+        ]
 
     def view(self, include_closed=True):
         """Describe the team, including members that have already finished.

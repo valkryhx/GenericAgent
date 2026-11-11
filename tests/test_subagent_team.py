@@ -31,6 +31,8 @@ class _Entry:
         run_id="run1",
         turn_status=None,
         process_status=None,
+        parent_session_id=None,
+        agent_type=None,
     ):
         self.agent_path = agent_path
         self.task_name = task_name
@@ -39,6 +41,10 @@ class _Entry:
         self.run_id = run_id
         self.turn_status = turn_status
         self.process_status = process_status
+        # Ownership fields. A row belongs to the team that spawned it; without them the
+        # roster cannot tell a teammate from a workflow child (`team.py:members`).
+        self.parent_session_id = parent_session_id
+        self.agent_type = agent_type
 
 
 class _FakeRegistry:
@@ -245,6 +251,112 @@ class TeamStatusToolTest(unittest.TestCase):
             self.assertEqual(outcome.data["status"], "success")
             self.assertEqual(outcome.data["team"]["teamName"], "default")
             self.assertEqual(outcome.data["team"]["leadName"], "team-lead")
+
+
+class TeamMembershipScopeTest(unittest.TestCase):
+    """The team roster must list *this team's* members, not the whole registry.
+
+    Reported from a real run: a workflow was started with 3 subagents, and while it
+    was still running the agent-team overlay listed those workflow children as team
+    members -- their row names carried the workflow runId
+    (``impl-c  wf_1778661927543-21c-1``), and their task rows read ``[working]``
+    while the roster said every member was idle.
+
+    Cause: ``SubagentTeam.members()`` forwarded straight to
+    ``SubagentRegistry.list_agents()`` with no prefix and no ownership filter, so
+    every row in the shared registry became a "teammate": workflow children, other
+    sessions' leftovers, rescues -- anything that had ever been spawned.
+
+    Ownership comes from two fields the registry already records:
+
+      * ``parent_session_id`` -- the session that spawned the row;
+      * ``agent_type``        -- ``workflow_child`` for children a workflow owns.
+
+    A row belongs to the team when it was spawned by this session's lead. Rows
+    spawned by a workflow run are that run's children, not the team's.
+    """
+
+    def _registry(self, entries, *, team_name="session-abc"):
+        return _FakeRegistry(entries)
+
+    def test_workflow_children_are_not_team_members(self):
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/alpha", "alpha"),
+            _Entry("/root/beta", "beta", agent_type="workflow_child"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc")
+        names = [m["name"] for m in team.view()["members"]]
+        self.assertEqual(
+            ["alpha"],
+            names,
+            f"a workflow child was listed as a team member: {names}",
+        )
+
+    def test_members_from_another_session_are_not_team_members(self):
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/mine", "mine", parent_session_id="session-abc"),
+            _Entry("/root/theirs", "theirs", parent_session_id="session-other"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc", session_id="session-abc")
+        names = [m["name"] for m in team.view()["members"]]
+        self.assertEqual(["mine"], names, f"another session's agent joined this team: {names}")
+
+    def test_without_a_session_id_only_the_workflow_filter_applies(self):
+        """Callers that know just the team name still get the workflow-child filter,
+        but cannot tell another session's row apart -- same as before this fix."""
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/alpha", "alpha"),
+            _Entry("/root/wfkid", "wfkid", agent_type="workflow_child"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc")
+        names = [m["name"] for m in team.view()["members"]]
+        self.assertEqual(["alpha"], names, f"workflow child leaked without a session id: {names}")
+
+    def test_workflow_nested_rows_are_excluded_even_without_the_type(self):
+        """A workflow child can itself spawn; those grandchildren carry the workflow's
+        session, and the type is the only surviving marker after a restart."""
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/alpha", "alpha"),
+            _Entry("/root/alpha/inner", "inner", agent_type="workflow_child"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc")
+        names = [m["name"] for m in team.view()["members"]]
+        self.assertNotIn("inner", names, f"a nested workflow agent was listed: {names}")
+
+    def test_a_row_with_no_ownership_fields_stays_visible(self):
+        """Legacy rows predate these fields. Dropping them would hide real members,
+        which is the worse failure: the roster is a report, not a permission check."""
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/legacy", "legacy"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc")
+        names = [m["name"] for m in team.view()["members"]]
+        self.assertEqual(["legacy"], names, "a legacy row without ownership fields was hidden")
+
+    def test_the_lead_itself_still_counted_before_still_counts(self):
+        """Existing behaviour must not regress: plain teammates are unaffected."""
+        from genericagent.agents.team import SubagentTeam
+
+        registry = _FakeRegistry([
+            _Entry("/root/alpha", "alpha", parent_session_id="session-abc"),
+            _Entry("/root/beta", "beta", status="closed", parent_session_id="session-abc"),
+        ])
+        team = SubagentTeam(registry, "/root", team_name="session-abc")
+        self.assertEqual(
+            ["alpha", "beta"],
+            [m["name"] for m in team.view()["members"]],
+            "a closed teammate (or a running one) was dropped from the roster",
+        )
 
 
 if __name__ == "__main__":
