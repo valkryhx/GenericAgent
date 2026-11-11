@@ -223,26 +223,114 @@ def _iter_files(root: Path, *, pattern: str | None = None):
             yield Path(dirpath) / name
 
 
+def _glob_to_regex(pattern: str) -> str:
+    """Translate a glob into a regex where ``*`` does NOT cross ``/``.
+
+    This is the whole point of not using ``fnmatch``. ``fnmatch`` is a *filename*
+    matcher: its ``*`` happily matches ``/``, so ``src/*.py`` also matched
+    ``src/sub/c.py`` and a bare ``*`` meant "everything, recursively". A path glob
+    has to treat the separator as a hard boundary.
+
+    ``**`` is the globstar token and crosses separators; ``**/`` also matches zero
+    directories, so ``src/**/*.py`` finds ``src/a.py`` as well as ``src/sub/c.py``.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(pattern)
+    while index < length:
+        char = pattern[index]
+        if char == "*":
+            if pattern.startswith("**", index):
+                # `**/` matches zero or more whole directories.
+                if pattern.startswith("**/", index):
+                    out.append("(?:[^/]+/)*")
+                    index += 3
+                else:
+                    out.append(".*")
+                    index += 2
+                continue
+            out.append("[^/]*")
+            index += 1
+        elif char == "?":
+            out.append("[^/]")
+            index += 1
+        elif char == "[":
+            end = index + 1
+            if end < length and pattern[end] in "!^":
+                end += 1
+            if end < length and pattern[end] == "]":
+                end += 1
+            while end < length and pattern[end] != "]":
+                end += 1
+            if end >= length:
+                out.append(re.escape(char))
+                index += 1
+            else:
+                body = pattern[index + 1 : end]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                out.append("[" + body.replace("\\", "\\\\") + "]")
+                index = end + 1
+        else:
+            out.append(re.escape(char))
+            index += 1
+    return "".join(out)
+
+
+def _path_matches(relative: str, pattern: str) -> bool:
+    """Does the root-relative posix path ``relative`` match ``pattern``?
+
+    Two forms are accepted for the same intent, because both are natural to write:
+
+    * ``*.py``      -- no separator anywhere in the pattern. Read as "any file with
+      this name, at any depth", which is what every caller means by it and what the
+      old implementation did.
+    * ``src/*.py``  -- a pattern containing a separator is anchored at the root and
+      matched component by component.
+
+    ``**/src/*.py`` and ``src/*.py`` therefore agree, instead of disagreeing as they
+    did when ripgrep and the fallback each had their own idea.
+    """
+    pattern = pattern.strip()
+    if not pattern:
+        return False
+    normalized = pattern.lstrip("./") if pattern.startswith("./") else pattern
+    # A leading `**/` is redundant: this matcher is already anchored at the root and
+    # a pattern without a separator matches at any depth. Stripping it FIRST is what
+    # makes `**/*.md` collapse to the bare-filename case instead of being read as
+    # "one or more directories", which used to return nothing for root-level files.
+    while normalized.startswith("**/"):
+        normalized = normalized[3:]
+    if "/" not in normalized.rstrip("/"):
+        # Bare filename pattern: match the basename at any depth.
+        return re.fullmatch(_glob_to_regex(normalized), relative.rsplit("/", 1)[-1]) is not None
+    return re.fullmatch(_glob_to_regex(normalized), relative) is not None
+
+
 def glob_files(root: str, pattern: str, *, limit: int = GLOB_MAX_FILES) -> GlobResult:
-    """Match ``pattern`` under ``root``. Returns relative paths, sorted."""
+    """Match ``pattern`` under ``root``. Returns root-relative paths, sorted.
+
+    Both engines run the SAME matcher over the same candidate set, so a result never
+    depends on whether ripgrep happens to be installed. ripgrep is still used to
+    *collect* candidates (it applies .gitignore and skips binaries); the pattern is
+    applied here rather than by ``rg --glob`` because rg matches a glob against the
+    absolute path when the search root is an argument, which made every
+    directory-scoped pattern silently match nothing.
+    """
 
     base = Path(root)
     if not base.is_dir():
         return GlobResult(note=f"not a directory: {root}")
+    if not str(pattern or "").strip():
+        return GlobResult(note="file_glob requires `pattern`, e.g. **/*.py")
 
     rg = find_ripgrep()
-    matches: list[str] = []
+    candidates: list[str] = []
     engine = "python"
     if rg:
-        # `--files` lists files; `--glob` applies the pattern. Hidden files are
-        # included because a bare `**/*.json` should still find `.eslintrc.json`.
-        # Dependency/VCS directories must be excluded explicitly: ripgrep only
-        # honors `.gitignore`, and a search root outside a repo (e.g. a
-        # tempfile directory) has none, so `node_modules` would leak into the
-        # results. Negations must come after the include pattern, and the
-        # leading `**/` is required because rg matches the full path when the
-        # search root is absolute.
-        command = [rg, "--files", "--hidden", "--glob", pattern]
+        # Ask rg for every file (no --glob) so it applies ignore rules; the pattern
+        # is applied on our side afterwards.
+        command = [rg, "--files", "--hidden"]
         for ignored in sorted(_COMMON_IGNORE_DIRS):
             command += ["--glob", f"!**/{ignored}/**"]
         command.append(str(base))
@@ -253,28 +341,25 @@ def glob_files(root: str, pattern: str, *, limit: int = GLOB_MAX_FILES) -> GlobR
             )
             if completed.returncode in (0, 1):
                 engine = "rg"
-                matches = [
+                candidates = [
                     line.strip() for line in (completed.stdout or "").splitlines() if line.strip()
                 ]
         except (OSError, subprocess.SubprocessError):
-            matches = []
+            candidates = []
 
     if engine != "rg":
-        # Pure-Python fallback: match the whole relative path, so `src/**/*.py`
-        # behaves like it does with ripgrep.
-        for path in _iter_files(base):
-            rel = path.relative_to(base).as_posix()
-            if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
-                matches.append(str(path))
+        candidates = [str(path) for path in _iter_files(base)]
 
-    normalized: list[str] = []
-    for raw in matches:
+    matches: list[str] = []
+    for raw in candidates:
         try:
-            normalized.append(Path(raw).resolve().relative_to(base.resolve()).as_posix())
+            relative = Path(raw).resolve().relative_to(base.resolve()).as_posix()
         except (ValueError, OSError):
-            normalized.append(raw)
-    normalized.sort()
+            continue
+        if _path_matches(relative, pattern):
+            matches.append(relative)
 
+    normalized = sorted(set(matches))
     total = len(normalized)
     truncated = total > limit
     return GlobResult(
