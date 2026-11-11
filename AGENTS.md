@@ -128,9 +128,14 @@ Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + ts
      ```
      该命令会打印一行给用户在另一个终端粘贴（`GA_UI_TRACE=... NODE_OPTIONS='--import "file:///.../scripts/ga_frame_trace.mjs"' ga`）。产出 `temp/ink_trace/frames-<pid>.log`。
      在空会话里跑驱动模式抓到的全是 `idle` 帧——先判断能不能复现，再选模式。
-3. **画出现 / 消失时间线**，这是结案的关键一步。不要只看「第一帧命中」，要看连续区块
-   （跳过剥掉 ANSI 后为空的纯 cursor-park 写入）。`存在 → 消失 → 又出现` 这个形态本身
-   就排除了「一直没清掉」「第一次画错」等假设，把问题精确转成「**为什么清空之后会重播**」。
+3. **画出现 / 消失时间线**，这是结案的关键一步，已做成子命令：
+   ```bash
+   python scripts/probe_ink_frames.py --timeline "用户看到的文字"
+   ```
+   不要只看「第一帧命中」，要看连续区块（脚本自动跳过剥掉 ANSI 后为空的 cursor-park
+   写入）。`存在 → 消失 → 又出现` 这个形态本身就排除了「一直没清掉」「第一次画错」等假设，
+   把问题精确转成「**为什么清空之后会重播**」。脚本会直接把三种形态（再出现 / 一直未消失 /
+   只出现过一次）的结论打出来，因为三者对应的排查方向完全不同。
 4. **dump 转折帧**，记下同时刻的其他 UI 状态（当前回合是什么、输入框内容）。本次靠帧里
    输入框是 `/agent` 而播报内容是上一轮 workflow，才确认「两者对不上」。
 5. **复刻后端 payload 对账**：用真实数据直接跑 bridge 的组包逻辑（如
@@ -142,11 +147,19 @@ Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + ts
    **在安装版上验**（确认修复在 wheel 里，且直接 import site-packages 里的模块跑回放）。
    最后重新打包安装再验一次。
 
-**高频根因模式：把「全量状态快照」当成「增量事件流」来消费。** 事件流可以「收到就播报」；
+**高频根因模式一：把「全量状态快照」当成「增量事件流」来消费。** 事件流可以「收到就播报」；
 全量快照不行——它每次都在陈述「这些记录*存在*」，而不是「刚刚*发生*」。任何由全量快照驱动
 的通知，都必须自带**跨快照存活的幂等集合**，不能从当前显示状态反推（显示会在回合结束时被
 清空，记忆不能）。本仓库另见 team roster 过滤，同族缺陷：消费方按自己的假设重新推导，而不是
 问唯一权威来源。
+
+**高频根因模式二：一个实体要登记进 N 张表，漏一张不报错、只让边缘路径行为不一致。**
+`file_glob` / `file_grep` 就是这样坏的：handler、schema、`loop.py` 并行白名单都补了，但
+`core/permissions/policy.py::_STATIC_READ_TOOLS`、`workflow/permissions.py::ALLOWED_READ_ONLY_STATIC_TOOLS`、
+`workflow/tool_profiles.py::READ_TOOL_NAMES` 三张表漏了。默认档下完全正常，只在只读
+档 / workflow profile 下才表现为「工具未识别」。防御手段不是「记得补」，而是写一个以
+**这类实体的全集**为输入、**遍历每张表**的断言（见 `tests/test_read_tool_classification.py`：
+新增读工具时它会自动要求你补全每张表）。
 
 命名/字符串形态**不是**来源证据（`wf_` 前缀同时被 workflow runId、`.claude/worktrees` 命名、
 用户手写复述使用过），要去数据里找那条记录本身。

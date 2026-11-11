@@ -174,29 +174,34 @@ for kw in ['Waiting', 'impl-b', 'working', 'wf_', 'Lead']:
 **零命中同样是信息**：说明用户记的字面文字不是这份代码产的（很常见，用户复述会变形）。
 `Waiting` 命中 40 帧就直接拿到了确切文案与上下文。
 
-### 3.2 画出现/消失时间线（本次的关键一步）
+### 3.2 画出现/消失时间线（本次的关键一步，已做成子命令）
 
-不要只看「第一帧命中」，要看**连续的区块**。忽略纯光标 park 写入（剥掉 ANSI 后为空的帧），
-把「含目标文字 / 不含」压成 run：
+不要只看「第一帧命中」，要看**连续的区块**。这一步已固化为：
 
-```python
-runs = []; cur = None
-for f in frames:
-    if not strip_ansi(f['raw']).strip():   # 纯 cursor-park 写入，跳过
-        continue
-    has = 'workflow-child' in f['raw']
-    if cur and cur[0] == has: cur[2] = f['seq']; cur[3] = f['iso']
-    else: cur = [has, f['seq'], f['seq'], f['iso']]; runs.append(cur)
+```bash
+python scripts/probe_ink_frames.py --timeline "workflow-child"
+python scripts/probe_ink_frames.py --timeline "Waiting" --trace temp/ink_trace/frames-23960.log
 ```
 
-本次输出（这就是结案证据）：
+输出（真实数据的形状）：
 
 ```
-False seq   5..354   13:59:40
-True  seq 357..357   13:59:40   ← workflow 跑完，播报 5 条
-False seq 360..534   14:00:38   ← 回合结束，播报被清空
-True  seq 537..785   14:04:06   ← 下一个回合（agent team）开始，又回来了
+[timeline] keyword='workflow-child'  共 4 段
+   1. [无] seq 1..40     13:57:32 -> 13:59:40
+   2. [有] seq 41..43    13:59:40 -> 13:59:41
+        ✓ Subagent workflow-child:wf_6dcbb054...:agent_1 completed
+   3. [无] seq 44..217   13:59:41 -> 14:00:38
+   4. [有] seq 218..466  14:00:39 -> 14:04:06
+        ✓ Subagent workflow-child:wf_6dcbb054...:agent_1 completed
+  => 出现 -> 消失 -> 再出现：目标被清空后又重新写入。这排除了「一直没清掉」和
+     「第一次画错」，问题应表述为「为什么清空之后会重播」。
 ```
+
+实现在 `build_timeline()` / `format_timeline()`，两个细节值得注意：
+
+- **跳过剥掉 ANSI 后为空的帧**：那是 cursor-park 写入，不含 UI 状态，否则每一段都会被切碎。
+- **把结论直接打出来**：`出现→消失→再出现` / `一直未消失` / `只出现过一次` 三种形态对应
+  三种完全不同的排查方向，让读者自己看表得结论就是让报告被略读。
 
 **「消失后又出现」这个形态本身就是答案**，它排除了大量假设：
 
@@ -310,6 +315,49 @@ team roster 过滤也是同族：消费方按自己的假设重新推导，而�
 
 同一个 bug，两种观感。**如果只按「一闪而过」去查，会误以为是个渲染时序问题、
 去查节流/帧合并** —— 那是另一个方向。
+
+---
+
+### 4.6 同族缺陷：工具名清单漏登记（`file_glob` / `file_grep`）
+
+同一天排查的另一个问题是这个模式在**静态分类表**上的翻版，值得并列记下。
+
+`file_glob` / `file_grep` 于 2026-11-08 加入（见 `docs/20261108-GA内置工具集补齐设计.md`），
+handler 实现、schema 条目、`loop.py` 并行白名单都补了，但**三张分类表漏了**：
+
+| 表 | 位置 | 后果 |
+| --- | --- | --- |
+| `_STATIC_READ_TOOLS` | `core/permissions/policy.py` | `classify_tool` 返回 `("mutating", "static_unknown")` |
+| `ALLOWED_READ_ONLY_STATIC_TOOLS` | `workflow/permissions.py` | 只读档 deny，reason=`read_only_static_unknown` |
+| `READ_TOOL_NAMES` | `workflow/tool_profiles.py` | 能力分类为**空集** |
+
+```
+file_read   -> ['file_read']          ← 已登记
+file_glob   -> （空：无能力分类）      ← 漏登记
+file_grep   -> （空：无能力分类）      ← 漏登记
+```
+
+后果比"工具不存在"更难查：
+
+- 默认 `full_access` 下一切正常，**只有切到只读档或 workflow profile 才复现**；
+- reason 写作 `static_unknown`，从模型侧看就是"这个工具未识别"；
+- `READ_TOOL_NAMES` 漏登记的空集是最坏形态：**没有 profile 会 deny 它**（没有交集），
+  同时 `capability_coverage` 又看不见它 —— 于是 research profile 的证据报告说
+  `file_read` 能力不可用，而子代理其实读得好好的。
+
+**模式**：一个工具/实体需要同时登记进 N 张表时，漏一张不会报错，只会让某个边缘路径
+行为不一致。防御手段不是"记得补"，而是**写一个以「所有读工具」为输入、遍历每张表的断言**：
+
+```python
+READ_TOOLS = ("file_read", "file_glob", "file_grep")
+for tool in READ_TOOLS:
+    assert classify_tool(tool)[0] == "read"
+    assert tool in ALLOWED_READ_ONLY_STATIC_TOOLS
+    assert "file_read" in tool_capabilities(tool)
+    assert build_subagent_capability_profile(...).allows(tool)
+```
+
+见 `tests/test_read_tool_classification.py`。新增读工具时，该文件会自动要求你补全每一张表。
 
 ---
 

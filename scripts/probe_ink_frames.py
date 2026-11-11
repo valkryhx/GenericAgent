@@ -220,6 +220,107 @@ def find_traces(directory: Path) -> list[Path]:
     return sorted(directory.glob("frames-*.log"), key=lambda p: p.stat().st_mtime)
 
 
+# --- timeline: turn "when did it appear?" into one command -------------------------
+#
+# The single highest-value step when a panel flashes: a run of `present -> absent ->
+# present` rules out "never cleared" and "painted wrong once" in one glance, and
+# reframes the question as "why did it come back?". Written by hand it is a throwaway
+# script every time; this makes it reproducible and lets the answer be diffed.
+
+def frame_lines(frame: dict) -> list[str]:
+    """ANSI-stripped, non-blank lines of one frame.
+
+    Blank-only frames are dropped by the caller: they are cursor-park writes, which
+    carry no UI state and would otherwise split every run into noise.
+    """
+    return [line for line in strip_ansi(frame["raw"]).splitlines() if line.strip()]
+
+
+def build_timeline(frames: list[dict], keyword: str) -> list[dict]:
+    """Collapse frames into runs of ``present`` / ``absent`` for ``keyword``.
+
+    Returns ``[{present, first_seq, last_seq, first_iso, last_iso, sample}]``, oldest
+    first. Frames whose visible text is empty are skipped entirely -- see ``frame_lines``.
+
+    ``sample`` is the first matching line of the run, which is what makes the output
+    self-explanatory: you can read *what* reappeared, not just that something did.
+    """
+    runs: list[dict] = []
+    current: dict | None = None
+    for frame in frames:
+        lines = frame_lines(frame)
+        if not lines:
+            continue
+        matches = [line for line in lines if keyword in line]
+        present = bool(matches)
+        if current is not None and current["present"] == present:
+            current["last_seq"] = frame["seq"]
+            current["last_iso"] = frame["iso"]
+            continue
+        current = {
+            "present": present,
+            "first_seq": frame["seq"],
+            "last_seq": frame["seq"],
+            "first_iso": frame["iso"],
+            "last_iso": frame["iso"],
+            "sample": matches[0].strip()[:110] if matches else "",
+        }
+        runs.append(current)
+    return runs
+
+
+def format_timeline(runs: list[dict], keyword: str) -> str:
+    """Render runs as the table that made this technique worth writing down."""
+    if not runs:
+        return f"[timeline] {keyword!r}: 没有可用帧（trace 为空或全是 cursor-park 写入）"
+    lines = [f"[timeline] keyword={keyword!r}  共 {len(runs)} 段"]
+    for index, run in enumerate(runs):
+        mark = "有" if run["present"] else "无"
+        span = run["first_seq"] if run["first_seq"] == run["last_seq"] \
+            else f'{run["first_seq"]}..{run["last_seq"]}'
+        lines.append(
+            f"  {index + 1:>2}. [{mark}] seq {span:<12} {run['first_iso']} -> {run['last_iso']}"
+        )
+        if run["sample"]:
+            lines.append(f"        {run['sample']}")
+    # The shape is the finding, so state it rather than leaving it to the reader.
+    present_runs = sum(1 for run in runs if run["present"])
+    if present_runs >= 2:
+        lines.append(
+            "  => 出现 -> 消失 -> 再出现：目标被清空后又重新写入。"
+            "这排除了「一直没清掉」和「第一次画错」，"
+            "问题应表述为「为什么清空之后会重播」。"
+        )
+    elif present_runs == 1 and runs and runs[0]["present"]:
+        lines.append("  => 出现后一直未消失：更像清理逻辑缺失，而非重播。")
+    elif present_runs == 1:
+        lines.append("  => 只出现过一次：更像一次性渲染问题，注意它前后各发生了什么。")
+    return "\n".join(lines)
+
+
+def timeline_from_paths(paths: list[Path], keyword: str) -> str:
+    """Timelines for each trace file, labelled by pid."""
+    blocks: list[str] = []
+    for path in paths:
+        frames = read_trace_file(path)
+        blocks.append(f"\n===== {path.name} ({len(frames)} frames) =====")
+        blocks.append(format_timeline(build_timeline(frames, keyword), keyword))
+    return "\n".join(blocks) if blocks else "[timeline] 没有找到 trace 文件"
+
+
+def resolve_trace_paths(raw: str | None) -> list[Path]:
+    """Accept a file, a directory, or nothing (default: the live trace dir)."""
+    if raw:
+        target = Path(raw).expanduser()
+        if target.is_file():
+            return [target]
+        if target.is_dir():
+            return find_traces(target)
+        raise FileNotFoundError(f"没有这个 trace 路径: {target}")
+    default_dir = REPO_ROOT / "temp" / "ink_trace"
+    return find_traces(default_dir)
+
+
 def attach(out_dir: Path, grep: str | None, watch: bool = True, idle_exit: float = 30.0) -> int:
     """Watch a live trace directory -- the 'you drive, I record' mode.
 
@@ -317,7 +418,25 @@ def main(argv: list[str] | None = None) -> int:
         default=30.0,
         help="with --attach: exit after this many idle seconds (0 = wait forever)",
     )
+    parser.add_argument(
+        "--timeline",
+        metavar="TEXT",
+        default=None,
+        help="print when TEXT appears/disappears across captured frames (no UI launched)",
+    )
+    parser.add_argument(
+        "--trace",
+        default=None,
+        help="with --timeline: trace file or directory (default: temp/ink_trace)",
+    )
     args = parser.parse_args(argv)
+
+    if args.timeline:
+        # Answering "when did it appear?" is the step that ends most of these
+        # investigations, and doing it by hand each time is how it gets skipped.
+        paths = resolve_trace_paths(args.trace)
+        print(timeline_from_paths(paths, args.timeline))
+        return 0
 
     if args.attach:
         out_dir = Path(args.out) if args.out else REPO_ROOT / "temp" / "ink_trace"

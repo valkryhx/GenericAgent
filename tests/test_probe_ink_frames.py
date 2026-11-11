@@ -253,5 +253,80 @@ class UiDirResolutionTest(unittest.TestCase):
         self.assertTrue((resolved / "src" / "main.tsx").is_file())
 
 
+class TimelineTest(unittest.TestCase):
+    """``--timeline`` answers "when did it appear?" -- the step that ends most hunts.
+
+    It exists because doing this by hand was a throwaway script every time, and a
+    step that costs a script to set up is a step that gets skipped.
+    """
+
+    def _frame(self, seq, body, iso="2026-11-11T00:00:00.000Z"):
+        return {"seq": seq, "iso": iso, "cols": 80, "rows": 24, "raw": body, "truncated": False}
+
+    def test_a_flash_that_returns_is_two_present_runs(self):
+        frames = [
+            self._frame(1, "idle\n >\n"),
+            self._frame(2, "panel impl-b Waiting\n"),
+            self._frame(3, "idle\n >\n"),
+            self._frame(4, "panel impl-b Waiting\n"),
+        ]
+        runs = probe.build_timeline(frames, "Waiting")
+        self.assertEqual([False, True, False, True], [run["present"] for run in runs])
+
+    def test_blank_cursor_park_frames_do_not_split_a_run(self):
+        # ink writes cursor-park sequences that strip to nothing. Counting those as
+        # frames would break every run into pieces and make the table unreadable.
+        frames = [
+            self._frame(1, "panel impl-b Waiting\n"),
+            self._frame(2, "\x1b[3A\x1b[5G\x1b[?25h"),
+            self._frame(3, "panel impl-b Waiting\n"),
+        ]
+        runs = probe.build_timeline(frames, "Waiting")
+        self.assertEqual(1, len(runs))
+        self.assertEqual([1, 3], [runs[0]["first_seq"], runs[0]["last_seq"]])
+
+    def test_an_absent_run_has_no_sample(self):
+        runs = probe.build_timeline([self._frame(1, "idle\n")], "Waiting")
+        self.assertEqual("", runs[0]["sample"])
+
+    def test_the_sample_shows_what_reappeared(self):
+        runs = probe.build_timeline(
+            [self._frame(1, "  ok Subagent workflow-child:wf_1:agent_1 completed\n")],
+            "workflow-child",
+        )
+        self.assertIn("agent_1", runs[0]["sample"])
+
+    def test_reappearance_is_called_out_explicitly(self):
+        # The shape IS the finding; leaving the reader to spot it is how a report
+        # gets skimmed and the wrong conclusion drawn.
+        frames = [
+            self._frame(1, "x Waiting\n"),
+            self._frame(2, "idle\n"),
+            self._frame(3, "x Waiting\n"),
+        ]
+        text = probe.format_timeline(probe.build_timeline(frames, "Waiting"), "Waiting")
+        self.assertIn("再出现", text)
+
+    def test_never_disappearing_reads_differently_from_reappearing(self):
+        frames = [self._frame(1, "x Waiting\n"), self._frame(2, "x Waiting\n")]
+        text = probe.format_timeline(probe.build_timeline(frames, "Waiting"), "Waiting")
+        self.assertNotIn("再出现", text)
+        self.assertIn("一直未消失", text)
+
+    def test_a_single_appearance_is_reported_as_such(self):
+        frames = [self._frame(1, "idle\n"), self._frame(2, "x Waiting\n")]
+        text = probe.format_timeline(probe.build_timeline(frames, "Waiting"), "Waiting")
+        self.assertIn("只出现过一次", text)
+
+    def test_an_empty_trace_says_so_instead_of_printing_nothing(self):
+        self.assertIn("没有可用帧", probe.format_timeline([], "Waiting"))
+
+    def test_resolve_trace_paths_rejects_a_missing_path(self):
+        with self.assertRaises(FileNotFoundError):
+            probe.resolve_trace_paths("/nonexistent/definitely/not/here")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
