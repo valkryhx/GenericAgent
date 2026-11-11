@@ -5,6 +5,11 @@ recursive-include frontends/ink/ui *.json *.ts *.tsx
 prune frontends/ink/ui/node_modules
 prune frontends/ink/ui/scripts
 recursive-include genericagent/resources *.py *.json *.txt *.example *.md
+# The workflow JS preflight does require('acorn'), and Node only resolves a bare
+# specifier from a node_modules directory next to (or above) the requiring file. The
+# wheel therefore has to carry this one package; scripts/build_release.ps1 vendors it
+# here from the repo root. node_modules is gitignored, so sdist needs it included too.
+recursive-include genericagent/workflow/js/node_modules/acorn *.js *.mjs *.json *.md
 prune tests
 prune docs
 prune temp

@@ -102,7 +102,20 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
+# `js/script_contract.js` does `require('acorn')`. Node resolves a bare specifier by
+# walking up from the requiring file until it finds `node_modules/acorn`, so acorn has
+# to sit under js/ INSIDE the wheel. In a source checkout the walk reaches the repo
+# root's node_modules; an installed wheel has nothing above it in site-packages, so
+# without this entry every installed user gets "Cannot find module 'acorn'" on the
+# first workflow run. scripts/build_release.ps1 vendors acorn into that folder.
 "genericagent.workflow" = ["js/*.js"]
+"genericagent.workflow.js" = [
+    "node_modules/acorn/package.json",
+    "node_modules/acorn/dist/*.js",
+    "node_modules/acorn/dist/*.mjs",
+    "node_modules/acorn/LICENSE",
+    "node_modules/acorn/README.md",
+]
 "genericagent.resources" = [
     "*.py",
     "llm.yaml.example",

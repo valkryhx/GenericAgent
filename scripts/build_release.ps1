@@ -16,11 +16,11 @@ function Invoke-Python {
     }
 }
 
-Write-Host "[1/7] Checking build toolchain..."
+Write-Host "[1/8] Checking build toolchain..."
 Invoke-Python @("-c", "import build, setuptools; print('build', build.__version__)")
 
 if (-not $SkipClean) {
-    Write-Host "[2/7] Cleaning previous GA build and release artifacts..."
+    Write-Host "[2/8] Cleaning previous GA build and release artifacts..."
     $BuildDir = Join-Path $RepoRoot "build"
     if (Test-Path -LiteralPath $BuildDir) {
         $ResolvedBuild = (Resolve-Path -LiteralPath $BuildDir).Path
@@ -41,10 +41,38 @@ if (-not $SkipClean) {
         Get-ChildItem -Path $_ -ErrorAction SilentlyContinue | Remove-Item -Force
     }
 } else {
-    Write-Host "[2/7] Cleaning skipped."
+    Write-Host "[2/8] Cleaning skipped."
 }
 
-Write-Host "[3/7] Syncing packaged assets from assets/ ..."
+Write-Host "[3/8] Vendoring acorn for the workflow JS preflight ..."
+# `genericagent/workflow/js/script_contract.js` does `require('acorn')`. Node resolves a
+# bare specifier by walking UP from the requiring file to the nearest `node_modules`.
+# A source checkout finds `<repo>/node_modules/acorn`, but an installed wheel has
+# nothing above `site-packages/genericagent/workflow/js/`, so without a vendored copy
+# every installed user hits "Cannot find module 'acorn'" on the first workflow run.
+# `node_modules/` is gitignored by repo policy, so the copy is produced here instead of
+# being committed -- which also keeps the wheel the single source of truth for what ships.
+$AcornSource = Join-Path $RepoRoot "node_modules\acorn"
+$AcornTarget = Join-Path $RepoRoot "genericagent\workflow\js\node_modules\acorn"
+if (-not (Test-Path -LiteralPath $AcornSource)) {
+    throw "acorn not found at $AcornSource. Run 'npm install' in the repository root first."
+}
+if (Test-Path -LiteralPath $AcornTarget) {
+    Remove-Item -LiteralPath $AcornTarget -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $AcornTarget) | Out-Null
+Copy-Item -LiteralPath $AcornSource -Destination $AcornTarget -Recurse -Force
+# The npm package ships tests, source maps and docs the runtime never loads. Trim to
+# what `require('acorn')` actually touches so the wheel does not carry dead weight.
+foreach ($Drop in @("bin", "CHANGELOG.md")) {
+    $Path = Join-Path $AcornTarget $Drop
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+}
+$AcornVersion = (& $Python -c "import json,sys; print(json.load(open(sys.argv[1]))['version'])" (Join-Path $AcornTarget "package.json"))
+if ($LASTEXITCODE -ne 0) { throw "Cannot read the vendored acorn version." }
+Write-Host ("  acorn {0} vendored -> genericagent/workflow/js/node_modules/acorn" -f $AcornVersion)
+
+Write-Host "[4/8] Syncing packaged assets from assets/ ..."
 $SourceAssets = Join-Path $RepoRoot "assets"
 $PackagedAssets = Join-Path $RepoRoot "genericagent\resources\assets"
 if (-not (Test-Path -LiteralPath $SourceAssets)) {
@@ -70,7 +98,7 @@ foreach ($TargetFile in (Get-ChildItem -LiteralPath $PackagedAssets -Recurse -Fi
 }
 Write-Host ("  packaged assets synced ({0} file(s))" -f $SyncedAssets)
 
-Write-Host "[4/7] Building wheel and sdist..."
+Write-Host "[5/8] Building wheel and sdist..."
 Invoke-Python @("-m", "build", "--wheel", "--sdist")
 
 $Wheel = Get-ChildItem -Path "dist\genericagent-*.whl" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -78,7 +106,7 @@ if (-not $Wheel) {
     throw "Wheel was not produced in dist/."
 }
 
-Write-Host "[5/7] Auditing wheel contents..."
+Write-Host "[6/8] Auditing wheel contents..."
 $AuditScript = @'
 import sys
 import zipfile
@@ -101,6 +129,10 @@ required = {
     "genericagent/resources/assets/tmwd_cdp_bridge/config.js",
     "genericagent/workflow/js/worker.js",
     "genericagent/workflow/js/script_contract.js",
+    # script_contract.js requires acorn; without it every installed user fails the
+    # workflow preflight with "Cannot find module 'acorn'".
+    "genericagent/workflow/js/node_modules/acorn/package.json",
+    "genericagent/workflow/js/node_modules/acorn/dist/acorn.js",
     "frontends/ink/bridge.py",
     "frontends/ink/ui/package.json",
     "frontends/ink/ui/package-lock.json",
@@ -113,6 +145,12 @@ required = {
 forbidden_parts = (
     "node_modules/",
     "__pycache__/",
+)
+# The workflow JS preflight requires acorn at runtime, so that one vendored package is
+# the deliberate exception to the node_modules ban. Everything else under node_modules
+# (npm's big trees, the Ink UI's deps) must never ride along.
+allowed_node_modules = (
+    "genericagent/workflow/js/node_modules/acorn/",
 )
 forbidden_suffixes = (
     "/llm.yaml",
@@ -128,7 +166,10 @@ with zipfile.ZipFile(wheel) as archive:
     leaked = []
     for name in names:
         normalized = name.replace("\\", "/")
-        if any(part in normalized for part in forbidden_parts):
+        if (
+            any(part in normalized for part in forbidden_parts)
+            and not normalized.startswith(allowed_node_modules)
+        ):
             leaked.append(name)
             continue
         if any(normalized.endswith(suffix) for suffix in forbidden_suffixes):
@@ -152,7 +193,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Wheel audit failed."
 }
 
-Write-Host "[6/7] Packaging release files..."
+Write-Host "[7/8] Packaging release files..."
 Copy-Item -Force "llm.yaml.example" "dist\llm.yaml.example"
 Copy-Item -Force "scripts\install_release.ps1" "dist\install_release.ps1"
 
@@ -185,5 +226,5 @@ $ReportJson = ($Report | ConvertTo-Json -Depth 4).Replace("`r`n", "`n")
 $ReportPath = Join-Path (Join-Path (Get-Location) "dist") "build-report.json"
 [System.IO.File]::WriteAllText($ReportPath, $ReportJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
-Write-Host "[7/7] Release artifacts:"
+Write-Host "[8/8] Release artifacts:"
 Get-ChildItem -Path "dist" | Select-Object Name, Length | Format-Table -AutoSize
