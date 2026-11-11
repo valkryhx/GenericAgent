@@ -100,6 +100,26 @@ stripAnsi 后切帧 / 正则批量改同名键），写 UI 断言前必读。
 
 Ink UI 测试位于 `frontends/ink/ui/src/*.test.ts`，用 Node test runner + tsx 运行。调试 Ink UI bug（光标/IME、布局、换行、重复渲染、流式）时，优先写程序化回归测试而非靠人眼看截图。核心思想：终端 UI 的 bug 最终都表现为「写进 stdout 的字节」或「布局出来的行列几何」，二者都是确定性、可被机器断言的。按现象选手段——相对光标算术用虚拟终端追踪器（`cursorParkModel.ts`），控制序列用字节级 ANSI 断言（`match` + `doesNotMatch` + `indexOf` 切片查顺序），布局用内存终端（`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`）配帧几何解析器，布局/分区决策抽成纯函数单测，CJK/emoji 换行一律用 `string-width`（绝不用 `.length`），重复渲染用唯一探针文本计数。完整方法论、决策表和可复用工具见 `docs/ga_ink_ui_testing_playbook_2026-07-16.md`，新增或调试 Ink UI 测试前先读它。唯一盲区：跨终端行为（如 IME 锚定可见原生光标）只能靠真机截图发现，之后仍应尽量把它降维回字节级契约测试。
 
+### Ink UI 瞬时帧 / 一闪而过的面板：先定位运行体，再抓帧
+
+「面板一闪而过」「来不及看」「偶发」这类现象，本质是**跨多次 render 的状态时序 bug**：纯函数单测看不见它，人眼也读不完它。此时**不要直接从现象推断代码位置**，按下面顺序做，否则极易「修对了代码、修错了问题」：
+
+1. **先定位运行体**。本仓库 `ga` 走 `C:\anaconda3\Scripts\ga.exe` → site-packages 的 wheel，**在源码目录执行 `ga` 跑的仍是安装版**。用 `psutil` 看 cmdline/cwd 确认实际加载路径，再去那个目录搜代码：
+   ```bash
+   python -c "import psutil; [print(p.info['pid'], p.info['cwd'], ' '.join(p.info['cmdline'])[:160]) for p in psutil.process_iter(['cmdline','cwd']) if p.info['cmdline'] and any(k in ' '.join(p.info['cmdline']) for k in ('main.tsx','bridge.py','genericagent.core.app'))]"
+   ```
+   **任何「代码里搜不到用户描述的文字」的情况，第一反应都应该是「我搜的是不是正在运行的那份」。**
+2. **抓帧**。用 `scripts/probe_ink_frames.py`，喂用户的按键序列，把一次性现象变成磁盘文件：
+   ```bash
+   python scripts/probe_ink_frames.py --keys "nnndadadad|\r|\x1b" --wait 7
+   python scripts/probe_ink_frames.py --grep "用户看到的文字"
+   ```
+   产出 `temp/ink_frames/<stamp>/{stdout.bin,frames.txt}`，可反复 grep。
+3. **复刻后端 payload**。前端可疑时，用真实数据直接跑 `bridge._team_roster_payload()` 那套组包逻辑，确认界面内容的数据来源，别读代码猜。
+4. **只有 2/3 都指向同一处时才改代码。**
+
+命名/字符串形态**不是**来源证据（本仓库 `wf_` 前缀同时被 workflow runId、`.claude/worktrees` 命名、用户手写复述使用过），要去数据里找那条记录本身。完整案例、失败路径与教训见 `docs/ga_ink_transient_frame_debug_2026-11-11.md`。
+
 ### GA ink 真实 LLM API e2e 自测：先读 SOP
 
 凡是「用 GA ink + 真实 LLM API 做端到端自测」的需求（反复发生），**先读**
