@@ -30,6 +30,26 @@ from genericagent.agents.wait import (
 ROUND_END_MARKER = "[ROUND END]"
 
 
+def _loaded_llm_config_path():
+    """Return the llm.yaml this process actually loaded, if it can be resolved.
+
+    ``llm_no`` is a position in a profile list, not a stable identity. A child
+    that resolves its own config file can therefore land on a different profile
+    than the parent intended whenever the two files disagree about membership or
+    order -- which is exactly what happens when the parent is an installed wheel
+    reading ``%APPDATA%`` while the child imports an in-tree copy because its cwd
+    is a GA source checkout. Shipping the resolved path down with the child
+    removes the child's guess entirely.
+    """
+    try:
+        from genericagent import paths as _paths
+
+        resolved = _paths.resolve_llm_config_path()
+        return str(resolved) if resolved else ""
+    except Exception:
+        return ""
+
+
 class SubagentStartupError(RuntimeError):
     def __init__(self, reason, task_name, pid, message, *, returncode=None):
         self.reason = str(reason)
@@ -495,6 +515,17 @@ class SubagentManager:
         team_name = str(getattr(self, "team_name", "") or "").strip()
         if team_name:
             env[TEAM_NAME_ENV] = team_name
+        # ``llm_no`` is an INDEX into the parent's own profile list, so the child can only
+        # honour it if it loads the same llm.yaml.  It usually does not: the child's cwd is
+        # the user's project, but when that project IS a GA source checkout, ``-m`` puts the
+        # checkout on sys.path and the child imports the in-tree package, whose
+        # is_source_checkout() then prefers <repo>/llm.yaml over the installed wheel's
+        # per-user %APPDATA% copy.  Two files that differ by even one profile shift every
+        # later index, so the parent's "zhanlu-ds" (16) silently becomes the child's
+        # "官方-ds-v41-1017" (16).  Pin the exact file the parent resolved.
+        llm_config_path = _loaded_llm_config_path()
+        if llm_config_path:
+            env["GA_LLM_CONFIG"] = llm_config_path
         kwargs = {
             "cwd": str(worktree_path or self.root_dir),
             "stdout": stdout,

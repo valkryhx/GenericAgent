@@ -650,6 +650,44 @@ class SubagentManagerSpawnWaitMailboxTest(unittest.TestCase):
             # (CC m1578) or the teammate would resolve a different task board.
             self.assertEqual(kwargs["env"]["GA_TEAM_NAME"], "session-abcdef12")
 
+    def test_child_launch_pins_the_llm_config_the_parent_loaded(self):
+        """`llm_no` is an index into the PARENT's profile list, so the child must
+        load the same llm.yaml or the index silently means a different profile.
+
+        Real failure this guards: the parent is an installed wheel and reads
+        %APPDATA%\\GenericAgent\\llm.yaml (18 entries, zhanlu-ds at 16), while the
+        child runs with cwd inside a GA source checkout, imports the in-tree
+        package, and reads <repo>/llm.yaml (20 entries, zhanlu-ds at 17). The
+        parent's llm_no=16 then resolves to 官方-ds-v41-1017 in the child, which
+        fails against that provider's credentials.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+            with patch(
+                "genericagent.agents.manager._loaded_llm_config_path",
+                return_value=r"C:\Users\someone\AppData\Roaming\GenericAgent\llm.yaml",
+            ):
+                kwargs = manager._child_popen_kwargs(
+                    None, stdout=object(), stderr=object(), agent_path="/root/worker"
+                )
+
+            self.assertEqual(
+                kwargs["env"].get("GA_LLM_CONFIG"),
+                r"C:\Users\someone\AppData\Roaming\GenericAgent\llm.yaml",
+            )
+
+    def test_child_launch_omits_llm_config_pin_when_unresolved(self):
+        """No config resolved means nothing to pin; do not leak an empty override
+        that would make the child's own lookup fail outright."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = SubagentManager(root_dir=td)
+            with patch("genericagent.agents.manager._loaded_llm_config_path", return_value=""):
+                kwargs = manager._child_popen_kwargs(
+                    None, stdout=object(), stderr=object(), agent_path="/root/worker"
+                )
+
+            self.assertNotIn("GA_LLM_CONFIG", kwargs["env"])
+
     def test_spawn_fails_fast_when_child_never_emits_startup_handshake(self):
         """Popen returning a PID is not proof that agentmain entered the child."""
         with tempfile.TemporaryDirectory() as td:
