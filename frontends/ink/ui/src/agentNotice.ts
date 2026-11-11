@@ -174,6 +174,88 @@ export function agentNoticeFromRecord(record: AgentRecordLike): AgentNotice | nu
   return { executionId, name, ok, word, detail }
 }
 
+export type AgentNoticeLike = AgentRecordLike
+
+/** How many announcements the chrome keeps on screen at once. */
+export const MAX_AGENT_NOTICES = 6
+
+export type NoticeMerge = {
+  /** What to display now, oldest first. */
+  notices: AgentNotice[]
+  /** True when the caller should `setState`; false means nothing visibly changed. */
+  changed: boolean
+  /**
+   * Every execution id ever announced in this session.
+   *
+   * The caller must keep this across turns. It is deliberately *not* derivable from
+   * `notices`, because the display is cleared at turn end while the announcement has
+   * still happened -- see `mergeAgentNotices`.
+   */
+  announced: Set<string>
+}
+
+/**
+ * Fold a bridge snapshot into the announcement list.
+ *
+ * The bug this exists to prevent: `_emit_agent_snapshot` sends
+ * `list_records(include_terminal=True)` -- *every* terminal record in the session's
+ * workflow store, on every snapshot, forever. The merge used to derive "already
+ * announced" from the currently displayed notices, which are cleared at turn end. So
+ * the first snapshot of the next turn saw an empty list, treated all those old terminal
+ * records as new, and repainted them. In a real session that meant workflow children
+ * from an earlier turn reappearing over an agent-team turn and staying for minutes.
+ *
+ * `announced` is therefore an *input*: a set that survives the display being cleared. An
+ * id in it is never announced again. `notices` alone decides what is currently painted.
+ *
+ * Note what is deliberately NOT keyed into `announced`: the verdict. A child that first
+ * reports `closed` and then `succeeded` is announced once, at `succeeded`. Refinements
+ * to an *already displayed* line still go through, so a line cannot get stuck on a stale
+ * verdict.
+ */
+export function mergeAgentNotices(
+  current: AgentNotice[],
+  records: readonly AgentRecordLike[],
+  announced: ReadonlySet<string>,
+): NoticeMerge {
+  const announcedNext = new Set(announced)
+  const byExecution = new Map<string, AgentNotice>()
+  for (const notice of current) byExecution.set(notice.executionId, notice)
+  let changed = false
+
+  for (const record of records) {
+    const notice = agentNoticeFromRecord(record)
+    if (!notice) continue
+    const displayed = byExecution.get(notice.executionId)
+    if (displayed) {
+      // Already on screen: let a refined verdict replace the stale one.
+      if (displayed.ok === notice.ok && displayed.word === notice.word) continue
+      byExecution.set(notice.executionId, notice)
+      changed = true
+      continue
+    }
+    // Not on screen. If it was announced in an earlier turn, stay silent -- this is
+    // exactly the stale-workflow-replay case.
+    if (announcedNext.has(notice.executionId)) continue
+    announcedNext.add(notice.executionId)
+    byExecution.set(notice.executionId, notice)
+    changed = true
+  }
+
+  if (!changed) return { notices: current, changed: false, announced: announcedNext }
+
+  const next = [...byExecution.values()]
+  return {
+    // Oldest first, bounded: a long session must not grow the chrome forever, and older
+    // announcements have already been read. The bound is on the *display* only --
+    // `announced` keeps every id, or a trimmed one would re-announce when the list
+    // had room again.
+    notices: next.length > MAX_AGENT_NOTICES ? next.slice(-MAX_AGENT_NOTICES) : next,
+    changed: true,
+    announced: announcedNext,
+  }
+}
+
 /** The rendered line. Green+bold for success, error+bold for anything else. */
 export function agentNoticeLine(notice: AgentNotice, successColor: string) {
   const color = notice.ok ? successColor : 'red'

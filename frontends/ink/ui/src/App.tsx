@@ -133,7 +133,7 @@ import {
 } from './promptChrome.js'
 import { completedStatusSegments, pickRunningVerb, retryStatusText, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { agentNoticeFromRecord, agentNoticeLine, type AgentNotice } from './agentNotice.js'
+import { agentNoticeLine, mergeAgentNotices, type AgentNotice } from './agentNotice.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
@@ -879,6 +879,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
    */
   const agentNoticesRef = useRef<AgentNotice[]>([])
   agentNoticesRef.current = agentNotices
+  /**
+   * Every execution id ever announced this session.
+   *
+   * Must be a ref, not derived from `agentNotices`: the display is *cleared* when a turn
+   * ends, and the bridge keeps re-sending every terminal record via
+   * `list_records(include_terminal=True)`. Without a memory that outlives the display,
+   * the first snapshot of the next turn re-announces the previous turn's finished
+   * subagents -- which is exactly how a finished workflow's children reappeared over an
+   * agent-team turn. Reset only by an explicit session reset, never by an idle
+   * transition.
+   */
+  const announcedAgentsRef = useRef<Set<string>>(new Set())
   // Tracks whether the session was actually running, so "notices are stale" can be told
   // apart from "the app has never run a turn yet". Without it the clear-on-idle path also
   // fires on the initial `connecting -> idle` transition and eats the first snapshot.
@@ -1403,6 +1415,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         if (event.resetSession) {
           setCompletedTurnActivity(null)
           activeTurnStartedAtRef.current = null
+          // A new session has its own children; ids from the old session can never recur,
+          // so the announcement memory must start empty or a reused id could be suppressed.
+          announcedAgentsRef.current = new Set()
         }
         setSelector(null)
         setFooterPanel(null)
@@ -1532,25 +1547,22 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         // The verdict that survives is the latest one. Announcing the *first* terminal
         // word instead would be wrong in the other direction, because the first word is
         // exactly the unreliable one -- it is taken before the turn's own verdict lands.
-        let changed = false
-        const byExecution = new Map<string, AgentNotice>()
-        for (const notice of agentNoticesRef.current) byExecution.set(notice.executionId, notice)
-        for (const record of event.snapshot.records || []) {
-          const notice = agentNoticeFromRecord(record as Parameters<typeof agentNoticeFromRecord>[0])
-          if (!notice) continue
-          const previous = byExecution.get(notice.executionId)
-          // Nothing to do when the verdict has not moved. Without this, the bridge's
-          // re-emission of an unchanged snapshot would rewrite the chrome every frame.
-          if (previous && previous.ok === notice.ok && previous.word === notice.word) continue
-          byExecution.set(notice.executionId, notice)
-          changed = true
-        }
-        if (changed) {
-          // Oldest first, bounded: a long session must not grow the chrome forever, and
-          // older announcements have already been read.
-          const next = [...byExecution.values()]
-          setAgentNotices(next.length > 6 ? next.slice(-6) : next)
-        }
+        //
+        // `announced` (not `agentNotices`) decides what counts as already announced. The
+        // bridge sends `list_records(include_terminal=True)` -- every terminal record in
+        // the session's workflow store, on every snapshot -- while the *display* is
+        // cleared when a turn ends. Deriving "already announced" from the display made
+        // the first snapshot of the next turn treat an earlier turn's finished workflow
+        // as brand new, so its children repainted over an agent-team turn and stayed up
+        // for minutes. Captured in `temp/ink_trace/frames-23960.log`: first at frame 357,
+        // cleared at 360, reappearing at 537.
+        const merged = mergeAgentNotices(
+          agentNoticesRef.current,
+          (event.snapshot.records || []) as Parameters<typeof mergeAgentNotices>[1],
+          announcedAgentsRef.current,
+        )
+        announcedAgentsRef.current = merged.announced
+        if (merged.changed) setAgentNotices(merged.notices)
         dispatch(event)
         return
       }
