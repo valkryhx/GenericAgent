@@ -990,7 +990,12 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     terminalCleanedRef.current = true
     // park 由 cursorPark 控制器管理（相对移动，无 save/restore）。清理前先 unpark：
     // 把光标从 caret 相对移回帧底，让下面的 clear 几何从确定的帧底出发。
+    //
+    // 注意 unpark 走的是 cursorPark 的**包裹流**，它只往缓冲里追加、由 microtask 合并写出；
+    // 而下面的 clear / cleanup 写的是 App 拿到的 stdout（也就是同一个包裹流）。
+    // 若在 unpark 后立刻 dispose，缓冲区会被丢弃 —— 必须显式 flush 一次。
     cursorPark?.unpark()
+    cursorPark?.flush()
     cursorPark?.dispose()
     const liveViewportGeometry = liveViewportGeometryRef.current
     // unpark 后光标恒在帧底（= rows 行、cursorRow 取 rows），与旧「未 park」分支一致。
@@ -999,6 +1004,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       stdout.write(clearInlineLiveViewportSequence(inlineCleanupGeometry))
     }
     cleanupTerminalForExit(stdout, mouseMode, fullscreen)
+    // 清理序列本身也经包裹流进了缓冲；这里再 flush 一次确保它们真的写到终端。
+    cursorPark?.flush()
   }
 
   const exitCleanly = () => {
