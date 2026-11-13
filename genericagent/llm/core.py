@@ -209,10 +209,19 @@ def _provider_error_message(evt):
     Older code only matched type=="error", so such payloads were silently dropped
     and surfaced downstream as a blank ("empty") response. Return the message so
     callers can raise it instead.
+    The response object of the OpenAI Responses API carries an ``error`` field on
+    *every* response, set to ``null`` when nothing went wrong. Treating the mere
+    presence of the key as an error made every non-error /responses payload look
+    like "provider returned an unspecified error" — which also swallowed real
+    truncation (status=incomplete) behind a bogus !!!Error sentinel.
     """
     if not isinstance(evt, dict) or "error" not in evt:
         return None
     err = evt.get("error")
+    # Responses API 的响应对象永远带 error 字段，无错时为 null。只有 null 才算「没出错」；
+    # 空 dict/str 仍按「有 error 字段但没给信息」处理，保留原来的防御性提示。
+    if err is None:
+        return None
     if isinstance(err, dict):
         msg = err.get("message") or err.get("type") or ""
     else:
@@ -336,6 +345,21 @@ def _try_parse_tool_args(raw):
         return parsed
     return [{"_raw": raw}]
 
+def _truncation_warning(finish_reason):
+    """把 OpenAI 的 finish_reason 翻成上游循环认得的截断哨兵。
+
+    文案必须和 Anthropic 路径（``stop_reason == "max_tokens"`` 那条）逐字节一致：
+    ``do_no_tool`` 是靠 ``'max_tokens !!!]' in content[-100:]`` 认出来的，
+    认到之后会用「拆成多步」的提示重新生成。换措辞等于让截断重新变成静默失败。
+    """
+    if finish_reason == "length":
+        return "\n\n[!!! Response truncated: max_tokens !!!]"
+    if finish_reason == "content_filter":
+        # 内容过滤也是截断，但重试同一 payload 没意义，所以用不同措辞：
+        # 不命中 do_no_tool 的重试分支，只作为可见的结束说明留在正文里。
+        return "\n\n[!!! Response truncated: content_filter !!!]"
+    return None
+
 def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
     """Parse OpenAI SSE stream (chat_completions or responses API).
     Yields text chunks, returns list[content_block].
@@ -344,6 +368,13 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
     content_text = ""
     if api_mode == "responses":
         seen_delta = False; fc_buf = {}; current_fc_idx = None
+        # 和 chat_completions 的 finish_reason 对称：循环里只收集终止状态，
+        # 循环外统一判定一次并发哨兵，而不是在循环内就地报错。
+        # 截断有三个来源，都必须认：
+        #   1. response.incomplete + incomplete_details.reason == max_output_tokens
+        #   2. response.completed 自身带 status=incomplete（部分网关不发 1）
+        #   3. 非流式 response 对象的 incomplete_details.reason
+        trunc = None
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
@@ -364,10 +395,21 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             if etype in ("response.failed", "response.incomplete"):
                 _resp = evt.get("response") or {}
                 _err = _resp.get("error") or {}
+                _reason = (_resp.get("incomplete_details") or {}).get("reason")
                 _emsg = ((_err.get("message") if isinstance(_err, dict) else None)
-                         or (_resp.get("incomplete_details") or {}).get("reason") or etype)
-                msg = f"!!!Error: {_emsg}"
-                content_text += msg; yield msg
+                         or _reason or etype)
+                # response.incomplete + max_output_tokens 就是「输出被截断」，
+                # 与 chat_completions 的 finish_reason=length 同一件事。它不是
+                # provider 故障，重试同一 payload 也不会变好，应该走截断哨兵让上层
+                # 拆小步重来；报成 !!!Error: 只会被 do_no_tool 当成不可重试的错误。
+                _resp_trunc = _truncation_warning(
+                    "length" if _reason == "max_output_tokens" else None
+                )
+                if _resp_trunc and etype == "response.incomplete":
+                    trunc = _resp_trunc
+                else:
+                    msg = f"!!!Error: {_emsg}"
+                    content_text += msg; yield msg
                 break
             if etype == "response.output_text.delta":
                 delta = evt.get("delta", "")
@@ -388,9 +430,25 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
                 idx = evt.get("output_index", current_fc_idx or 0)
                 if idx in fc_buf: fc_buf[idx]["args"] = evt.get("arguments", fc_buf[idx]["args"])
             elif etype == "response.completed":
-                usage = evt.get("response", {}).get("usage", {})
+                _resp = evt.get("response") or {}
+                usage = _resp.get("usage", {})
                 _record_usage(usage, api_mode, sess)
+                # Some gateways never send a separate response.incomplete event and
+                # instead put the truncation on the terminal response.completed
+                # object itself (status=incomplete + incomplete_details.reason).
+                # Without this, that variant ends the turn silently — exactly the
+                # chat_completions finish_reason bug, just wearing a different hat.
+                if _resp.get("status") == "incomplete":
+                    _reason = (_resp.get("incomplete_details") or {}).get("reason")
+                    _completed_trunc = _truncation_warning(
+                        "length" if _reason == "max_output_tokens" else None
+                    )
+                    if _completed_trunc:
+                        trunc = _completed_trunc
                 break
+        if trunc:
+            print(f"[WARN] {trunc.strip()}")
+            content_text += trunc; yield trunc
         blocks = []
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(fc_buf):
@@ -404,6 +462,10 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
     else:
         tc_buf = {}  # index -> {id, name, args}
         reasoning_text = ""
+        # chat_completions 的截断信息只出现在 finish_reason 里（"length"），
+        # 不像 Anthropic 还有 message_stop 之类的结构性信号。以前这里完全没读
+        # finish_reason，于是 max_tokens 截断会被当成正常结束（end_turn）静默吞掉。
+        finish_reason = None
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
@@ -422,6 +484,10 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
                 break
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
+            # finish_reason 通常只出现在最后一帧（有时还会先给 null 再给真值），
+            # 所以只记非空值，避免被后续的 null 覆盖掉。
+            if ch.get("finish_reason"):
+                finish_reason = ch["finish_reason"]
             # reasoning_content 是标准字段；部分 vLLM/内部端点（如九天 GLM-5.2）
             # 流式思考在 reasoning 字段，回退兼容之。
             delta_reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -440,6 +506,10 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
                 if tc.get("id") and not tc_buf[idx]["id"]: tc_buf[idx]["id"] = tc["id"]
             usage = evt.get("usage")
             if usage: _record_usage(usage, api_mode, sess)
+        warn = _truncation_warning(finish_reason)
+        if warn:
+            print(f"[WARN] {warn.strip()}")
+            content_text += warn; yield warn
         blocks = []
         if reasoning_text: blocks.append({"type": "thinking", "thinking": reasoning_text})
         if content_text: blocks.append({"type": "text", "text": content_text})
@@ -542,6 +612,14 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
         return blocks
     if api_mode == "responses":
         _record_usage(data.get("usage") or {}, api_mode, sess)
+        # 非流式截断：responses 用 status=incomplete + incomplete_details.reason。
+        # 少数网关只给 status，不给 details，那种情况也按截断处理（宁可多提示，
+        # 不要静默把半截输出当成完整答案）。
+        _reason = (data.get("incomplete_details") or {}).get("reason")
+        _is_incomplete = data.get("status") == "incomplete"
+        _trunc = _truncation_warning(
+            "length" if (_reason == "max_output_tokens" or (_is_incomplete and not _reason)) else None
+        )
         for item in (data.get("output") or []):
             if item.get("type") == "message":
                 for p in (item.get("content") or []):
@@ -552,9 +630,13 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
                 except: args = {"_raw": item.get("arguments", "")}
                 blocks.append({"type": "tool_use", "id": item.get("call_id", item.get("id", "")),
                                "name": item.get("name", ""), "input": args})
+        if _trunc:
+            print(f"[WARN] {_trunc.strip()}")
+            blocks.append({"type": "text", "text": _trunc}); yield _trunc
     else:
         _record_usage(data.get("usage") or {}, api_mode, sess)
-        msg = (data.get("choices") or [{}])[0].get("message", {})
+        _choice = (data.get("choices") or [{}])[0]
+        msg = _choice.get("message", {})
         # reasoning_content 是标准字段名；部分 vLLM/内部端点（如九天 GLM-5.2）
         # 把思考放在 reasoning 字段，回退兼容之。
         reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
@@ -568,6 +650,10 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
             try: args = json.loads(fn.get("arguments", "")) if fn.get("arguments") else {}
             except: args = {"_raw": fn.get("arguments", "")}
             blocks.append({"type": "tool_use", "id": tc.get("id", ""), "name": fn.get("name", ""), "input": args})
+        _trunc = _truncation_warning(_choice.get("finish_reason"))
+        if _trunc:
+            print(f"[WARN] {_trunc.strip()}")
+            blocks.append({"type": "text", "text": _trunc}); yield _trunc
     return blocks
 
 def _stamp_oai_cache_markers(messages, model):
@@ -1161,7 +1247,18 @@ class NativeClaudeSession(BaseSession):
             if think_match:
                 thinking = think_match.group(1).strip()
                 content = re.sub(think_pattern, "", content, flags=re.DOTALL)
-        return MockResponse(thinking, content, tool_calls, str(content_blocks))
+        # 让截断在 stop_reason 上也可见，而不是永远报 end_turn。
+        # Anthropic 原生路径由 message_delta 的 stop_reason 直接给出 max_tokens；
+        # OpenAI 两条 wire 之前没有等价信号，这里从解析层追加的哨兵块反推。
+        stop_reason = "end_turn"
+        for b in content_blocks:
+            txt = b.get("text") or ""
+            if "Response truncated: max_tokens" in txt:
+                stop_reason = "max_tokens"; break
+            if "Response truncated: content_filter" in txt:
+                stop_reason = "content_filter"; break
+        return MockResponse(thinking, content, tool_calls, str(content_blocks),
+                            stop_reason=stop_reason)
 
 class NativeOAISession(NativeClaudeSession):
     def __init__(self, cfg):
