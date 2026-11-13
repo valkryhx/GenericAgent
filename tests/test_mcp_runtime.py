@@ -798,10 +798,15 @@ class McpRuntimeTest(unittest.TestCase):
             os.environ["GA_MCP_CONFIG"] = str(config_path)
             reset_mcp_manager()
 
+            # Cold-start and post-kill reconnect both pay the full stdio handshake
+            # (spawn interpreter, import fastmcp, initialize, list_tools), measured
+            # at 7.6-8.0s on this machine. These two budgets only wait for the
+            # fixture to come up; neither is what this test asserts. The 0.5s below
+            # IS the behaviour under test and must stay small.
             warmup = call_mcp_tool(
                 "mcp__timeout__delay",
                 {"text": "warmup", "seconds": 0},
-                timeout=10,
+                timeout=20,
             )
             self.assertEqual(warmup["status"], "success")
             first_pid = int(pid_path.read_text(encoding="utf-8"))
@@ -822,7 +827,7 @@ class McpRuntimeTest(unittest.TestCase):
             restored = call_mcp_tool(
                 "mcp__timeout__delay",
                 {"text": "fast", "seconds": 0},
-                timeout=5,
+                timeout=20,
             )
             starts = int(starts_path.read_text(encoding="utf-8"))
 
@@ -917,7 +922,14 @@ class McpRuntimeTest(unittest.TestCase):
 
             worker = threading.Thread(target=run_call, daemon=True)
             worker.start()
-            deadline = time.monotonic() + 5
+            # Same cold-start budget as
+            # test_generic_agent_abort_during_mcp_call_does_not_fail_server: a
+            # cold stdio handshake (spawn interpreter, import fastmcp,
+            # initialize, list_tools, call_tool) measured 7.6-8.0s on this
+            # machine, so a 5s wait here failed whenever this test ran first in
+            # a process. The budget is about waiting for the fixture to start,
+            # not about what the test asserts.
+            deadline = time.monotonic() + 20
             while not call_marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(call_marker.exists(), "MCP tool fixture did not start")

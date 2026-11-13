@@ -96,6 +96,12 @@ def normalize_named_workflow_name(name: str) -> str:
 
 _TAIL_WINDOW_BYTES = 64 * 1024
 
+# Statuses that mean "a user/operator stopped this run from outside". A stale
+# in-memory row must never be written back over one of these. Kept next to
+# _preserve_external_kill because that guard is the only consumer, and the
+# runtime's _raise_if_externally_stopped recognises the same two values.
+_TERMINAL_STOP_STATUSES = frozenset({"killed", "cancelled"})
+
 
 def _tail_sequence(journal_path: Path) -> int:
     """Highest ``sequence`` in an append-only journal, reading only its tail.
@@ -918,20 +924,28 @@ class WorkflowStore:
         return records
 
     def _preserve_external_kill(self, run: WorkflowRun, artifact_dir: Path) -> None:
-        """Carry a `killed` status that landed on disk onto the row about to be written.
+        """Carry a terminal stop status that landed on disk onto the row about to be written.
 
         Callers must already hold `_run_lock_path`: this reads the row it is about to overwrite,
-        so an unserialized copy loses exactly the kill it exists to preserve.
+        so an unserialized copy loses exactly the stop it exists to preserve.
+
+        Both stop states count, not just `killed`. `_raise_if_externally_stopped`
+        (runtime.py) treats `killed` and `cancelled` identically -- the user
+        pressing stop and the run being killed must both halt the workflow. The
+        guard originally only carried `killed`, so an external `cancelled` was
+        written over by the scheduler's next `save_run` of its stale in-memory
+        row and the run continued to its deadline. Measured: a stale save turned
+        a persisted `cancelled` back into `running`.
         """
-        if run.status == "killed":
+        if run.status in _TERMINAL_STOP_STATUSES:
             return
         state_path = artifact_dir / "state.json"
         if not state_path.exists():
             return
         current = WorkflowRun.from_dict(read_json_retrying(state_path))
-        if current.status != "killed":
+        if current.status not in _TERMINAL_STOP_STATUSES:
             return
-        run.status = "killed"
+        run.status = current.status
         run.error = current.error
 
     @staticmethod

@@ -3319,6 +3319,16 @@ def _run_in_thread(runtime, run, errors):
 class WorkflowCancellationSemanticsTest(unittest.TestCase):
     """CC-aligned cancellation semantics (m0869 @43713 jo, @74546 Ko, @75362 zo)."""
 
+    # Every test here asserts on how far the script advanced before the runtime
+    # deadline fired. The deadline is set to `now + timeout_seconds` BEFORE the
+    # node worker is spawned (runtime.py:284), so worker startup is paid out of
+    # this same budget. Measured spawn->ready on this machine: 0.157-0.214s.
+    # A 0.3s budget therefore left only ~0.09s for the script, and on a loaded
+    # machine went negative -- the run produced 0 or 1 registered agents at
+    # random. 2.0s keeps worker startup noise (and CI load) out of the
+    # measurement while still firing well before any test would hang.
+    CANCELLATION_DEADLINE_SECONDS = 2.0
+
     def _log_messages(self, store, run_id):
         return [
             event.payload.get("message")
@@ -3337,7 +3347,7 @@ const second = await agent('second')
 return [first, second]
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, runner=runner, timeout_seconds=0.3)
+            runtime = WorkflowRuntime(store=store, runner=runner, timeout_seconds=self.CANCELLATION_DEADLINE_SECONDS)
 
             with self.assertRaisesRegex(RuntimeError, "(?i)(timeout|deadline)"):
                 runtime.run(run)
@@ -3363,7 +3373,7 @@ return results
                 store=store,
                 runner=runner,
                 scheduler_config=SchedulerConfig(max_concurrent=2),
-                timeout_seconds=0.3,
+                timeout_seconds=self.CANCELLATION_DEADLINE_SECONDS,
             )
 
             with self.assertRaisesRegex(RuntimeError, "(?i)(timeout|deadline)"):
@@ -3386,12 +3396,16 @@ log('ready for external cancel')
 return await new Promise(() => {})
 """
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=5.0)
+            runtime = WorkflowRuntime(store=store, runner=FakeChildAgentRunner(), timeout_seconds=15.0)
             errors = []
 
             thread = threading.Thread(target=_run_in_thread, args=(runtime, run, errors), daemon=True)
             thread.start()
-            deadline = time.monotonic() + 1.0
+            # Wait for the script's first log line. This pays node worker startup
+            # (measured 0.157-0.214s here, worse under load), so the wait must not
+            # be tuned to the happy-path startup time -- a too-short wait here
+            # would make the external cancel race the runtime's own deadline.
+            deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
                 if any(event.event_type == "workflow_log" for event in store.replay_events("wf_test")):
                     break
@@ -3436,6 +3450,57 @@ return await new Promise(() => {})
             self.assertFalse(process.sent[0]["ok"])
             self.assertEqual(8, process.sent[0]["id"])
             self.assertNotIn(8, failed_pending)
+
+
+class ExternalStopStatusPersistenceTest(unittest.TestCase):
+    """A stale save_run must not write over an external stop.
+
+    `_raise_if_externally_stopped` halts the run for both `killed` and
+    `cancelled`, but `_preserve_external_kill` originally carried only `killed`.
+    An external `cancelled` was therefore overwritten by the scheduler's next
+    save of its stale in-memory row (still `running`), the runtime never saw the
+    stop, and the workflow ran to its deadline -- the user's stop was silently
+    ignored. Observed as a flaky
+    test_runtime_observes_external_cancel_of_running_workflow (roughly 1 in 4
+    runs hung the full 10s join).
+    """
+
+    def _survives_stale_save(self, status: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_stop", session_id="s", script="return 1", status="running"))
+
+            # Someone outside the runtime stops the run.
+            external = store.load_run("wf_stop")
+            external.status = status
+            external.error = f"user {status}"
+            store.save_run(external)
+
+            # The runtime writes back a stale in-memory copy that still says running.
+            stale = WorkflowRun.from_dict(run.to_dict())
+            stale.status = "running"
+            store.save_run(stale)
+
+            return store.load_run("wf_stop").status
+
+    def test_cancelled_survives_a_stale_save(self):
+        self.assertEqual("cancelled", self._survives_stale_save("cancelled"))
+
+    def test_killed_still_survives_a_stale_save(self):
+        self.assertEqual("killed", self._survives_stale_save("killed"))
+
+    def test_running_is_still_overwritten(self):
+        # The guard must not freeze every row: a genuinely running workflow has
+        # to accept the runtime's own updates.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WorkflowStore(root=tmp)
+            run = store.create_run(WorkflowRun(
+                run_id="wf_run", session_id="s", script="return 1", status="running"))
+            later = WorkflowRun.from_dict(run.to_dict())
+            later.status = "succeeded"
+            store.save_run(later)
+            self.assertEqual("succeeded", store.load_run("wf_run").status)
 
 
 class NestedWorkflowRuntimeTest(unittest.TestCase):
