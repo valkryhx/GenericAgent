@@ -168,6 +168,32 @@ test('a queued prompt is announced once, not per re-render', async () => {
   assert.equal(occurrences, 1, `the queued prompt was added ${occurrences} times`)
 })
 
+test('a queued prompt that becomes a real turn is not shown twice', async () => {
+  // Every queued prompt eventually arrives as a `user` event too: Esc interrupts and
+  // re-asks with it, and the bridge promotes it to a turn when the run ends first. The
+  // placeholder line and the real turn are the same message, so keeping both would make
+  // the user's single sentence appear twice in the transcript.
+  const { applyBridgeEvent, initialState } = await import('./state.js')
+  let state = applyBridgeEvent(initialState, { type: 'status', status: 'running', taskId: 1 } as BridgeEvent)
+  state = applyBridgeEvent(state, { type: 'prompt_queued', text: 'answer this instead', queued: 1 } as BridgeEvent)
+  state = applyBridgeEvent(state, { type: 'user', taskId: 2, text: 'answer this instead' } as BridgeEvent)
+
+  const occurrences = state.messages.filter(message => message.text.includes('answer this instead')).length
+  assert.equal(occurrences, 1, `the same message appeared ${occurrences} times`)
+  assert.equal(state.messages.at(-1)?.role, 'user')
+  assert.equal(state.messages.at(-1)?.taskId, 2, 'the surviving line is not the real turn')
+})
+
+test('a real turn does not delete an unrelated queued placeholder', async () => {
+  const { applyBridgeEvent, initialState } = await import('./state.js')
+  let state = applyBridgeEvent(initialState, { type: 'status', status: 'running', taskId: 1 } as BridgeEvent)
+  state = applyBridgeEvent(state, { type: 'prompt_queued', text: 'second thought, do X', queued: 1 } as BridgeEvent)
+  state = applyBridgeEvent(state, { type: 'user', taskId: 2, text: 'completely different question' } as BridgeEvent)
+
+  const pending = state.messages.filter(message => message.queuedPrompt)
+  assert.equal(pending.length, 1, 'a still-queued message was removed by an unrelated turn')
+})
+
 test('a child that completed its work is announced as completed even if the process was killed', async () => {
   const app = mountApp()
   try {

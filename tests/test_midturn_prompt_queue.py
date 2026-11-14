@@ -118,6 +118,72 @@ class RenderQueuedPromptsTest(unittest.TestCase):
     def test_nothing_queued_renders_nothing(self):
         self.assertEqual("", render_queued_prompts([]))
 
+    def test_a_carried_over_message_is_not_described_as_mid_turn(self):
+        """A message that survived the turn boundary reaches the model at turn start.
+
+        Rendering it with the mid-turn wording tells the model it is still inside a turn
+        that has already ended, and it answers the message as a footnote to the finished
+        request instead of as part of the new task.
+        """
+        text = render_queued_prompts([QueuedPrompt(text="and also do this")], when="turn_start")
+
+        self.assertIn(WRAP_PREFIX, text)
+        self.assertIn("and also do this", text)
+        self.assertIn("previous turn", text)
+        self.assertNotIn("while you were working", text)
+        self.assertNotIn("mid-turn", text)
+
+    def test_an_unknown_when_falls_back_to_the_mid_turn_wording(self):
+        text = render_queued_prompts([QueuedPrompt(text="x")], when="nonsense")
+
+        self.assertIn("while you were working", text)
+
+
+class CarriedPromptDeliveryTest(unittest.TestCase):
+    """The queue survives a turn boundary, so something must drain it at the next turn.
+
+    ``pending_input.py`` states the design intent: "a message that arrives after the last
+    fold point of turn N must survive into turn N+1". The queue half was implemented and
+    the N+1 half was not, so such a message sat in the queue forever while the UI said
+    "will be sent at the next tool boundary". This pins the missing half.
+    """
+
+    def _agent(self):
+        from genericagent.core.app import GenericAgent
+
+        agent = GenericAgent.__new__(GenericAgent)
+        agent.pending_prompts = PendingPromptQueue()
+        return agent
+
+    def test_a_leftover_message_is_delivered_at_the_next_turn_start(self):
+        agent = self._agent()
+        agent.pending_prompts.push("why are you silent")
+
+        carried = agent._drain_carried_prompts()
+
+        self.assertIn("why are you silent", carried)
+        self.assertIn("previous turn", carried, "the turn-start wording was not used")
+
+    def test_delivery_is_once_only(self):
+        agent = self._agent()
+        agent.pending_prompts.push("say it once")
+
+        agent._drain_carried_prompts()
+
+        self.assertEqual("", agent._drain_carried_prompts())
+
+    def test_nothing_queued_yields_nothing(self):
+        self.assertEqual("", self._agent()._drain_carried_prompts())
+
+    def test_an_agent_without_a_queue_still_serves_its_turn(self):
+        """Older agents and light test doubles have no queue; that must not raise."""
+        from genericagent.core.app import GenericAgent
+
+        agent = GenericAgent.__new__(GenericAgent)
+
+        self.assertEqual("", agent._drain_carried_prompts())
+
+
 
 class FoldPointInjectsQueuedTextTest(unittest.TestCase):
     """The loop must fold queue text in, the same way it folds notifications in."""

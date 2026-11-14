@@ -1799,6 +1799,92 @@ class WaitAgentsWatchTest(unittest.TestCase):
             self.assertTrue(result.timed_out)
             self.assertTrue(slept, "the file transport lost its poll loop")
 
+    def test_a_user_message_ends_the_wait_before_the_slice_elapses(self):
+        """The user talking outranks the subagent the wait is watching for.
+
+        Measured live before this existed: a message typed while the model blocked in
+        ``wait_agent`` took 14.5s to reach it with the default 10s slice, and 57s with
+        the slice raised to 120s. The delay was the slice, not the fold point -- the
+        queue already held the text the whole time.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "slow")
+            manager = SubagentManager(
+                root_dir=td,
+                process_exists=lambda _pid: True,
+                sleep=lambda _: time.sleep(0.01),
+            )
+            pending = []
+            # True from the second probe on: the message arrives "during" the wait,
+            # not before it started.
+            probes = []
+
+            def probe():
+                probes.append(1)
+                return len(probes) > 1
+
+            started = time.monotonic()
+            # A 30s slice: without the probe this would block for the full 30s.
+            manager.WAIT_SLICE_MAX_S = 30.0
+            result = manager.wait_agents(
+                ["slow"], timeout_s=30, poll_interval_s=0.01, user_input_probe=probe
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertTrue(result.interrupted_by_user)
+            self.assertFalse(result.timed_out, "a user message is not a timeout")
+            self.assertLess(elapsed, 5.0, f"the wait ignored the message for {elapsed:.1f}s")
+            self.assertEqual(
+                result.recommended_next_action,
+                "respond_to_user",
+                "recommending wait_agent again would swallow the message",
+            )
+            self.assertIn("user", result.message.lower())
+
+    def test_a_wait_without_a_probe_never_reports_a_user_interrupt(self):
+        """Subagents, workflow children and headless callers pass no probe."""
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "quiet")
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+
+            result = manager.wait_agents(["quiet"], timeout_s=0.05, poll_interval_s=0.01)
+
+            self.assertTrue(result.timed_out)
+            self.assertFalse(result.interrupted_by_user)
+
+    def test_a_failing_probe_does_not_break_the_wait(self):
+        """A broken queue must not cost the model its wait result."""
+        with tempfile.TemporaryDirectory() as td:
+            self._agent(td, "safe")
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+
+            def broken():
+                raise RuntimeError("queue is gone")
+
+            result = manager.wait_agents(
+                ["safe"], timeout_s=0.05, poll_interval_s=0.01, user_input_probe=broken
+            )
+
+            self.assertTrue(result.timed_out)
+            self.assertFalse(result.interrupted_by_user)
+
+    def test_a_waiting_turn_sees_the_subagent_result_when_no_message_arrives(self):
+        """The probe must not mask the normal completion path it sits next to."""
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = self._agent(td, "finishes")
+            (task_dir / "output.txt").write_text("done\n\n[ROUND END]\n", encoding="utf-8")
+            manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
+
+            result = manager.wait_agents(
+                ["finishes"],
+                timeout_s=5,
+                poll_interval_s=0.01,
+                user_input_probe=lambda: False,
+            )
+
+            self.assertFalse(result.interrupted_by_user)
+            self.assertEqual([state.task_name for state in result.changed_agents], ["finishes"])
+
     def test_wait_sleeps_on_the_channel_when_one_exists(self):
         with tempfile.TemporaryDirectory() as td:
             self._agent(td, "piped")
@@ -2933,3 +3019,75 @@ class LeadMessageInboundGateTest(unittest.TestCase):
             finally:
                 os.environ.pop("GA_CROSS_SESSION_INBOUND", None)
                 reset_swarm_cache()
+
+
+class SubagentLivenessProbeTest(unittest.TestCase):
+    """A frozen output mirror is not a dead child.
+
+    Measured failure (user report + core/app.py's own note about the "worker stuck 300s"
+    false positive): a child that spends minutes inside one long tool call writes nothing
+    to output.txt. A supervisor reading "no growth" as "gone" kills it and loses the work
+    it had already produced. The fix is to ask the child-owned signals -- heartbeat_at,
+    stdout.log, events.jsonl -- before concluding anything.
+    """
+
+    def _manager(self, root):
+        return SubagentManager(root_dir=root, process_exists=lambda _pid: True)
+
+    def _task_dir(self, root, name="stall_worker"):
+        task_dir = Path(root) / "temp" / name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        return task_dir
+
+    def test_a_fresh_heartbeat_means_not_stalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            task_dir = self._task_dir(td)
+            from datetime import datetime, timezone
+            state = {
+                "task_name": "stall_worker",
+                "heartbeat_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "turn_status": "running",
+            }
+            atomic_write_json(str(task_dir / "state.json"), state)
+
+            verdict = manager._output_is_stalled(task_dir, state)
+
+            self.assertFalse(verdict["stalled"])
+            self.assertEqual("heartbeat", verdict["evidence"])
+
+    def test_an_old_heartbeat_with_growing_stdout_is_not_stalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            task_dir = self._task_dir(td)
+            state = {"task_name": "stall_worker", "heartbeat_at": "2020-01-01T00:00:00+00:00"}
+            atomic_write_json(str(task_dir / "state.json"), state)
+            # The child is emitting to its own stdout, which is proof of life even
+            # though output.txt (the mirror) is untouched.
+            (task_dir / "stdout.log").write_text("still working\n", encoding="utf-8")
+
+            verdict = manager._output_is_stalled(task_dir, state)
+
+            self.assertFalse(verdict["stalled"])
+            self.assertIn(verdict["evidence"], {"stdout_growth", "event_growth"})
+
+    def test_no_child_signal_at_all_reads_as_stalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            task_dir = self._task_dir(td)
+            state = {"task_name": "stall_worker", "heartbeat_at": "2020-01-01T00:00:00+00:00"}
+            atomic_write_json(str(task_dir / "state.json"), state)
+
+            verdict = manager._output_is_stalled(task_dir, state)
+
+            self.assertTrue(verdict["stalled"], "a frozen child must be reportable as stalled")
+
+    def test_a_child_with_no_state_at_all_is_not_declared_stalled(self):
+        """Absence of evidence is not evidence of a stall; the process check owns death."""
+        with tempfile.TemporaryDirectory() as td:
+            manager = self._manager(td)
+            task_dir = self._task_dir(td)
+
+            verdict = manager._output_is_stalled(task_dir, {})
+
+            self.assertFalse(verdict["stalled"])

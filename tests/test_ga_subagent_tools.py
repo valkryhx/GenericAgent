@@ -972,6 +972,80 @@ class GaSubagentToolsTest(unittest.TestCase):
             status_line = "".join(chunks)
             self.assertNotIn("target(s) still pending/running", status_line)
 
+    def test_wait_agent_returns_to_the_turn_when_the_user_speaks(self):
+        """A message typed during ``wait_agent`` must end the wait, not ride it out.
+
+        Measured live: 14.5s at the 10s slice, 57s at a 120s slice, for a message
+        already sitting in the queue. The wait now probes the queue every iteration.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td)
+            handler.subagent_manager.wait_agents = lambda **kwargs: WaitResult(
+                timed_out=False,
+                changed_agents=[],
+                message="The user sent a message while this wait was blocking.",
+                interrupted_by_user=True,
+                recommended_next_action="respond_to_user",
+            )
+
+            chunks = []
+            generator = handler.do_wait_agent(
+                {"targets": ["slow_worker"], "timeout_seconds": 300},
+                response=None,
+            )
+            try:
+                while True:
+                    chunks.append(next(generator))
+            except StopIteration as stop:
+                outcome = stop.value
+
+            self.assertEqual(outcome.data["status"], "interrupted_by_user")
+            self.assertFalse(outcome.data.get("timed_out"))
+            self.assertEqual(outcome.data["recommended_next_action"], "respond_to_user")
+            self.assertIn("user", "".join(chunks).lower())
+            # The returned prompt is what the model reads next: it must send it back to
+            # the turn, and must not repeat the queued text (the loop folds that in).
+            prompt = str(outcome.next_prompt or "")
+            self.assertIn("do not call wait_agent again", prompt)
+            self.assertNotIn("[GA_USER_MIDTURN_MESSAGE]", prompt)
+
+    def test_wait_agent_passes_a_queue_probe_only_when_a_queue_exists(self):
+        """Subagents and workflow children have no queue; they must pass no probe."""
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td)
+            seen = {}
+
+            def fake_wait(**kwargs):
+                seen.update(kwargs)
+                return WaitResult(timed_out=True, changed_agents=[], message="no")
+
+            handler.subagent_manager.wait_agents = fake_wait
+
+            class _Queue:
+                def __init__(self):
+                    self.items = []
+
+                def __len__(self):
+                    return len(self.items)
+
+            queue = _Queue()
+            handler.parent.pending_prompts = queue
+            exhaust(handler.do_wait_agent({"targets": ["w"], "timeout_seconds": 0}, response=None))
+            self.assertIn("user_input_probe", seen)
+            probe = seen["user_input_probe"]
+            self.assertFalse(probe(), "an empty queue must not look like user input")
+            queue.items.append("hello")
+            self.assertTrue(probe(), "a queued message must end the wait")
+
+            del handler.parent.pending_prompts
+            seen.clear()
+            exhaust(handler.do_wait_agent({"targets": ["w"], "timeout_seconds": 0}, response=None))
+            self.assertIsNone(
+                seen.get("user_input_probe"),
+                "a parent with no queue must not hand the wait a probe",
+            )
+
+
     def test_message_followup_and_interrupt_tools_write_mailbox_reply_and_stop_file(self):
         with tempfile.TemporaryDirectory() as td:
             task_dir = Path(td) / "temp" / "mail_worker"
@@ -1581,6 +1655,44 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertNotIn("subagent_registry.py:", msg)
             self.assertNotIn("SubagentNameConflictError:", msg)
             self.assertNotIn(" -> `", msg)
+
+    def test_a_truncated_argument_stream_is_not_reported_as_a_missing_message(self):
+        """The real session's most expensive agent-team defect: five spawns died here.
+
+        When the tool-call argument JSON is cut off, ``llm._try_parse_tool_args`` gives up
+        and hands the handler ``{"_raw": "<half a document>"}``. The old code then said
+        "message is required", which reads to the model as "my message was not allowed /
+        was too long" -- so it dropped to a short message plus a brief file and kept that
+        workaround forever. The message was never the problem: the arguments never
+        arrived. The error has to say so, or the model learns the wrong lesson.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td, popen=lambda *_, **__: None, python_executable="python-test")
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"_raw": '{"task_name": "reviewer", "message": "review the diff betwe'},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "tool_args_unparsed")
+            msg = outcome.data["msg"]
+            self.assertIn("truncation", msg.lower())
+            self.assertIn("Retry the same call with the same full message", msg)
+            # The misleading diagnosis must be gone entirely.
+            self.assertNotIn("message is required", msg)
+            self.assertNotIn("task_name is required", msg)
+
+    def test_a_genuinely_empty_message_is_still_reported_as_missing(self):
+        """The truncation branch must not swallow the real "you forgot the field" case."""
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td, popen=lambda *_, **__: None, python_executable="python-test")
+
+            outcome = exhaust(handler.do_spawn_agent({"task_name": "reviewer"}, response=None))
+
+            self.assertEqual(outcome.data["msg"], "message is required")
 
     def test_spawn_agent_tool_still_reports_other_failures_with_traceback_context(self):
         """Only the name conflict loses the file/line suffix; real crashes still need it."""

@@ -331,9 +331,18 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
   if (event.type === 'user') {
     // P0-A: open-turn user stays !done so it only paints in live until finalize.
     // Prevents premature Static write that live dock height changes can cover.
+    //
+    // A queued prompt becomes a real turn through *two* events: `prompt_queued` when the
+    // keystroke is accepted, then `user` when it is actually submitted (Esc interrupts and
+    // re-asks, and the bridge also promotes a queue item to a turn when the run ends
+    // first). Both describe the same sentence, so the placeholder is dropped here --
+    // otherwise one message the user typed appears twice in the transcript.
+    const withoutPlaceholder = state.messages.filter(
+      message => !(message.queuedPrompt && message.role === 'user' && message.text.startsWith(event.text)),
+    )
     return {
       ...state,
-      messages: [...state.messages, { id: `u-${event.taskId}`, role: 'user', text: event.text, done: false, taskId: event.taskId }],
+      messages: [...withoutPlaceholder, { id: `u-${event.taskId}`, role: 'user', text: event.text, done: false, taskId: event.taskId }],
       error: null,
     }
   }

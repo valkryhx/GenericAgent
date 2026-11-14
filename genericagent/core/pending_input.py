@@ -41,6 +41,18 @@ _TEMPLATE = (
     "treating it as a new conversation turn. 用户在上一轮执行过程中补充了这条要求，请在当前回合内一并处理。"
 )
 
+# A message that was still queued when the previous turn ended reaches the model at the
+# *start of the next turn* instead. The mid-turn wording would be a lie there: there is
+# no running turn to continue, and telling the model otherwise makes it answer the new
+# message as a side note to the previous request.
+_TURN_START_TEMPLATE = (
+    "The user sent these messages while the previous turn was still finishing:\n"
+    "{body}\n"
+    "\n"
+    "They were accepted but could not be folded into that turn, so they are part of your "
+    "task now. 用户上次请求尚未收尾时补充了这些内容，未能并入那一回合，请在本回合一并处理。"
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -84,11 +96,19 @@ class PendingPromptQueue:
             return len(self._items)
 
 
-def render_queued_prompts(items) -> str:
-    """Render drained prompts as one model-facing block, or ``""`` when empty."""
+def render_queued_prompts(items, *, when: str = "mid_turn") -> str:
+    """Render drained prompts as one model-facing block, or ``""`` when empty.
+
+    ``when`` picks the wrapper: ``"mid_turn"`` for the fold point inside a running turn,
+    ``"turn_start"`` for a message that outlived its turn and is being delivered at the
+    start of the next one. Both exist because the queue deliberately survives a turn
+    boundary -- rendering both cases with the mid-turn wording would tell the model it is
+    still inside a turn that has already ended.
+    """
     texts = [str(getattr(item, "text", item) or "").strip() for item in items]
     texts = [text for text in texts if text]
     if not texts:
         return ""
     body = "\n\n".join(texts)
-    return "\n".join([WRAP_PREFIX, _TEMPLATE.format(body=body), WRAP_SUFFIX])
+    template = _TURN_START_TEMPLATE if str(when) == "turn_start" else _TEMPLATE
+    return "\n".join([WRAP_PREFIX, template.format(body=body), WRAP_SUFFIX])

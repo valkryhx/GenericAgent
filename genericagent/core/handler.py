@@ -1466,6 +1466,26 @@ class GenericAgentHandler(BaseHandler):
         yield "[Schema] structured output accepted.\n"
         return StepOutcome({"status": "ok", "structured_output": payload}, next_prompt=None)
 
+    def _pending_user_input_probe(self):
+        """A cheap "did the user type something?" callable, or ``None``.
+
+        Handed to ``wait_agents`` so a synchronous wait can abort the moment a message
+        arrives instead of running to its slice deadline. Without this the wait is a
+        black hole for exactly as long as the model asked: measured 14.5s at the 10s
+        slice, 57s at a 120s slice, for a message that was already in the queue.
+
+        ``len`` on the queue is a single lock-and-count, so polling it inside the wait's
+        own poll loop costs nothing measurable.
+        """
+        queue = self.pending_prompts()
+        if queue is None:
+            return None
+        try:
+            len(queue)
+        except TypeError:
+            return None
+        return lambda: bool(len(queue))
+
     def _bind_workflow_wait_resolver(self, manager):
         """Give the manager the workflow-store resolver owned by the frontend.
 
@@ -1584,6 +1604,14 @@ class GenericAgentHandler(BaseHandler):
             "startup_phase": getattr(state, "startup_phase", None),
             "startup_phase_at": getattr(state, "startup_phase_at", None),
             "startup_elapsed_ms": getattr(state, "startup_elapsed_ms", None),
+            # Liveness, reported separately from turn/process status on purpose. A child
+            # that is mid-tool-call writes nothing to output.txt; without these fields the
+            # only way to tell "still working" from "gone" was the frozen mirror, which is
+            # exactly the misreading that got live children killed.
+            "heartbeat_at": getattr(state, "heartbeat_at", None),
+            "progress_stalled": bool(getattr(state, "progress_stalled", False)),
+            "progress_evidence": getattr(state, "progress_evidence", None),
+            "progress_age_seconds": getattr(state, "progress_age_seconds", None),
         }
         if include_output and state.final_output_path and os.path.exists(state.final_output_path):
             try:
@@ -1638,6 +1666,31 @@ class GenericAgentHandler(BaseHandler):
             except Exception as e:
                 return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} could not be loaded: {format_error(e)}"}, next_prompt="\n")
         message = args.get("message") or args.get("prompt") or ""
+        # A truncated tool-call argument stream makes ``_try_parse_tool_args`` give up and
+        # hand us ``{"_raw": "<half a JSON document>"}``. Reporting that as "message is
+        # required" is actively misleading: the model reads it as "my message was too
+        # long / not allowed", drops to a shorter one, and a real transport truncation
+        # turns into a lasting workaround (measured on a real session: five consecutive
+        # spawn failures, then every later spawn used a short message plus a brief file).
+        # Say what actually happened, and say the retry is safe.
+        if "_raw" in args and not (task_name and message):
+            raw = str(args.get("_raw") or "")
+            return StepOutcome(
+                {
+                    "status": "error",
+                    "reason": "tool_args_unparsed",
+                    "msg": (
+                        "The tool-call arguments did not arrive as valid JSON "
+                        f"({len(raw)} chars, ends with {raw[-40:]!r}). This is a transport-level "
+                        "truncation, not a limit on the message you may send: the message field was "
+                        "never delivered. Retry the same call with the same full message. If it "
+                        "truncates again, split the work across several spawns rather than "
+                        "shortening the message into something the child cannot act on."
+                    ),
+                    "raw_chars": len(raw),
+                },
+                next_prompt="\n",
+            )
         if not task_name:
             return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
         if not message:
@@ -1935,7 +1988,39 @@ class GenericAgentHandler(BaseHandler):
                     "team_task_id instead of relying on a name guess."
                 ),
             }
-        pick = max(scored, key=lambda item: item[0])[1]
+        # An ambiguous guess is worse than no guess: binding a reviewer to a task whose
+        # subject describes *different* work is silent corruption -- the child does the
+        # task it was told to do, reports against a title that says something else, and
+        # the board (the stated source of truth for progress) is now wrong.
+        #
+        # Measured on a real session: the agent spawned for "Enter-key routing" was bound
+        # to the top-scoring task titled "cursor rendering", because the long task
+        # message happened to contain the word 光标. The lead had to repair the title and
+        # owner by hand afterwards.
+        #
+        # So an unattended auto-bind requires a clear margin, not just a positive score.
+        # A tie or a near-tie goes back to the caller with the candidates named, which is
+        # a cheap retry (pass team_task_id) instead of a silently mis-bound teammate.
+        ordered = sorted(scored, key=lambda item: item[0], reverse=True)
+        runner_up = ordered[1][0] if len(ordered) > 1 else 0
+        if best_score == runner_up:
+            return {
+                "success": False,
+                "reason": "team_task_ambiguous",
+                "msg": (
+                    "Several claimable tasks match this teammate equally well; refusing to guess. "
+                    "Pass the exact task_create id as team_task_id. Candidates: "
+                    + "; ".join(
+                        f"#{task.get('id')} {str(task.get('subject') or '')[:60]}"
+                        for score, task in ordered[:4]
+                    )
+                ),
+                "candidates": [
+                    {"id": task.get("id"), "subject": task.get("subject")}
+                    for score, task in ordered[:4]
+                ],
+            }
+        pick = ordered[0][1]
         return {"success": True, "task": pick, "store": store}
 
     @staticmethod
@@ -2274,7 +2359,31 @@ class GenericAgentHandler(BaseHandler):
             poll_interval_s=poll_interval_s,
             since_event_seq=since_event_seq,
             wait_condition=wait_condition,
+            user_input_probe=self._pending_user_input_probe(),
         )
+        if getattr(result, "interrupted_by_user", False):
+            # The wait ended because the user spoke. Say that plainly and return an
+            # outcome whose prompt sends the model back to the turn *without* re-waiting;
+            # the queued text itself is folded in by the loop at the next fold point, so
+            # it must not be repeated here.
+            yield "[Status] interrupted by a new user message; returning to the turn.\n"
+            return StepOutcome(
+                {
+                    "status": "interrupted_by_user",
+                    "condition": result.condition,
+                    "remaining_targets": result.remaining_targets,
+                    "observed_agents": [
+                        self._subagent_state_payload(state, include_output=False)
+                        for state in (result.observed_agents or [])
+                    ],
+                    "message": result.message,
+                    "recommended_next_action": result.recommended_next_action,
+                },
+                next_prompt=(
+                    "The user sent a message while you were waiting. Read it, act on it, "
+                    "and do not call wait_agent again for this turn.\n"
+                ),
+            )
         data = {
             "status": "timeout" if result.timed_out else ("satisfied" if result.satisfied else "changed"),
             "condition": result.condition,

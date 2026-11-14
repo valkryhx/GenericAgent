@@ -123,6 +123,13 @@ class AgentState:
     startup_phase: str | None = None
     startup_phase_at: str | None = None
     startup_elapsed_ms: float | None = None
+    # Liveness, kept separate from ``updated_at`` on purpose: ``updated_at`` moves on
+    # every state write (including the parent's own reconciliation), so it cannot say
+    # whether the child itself is progressing. These come from child-owned signals.
+    heartbeat_at: str | None = None
+    progress_stalled: bool = False
+    progress_evidence: str | None = None
+    progress_age_seconds: float | None = None
 
 
 @dataclass
@@ -164,6 +171,11 @@ class WaitResult:
     terminal_targets: list[str] = field(default_factory=list)
     result_refs: dict[str, str] = field(default_factory=dict)
     recommended_next_action: str = "wait_agent"
+    # A user message arrived while the wait was blocking. Distinct from ``timed_out``
+    # on purpose: a timeout says "nothing happened", this says "something far more
+    # important than the subagent happened, stop waiting". The caller must not retry
+    # the wait.
+    interrupted_by_user: bool = False
 
 
 @dataclass
@@ -1721,6 +1733,7 @@ class SubagentManager:
         since_event_offsets=None,
         since_event_seq=None,
         wait_condition="event",
+        user_input_probe=None,
     ):
         deadline = time.monotonic() + timeout_s
         condition = str(wait_condition or "event").strip().lower()
@@ -1751,6 +1764,19 @@ class SubagentManager:
         baseline = since_event_offsets or {target: self._event_size(target) for target in targets}
         inbox_baseline = self._parent_inbox_size()
         while True:
+            # The user talking outranks every subagent event this wait is watching for.
+            # Checked first, and checked on every iteration rather than only at the slice
+            # deadline: the whole point is that a message typed during a wait must not
+            # wait for a wait. Measured before this existed: a steering message took
+            # 14.5s to reach the model with a 10s slice, and 57s when the slice was
+            # raised to 120s -- the delay was the slice, not the fold point.
+            if user_input_probe is not None:
+                try:
+                    pending = bool(user_input_probe())
+                except Exception:
+                    pending = False
+                if pending:
+                    return self._interrupted_by_user_result(targets, condition)
             if since_event_seq is not None:
                 bus_events = self.event_bus.read_events_since(since_event_seq, targets=targets)
                 if bus_events:
@@ -1875,6 +1901,40 @@ class SubagentManager:
             terminal_targets=decision.terminal_targets,
             result_refs=decision.result_refs,
             recommended_next_action=decision.recommended_next_action,
+        )
+
+    def _interrupted_by_user_result(self, targets, condition="event"):
+        """End the wait because the user spoke, not because a subagent moved.
+
+        Deliberately shaped like a normal "not yet" result rather than an error: the
+        subagents are fine, nothing failed, and the model should simply return to the
+        turn. But it must not carry ``recommended_next_action="wait_agent"`` -- that is
+        what would make the model immediately re-enter the same wait and swallow the
+        message it just received.
+
+        ``timed_out`` stays False: reporting a user message as a timeout would tell the
+        model "the thing you waited for did not happen", which is both false and an
+        invitation to retry.
+        """
+        observed = []
+        for target in targets:
+            try:
+                observed.append(self.probe_agent(target))
+            except (FileNotFoundError, ValueError):
+                continue
+        return WaitResult(
+            False,
+            [],
+            (
+                "The user sent a message while this wait was blocking. Stop waiting and "
+                "address it now; the subagent notification will arrive on its own later."
+            ),
+            [],
+            self.event_bus.last_event_seq(),
+            observed_agents=observed,
+            condition=condition,
+            interrupted_by_user=True,
+            recommended_next_action="respond_to_user",
         )
 
     def _wait_slice_elapsed(self, targets, condition="event"):
@@ -3048,6 +3108,15 @@ class SubagentManager:
         result_status = "available" if final_output_path else (
             "failed" if turn_status in {"errored", "failed", "interrupted", "cancelled", "killed"} else "pending"
         )
+        # Liveness classification, so a caller never has to infer "working" from
+        # "output.txt grew". ``stalled`` means the child stopped proving it is alive;
+        # it is *not* a verdict that it is dead -- the process check above owns that.
+        # Reporting the two independently is the whole point: an earlier supervisor
+        # conflated them and killed children that were mid-tool-call.
+        try:
+            liveness = self._output_is_stalled(task_dir, raw)
+        except Exception:
+            liveness = {"stalled": False, "evidence": "probe_failed", "age_s": None}
         refreshed.update(
             {
                 "schema_version": 1,
@@ -3057,6 +3126,10 @@ class SubagentManager:
                 "round": int(raw.get("round") or 0),
                 "turn_status": turn_status,
                 "process_status": process_status,
+                "heartbeat_at": raw.get("heartbeat_at"),
+                "progress_stalled": bool(liveness.get("stalled")),
+                "progress_evidence": liveness.get("evidence"),
+                "progress_age_seconds": liveness.get("age_s"),
                 "output_path": str(output_path) if output_path else raw.get("output_path"),
                 "final_output_path": final_output_path,
                 "final_output_sha256": final_output_sha256,
@@ -3129,6 +3202,70 @@ class SubagentManager:
         except OSError:
             return False
 
+    def _output_is_stalled(self, task_dir, raw):
+        """Is the child's *visible progress mirror* frozen, even though it is alive?
+
+        A stalled ``output.txt`` is not evidence of a dead child. The child streams to
+        its own stdout first; ``output.txt`` is written as the turn's mirror, and a turn
+        that spends minutes inside one long tool call (``code_run`` compiling, a build,
+        a poll loop) legitimately writes nothing to it. A supervisor that reads "no
+        growth in output.txt" as "process is gone" kills a child that is working fine --
+        and the already-completed work dies with it.
+
+        So the question "is it stalled?" is answered from signals the child itself
+        produces, in order of reliability:
+
+          * ``heartbeat_at`` (written by the child at each turn start) -- best evidence;
+          * ``stdout.log`` growth -- the child is emitting, so it is alive;
+          * ``events.jsonl`` growth -- the child is reporting, so it is alive.
+
+        Returns ``{"stalled": bool, "evidence": str, "age_s": float|None}``. ``stalled``
+        is only True when the heartbeat is old AND no child-owned file is growing; even
+        then the caller must not kill on it alone unless the process is also gone.
+        """
+        import time as _time
+
+        def _mtime_age(path):
+            try:
+                return _time.time() - Path(path).stat().st_mtime
+            except OSError:
+                return None
+
+        heartbeat = str(raw.get("heartbeat_at") or "").strip()
+        heartbeat_age = None
+        if heartbeat:
+            try:
+                from datetime import datetime
+                stamp = datetime.fromisoformat(heartbeat)
+                heartbeat_age = _time.time() - stamp.timestamp()
+            except Exception:
+                heartbeat_age = None
+
+        stdout_age = _mtime_age(task_dir / "stdout.log")
+        events_age = _mtime_age(task_dir / "events.jsonl")
+        output_age = _mtime_age(self._resolve_output_path(task_dir, raw) or "")
+
+        # A stalled mirror is "nothing visible for a while", not "dead": the threshold is
+        # deliberately generous so a single slow tool call never trips it.
+        stall_threshold_s = 90.0
+        candidates = [age for age in (heartbeat_age, stdout_age, events_age) if age is not None]
+        freshest_child_signal = min(candidates) if candidates else None
+        if freshest_child_signal is None:
+            return {"stalled": False, "evidence": "no_child_signals", "age_s": None}
+        if freshest_child_signal < stall_threshold_s:
+            evidence = (
+                "heartbeat" if heartbeat_age is not None and heartbeat_age < stall_threshold_s
+                else "stdout_growth" if stdout_age is not None and stdout_age < stall_threshold_s
+                else "event_growth"
+            )
+            return {"stalled": False, "evidence": evidence, "age_s": round(freshest_child_signal, 1)}
+        return {
+            "stalled": True,
+            "evidence": "no_child_signal_for_%.0fs" % freshest_child_signal,
+            "age_s": round(freshest_child_signal, 1),
+            "output_age_s": None if output_age is None else round(output_age, 1),
+        }
+
     def _agent_state_from_dict(self, task_name, task_dir, raw):
         startup = self._read_startup_status(task_dir)
         return AgentState(
@@ -3181,6 +3318,10 @@ class SubagentManager:
             startup_phase=startup.get("startup_phase") or raw.get("startup_phase"),
             startup_phase_at=startup.get("startup_phase_at") or raw.get("startup_phase_at"),
             startup_elapsed_ms=startup.get("startup_elapsed_ms"),
+            heartbeat_at=raw.get("heartbeat_at"),
+            progress_stalled=bool(raw.get("progress_stalled", False)),
+            progress_evidence=raw.get("progress_evidence"),
+            progress_age_seconds=raw.get("progress_age_seconds"),
         )
 
     @staticmethod
@@ -3235,6 +3376,7 @@ def wait_agents(
     since_event_offsets=None,
     since_event_seq=None,
     wait_condition="event",
+    user_input_probe=None,
 ):
     return _DEFAULT_MANAGER.wait_agents(
         targets,
@@ -3243,6 +3385,7 @@ def wait_agents(
         since_event_offsets,
         since_event_seq,
         wait_condition,
+        user_input_probe=user_input_probe,
     )
 
 

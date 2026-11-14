@@ -637,15 +637,94 @@ class GenericAgentBridge:
         self._hook_session_ended = True
 
     def abort_current_turn(self) -> None:
-        """Ink Esc or /stop: end the current user turn, not the session."""
-        if getattr(self.agent, "is_running", False) or self._is_consuming():
+        """Ink Esc or /stop: end the current user turn, not the session.
+
+        Esc means "stop what you are saying and answer *this*", not "throw everything
+        away" -- the CC semantics. So a prompt the user queued during the run is not
+        discarded with the turn: it is drained here, before the abort, and submitted as
+        the next turn once the agent actually goes idle.
+
+        Order matters. Draining after the abort would race the turn-end cleanup; draining
+        before it guarantees the text is in our hands even if the turn dies mid-write.
+        With nothing queued the behaviour is unchanged: a plain abort.
+        """
+        queued_text = self._take_queued_prompt_text()
+        busy = getattr(self.agent, "is_running", False) or self._is_consuming()
+        if busy:
             try:
                 with backend_output_redirect():
                     self.agent.abort()
             finally:
                 self.emit({"type": "status", "status": "stopping"})
+            if queued_text:
+                self._submit_when_idle(queued_text)
+            return
+        if queued_text:
+            # Nothing was running, so there is nothing to abort -- but a queued prompt
+            # still has to become a turn, or Esc-plus-a-typed-message would silently
+            # drop the message.
+            self.submit(queued_text)
             return
         self.stop()
+
+    def _take_queued_prompt_text(self) -> str:
+        """Drain the mid-turn queue into one plain-text block, or ``""``.
+
+        Rendered without the mid-turn wrapper: the text is about to become a *new* user
+        turn (Esc interrupts and re-asks), and the wrapper would tell the model it is
+        still continuing a turn that was just aborted.
+        """
+        queue = getattr(self.agent, "pending_prompts", None)
+        if queue is None:
+            return ""
+        try:
+            drained = queue.drain()
+        except Exception:
+            return ""
+        texts = [str(getattr(item, "text", "") or "").strip() for item in drained]
+        return (chr(10) + chr(10)).join(text for text in texts if text)
+
+    def _submit_when_idle(self, text: str) -> None:
+        """Submit ``text`` as a new turn once the aborted turn has fully unwound.
+
+        The aborted turn is still finishing its finally block (compaction, goal
+        bookkeeping) and still holds ``is_running``; submitting now would answer
+        ``busy`` and the user's message would vanish. A watcher thread waits for idle,
+        exactly like the hook/goal wake paths already do.
+        """
+
+        def wait_and_submit():
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                if bool(getattr(self, "_shutdown_requested", False)):
+                    return
+                if not (
+                    getattr(self.agent, "is_running", False) or self._is_consuming()
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                self.emit({
+                    "type": "error",
+                    "code": "queued_prompt_dropped",
+                    "message": "the interrupted turn did not finish; the queued message was not sent",
+                })
+                return
+            try:
+                with backend_output_redirect():
+                    self.submit(text.strip())
+            except Exception as exc:  # noqa: BLE001
+                self.emit({
+                    "type": "error",
+                    "code": "queued_prompt_dropped",
+                    "message": f"could not send the queued message: {exc}",
+                })
+
+        threading.Thread(
+            target=wait_and_submit,
+            daemon=True,
+            name="ga-ink-queued-after-stop",
+        ).start()
 
     def stop(self) -> None:
         """Close the Ink session. The caller normally exits after this."""
@@ -3411,12 +3490,31 @@ class GenericAgentBridge:
                     self._emit_agent_read_model()
                     self._await_agent_idle()
                     self.emit({"type": "status", "status": "idle", "taskId": task_id})
+                    self._start_queued_turn_after_end()
                     return
         except Exception as exc:
             self.emit({"type": "error", "code": "consume_failed", "message": str(exc), "taskId": task_id})
             self._emit_agent_read_model()
             self._await_agent_idle()
             self.emit({"type": "status", "status": "idle", "taskId": task_id})
+            self._start_queued_turn_after_end()
+
+    def _start_queued_turn_after_end(self) -> None:
+        """A prompt queued during the turn starts its own turn once that turn ends.
+
+        CC runs a queued message as the next turn. GA used to leave it in the queue
+        until the user typed something else -- and the turn-start drain would then
+        deliver it as a *prefix* to that unrelated later request, which reads to the user
+        as "my message was silently delayed until I spoke again".
+
+        Not submitted inline: this runs inside ``_consume_display_queue``, so
+        ``_is_consuming()`` is still true for this very thread and ``submit`` would
+        answer ``busy``. ``_submit_when_idle`` waits for the consumer to finish, which is
+        the same path Esc uses.
+        """
+        text = self._take_queued_prompt_text()
+        if text:
+            self._submit_when_idle(text)
 
 
 def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:

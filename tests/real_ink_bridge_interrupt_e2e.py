@@ -61,6 +61,11 @@ SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/=-]{24,}
 STAMP = int(time.time())
 PROMPT_PROBE_MARKER = f"GA_UI_LONGRUN_{STAMP}"
 SHORT_MARKER = f"GA_UI_SECOND_TURN_{STAMP}"
+# The Esc test needs its own marker. Reusing SHORT_MARKER made the assertion match an
+# `user` event from the earlier reuse test (taskId 2, emitted before this test ran) and
+# reported "0.0s to a new turn" -- a green check that proved nothing.
+ESC_MARKER = f"GA_UI_ESC_QUEUED_{STAMP}"
+ESC_PROMPT = f"不要调用工具，不要输出 Markdown。只输出这一行精确文本：{ESC_MARKER}"
 
 # Same shape as the subagent E2E's long prompt: measured there to run past 300s un-interrupted,
 # so any turn that ends in seconds ended because it was interrupted.
@@ -298,6 +303,100 @@ def check_reusable_after_interrupt(bridge, agent, events: list[dict], summary: d
         summary["issues"].append("ui_did_not_settle_at_idle_after_the_second_turn")
 
 
+def check_esc_sends_the_queued_prompt(bridge, agent, events: list[dict], summary: dict) -> None:
+    """U5/U6: ESC with a queued prompt interrupts *and* re-asks with it.
+
+    This is the CC semantic the old code got wrong: ``abort_current_turn`` only set
+    ``stop_sig``, so a prompt typed during the run vanished with the turn -- the user got
+    neither the interrupted answer nor their new question.
+
+    Measured end to end on a real provider call, because the interesting part is not
+    "the queue drained" but "the model actually answered the queued text in a new turn,
+    after the aborted turn released ``is_running``".
+    """
+    row: dict[str, Any] = {}
+    summary["escSendsQueuedPrompt"] = row
+
+    long_task = bridge.submit(LONG_PROMPT)
+    row["longTaskId"] = long_task
+    if long_task < 0:
+        summary["issues"].append("esc_test_long_submit_refused")
+        return
+    in_flight = wait_for(
+        lambda: provider_request_sent(agent.log_path, PROMPT_PROBE_MARKER), timeout_s=180, interval_s=0.2
+    )
+    row["providerRequestLogged"] = bool(in_flight)
+    if not in_flight:
+        summary["issues"].append("esc_test_provider_request_never_went_out")
+        return
+
+    # Type a prompt during the run: the bridge queues it, exactly as Ink's Enter does.
+    queued_ok = bridge.queue_prompt(ESC_PROMPT)
+    row["queueAccepted"] = bool(queued_ok)
+    if not queued_ok:
+        summary["issues"].append("esc_test_queue_prompt_was_rejected")
+        return
+    row["queueDepthBeforeStop"] = len(getattr(agent, "pending_prompts", []) or [])
+
+    sent_at = time.monotonic()
+    bridge.abort_current_turn()
+    row["statusRightAfterStop"] = statuses(events)[-1] if statuses(events) else None
+
+    # The watcher submits once the aborted turn unwinds. The judgement is the marker
+    # coming back from the model in a *new* turn -- a drained queue alone would pass even
+    # if the text went to a dead slot.
+    #
+    # The taskId must be new AND the event must have arrived after this test started:
+    # an earlier test emits its own `user` event, and matching on text alone latched
+    # onto it (`secondsToNewTurn: 0.0`, taskId 2 while the long task was 3).
+    new_task_seen = wait_for(
+        lambda: [
+            e for e in events
+            if e.get("type") == "user"
+            and ESC_MARKER in str(e.get("text") or "")
+            and int(e.get("taskId") or 0) > long_task
+        ],
+        timeout_s=180,
+        interval_s=0.2,
+    )
+    row["queuedPromptBecameANewTurn"] = bool(new_task_seen)
+    if not new_task_seen:
+        summary["issues"].append("queued_prompt_never_became_a_new_turn_after_esc")
+        return
+    row["secondsToNewTurn"] = round(time.monotonic() - sent_at, 3)
+    new_task = new_task_seen[0].get("taskId")
+    row["newTaskId"] = new_task
+    if new_task == long_task:
+        summary["issues"].append("queued_prompt_reused_the_aborted_task_id")
+
+    row["queueEmptyAfterTake"] = len(getattr(agent, "pending_prompts", []) or []) == 0
+    if not row["queueEmptyAfterTake"]:
+        # A queue that still holds the text would deliver it a second time at the next
+        # fold point.
+        summary["issues"].append("queued_prompt_was_not_drained")
+
+    answered = wait_for(
+        lambda: any(
+            e.get("type") == "assistant_done" and e.get("taskId") == new_task for e in events
+        ),
+        timeout_s=300,
+        interval_s=0.5,
+    )
+    row["newTurnCompleted"] = bool(answered)
+    if not answered:
+        summary["issues"].append("new_turn_after_esc_never_completed")
+        return
+    text = assistant_text(events, new_task)
+    row["modelAnsweredTheQueuedText"] = ESC_MARKER in text
+    if not row["modelAnsweredTheQueuedText"]:
+        # The model could only reproduce this marker by having read the queued text.
+        summary["issues"].append("model_did_not_answer_the_queued_prompt")
+    wait_for(lambda: not getattr(agent, "is_running", False), timeout_s=10, interval_s=0.05)
+    row["finalStatus"] = statuses(events)[-1] if statuses(events) else None
+    if row["finalStatus"] != "idle":
+        summary["issues"].append("esc_flow_did_not_settle_at_idle")
+
+
 def main() -> int:
     summary: dict[str, Any] = {
         "passed": False,
@@ -317,6 +416,7 @@ def main() -> int:
         bridge, agent = build_bridge(events, summary)
         check_ui_interrupt(bridge, agent, events, summary)
         check_reusable_after_interrupt(bridge, agent, events, summary)
+        check_esc_sends_the_queued_prompt(bridge, agent, events, summary)
         summary["eventTypes"] = sorted({str(e.get("type")) for e in events})
         summary["passed"] = not summary["issues"]
         report(summary)

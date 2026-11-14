@@ -2529,7 +2529,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   }, [mouseMode, transcriptScrollOffset, visibleTranscript.scrollOffset])
 
   const inputHint = queuedPrompts.length > 0
-    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc stop`
+    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc sends it now`
     : (state.status === 'running' || state.status === 'stopping')
       ? 'Running · type to queue · Enter queues · PgUp/PgDn · Ctrl+O tools · Esc stop'
       : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'

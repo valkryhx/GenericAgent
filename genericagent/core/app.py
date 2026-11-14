@@ -1121,6 +1121,27 @@ class GenericAgent:
         except Exception:
             pass
 
+    def _drain_carried_prompts(self):
+        """Prompts left over from the previous turn, rendered for this turn's start.
+
+        Returns ``""`` when nothing was queued, which is the normal case. Never raises:
+        a broken queue must not cost the user their turn.
+        """
+        queue = getattr(self, "pending_prompts", None)
+        if queue is None:
+            return ""
+        try:
+            drained = queue.drain()
+        except Exception:
+            return ""
+        if not drained:
+            return ""
+        try:
+            from genericagent.core.pending_input import render_queued_prompts
+            return render_queued_prompts(drained, when="turn_start")
+        except Exception:
+            return ""
+
     def put_task(self, query, source="user", images=None, model_prefix=None):
         """Queue one task.
 
@@ -1960,6 +1981,18 @@ class GenericAgent:
             if reset_cancel:
                 try: reset_cancel()
                 except Exception as e: print(f"[WARN] reset_cancel failed: {e}")
+            # Turn-start fold point. The queue is designed to outlive a turn (see
+            # core/pending_input.py) precisely so a message arriving after the last
+            # in-turn fold point is not lost -- but until this line existed nothing ever
+            # drained it at the next turn, so such a message sat in the queue forever
+            # while the UI promised "will be sent at the next tool boundary".
+            #
+            # Rendered with the turn-start wording, not the mid-turn one: there is no
+            # running turn to fold into any more, and claiming otherwise makes the model
+            # treat the message as a footnote to the request it already finished.
+            carried = self._drain_carried_prompts()
+            if carried:
+                raw_query = raw_query + chr(10) + chr(10) + carried
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             
@@ -2287,6 +2320,14 @@ def _subagent_state(task_dir, task_name, nround, turn_status, process_status, ou
         'turn_status': turn_status,
         'process_status': process_status,
         'updated_at': now_iso(),
+        # A separate liveness clock from ``updated_at``. ``updated_at`` moves on every
+        # state write, including the parent's own reconciliation passes, so it cannot
+        # answer "is the child making progress?" -- only "did anyone touch this file?".
+        # A supervisor that used it as a progress signal saw a stale mirror and killed a
+        # child that was still working (documented in core/app.py's own note about the
+        # "worker stuck 300s" false positive). ``heartbeat_at`` is written by the child
+        # at each turn start, so it advancing means the child is alive and between turns.
+        'heartbeat_at': now_iso(),
         'input_path': os.path.join(task_dir, 'input.txt'),
         'output_path': str(output_path) if output_path else old.get('output_path'),
         'final_output_path': str(final_output_path) if final_output_path else old.get('final_output_path'),
@@ -2901,7 +2942,25 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
             _subagent_event(task_dir, {'type': 'turn_started', 'task_name': task_name, 'round': int(nround) if isinstance(nround, int) else 0})
             _record_startup_phase('turn_started_complete', task_dir)
 
+            def _touch_heartbeat():
+                """Advance the child's liveness clock without rewriting turn status.
+
+                A turn can sit inside one long tool call (a build, a poll loop) for
+                minutes. ``state.json`` only moves at turn boundaries, so a supervisor
+                reading it as a progress signal sees a frozen child and kills work that is
+                actually fine. Called around each tool call: that is the finest-grained
+                moment the child itself can cheaply prove it is still running.
+                """
+                try:
+                    path = os.path.join(task_dir, 'state.json')
+                    state = read_json_or_none(path) or {}
+                    state['heartbeat_at'] = now_iso()
+                    atomic_write_json(path, state)
+                except Exception:
+                    pass
+
             def _transcript_tool_before(tool_name, args, response):
+                _touch_heartbeat()
                 _subagent_transcript_append(
                     task_dir,
                     'tool_call',
@@ -2927,6 +2986,10 @@ def run_task_worker_loop(agent, task_dir, input_text=None, reply_wait_iterations
                         'data': data,
                     },
                 )
+                # The tool finished, so the child is certainly alive and productive;
+                # stamp it so a supervisor watching for progress sees movement even when
+                # this tool produced nothing for output.txt.
+                _touch_heartbeat()
 
             def _transcript_permission(tool_name, args, decision):
                 _subagent_transcript_append(

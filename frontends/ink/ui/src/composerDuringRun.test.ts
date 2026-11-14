@@ -265,6 +265,32 @@ test('Enter while running queues the draft instead of discarding it', async () =
   }
 })
 
+test('the hint tells the user Esc sends a queued prompt immediately', async () => {
+  // CC's Esc is "stop talking and answer this", not "cancel": the queued message is
+  // submitted as the next turn. The bridge now does that, but a hint that only says
+  // "Esc stop" leaves the user believing it discards their message, so they never press
+  // it when they most want to interrupt.
+  const app = mountApp(false)
+  try {
+    await waitUntil(() => app.framesSince(0).length > 0)
+    await app.setRunning()
+    await app.stdin.send('answer this instead')
+    await delay(40)
+    await app.stdin.send('\r')
+    await delay(140)
+
+    const frame = stripAnsi(app.framesSince(0))
+    assert.match(frame, /Esc/i, 'the hint stopped mentioning Esc while a prompt is queued')
+    assert.match(
+      frame,
+      /Esc[^\n]*(?:sends it now|send it now|sends now)/i,
+      'the hint does not say Esc delivers the queued message instead of discarding it',
+    )
+  } finally {
+    app.instance.unmount()
+  }
+})
+
 test('the composer says the input was queued', async () => {
   const app = mountApp(false)
   try {
