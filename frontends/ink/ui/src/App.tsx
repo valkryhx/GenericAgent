@@ -101,14 +101,19 @@ import {
   type ApprovalPanelState,
 } from './approvalPanel.js'
 import {
+  answerFromTextInput,
   answersToPayload,
+  beginTextInput,
   createQuestionPanel,
+  endTextInput,
+  setTextInput,
   currentQuestionAt,
   isReviewPage,
   questionFromRequest,
   questionPanelOnEnter,
   questionPanelOnEscape,
   moveOptionSelection,
+  movePage,
   optionRows,
   questionPanelRows,
   selectOption,
@@ -519,9 +524,13 @@ function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme:
           )
         }
         if (row.kind === 'other') {
+          const typing = panel.editingKey === question.key
+          const typed = panel.textInput[question.key] ?? ''
           return (
             <Text key="other" color={selected ? theme.accent : undefined}>
-              {`${selected ? '> ' : '  '}Other (type your own answer)`}
+              {typing
+                ? `  Other: ${typed}▏`
+                : `${selected ? '> ' : '  '}Other (type your own answer)`}
             </Text>
           )
         }
@@ -2087,6 +2096,52 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // 提问卡片同样阻塞工具调用，所以放在同一优先级层，且在审批之后
     // （审批是安全门禁，不能让它等在提问后面）。
     if (questionPanel) {
+      // 文本输入态：所有可打印字符进 textInput，Enter 接受、Esc 退出。
+      if (questionPanel.editingKey) {
+        const key1 = questionPanel.editingKey
+        if (key.escape) {
+          setQuestionPanel(panel => (panel ? endTextInput(panel) : panel))
+          return
+        }
+        if (key.return) {
+          const answered = answerFromTextInput(questionPanel, key1)
+          if (answered === questionPanel) {
+            // 空白输入：退出输入态，不算作答
+            setQuestionPanel(panel => (panel ? endTextInput(panel) : panel))
+            return
+          }
+          const typed = String(answered.answers[key1] ?? '')
+          if (shouldAutoSubmit(answered, typed)) {
+            bridgeRef.current?.send({
+              type: 'question_response',
+              requestId: answered.requestId,
+              answers: answersToPayload(answered.answers),
+            })
+            setQuestionPanel(null)
+          } else {
+            setQuestionPanel(endTextInput(movePage(answered, 1)))
+          }
+          return
+        }
+        if (key.backspace || key.delete) {
+          setQuestionPanel(panel => {
+            if (!panel) return panel
+            const current = panel.textInput[key1] ?? ''
+            return setTextInput(panel, key1, current.slice(0, -1))
+          })
+          return
+        }
+        const typedChar = input && !input.startsWith('\x1b') ? input : ''
+        if (typedChar) {
+          setQuestionPanel(panel => {
+            if (!panel) return panel
+            const current = panel.textInput[key1] ?? ''
+            return setTextInput(panel, key1, current + typedChar)
+          })
+          return
+        }
+        return
+      }
       if (key.escape) {
         const action = questionPanelOnEscape(questionPanel)
         if (action.type === 'cancel') {
@@ -2120,8 +2175,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         } else if (action.type === 'advance') {
           setQuestionPanel(action.next)
         } else if (action.type === 'editText') {
-          // 光标移到 Other 行；实际文本输入由 composer 承担（下一步）
-          setQuestionPanel(panel => panel ? { ...panel, optionIndex: 0 } : panel)
+          // 进入 Other 文本输入态：把这一题的文本清空重来，
+          // 后续按键由下面的 editingKey 分支接收。
+          setQuestionPanel(panel =>
+            panel ? beginTextInput({ ...panel, textInput: { ...panel.textInput, [action.key]: '' } }, action.key) : panel,
+          )
         } else if (action.type === 'chat') {
           bridgeRef.current?.send({
             type: 'question_response',

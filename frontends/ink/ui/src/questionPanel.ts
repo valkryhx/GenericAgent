@@ -44,6 +44,8 @@ export type QuestionPanelState = {
   answers: Record<string, AnswerValue>
   /** 当前题正在输入的文本（Other 行）。 */
   textInput: Record<string, string>
+  /** 正在往哪一题输入文本；null = 不在输入态。 */
+  editingKey: string | null
   /** 当前题上的选项光标。 */
   optionIndex: number
   hideSubmitTab: boolean
@@ -89,6 +91,7 @@ export function createQuestionPanel(request: QuestionRequest): QuestionPanelStat
     currentIndex: 0,
     answers: {},
     textInput: {},
+    editingKey: null,
     optionIndex: 0,
     hideSubmitTab: hideSubmitTab(request.questions),
   }
@@ -172,6 +175,34 @@ export function setTextInput(
   text: string,
 ): QuestionPanelState {
   return { ...panel, textInput: { ...panel.textInput, [key]: text } }
+}
+
+/** 进入「Other」文本输入态。 */
+export function beginTextInput(
+  panel: QuestionPanelState,
+  key: string,
+): QuestionPanelState {
+  return { ...panel, editingKey: key }
+}
+
+/** 退出文本输入态（Esc / Enter 之后）。 */
+export function endTextInput(panel: QuestionPanelState): QuestionPanelState {
+  return { ...panel, editingKey: null }
+}
+
+/**
+ * 把 Other 行输入的文字转成答案。
+ *
+ * 空白输入不算答 —— 用户点了 Other 又什么都没写，与没答等价
+ * （后端 `finalize` 与这里判定一致）。
+ */
+export function answerFromTextInput(
+  panel: QuestionPanelState,
+  key: string,
+): QuestionPanelState {
+  const text = (panel.textInput[key] ?? '').trim()
+  if (!text) return panel
+  return applyAnswer(panel, key, text)
 }
 
 /**
