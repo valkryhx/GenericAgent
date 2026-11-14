@@ -435,6 +435,15 @@ class GenericAgentBridge:
                 gruntime.set_emit(self.emit)
         except Exception:
             pass
+        # 结构化提问：注入 emit，使 do_ask_user_question 能发 question_request。
+        # 与 permission_runtime 并列而不是复用：载荷是「多题 × 多选 × 可输入」，
+        # 与 accept/deny 的审批面板形状不同（实施方案 §7.1/§7.2）。
+        try:
+            qruntime = getattr(agent, "question_runtime", None)
+            if qruntime is not None and hasattr(qruntime, "set_emit"):
+                qruntime.set_emit(self.emit)
+        except Exception:
+            pass
         # LLM 重试横幅（对齐 CC 的 onRetryStatus）：断链期间底部活动行显示
         # "Retrying in Ns · attempt n/m"，重连成功后自动消失，绝不往对话区写报错。
         self._bind_retry_status(agent)
@@ -1025,6 +1034,37 @@ class GenericAgentBridge:
                 )
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
+
+    def question_response(self, request_id: str, payload: object) -> None:
+        '''UI 对 question_request 的应答：answers 字典。
+
+        准入在 runtime 内部执行（`QuestionRuntime.submit`），所以这里
+        不需要重复校验——前端、SDK、任何走这条通道的客户端都绕不过去。
+        '''
+        try:
+            runtime = getattr(self.agent, "question_runtime", None)
+            if runtime is None:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "question_response_failed",
+                        "message": "question_runtime unavailable",
+                    }
+                )
+                return
+            ok = bool(runtime.submit(str(request_id or ""), payload))
+            if not ok:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "question_response_rejected",
+                        "message": (
+                            f"unknown requestId or rejected answer: {request_id}"
+                        ),
+                    }
+                )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "question_response_failed", "message": str(exc)})
 
     def goal_command(self, text: str) -> None:
         """Run ``/goal`` status/clear immediately, even while a turn is running.
@@ -3614,6 +3654,11 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             )
         elif cmd_type == "goal_command":
             bridge.goal_command(str(command.get("text") or ""))
+        elif cmd_type == "question_response":
+            bridge.question_response(
+                str(command.get("requestId") or command.get("request_id") or ""),
+                command.get("answers") or command.get("payload") or {},
+            )
         elif cmd_type == "goal_proposal_response":
             bridge.goal_proposal_response(
                 str(command.get("requestId") or command.get("request_id") or ""),

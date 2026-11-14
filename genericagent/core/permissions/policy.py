@@ -46,10 +46,16 @@ _STATIC_READ_TOOLS = frozenset(
         "web_fetch",
         "no_tool",
         "ask_user",
+        "ask_user_question",
         "load_skill",
         "propose_goal",
     }
 )
+
+# 「必须问人」的工具集合从 ask_user_question 模块取，避免两处各写一份、
+# 改一处忘一处。这里的 import 放在常量之后，是因为 policy 被 handler 早期
+# 导入，而 ask_user_question 只依赖标准库，不会形成环。
+from genericagent.core.ask_user_question import ALWAYS_ASK_TOOLS as _ALWAYS_ASK_TOOLS
 
 
 def normalize_permission_mode(mode: object) -> str:
@@ -84,6 +90,10 @@ class PermissionModePolicy:
 
     def evaluate(self, tool_name: str, args: dict | None = None) -> PermissionDecision:
         tool_name = str(tool_name or "")
+        # 「必须问人」的工具在任何档位都走 ask，不能被 full_access 放行。
+        # 详见 genericagent/core/ask_user_question/__init__.py 的 ALWAYS_ASK_TOOLS。
+        if tool_name in _ALWAYS_ASK_TOOLS:
+            return self._decision("ask", "always_ask", tool_name)
         if self.mode == FULL_ACCESS:
             return self._decision("allow", "full_access", tool_name)
         kind, class_reason = classify_tool(tool_name)

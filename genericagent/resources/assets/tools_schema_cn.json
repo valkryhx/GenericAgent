@@ -849,6 +849,73 @@
   {
     "type": "function",
     "function": {
+      "name": "ask_user_question",
+      "description": "向用户提一个或多个结构化的选择题，并在本次工具调用内阻塞直到用户作答。仅当被一个真正属于用户的决定卡住时使用：从请求、代码、或合理默认值里解不出来的那种。用户可以逐题作答、在确认页统一提交，也可以不答某题。答案随本次 tool_result 返回，因此可以在同一轮里继续工作。优先用它而不是 `ask_user`——后者会结束回合。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "description": "1-4 个问题，以页签表单形式展示。把最重要的问题放第一。用户逐题作答，最后在确认页统一提交。允许某些题不答。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "description": "该问题的稳定标识，用于把答案映射回来。单次调用内必须唯一，如 \"db\" 或 \"q1\"。"
+                },
+                "question": {
+                  "type": "string",
+                  "description": "问题本身。要能独立成句：用户可能只看得见这个对话框，看不到你之前的消息。"
+                },
+                "header": {
+                  "type": "string",
+                  "description": "页签条上的极短标签（约 12 字符以内，如 \"数据库\"）。缺省显示为 Q1、Q2……"
+                },
+                "multiSelect": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "是否允许多选。除非选项互斥，否则建议设为 true。"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "description": "简短的选项文字（1-5 个词）。"
+                      },
+                      "description": {
+                        "type": "string",
+                        "description": "一行说明这个选项意味着什么。仅当标签本身有歧义时才加。"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ]
+                  },
+                  "description": "2-4 个选项。不要提供 'Other' 选项，界面会自动加。若你推荐某一个，把它放第一位并在末尾加 \"(Recommended)\"。"
+                }
+              },
+              "required": [
+                "key",
+                "question"
+              ]
+            }
+          }
+        },
+        "required": [
+          "questions"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "codex_lesson_update",
       "description": "在阅读脱敏 Codex session packet 后，记录一条由 LLM 分析提出的可复用编码经验。必须由 LLM 基于完整 packet 判断，不要用于简单规则匹配、原始日志、密钥、私有路径或项目特定事实。工具会校验、去重并写入候选库；独立 source_hash 会作为晋升证据。",
       "parameters": {

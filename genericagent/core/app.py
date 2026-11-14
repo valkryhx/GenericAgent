@@ -737,6 +737,17 @@ class GenericAgent:
             self.permission_runtime = None
             permission_status, permission_error = 'error', f'{type(e).__name__}: {e}'
         _record_startup_phase('agent_permission_init_complete', status=permission_status, error=permission_error)
+        # 结构化提问 runtime（ask_user_question）。与 permission_runtime 并列：
+        # 前者弹「多题 × 多选 × 可输入」的卡片，后者弹 accept/deny 审批。
+        # 无 emit 时 ask() 返回 unavailable（不是 deny），见 runtime.py 的模块注释。
+        question_status, question_error = 'ok', None
+        try:
+            from genericagent.core.ask_user_question.runtime import QuestionRuntime
+            self.question_runtime = QuestionRuntime()
+        except Exception as e:
+            self.question_runtime = None
+            question_status, question_error = 'error', f'{type(e).__name__}: {e}'
+        _record_startup_phase('agent_question_init_complete', status=question_status, error=question_error)
         self.log_path = str(paths.TEMP_DIR / f'model_responses/model_responses_{int(time.time()*1e6)%1000000:06d}.txt')
         _record_startup_phase('agent_model_config_started')
         self.load_llm_sessions()
@@ -1092,6 +1103,14 @@ class GenericAgent:
                 gruntime.cancel_all()
             except Exception as e:
                 print(f"[WARN] goal_proposal_runtime.cancel_all failed: {e}")
+        # 挂起的结构化提问也按 cancelled 收尾：否则 /stop 之后卡片仍在等
+        # 一个永远不会来的答案，工具线程永久阻塞。
+        qruntime = getattr(self, 'question_runtime', None)
+        if qruntime is not None:
+            try:
+                qruntime.cancel_all()
+            except Exception as e:
+                print(f"[WARN] question_runtime.cancel_all failed: {e}")
         for target in (getattr(self, 'llmclient', None), getattr(getattr(self, 'llmclient', None), 'backend', None)):
             cancel = getattr(target, 'cancel_current_request', None)
             if cancel:
@@ -2055,6 +2074,9 @@ class GenericAgent:
                 handler.subagent_permission_event_callback = subagent_permission_callback
             # 共享 agent 级 runtime（含 bridge emit）；每轮 handler 都挂上同一实例
             handler.permission_runtime = getattr(self, 'permission_runtime', None)
+            # 结构化提问同理：漏了这一行，do_ask_user_question 永远拿到 None，
+            # 于是永远返回 unavailable —— 而所有单元测试都还是绿的。
+            handler.question_runtime = getattr(self, 'question_runtime', None)
             self.handler = handler  # although new handler, the **full** history is in llmclient, so it is full history!
             self.llmclient.log_path = self.log_path
             transcript_history_before = transcript_delta_anchor(self)
