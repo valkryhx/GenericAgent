@@ -118,6 +118,58 @@ export function spinnerFrameAt(index: number): string {
 const DEFAULT_SPINNER_FRAME_INDEX = 4
 
 /**
+ * 压缩行用的「思考帧」`∴ ∷ ∵ ∷`，CC 常量 `tLr`（m0094:6163）。
+ *
+ * 与普通 spinner 是**两套不同的帧表**，这是有意的：CC 在压缩时换帧表 + 把间隔
+ * 从 100ms 改成 150ms，让「这不是普通运行，是在压缩」一眼可辨。
+ */
+export function compactionFrameCount(): number {
+  return GLYPHS.thinkingFrames.length
+}
+
+/** 取第 `index` 个思考帧，自动取模（负数与越界都归一化）。 */
+export function compactionFrameAt(index: number): string {
+  const frames = GLYPHS.thinkingFrames
+  const n = frames.length
+  const i = ((Math.floor(index) % n) + n) % n
+  return frames[i]!
+}
+
+/** CC 压缩行的文案（`fc`，m2064:7486）。两个阶段都用这一行做前缀。 */
+export const COMPACTING_LABEL = 'Compacting conversation'
+
+/**
+ * 这一行是不是压缩期的活动行。
+ *
+ * 阶段文案里 `Running PreCompact hooks…` 和 `Compacting conversation` 都属于压缩，
+ * 两者都该用思考帧 —— 否则用户在 hook 阶段看到普通 spinner，会以为压缩还没开始。
+ */
+export function isCompactionLabel(label: string | null | undefined): boolean {
+  if (!label) return false
+  return label.startsWith(COMPACTING_LABEL) || label.startsWith('Running PreCompact hooks')
+}
+
+/** 压缩行的帧间隔：CC 用 150ms（普通运行是 100ms）。 */
+export const COMPACTION_FRAME_INTERVAL_MS = 150
+/** 普通运行行的帧间隔。 */
+export const RUNNING_FRAME_INTERVAL_MS = 120
+
+/**
+ * 压缩期那一行；`reducedMotion` 时固定一帧（CC 同样不跳，且不起定时器）。
+ */
+export function compactionStatusSegments(
+  seconds: number,
+  label = 'Compacting conversation',
+  frameIndex?: number,
+  options: { reducedMotion?: boolean } = {},
+): StatusSegment[] {
+  const glyph = options.reducedMotion
+    ? GLYPHS.thinkingFrames[1]!
+    : compactionFrameAt(frameIndex ?? 0)
+  return [{ text: `${glyph} ${label} (${formatElapsed(seconds)})` }]
+}
+
+/**
  * 运行中状态，按片段返回（供渲染层分别着色/加粗）。
  *
  * `frameIndex` 让行首图标跳动（调用方按动画 tick 递增）。不传时固定落在

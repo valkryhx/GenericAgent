@@ -157,7 +157,17 @@ import {
   type InputLinePart,
   type InputViewport,
 } from './promptChrome.js'
-import { completedStatusSegments, pickRunningVerb, retryStatusText, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
+import {
+  COMPACTION_FRAME_INTERVAL_MS,
+  RUNNING_FRAME_INTERVAL_MS,
+  compactionStatusSegments,
+  completedStatusSegments,
+  isCompactionLabel,
+  pickRunningVerb,
+  retryStatusText,
+  runningStatusSegments,
+  shouldShowActivityStatus,
+} from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
 import { agentNoticeLine, agentNoticeText, mergeAgentNotices, type AgentNotice } from './agentNotice.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
@@ -847,9 +857,15 @@ function ActivityView({ seconds, label, tokenUsage, completedTurn, theme, frameI
   // rendered bold while the surrounding prose stays normal weight. Bolding the
   // whole line (the easy version) makes "Worked for 2m 11s • Oct 5 at 13:41" and
   // the counts blur into one another.
+  //
+  // Compaction gets its own frame table (`∴ ∷ ∵ ∷`) rather than the shared spinner,
+  // which is how CC makes "this is a compaction, not an ordinary turn" readable at a
+  // glance instead of something the user has to infer from the label.
   const segments = completedTurn
     ? completedStatusSegments(completedTurn.durationSeconds, new Date(completedTurn.completedAt), tokenUsage)
-    : runningStatusSegments(seconds, label, tokenUsage, frameIndex)
+    : isCompactionLabel(label)
+      ? compactionStatusSegments(seconds, label, frameIndex)
+      : runningStatusSegments(seconds, label, tokenUsage, frameIndex)
   return (
     <Box paddingX={1}>
       <Text color={completedTurn ? theme.muted : theme.warning} wrap="truncate-end">
@@ -1045,6 +1061,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [completedTurnActivity, setCompletedTurnActivity] = useState<CompletedTurnActivity | null>(null)
   const [lastActivitySeconds, setLastActivitySeconds] = useState(0)
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
+  /**
+   * 当前活动行标签的实时快照。
+   *
+   * spinner 定时器建立在 status → running 的那一刻，但压缩阶段会在这之后才把
+   * 标签换成 `Compacting conversation`（先是 `Running PreCompact hooks…`）。
+   * 定时器只跑一次、闭包捕获不到后来的值，所以帧间隔要读 ref。
+   */
+  const activityLabelRef = useRef<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   /**
@@ -1104,6 +1128,10 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   useEffect(() => {
     inputSnapshotRef.current = { value: input, cursorOffset }
   }, [input, cursorOffset])
+
+  useEffect(() => {
+    activityLabelRef.current = state.activityLabel
+  }, [state.activityLabel])
 
   const appendLocalCommandInput = (commandText: string) => {
     dispatch({ type: 'local_command_input', text: commandText })
@@ -1422,9 +1450,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       })
       setNow(Date.now())
       const timer = setInterval(() => setNow(Date.now()), 1000)
-      // 独立的 spinner 动画计时器：120ms 一帧。只在运行时跑，
-      // 空闲时不留一个永远唤不醒的定时器。
-      const spin = setInterval(() => setSpinnerTick(t => (t + 1) % 1_000_000), 120)
+      // 独立的 spinner 动画计时器。只在运行时跑，空闲时不留一个永远唤不醒的定时器。
+      // 压缩行慢一些（150ms，对齐 CC 的 `CGt`）：思考帧是点和三角，跳太快像抖动；
+      // 普通运行行保持 120ms。
+      const spin = setInterval(
+        () => setSpinnerTick(t => (t + 1) % 1_000_000),
+        isCompactionLabel(activityLabelRef.current) ? COMPACTION_FRAME_INTERVAL_MS : RUNNING_FRAME_INTERVAL_MS,
+      )
       return () => {
         clearInterval(timer)
         clearInterval(spin)
@@ -2826,13 +2858,19 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (showWorkflowStatusBar) return [workflowStatusRows.join(' · ')]
     if (compactGoalLine) return [compactGoalLine]
     if (hasActivity) {
+      // Mirrors ActivityView exactly, including the compaction frame table: a frame
+      // model that says a different glyph than the screen is a line the user can see
+      // but copies wrong.
+      const label = state.activityLabel ?? runningLabel
       const segments = completedTurnActivity
         ? completedStatusSegments(
             completedTurnActivity.durationSeconds,
             new Date(completedTurnActivity.completedAt),
             state.tokenUsage,
           )
-        : runningStatusSegments(activitySeconds, state.activityLabel ?? runningLabel, state.tokenUsage, spinnerTick)
+        : isCompactionLabel(label)
+          ? compactionStatusSegments(activitySeconds, label, spinnerTick)
+          : runningStatusSegments(activitySeconds, label, state.tokenUsage, spinnerTick)
       return [segments.map(segment => segment.text).join('')]
     }
     return []
