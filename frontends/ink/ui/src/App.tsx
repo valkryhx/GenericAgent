@@ -245,6 +245,15 @@ type Props = {
 }
 
 const STDIN_RESUME_GAP_MS = 5000
+/**
+ * 宽度变化后，等 ink 的节流尾帧落地再重挂 <Static>。
+ *
+ * ink 把 `log` 包成 `throttle(log, 32, {leading:true, trailing:true})`。resize 时
+ * 那次尾帧捕获的是旧宽度的 output（不含 static 区）。实测过 `ink.clear()` 那一路：
+ * 它能消掉紧随重置的那一帧的擦除，却治不了这个尾帧 —— 只有等它落地再重挂才有效。
+ * 32ms 是节流的最大延迟，留足余量取 120ms（约两帧 60fps，用户不会察觉）。
+ */
+const RESIZE_REMOUNT_DELAY_MS = 120
 
 /**
  * Columns reserved on the left of the transcript content area.
@@ -1431,7 +1440,17 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // clear_after_position + invalidate_viewport）：不猜 reflow 后的几何，直接整屏重置 +
       // 全量重绘 —— 重挂 <Static> 让 ink 重发历史，ink 随后按新宽度写出新帧，屏幕上只留一份。
       resetTranscriptViewport()
-      resetStaticTranscriptOutput()
+      // 重挂 <Static> 必须推到 ink 的节流窗口之后。ink 把 log 包成
+      // `throttle(log, 32, {leading:true, trailing:true})`：resize 那一刻，节流窗口里
+      // 挂着一次**延迟执行的尾帧**，它捕获的 output 是 resize 之前的（只有 live 区）。
+      // 若立刻重挂，尾帧会在之后按旧行数擦一遍、且只重画 live —— 刚重发的历史行被擦掉
+      // 且不再重画。实测那条 user 行就是这么消失的。
+      //
+      // 延迟到 120ms 的重挂会整屏重画一次，把被尾帧擦掉的内容补回来。
+      setTimeout(() => {
+        if (terminalCleanedRef.current) return
+        resetStaticTranscriptOutput()
+      }, RESIZE_REMOUNT_DELAY_MS)
     }
     stdout.on('resize', syncTerminalSize)
     return () => {
