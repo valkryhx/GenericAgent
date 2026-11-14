@@ -44,3 +44,45 @@ test('the question panel block still exists and handles escape', () => {
   assert.match(block, /key\.escape/, '提问卡片必须有 Esc 处理')
   assert.match(block, /key\.return/, '提问卡片必须有 Enter 处理')
 })
+
+// ---- 真机 bug 回归（2026-11-14）----
+//
+// 用户实测：「用 enter 表示选中 那如何 submit 呢 尤其是可以多选 我似乎
+// 没法提交了」「other 那一行我无法输入」。两个都是接线层的问题，
+// 逻辑层单测覆盖不到，所以这里对 App.tsx 做 AST 级检查。
+
+test('the question block handles Space for multiSelect confirmation', () => {
+  const start = appSource.indexOf('if (questionPanel) {')
+  const end = appSource.indexOf('if (permissionPanel) {', start)
+  const block = appSource.slice(start, end)
+  assert.match(block, /questionPanelOnSpace/, '提问卡片必须接空格键（多选勾选）')
+  assert.match(block, /rawInput === ' '/, '空格要用 rawInput 判定')
+})
+
+test('space handling is skipped while typing Other text', () => {
+  // 编辑态的空格必须能打进文本，否则 Other 行永远打不出空格
+  const start = appSource.indexOf('if (questionPanel) {')
+  const end = appSource.indexOf('if (permissionPanel) {', start)
+  const block = appSource.slice(start, end)
+  const spaceIdx = block.indexOf("rawInput === ' '")
+  assert.ok(spaceIdx > 0, '找不到空格分支')
+  const before = block.slice(Math.max(0, spaceIdx - 200), spaceIdx)
+  assert.match(before, /!questionPanel\.editingKey/, '空格分支必须排除编辑态')
+})
+
+test('Other text input reads rawInput, not the composer state', () => {
+  // 根因：编辑态读 `input`（composer 的 useState），而提问卡打开时字符
+  // 进不到 composer，input 恒为空串 → Other 行打字无效。
+  const start = appSource.indexOf('if (questionPanel.editingKey)')
+  assert.ok(start > 0, '找不到编辑态分支')
+  // 编辑态分支到「离开编辑态后的 Esc 处理」为止
+  const end = appSource.indexOf("rawInput === ' '", start)
+  assert.ok(end > start, '找不到编辑态分支的结尾')
+  const block = appSource.slice(start, end)
+  assert.match(block, /textFromRawInput\(\s*rawInput/, 'Other 输入必须取自 rawInput')
+  assert.doesNotMatch(
+    block,
+    /const typedChar = input\b/,
+    '不能用 composer 的 input —— 提问卡打开时它恒为空串',
+  )
+})

@@ -144,7 +144,9 @@ function QuestionCard({ panel }: { panel: QuestionPanelState }) {
       React.createElement(
         Text,
         { key: 'hint', color: theme.muted },
-        `Enter 选择 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`,
+        question.multiSelect
+          ? `Space 勾选 · Enter 下一步 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`
+          : `Space/Enter 选择 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`,
       ),
     )
   }
@@ -185,6 +187,20 @@ function mkPanel(questions: QuestionSpec[]): QuestionPanelState {
   )
 }
 
+const MULTI_ONLY: QuestionSpec[] = [
+  {
+    key: 'traits',
+    question: '黄仁勋最突出的领导特质有哪些？',
+    header: '特质',
+    multiSelect: true,
+    options: [
+      { label: '长期主义' },
+      { label: '极致执行' },
+      { label: '生态构建' },
+    ],
+  },
+]
+
 const scenarios: Array<[string, QuestionPanelState]> = [
   ['A-multi-first-question', mkPanel(MULTI)],
   ['B-multi-answered-first', { ...mkPanel(MULTI), answers: { db: 'postgres' } }],
@@ -193,6 +209,9 @@ const scenarios: Array<[string, QuestionPanelState]> = [
   ['E-single-no-submit-tab', mkPanel(SINGLE)],
   ['F-single-typing-other', beginTextInput(mkPanel(SINGLE), 'db')],
   ['G-multi-typing-other', { ...beginTextInput(mkPanel(MULTI), 'db'), textInput: { db: 'we use oracle' } }],
+  // 用户实测报 bug 的场景：单题多选。旧代码在这里无法提交。
+  ['H-single-multiselect-empty', mkPanel(MULTI_ONLY)],
+  ['I-single-multiselect-chosen', { ...mkPanel(MULTI_ONLY), answers: { traits: ['长期主义', '生态构建'] } }],
 ]
 
 async function capture(name: string, panel: QuestionPanelState, columns: number): Promise<string> {

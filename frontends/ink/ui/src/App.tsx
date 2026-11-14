@@ -113,6 +113,8 @@ import {
   questionFromRequest,
   questionPanelOnEnter,
   questionPanelOnEscape,
+  questionPanelOnSpace,
+  textFromRawInput,
   moveOptionSelection,
   movePage,
   optionRows,
@@ -542,7 +544,9 @@ function QuestionPanelView({ panel, theme, columns }: { panel: QuestionPanelStat
         )
       })}
       <Text color={theme.muted}>
-        {`Enter 选择 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`}
+        {question.multiSelect
+          ? `Space 勾选 · Enter 下一步 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`
+          : `Space/Enter 选择 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`}
       </Text>
     </Box>
   )
@@ -2161,7 +2165,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
           })
           return
         }
-        const typedChar = input && !input.startsWith('\x1b') ? input : ''
+        const typedChar = textFromRawInput(rawInput, key)
         if (typedChar) {
           setQuestionPanel(panel => {
             if (!panel) return panel
@@ -2191,6 +2195,36 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       if (key.downArrow) {
         setQuestionPanel(panel => panel ? { ...panel, optionIndex: moveOptionSelection(panel, 1) } : panel)
+        return
+      }
+      // 空格 = 确认（真机实测后新增，2026-11-14）。
+      // 必须放在 Enter 之前；编辑态的空格要能打进文本，所以只在非编辑态生效。
+      // 用 rawInput 判定：终端不把空格当作特殊键。
+      if (!questionPanel.editingKey && rawInput === ' ') {
+        const action = questionPanelOnSpace(questionPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'question_response',
+            requestId: action.requestId,
+            answers: action.answers,
+          })
+          setQuestionPanel(null)
+        } else if (action.type === 'advance') {
+          setQuestionPanel(action.next)
+        } else if (action.type === 'editText') {
+          setQuestionPanel(panel =>
+            panel ? beginTextInput({ ...panel, textInput: { ...panel.textInput, [action.key]: '' } }, action.key) : panel,
+          )
+        } else if (action.type === 'chat') {
+          bridgeRef.current?.send({
+            type: 'question_response',
+            requestId: questionPanel.requestId,
+            answers: {},
+            cancelled: true,
+            reason: 'chat',
+          })
+          setQuestionPanel(null)
+        }
         return
       }
       if (key.return) {

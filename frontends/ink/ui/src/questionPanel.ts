@@ -390,11 +390,25 @@ export function toggleMultiOption(
 }
 
 /**
- * Enter 的语义随位置变化：
+ * Enter 的语义随位置变化【真机实测后修订 2026-11-14】：
  * - 确认页 → 提交**全部**答案
- * - 选项行 → 选中该项（单选）或切换该项（多选），再决定要不要推进
+ * - 多选页 → **前进到下一页**（不改动已勾选的答案）
+ * - 单选选项 → 选中该项，单题单选则立即提交
  * - Other 行 → 进入文本输入，不算作答
  * - Chat 行 → 走「聊一聊」出口（deny + feedback，不伪造答案）
+ *
+ * ## 为什么多选页的 Enter 是「前进」而不是「toggle」
+ *
+ * 原设计和 CC 一样用 Enter 同时承担「勾选」和「提交」，结果多选页走不出去：
+ * toggle 分支永远 `advance` 到同一页，`movePage` 一次都调不到，用户
+ * 勾完之后没有任何办法提交（真机实测：「我似乎没法提交了」）。
+ *
+ * 现在分成两键，语义互不重叠：
+ * - **空格 = 确认**（勾选 / 取消勾选，单选页等价于选中）
+ * - **Enter = 提交 / 进入下一步**
+ *
+ * 这也消掉了「Enter 到底是勾选还是提交」的歧义 —— CC 靠 `submitButtonText`
+ * 那颗按钮区分，终端里没有鼠标，必须靠键位区分。
  *
  * 「确认页未答全也允许提交」是刻意的（调研 §9.7.5）：
  * 强行拦住会逼出「随便选一个」。
@@ -420,12 +434,13 @@ export function questionPanelOnEnter(panel: QuestionPanelState): QuestionPanelAc
     return { type: 'chat' }
   }
 
+  if (question.multiSelect) {
+    // 多选：Enter 只负责前进。勾选交给空格（questionPanelOnSpace）。
+    // 未勾选任何项也前进 —— 与确认页允许提交同一个理由。
+    return { type: 'advance', next: movePage(panel, 1) }
+  }
+
   if (row?.kind === 'option') {
-    if (question.multiSelect) {
-      // 多选：切换，不推进 —— 用户要显式按 Enter（在最后一项上）才继续
-      const next = toggleMultiOption(panel, panel.currentIndex, row.label)
-      return { type: 'advance', next }
-    }
     const answered = selectOption(panel, panel.currentIndex, row.label)
     // 单题单选 → 选中即提交（hideSubmitTab 蕴含的就是这个场景）
     if (shouldAutoSubmit(answered, row.label)) {
@@ -461,6 +476,64 @@ export function questionPanelOnEnter(panel: QuestionPanelState): QuestionPanelAc
     }
   }
   return { type: 'advance', next }
+}
+
+/**
+ * 空格 = 确认（真机实测后新增 2026-11-14）。
+ *
+ * - 多选选项 → 切换勾选，并把光标下移一格，让「连续空格勾多个」成立
+ * - 单选选项 → 与 Enter 等价（选中；单题单选则立即提交）
+ * - Other / Chat 行 → 与 Enter 等价
+ * - 确认页 → 什么都不做（提交只认 Enter）
+ */
+export function questionPanelOnSpace(panel: QuestionPanelState): QuestionPanelAction {
+  if (isReviewPage(panel.questions, panel.currentIndex)) return { type: 'noop' }
+
+  const question = currentQuestionAt(panel.questions, panel.currentIndex)
+  if (!question) return { type: 'noop' }
+
+  const row = optionRows(panel)[panel.optionIndex]
+  if (!row) return { type: 'noop' }
+
+  if (row.kind === 'other') return { type: 'editText', key: question.key }
+  if (row.kind === 'chat') return { type: 'chat' }
+
+  if (question.multiSelect) {
+    const toggled = toggleMultiOption(panel, panel.currentIndex, row.label)
+    // 光标下移一格（不移到 Other/Chat 之外的下界由 moveOptionSelection 兜住）。
+    // 连续按空格就能勾选多项，不必每勾一次再按 ↓。
+    const total = optionRows(toggled).length
+    const next = Math.min(total - 1, toggled.optionIndex + 1)
+    return { type: 'advance', next: { ...toggled, optionIndex: next } }
+  }
+
+  // 单选：和 Enter 同一条路径
+  return questionPanelOnEnter(panel)
+}
+
+/**
+ * 从一次按键的原始字节里取出可插入的文本。
+ *
+ * ## 为什么不能用 composer 的 `input`
+ *
+ * 真机 bug（2026-11-14）：编辑态里读的是 `input`（composer 的 React state），
+ * 而提问卡打开时字符根本进不到 composer —— `input` 恒为空串，Other 行
+ * 打字永远无效。文本必须取自**本次按键**的 `rawInput`。
+ *
+ * 拒绝三类：控制字符（`\r` `\x7f` `\x1b` 等）、以 ESC 开头的转义序列
+ * （方向键/功能键）、空串。粘贴进来的多字符文本照收。
+ */
+export function textFromRawInput(
+  rawInput: string,
+  key: { return?: boolean; escape?: boolean },
+): string {
+  if (!rawInput) return ''
+  if (key.return || key.escape) return ''
+  if (rawInput.startsWith('\x1b')) return ''
+  // 单个控制字符（含退格 \x7f、Ctrl+X）不是文本
+  if (rawInput.length === 1 && rawInput.charCodeAt(0) < 0x20) return ''
+  if (rawInput.length === 1 && rawInput === '\x7f') return ''
+  return rawInput
 }
 
 /** Esc = 取消，走普通 deny 语义（调研 §9.4），不伪造答案。 */
