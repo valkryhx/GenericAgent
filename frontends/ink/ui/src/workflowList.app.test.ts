@@ -69,11 +69,27 @@ function isLiveChromeFrame(chunk: string): boolean {
     || /─{8,}/.test(chunk)
 }
 
-async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: string) => boolean): Promise<string> {
+/**
+ * 等一个满足谓词的**新**帧。
+ *
+ * `since` 是「从这一刻起的 chunk」游标：按键/事件之前就已经在屏上的帧不能算数。
+ * 少了这个游标会假绿/假红两种错法 —— 本文件真实踩过：
+ * 面板列出所有 phase，`◌ Two` 在**未选中**时就已经在屏上；`j` 按下后谓词
+ * `frame.includes('◌ Two')` 立刻命中按键前的旧帧，随后的
+ * `assert.match(moved, /› ...◌ Two/)` 于 74ms 内失败 —— 一次真正的竞态红。
+ * 反过来，如果断言只检查「某内容存在」，旧帧会让它直接通过，掩盖了切换没发生。
+ *
+ * 传 `since` 的调用方拿到的一定是游标之后写出的帧。
+ */
+async function waitForFrame(
+  stdout: CaptureWriteStream,
+  predicate: (frame: string) => boolean,
+  since = 0,
+): Promise<string> {
   const deadline = Date.now() + 2000
   let lastFrame = ''
   while (Date.now() < deadline) {
-    const frames = stdout.chunks.map(stripAnsi).filter(isLiveChromeFrame)
+    const frames = stdout.chunks.slice(since).map(stripAnsi).filter(isLiveChromeFrame)
     lastFrame = frames.at(-1) ?? ''
     if (predicate(lastFrame)) return lastFrame
     await delay(20)
@@ -260,8 +276,16 @@ test('App keeps workflow panel keys out of the composer', async () => {
     const opened = await waitForFrame(stdout, frame => frame.includes('keys-demo') && frame.includes('◌ One'))
     assert.match(opened, /› (?:├|└)─ ◌ One/)
 
+    // The cursor matters: `◌ Two` is already on screen (unselected) in the frame
+    // above, so a predicate without it would match that old frame and fail here
+    // within one poll -- the real red that prompted this helper change.
+    const markAfterJ = stdout.chunks.length
     stdin.push('j')
-    const moved = await waitForFrame(stdout, frame => frame.includes('◌ Two'))
+    const moved = await waitForFrame(
+      stdout,
+      frame => /› (?:├|└)─ ◌ Two/.test(frame),
+      markAfterJ,
+    )
     assert.match(moved, /› (?:├|└)─ ◌ Two/)
     // The overlay owns 'j': it must not be typed into the composer.
     assert.equal(moved.includes('> j'), false)
