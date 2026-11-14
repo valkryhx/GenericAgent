@@ -1161,6 +1161,17 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome(payload, next_prompt=_answered_prompt(questions, result.answers))
 
         if result.status == CANCELLED:
+            # 「Chat about this」不是「不想答」，是「有话要说」——
+            # 用 CC 的话术让模型先问用户想澄清什么（调研 §9.3）。
+            if getattr(result, "reason", "") == "chat":
+                from genericagent.core.ask_user_question.admit import (
+                    CHAT_ABOUT_THIS_PROMPT,
+                )
+
+                return StepOutcome(
+                    {"status": "cancelled", "answers": {}, "reason": "chat"},
+                    next_prompt=CHAT_ABOUT_THIS_PROMPT,
+                )
             return StepOutcome(
                 {"status": "cancelled", "answers": {}},
                 next_prompt=(
@@ -1169,7 +1180,6 @@ class GenericAgentHandler(BaseHandler):
                     "stated assumption or report what you were blocked on."
                 ),
             )
-
         return StepOutcome(
             {"status": "unavailable", "answers": {}, "message": result.message},
             next_prompt=(

@@ -51,6 +51,9 @@ class QuestionResult:
     answers: dict[str, Any] = field(default_factory=dict)
     annotations: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    # 取消的原因："" = 用户按了 Esc；"chat" = 用户选了「Chat about this」。
+    # 这两者给模型的话术不同（调研 §9.3）：后者是有话要说，不是不想答。
+    reason: str = ""
 
     @property
     def answered(self) -> bool:
@@ -188,14 +191,18 @@ class QuestionRuntime:
         self._emit_event("question_resolved", rid, "submitted")
         return True
 
-    def cancel(self, request_id: str) -> bool:
+    def cancel(self, request_id: str, reason: str = "") -> bool:
         rid = str(request_id or "")
         with self._lock:
             pending = self._pending.pop(rid, None)
         if pending is None or pending.future.done():
             return False
         pending.future.set_result(
-            QuestionResult(status=CANCELLED, message="The question was cancelled.")
+            QuestionResult(
+                status=CANCELLED,
+                message="The question was cancelled.",
+                reason=str(reason or ""),
+            )
         )
         self._emit_event("question_resolved", rid, "cancelled")
         return True

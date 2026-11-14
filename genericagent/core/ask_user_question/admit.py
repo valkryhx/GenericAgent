@@ -191,3 +191,18 @@ def refusal_prompt(reason: str) -> str:
         "questions you asked. Do not retry the same call blindly; either ask again "
         "with the same questions, or proceed under a stated assumption." % reason
     )
+
+
+# 「Chat about this」出口的话术。
+#
+# CC 把「我不想选，我想跟你聊聊这个问题」实现成 `deny + feedback`，
+# 而不是伪造一个答案（调研 §9.3）。这是整套机制里最值得抄的一条：
+# 用户在选项之外有话要说，那是**新的输入**，不是对选项的选择。
+#
+# 措辞照 CC 的 `Nht`（`full:69562`）。
+CHAT_ABOUT_THIS_PROMPT = (
+    "The user wants to clarify these questions.\n"
+    "This means they may have additional information, context or questions for you.\n"
+    "Take their response into account and then reformulate the questions if appropriate.\n"
+    "Start by asking them what they would like to clarify."
+)

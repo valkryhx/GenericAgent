@@ -2128,6 +2128,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
             requestId: questionPanel.requestId,
             answers: {},
             cancelled: true,
+            reason: 'chat',
           })
           setQuestionPanel(null)
         }

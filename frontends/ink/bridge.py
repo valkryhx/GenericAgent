@@ -1035,8 +1035,19 @@ class GenericAgentBridge:
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
 
-    def question_response(self, request_id: str, payload: object) -> None:
+    def question_response(
+        self,
+        request_id: str,
+        payload: object,
+        *,
+        cancelled: bool = False,
+        reason: str = "",
+    ) -> None:
         '''UI 对 question_request 的应答：answers 字典。
+
+        `cancelled=True` 表示这不是一次作答（Esc / 「Chat about this」），
+        走 cancel 而不是 submit —— 空 answers 是合法作答之外的另一种情况：
+        用户一题都没答就取消，不应该被准入当成「非法 payload」拒掉。
 
         准入在 runtime 内部执行（`QuestionRuntime.submit`），所以这里
         不需要重复校验——前端、SDK、任何走这条通道的客户端都绕不过去。
@@ -1052,7 +1063,11 @@ class GenericAgentBridge:
                     }
                 )
                 return
-            ok = bool(runtime.submit(str(request_id or ""), payload))
+            rid = str(request_id or "")
+            if cancelled:
+                ok = bool(runtime.cancel(rid, reason=reason))
+            else:
+                ok = bool(runtime.submit(rid, payload))
             if not ok:
                 self.emit(
                     {
@@ -3658,6 +3673,8 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             bridge.question_response(
                 str(command.get("requestId") or command.get("request_id") or ""),
                 command.get("answers") or command.get("payload") or {},
+                cancelled=bool(command.get("cancelled")),
+                reason=str(command.get("reason") or ""),
             )
         elif cmd_type == "goal_proposal_response":
             bridge.goal_proposal_response(

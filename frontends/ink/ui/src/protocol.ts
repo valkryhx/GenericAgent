@@ -69,6 +69,8 @@ export type BridgeCommand =
       answers: Record<string, string | string[]>
       /** true = 用户取消 / 走「聊一聊」出口，不是作答。 */
       cancelled?: boolean
+      /** 'chat' = 「Chat about this」，给模型的话术不同。 */
+      reason?: string
     }
   | { type: 'goal_proposal_response'; requestId: string; decision: 'approve' | 'reject' }
   | { type: 'skill_status' }
