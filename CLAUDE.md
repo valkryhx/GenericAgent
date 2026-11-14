@@ -132,6 +132,16 @@ value N times showed the behavior itself is stochastic at small delays (48ms →
 sample, and to treat "the metric is non-monotonic in the parameter" as a sign that the
 parameter is not the real variable.
 
+**5b. When verifying that a time window disappeared, the observation window must extend past
+every later suspect.**
+
+Same round, a second and worse version of rule 5: `resize_delay_sweep` reported every delay
+6/6 after a fix, and that was taken as "the ~140ms blank window is gone". It was not — that
+probe watches only `delayMs + 600` and judges the **final** screen, so it cannot see a stale
+frame landing near t+120ms. `probes/resize_blank_window.ts` (continuous sampling of the whole
+timeline) showed 3 of 5 runs losing history at t+73~126ms. Sampling count is not enough; the
+window has to cover everything that could undo the thing you just measured.
+
 **6. When a fix is a timing heuristic, its reasoning belongs in a probe, not only a comment.**
 
 `RESIZE_REMOUNT_DELAY_MS = 120` exists because ink's throttled tail frame replays a
@@ -140,8 +150,21 @@ failing round, a frame containing static output lands and is then overwritten by
 `eraseLines(n)` frame that writes only the live region; in a passing round the stale frame
 lands first and the static remount happens afterwards. Because the outcome depends on that
 **ordering**, not on the delay's magnitude, dropping the delay below 120ms has no reliable
-safe value — shrinking the ~140ms blank window needs a different mechanism (taking over the
-stale write), not a smaller constant. Read those two probes before touching that constant.
+safe value — shrinking the ~140ms blank window needs a different mechanism, not a smaller
+constant.
+
+**6b. How far that mechanism has been tried, and where it stops.**
+
+Making `cursorPark.resetViewport` buffer the reset so it merges with the repaint fixes only
+half the problem (the reset no longer appears alone). The stale throttled frame still lands
+afterwards and erases the history — measured in `probes/resize_write_dump.ts`, and the
+repo-wide experiment is written up in
+`docs/20261115-CC为何没有resize空白窗口.md` §4.5. The wrapper can see that write but cannot
+know which history rows it should have contained without touching `computeLineDiff` /
+`recognizeFrame` contracts, which broke three unrelated tests. **Do not retry "just merge in
+cursorPark" as if it were new** — read §4.5 first; removing the 120ms needs the stale frame's
+source (ink's `throttledLog`) handled too. CC avoids this entirely because `E$o` merges a
+frame's ops into one write, so no two-phase write exists.
 
 For Ink UI bugs (cursor/IME, layout, wrapping, duplicate rendering, streaming), prefer program-driven regression tests over eyeballing screenshots. The core idea: terminal UI bugs reduce to deterministic facts in the emitted stdout bytes or the laid-out row/column geometry, both of which are machine-assertable. Reach for the matching technique — virtual-terminal cursor tracker for relative-cursor arithmetic, byte-level ANSI assertions (match + doesNotMatch + indexOf-slice for ordering) for control sequences, in-memory terminal (`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`) with frame-geometry parsers for layout, pure functions for layout/partition decisions, `string-width` (never `.length`) for CJK/emoji wrapping, and unique-probe counting for duplicate rendering. The full playbook, decision table, and reusable helpers are in `docs/ga_ink_ui_testing_playbook_2026-07-16.md` — read it before adding or debugging Ink UI tests. Its one blind spot: cross-terminal behavior (e.g. IME anchoring to the visible native cursor) can only be caught by real-terminal screenshots, then reduced back into a byte-level contract.
 For real end-to-end self-tests against a real LLM API (a recurring need), follow `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`: three tiers (L1 event-level `tests/real_ink_selftest.py`, L2 UI-layout `frontends/ink/ui/scripts/real_ink_team_panel_e2e.ts`, L3 interactive `./ga`), judged by evidence (event stream / logs / artifacts / real UI frames) + invariant assertions, never by fixed expected output. Note `scripts/real_ink_ui_user_input_e2e.ts` is luna-profile hardwired and fails on the default `deepseek-flash` model (subagent never reaches succeeded) — do not use it to judge the default model.
