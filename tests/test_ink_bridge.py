@@ -4990,6 +4990,114 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         self.assertLess(kinds.index("history_replace"), kinds.index("user"))
         self.assertEqual([("follow up", "user", [])], agent.prompts)
 
+    def test_cancelled_compaction_keeps_its_summary_for_next_time(self):
+        """Esc must not throw the summarizer's work away.
+
+        CC hands the still-running summary to `session.precompute` when the user
+        stops (`cyn`, m0591:104705) and reuses it next time (`hOo`). The user-facing
+        promise is the same: history is untouched now, and the next compaction does
+        not pay for the same summary twice.
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        agent.llmclient.backend.history = [
+            {"role": "user", "content": [{"type": "text", "text": "old context"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+        ]
+        in_compact = threading.Event()
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            in_compact.set()
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            result.summary = "the summary text"
+            result.summarized_messages = 2
+            result.original_messages = 2
+            result.kept_messages = 0
+            result.pre_tokens = 100
+            result.post_tokens = 20
+            result.duration_ms = 5
+            result.direction = "up_to"
+            result.pivot = None
+            result.kept_turns = 1
+            result.working_state = {}
+            result.invoked_skills = []
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            bridge.submit("large prompt")
+            self.assertTrue(in_compact.wait(2), "compaction never started")
+            bridge.abort_current_turn()
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+        cached = getattr(agent, "_precomputed_compact", None)
+        self.assertIsInstance(cached, dict, "the cancelled summary was thrown away")
+        self.assertEqual("the summary text", cached.get("summary"))
+
+    def test_a_cancelled_summary_passes_the_reuse_gate(self):
+        """Storing it is only half: core's own gate must accept it next time.
+
+        The gate is `_take_precomputed` -- it re-checks the instructions and the prefix
+        fingerprint, so a conversation that moved on invalidates the cache. Asserting
+        through that gate (rather than poking the attribute) is what makes this test
+        mean "the next compaction can actually use it".
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        history = [
+            {"role": "user", "content": [{"type": "text", "text": "old context"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+        ]
+        agent.llmclient.backend.history = [copy.deepcopy(item) for item in history]
+        in_compact = threading.Event()
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            in_compact.set()
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            result.summary = "cached summary body"
+            result.summarized_messages = 2
+            result.original_messages = 2
+            result.kept_messages = 0
+            result.direction = "up_to"
+            result.pivot = None
+            result.working_state = {}
+            result.invoked_skills = []
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            bridge.submit("large prompt")
+            self.assertTrue(in_compact.wait(2))
+            bridge.abort_current_turn()
+            release.set()
+            bridge.wait_for_idle(timeout=5)
+
+        from genericagent.core.context import (
+            AUTO_COMPACT_INSTRUCTIONS,
+            _take_precomputed,
+        )
+        taken = _take_precomputed(agent, history, AUTO_COMPACT_INSTRUCTIONS)
+        self.assertIsNotNone(taken, "core's reuse gate rejected the stored summary")
+        self.assertEqual("cached summary body", taken.get("summary"))
+
+        # And the gate still does its job: a changed prefix must invalidate it.
+        changed = [{"role": "user", "content": "different"}] + history[1:]
+        with patch("genericagent.core.context._history_fingerprint", return_value="moved-on"):
+            self.assertIsNone(_take_precomputed(agent, changed, AUTO_COMPACT_INSTRUCTIONS))
+
     def test_compaction_shows_each_phase_it_is_in(self):
         """CC names the phase: PreCompact hooks, then the summary request.
 

@@ -795,6 +795,12 @@ class GenericAgentBridge:
                 # came back fine (``ne.ok && signal.aborted -> ok:!1``). Speculative
                 # summarizers may already have written, so restore explicitly.
                 self._restore_backend_history(history_before)
+                # CC does not throw the finished summary away: `cyn` hands the still
+                # running request to `session.precompute` so the next compaction can
+                # reuse it (`hOo`). Do the same with the result we already have, so an
+                # interrupted compaction is not paid for twice.
+                if getattr(result, "ok", False):
+                    self._stash_cancelled_summary(history_before, result)
                 # A system notice, not an error: the user did this on purpose, so no
                 # error banner. What they need to know is that history is untouched.
                 self.emit({"type": "system", "text": "Compaction cancelled; conversation history is unchanged."})
@@ -859,6 +865,49 @@ class GenericAgentBridge:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
         if backend is not None and hasattr(backend, "history"):
             backend.history = copy.deepcopy(history)
+
+    def _stash_cancelled_summary(self, history_before: Any, result: Any) -> None:
+        """Keep a cancelled compaction's summary for the next attempt.
+
+        Mirrors CC's ``compact_kept_through_stop`` (m0591:104735): the user stopped the
+        compaction, but the summary request had already been paid for. Storing it in the
+        same slot ``precompute_compaction`` uses means ``_take_precomputed`` will offer
+        it next time -- and that gate re-checks the prefix fingerprint, so a
+        conversation that moved on simply invalidates it. Nothing here can make the
+        next compaction apply a stale summary.
+        """
+        summary = str(getattr(result, "summary", "") or "")
+        if not summary:
+            # Without the body there is nothing to reuse; a summary reconstructed from
+            # the message would be a different text than the one that was validated.
+            return
+        try:
+            from genericagent.core.context import (
+                AUTO_COMPACT_INSTRUCTIONS,
+                _PRECOMPUTED_KEY,
+                _history_fingerprint,
+            )
+            covered = int(
+                getattr(result, "summarized_messages", 0)
+                or getattr(result, "original_messages", 0)
+                or 0
+            )
+            history = list(history_before or [])
+            if covered <= 0:
+                covered = len(history)
+            covered = min(covered, len(history))
+            if covered <= 0:
+                return
+            record = {
+                "summary": summary,
+                "coverage_len": covered,
+                "fingerprint": _history_fingerprint(history[:covered]),
+                "instructions": AUTO_COMPACT_INSTRUCTIONS,
+            }
+            setattr(self.agent, _PRECOMPUTED_KEY, record)
+        except Exception:
+            # A cache write must never break the cancel path itself.
+            pass
 
     def _note_compaction_failure(self, message: str) -> None:
         self._auto_compact_failures += 1
