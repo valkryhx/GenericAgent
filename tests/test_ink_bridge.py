@@ -4990,6 +4990,87 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         self.assertLess(kinds.index("history_replace"), kinds.index("user"))
         self.assertEqual([("follow up", "user", [])], agent.prompts)
 
+    def test_compaction_shows_each_phase_it_is_in(self):
+        """CC names the phase: PreCompact hooks, then the summary request.
+
+        One static "Compacting conversation" for the whole thing tells the user
+        nothing about whether it is stuck in a hook or waiting on the model, which
+        is exactly the question someone asks when a turn seems to hang.
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        seen_labels: list[str] = []
+        original_label_setter = bridge.emit
+
+        def capture(event):
+            if event.get("type") == "activity" and event.get("label"):
+                seen_labels.append(str(event["label"]))
+            original_label_setter(event)
+
+        bridge.emit = capture
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted."
+            bridge.submit("large prompt")
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertIn("Running PreCompact hooks…", seen_labels)
+        self.assertIn("Compacting conversation", seen_labels)
+        # The hook phase comes first: it is what actually runs before the request.
+        self.assertLess(
+            seen_labels.index("Running PreCompact hooks…"),
+            seen_labels.index("Compacting conversation"),
+        )
+
+    def test_compaction_completion_says_where_the_old_messages_went(self):
+        """CC tells the user the old messages are saved, and where.
+
+        "Compacted 8 messages" alone leaves the obvious question open: did my history
+        get deleted? Naming the transcript file answers it before it is asked.
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        agent.session_path = str(Path(tempfile.mkdtemp()) / "session.jsonl")
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = True
+            compact.return_value.message = "Compacted 8 messages into summary context."
+            bridge.submit("follow up")
+
+        bridge.wait_for_idle(timeout=5)
+        systems = [str(e.get("text") or "") for e in events if e.get("type") == "system"]
+        self.assertTrue(
+            any("Earlier messages are saved in" in text for text in systems),
+            f"no transcript-pointer notice; system events were {systems}",
+        )
+        self.assertTrue(
+            any(agent.session_path in text for text in systems),
+            f"the notice must name the file; got {systems}",
+        )
+
+    def test_compaction_clears_the_activity_line_when_it_finishes(self):
+        events = []
+        agent, bridge = self._bridge(events)
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = False
+            compact.return_value.message = "failed"
+            bridge.submit("large prompt")
+
+        bridge.wait_for_idle(timeout=5)
+        cleared = [e for e in events if e.get("type") == "activity" and e.get("label") is None]
+        self.assertTrue(cleared, "a failed compaction must not leave the activity line up")
+
     def test_compaction_emits_visible_activity(self):
         events = []
         agent, bridge = self._bridge(events)

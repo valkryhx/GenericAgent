@@ -750,12 +750,24 @@ class GenericAgentBridge:
             if not should_auto_compact_agent(self.agent, pending_text=pending_text):
                 return False, None
             from genericagent.core.context import _run_compact_hook
+            # CC names the phase it is in (``Running PreCompact hooks…`` then
+            # ``Compacting conversation``). One static line for the whole thing leaves
+            # the user unable to tell a slow hook from a slow model, which is exactly
+            # what they wonder when a turn looks stuck. This phase runs here, before
+            # the worker exists, so the label is emitted here.
+            self._emit_compaction_phase("Running PreCompact hooks…")
             pre = _run_compact_hook(self.agent, "PreCompact", {"trigger": "auto", "custom_instructions": ""})
             if getattr(pre, "blocked", False):
+                self._emit_compaction_phase(None)
                 return False, None
         except Exception as exc:
+            self._emit_compaction_phase(None)
             return True, str(exc)
         return True, None
+
+    def _emit_compaction_phase(self, label: str | None) -> None:
+        """Show what the compaction is doing right now (``None`` clears the line)."""
+        self.emit({"type": "activity", "label": label})
 
     def _compact_then_start_turn(self, queued: dict[str, Any] | None = None) -> None:
         """Run the summary request off the command loop, then start the turn.
@@ -766,7 +778,7 @@ class GenericAgentBridge:
         payload = queued or self._pending_turn
         self._pending_turn = None
         self.emit({"type": "status", "status": "running"})
-        self.emit({"type": "activity", "label": "Compacting conversation"})
+        self._emit_compaction_phase("Compacting conversation")
         history_before = copy.deepcopy(self._backend_history())
         start_turn = False
         try:
@@ -801,13 +813,19 @@ class GenericAgentBridge:
             self.emit({"type": "history_replace", "messages": [
                 {"role": "system", "text": "Auto " + result.message},
             ]})
+            # "Compacted N messages" leaves the real question open -- did my history get
+            # deleted? CC answers it by naming where the old messages went, so do that
+            # here too, before the user has to ask.
+            session_path = str(getattr(self.agent, "session_path", "") or "")
+            if session_path:
+                self.emit({"type": "system", "text": f"Earlier messages are saved in {session_path}"})
             start_turn = bool(payload and str(payload.get("text") or ""))
         except Exception as exc:
             self._restore_backend_history(history_before)
             self._note_compaction_failure(str(exc))
             return
         finally:
-            self.emit({"type": "activity", "label": None})
+            self._emit_compaction_phase(None)
             if not start_turn:
                 self.emit({"type": "status", "status": "idle"})
                 self._compaction_thread = None
