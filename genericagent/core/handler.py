@@ -217,6 +217,40 @@ def ask_user(question, candidates=None):
     return {"status": "INTERRUPT", "intent": "HUMAN_INTERVENTION",
         "data": {"question": question, "candidates": candidates or []}}
 
+
+def _answered_prompt(questions, answers):
+    """把用户答案整理成给模型看的一段话。
+
+    不直接丢 JSON（CA 的做法，调研 §5.3）：让模型读到「哪题答了什么」，
+    而不是自己解析结构。未答的题也要说出来 —— 用户可能故意不答，
+    模型不该把它当成「默认选项」。
+    """
+    lines = ["The user answered:"]
+    unanswered = []
+
+    for q in questions or []:
+        key = str(q.get("key") or "")
+        label = str(q.get("question") or key)
+        value = answers.get(key)
+        if value is None or value == "" or value == []:
+            unanswered.append(key)
+            continue
+        if isinstance(value, list):
+            text = ", ".join(str(v) for v in value)
+        else:
+            text = str(value)
+        lines.append("- %s → %s" % (label, text))
+
+    lines.append("")
+    if unanswered:
+        lines.append(
+            "Left unanswered: %s. Treat those as undecided, not as a default choice."
+            % ", ".join(unanswered)
+        )
+    else:
+        lines.append("All questions were answered.")
+    return "\n".join(lines)
+
 from genericagent.web import simphtml
 driver = None
 def first_init_driver():
@@ -1068,7 +1102,94 @@ class GenericAgentHandler(BaseHandler):
         result = ask_user(question, candidates)
         yield f"Waiting for your answer ...\n"
         return StepOutcome(result, next_prompt="", should_exit=True)
-    
+
+    def do_ask_user_question(self, args, response):
+        """结构化提问：在本次工具调用内阻塞，答案随 tool_result 回来。
+
+        与 `do_ask_user` 的区别（实施方案 §0）：**不结束回合**。
+        答案在同一轮里返回，模型不必重新建立上下文。
+
+        三种结局各有话术，不能混为一谈（实施方案 §6）：
+        - `submitted`   用户答了（可能只答了一部分）
+        - `cancelled`   用户取消 / Esc / 收到 /stop
+        - `unavailable` 没有可用的 UI —— 这**不是**「用户拒绝」
+        """
+        from genericagent.core.ask_user_question import validate_questions
+        from genericagent.core.ask_user_question.runtime import (
+            CANCELLED,
+            SUBMITTED,
+            QuestionRuntime,
+        )
+
+        questions = args.get("questions")
+        problem = validate_questions(questions)
+        if problem:
+            yield f"[ask_user_question] rejected: {problem}\n"
+            return StepOutcome(
+                {"status": "error", "error": problem},
+                next_prompt=(
+                    "ask_user_question was not shown to the user because the call was "
+                    "malformed: %s\n"
+                    "Fix the arguments and call it again, or proceed under a stated "
+                    "assumption." % problem
+                ),
+            )
+
+        runtime = getattr(self, "question_runtime", None)
+        if runtime is None:
+            # 没有挂 runtime 的会话（headless / 子 agent）直接给 unavailable，
+            # 不要伪装成「用户拒绝了」。
+            runtime = QuestionRuntime()
+
+        yield "Waiting for your answer ...\n"
+
+        parent = getattr(self, "parent", None)
+
+        def _stop_check() -> bool:
+            return bool(getattr(parent, "stop_sig", False))
+
+        result = runtime.ask(questions, stop_check=_stop_check)
+
+        if result.status == SUBMITTED:
+            payload = {
+                "status": "answered",
+                "answers": result.answers,
+                "questions": questions,
+            }
+            if result.annotations:
+                payload["annotations"] = result.annotations
+            return StepOutcome(payload, next_prompt=_answered_prompt(questions, result.answers))
+
+        if result.status == CANCELLED:
+            # 「Chat about this」不是「不想答」，是「有话要说」——
+            # 用 CC 的话术让模型先问用户想澄清什么（调研 §9.3）。
+            if getattr(result, "reason", "") == "chat":
+                from genericagent.core.ask_user_question.admit import (
+                    CHAT_ABOUT_THIS_PROMPT,
+                )
+
+                return StepOutcome(
+                    {"status": "cancelled", "answers": {}, "reason": "chat"},
+                    next_prompt=CHAT_ABOUT_THIS_PROMPT,
+                )
+            return StepOutcome(
+                {"status": "cancelled", "answers": {}},
+                next_prompt=(
+                    "The user cancelled the question dialog without answering. Do not "
+                    "ask the same question again in this turn; either proceed under a "
+                    "stated assumption or report what you were blocked on."
+                ),
+            )
+        return StepOutcome(
+            {"status": "unavailable", "answers": {}, "message": result.message},
+            next_prompt=(
+                "The question could not be shown to a user (%s). This is not a refusal — "
+                "nobody was asked. Proceed under a stated assumption, and if you truly "
+                "cannot, say what you need from the user in your final message."
+                % (result.message or "no interactive UI")
+            ),
+        )
+
     def do_propose_goal(self, args, response):
         """Model-proposed session goal (Stage F phase 4, CC ProposeGoal).
 
@@ -2836,14 +2957,14 @@ class GenericAgentHandler(BaseHandler):
         _plan = self._in_plan_mode()
 
         if turn % 65 == 0 and (not _plan):
-            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user，不允许继续重试。"
+            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user_question，不允许继续重试。"
         elif turn % 7 == 0:
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
         elif turn % 10 == 0: next_prompt += get_global_memory()
 
         if _plan and turn >= 10 and turn % 5 == 0:
             next_prompt = f"[Plan Hint] 正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
-        if _plan and turn >= 90: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
+        if _plan and turn >= 90: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user_question 汇报进度并确认是否继续。"
 
         injkeyinfo = consume_file(self.parent.task_dir, '_keyinfo')
         injprompt = consume_file(self.parent.task_dir, '_intervene')

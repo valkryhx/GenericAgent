@@ -46,10 +46,16 @@ _STATIC_READ_TOOLS = frozenset(
         "web_fetch",
         "no_tool",
         "ask_user",
+        "ask_user_question",
         "load_skill",
         "propose_goal",
     }
 )
+
+# 「必须问人」的工具集合从 ask_user_question 模块取，避免两处各写一份、
+# 改一处忘一处。这里的 import 放在常量之后，是因为 policy 被 handler 早期
+# 导入，而 ask_user_question 只依赖标准库，不会形成环。
+from genericagent.core.ask_user_question import SELF_UI_TOOLS as _SELF_UI_TOOLS
 
 
 def normalize_permission_mode(mode: object) -> str:
@@ -84,6 +90,17 @@ class PermissionModePolicy:
 
     def evaluate(self, tool_name: str, args: dict | None = None) -> PermissionDecision:
         tool_name = str(tool_name or "")
+        # 「工具自己就是 UI」的工具直接放行，不弹审批卡片。
+        #
+        # 真机实测（2026-11-14）踩过：ask_user_question 若走 ask，用户会先看到
+        # 一张「允许我问你问题吗」的 accept/deny 卡片，点「允许」之后才看到真正
+        # 的问题 —— 双重询问。若点「拒绝」，问题永远不会出现。
+        #
+        # 为什么可以放行：提问不改变任何状态，不需要授权；用户的「回答」本身
+        # 就是对这次交互的许可。只读档也要能问 —— 问问题不是写操作。
+        # 详见 genericagent/core/ask_user_question/__init__.py。
+        if tool_name in _SELF_UI_TOOLS:
+            return self._decision("allow", "self_ui_tool", tool_name)
         if self.mode == FULL_ACCESS:
             return self._decision("allow", "full_access", tool_name)
         kind, class_reason = classify_tool(tool_name)

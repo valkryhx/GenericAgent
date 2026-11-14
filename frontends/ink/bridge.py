@@ -221,6 +221,30 @@ except Exception:  # pragma: no cover - transcript resume falls back to legacy r
     session_transcript = None
 
 
+_QUESTION_PAYLOAD_KEYS = frozenset({"answers", "annotations", "response", "followUp"})
+
+
+def _question_payload(payload: object) -> object:
+    """把 UI 发来的答案规整成 admit 认识的 payload。
+
+    UI 的命令形状是 `{"answers": {"task": "x"}}`（protocol.ts 的
+    question_response），但前端把 `answers` 当独立字段发过来时，
+    bridge 收到的是 `{"task": "x"}` —— 少了外层。
+
+    真机实测（2026-11-14）就是这里出的错：`task` 被 admit 当成
+    「未知顶层键」，整个回答被拒，卡片收起但答案没到 LLM。
+    单元测试没抓到，因为它们是直接调 runtime.submit，绕过了 bridge。
+
+    规则：payload 里已有任何一个 admit 认识的顶层键 → 原样透传；
+    否则当成 bare answers 包一层。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if _QUESTION_PAYLOAD_KEYS & set(payload):
+        return payload
+    return {"answers": payload}
+
+
 class GenericAgentBridge:
     def __init__(
         self,
@@ -433,6 +457,15 @@ class GenericAgentBridge:
             gruntime = getattr(agent, "goal_proposal_runtime", None)
             if gruntime is not None and hasattr(gruntime, "set_emit"):
                 gruntime.set_emit(self.emit)
+        except Exception:
+            pass
+        # 结构化提问：注入 emit，使 do_ask_user_question 能发 question_request。
+        # 与 permission_runtime 并列而不是复用：载荷是「多题 × 多选 × 可输入」，
+        # 与 accept/deny 的审批面板形状不同（实施方案 §7.1/§7.2）。
+        try:
+            qruntime = getattr(agent, "question_runtime", None)
+            if qruntime is not None and hasattr(qruntime, "set_emit"):
+                qruntime.set_emit(self.emit)
         except Exception:
             pass
         # LLM 重试横幅（对齐 CC 的 onRetryStatus）：断链期间底部活动行显示
@@ -1025,6 +1058,52 @@ class GenericAgentBridge:
                 )
         except Exception as exc:
             self.emit({"type": "error", "code": "permission_response_failed", "message": str(exc)})
+
+    def question_response(
+        self,
+        request_id: str,
+        payload: object,
+        *,
+        cancelled: bool = False,
+        reason: str = "",
+    ) -> None:
+        '''UI 对 question_request 的应答：answers 字典。
+
+        `cancelled=True` 表示这不是一次作答（Esc / 「Chat about this」），
+        走 cancel 而不是 submit —— 空 answers 是合法作答之外的另一种情况：
+        用户一题都没答就取消，不应该被准入当成「非法 payload」拒掉。
+
+        准入在 runtime 内部执行（`QuestionRuntime.submit`），所以这里
+        不需要重复校验——前端、SDK、任何走这条通道的客户端都绕不过去。
+        '''
+        try:
+            runtime = getattr(self.agent, "question_runtime", None)
+            if runtime is None:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "question_response_failed",
+                        "message": "question_runtime unavailable",
+                    }
+                )
+                return
+            rid = str(request_id or "")
+            if cancelled:
+                ok = bool(runtime.cancel(rid, reason=reason))
+            else:
+                ok = bool(runtime.submit(rid, _question_payload(payload)))
+            if not ok:
+                self.emit(
+                    {
+                        "type": "error",
+                        "code": "question_response_rejected",
+                        "message": (
+                            f"unknown requestId or rejected answer: {request_id}"
+                        ),
+                    }
+                )
+        except Exception as exc:
+            self.emit({"type": "error", "code": "question_response_failed", "message": str(exc)})
 
     def goal_command(self, text: str) -> None:
         """Run ``/goal`` status/clear immediately, even while a turn is running.
@@ -3614,6 +3693,13 @@ def run_jsonl_loop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> in
             )
         elif cmd_type == "goal_command":
             bridge.goal_command(str(command.get("text") or ""))
+        elif cmd_type == "question_response":
+            bridge.question_response(
+                str(command.get("requestId") or command.get("request_id") or ""),
+                command.get("answers") or command.get("payload") or {},
+                cancelled=bool(command.get("cancelled")),
+                reason=str(command.get("reason") or ""),
+            )
         elif cmd_type == "goal_proposal_response":
             bridge.goal_proposal_response(
                 str(command.get("requestId") or command.get("request_id") or ""),

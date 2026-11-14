@@ -88,6 +88,9 @@ class LoadLlmSessionsYamlTest(unittest.TestCase):
                 "agent_image_gc_complete",
                 "agent_permission_init_started",
                 "agent_permission_init_complete",
+                # question runtime 与 permission runtime 并列创建，两者都可失败，
+                # 所以各自记一个边界（见 genericagent/core/app.py 的 GenericAgent.__init__）。
+                "agent_question_init_complete",
                 "agent_model_config_started",
                 "agent_model_config_complete",
                 "agent_session_init_started",

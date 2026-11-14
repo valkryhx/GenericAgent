@@ -63,6 +63,15 @@ export type BridgeCommand =
   | { type: 'permission_status' }
   | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
   | { type: 'permission_response'; requestId: string; decision: 'accept' | 'deny' }
+  | {
+      type: 'question_response'
+      requestId: string
+      answers: Record<string, string | string[]>
+      /** true = 用户取消 / 走「聊一聊」出口，不是作答。 */
+      cancelled?: boolean
+      /** 'chat' = 「Chat about this」，给模型的话术不同。 */
+      reason?: string
+    }
   | { type: 'goal_proposal_response'; requestId: string; decision: 'approve' | 'reject' }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
@@ -410,6 +419,20 @@ export type AgentSnapshot = {
   errors: Record<string, string>
 }
 
+/** 结构化提问（ask_user_question）的题目规格，与后端 schema 对应。 */
+export type QuestionRequestOption = {
+  label: string
+  description?: string
+}
+
+export type QuestionRequestSpec = {
+  key: string
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options?: QuestionRequestOption[]
+}
+
 export type BridgeEvent =
   | { type: 'ready'; version: number }
   | { type: 'status'; status: 'idle' | 'running' | 'stopping'; taskId?: number }
@@ -445,6 +468,12 @@ export type BridgeEvent =
       mode?: string
     }
   | { type: 'permission_request_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
+  | {
+      type: 'question_request'
+      requestId: string
+      questions: QuestionRequestSpec[]
+    }
+  | { type: 'question_resolved'; requestId: string; outcome: 'submitted' | 'cancelled' | string }
   | { type: 'goal_proposal_request'; requestId: string; condition: string }
   | { type: 'goal_proposal_settled'; requestId: string; outcome: 'resolved' | 'cancelled' | string }
   | {
