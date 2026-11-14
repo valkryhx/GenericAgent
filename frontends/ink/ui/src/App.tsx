@@ -242,6 +242,13 @@ type Props = {
   bridgeScript: string
   startBridgeClient?: typeof startBridge
   cursorPark?: CursorParkController
+  /**
+   * 宽度变化后等待 ink 节流尾帧落地的时长（见 `RESIZE_REMOUNT_DELAY_MS`）。
+   *
+   * 做成注入点有两个用途：探针可以扫这个值找出安全下限（`probes/resize_delay_sweep.ts`），
+   * 测试可以显式钉住它而不是隐式依赖一个模块级常量。默认值仍是 120ms。
+   */
+  resizeRemountDelayMs?: number
 }
 
 const STDIN_RESUME_GAP_MS = 5000
@@ -987,7 +994,13 @@ export function helpText(): string {
   ].join('\n')
 }
 
-export function App({ python, bridgeScript, startBridgeClient = startBridge, cursorPark }: Props) {
+export function App({
+  python,
+  bridgeScript,
+  startBridgeClient = startBridge,
+  cursorPark,
+  resizeRemountDelayMs = RESIZE_REMOUNT_DELAY_MS,
+}: Props) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { setRawMode, isRawModeSupported, internal_eventEmitter } = useStdin()
@@ -1446,11 +1459,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // 若立刻重挂，尾帧会在之后按旧行数擦一遍、且只重画 live —— 刚重发的历史行被擦掉
       // 且不再重画。实测那条 user 行就是这么消失的。
       //
-      // 延迟到 120ms 的重挂会整屏重画一次，把被尾帧擦掉的内容补回来。
+      // 延迟到 `resizeRemountDelayMs`（默认 120ms）的重挂会整屏重画一次，把被尾帧擦掉的内容补回来。
+      // 这段延迟就是「历史暂时不可见」的窗口长度，实测约 140ms；下限由探针
+      // `probes/resize_delay_sweep.ts` 扫出来，改这个值前先跑它。
       setTimeout(() => {
         if (terminalCleanedRef.current) return
         resetStaticTranscriptOutput()
-      }, RESIZE_REMOUNT_DELAY_MS)
+      }, resizeRemountDelayMs)
     }
     stdout.on('resize', syncTerminalSize)
     return () => {

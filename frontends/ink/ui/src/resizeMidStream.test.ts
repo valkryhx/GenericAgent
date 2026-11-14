@@ -91,6 +91,11 @@ test('narrowing mid-stream keeps the open turn header, at every point in time', 
     bridgeScript: 'bridge.py',
     startBridgeClient,
     cursorPark,
+    // Pin the default explicitly. The safe window is not a pure function of this value
+    // (probes/resize_delay_sweep.ts shows pass rate is non-monotonic: 48ms < 64ms < 120ms),
+    // so a test that silently inherits the constant cannot tell "someone tuned it" from
+    // "the ordering race changed". Naming it here makes a change deliberate.
+    resizeRemountDelayMs: 120,
   }), {
     ...inkRenderOptions,
     stdout: cursorPark.stdout,

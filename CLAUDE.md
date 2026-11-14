@@ -78,6 +78,71 @@ Python tests use the standard library `unittest` and live under `tests/` as `tes
 
 Ink UI tests live beside the TypeScript sources as `frontends/ink/ui/src/*.test.ts` and run with Node's test runner through `tsx`.
 
+### Hard rules (do not relearn these the hard way)
+
+**1. Never delete a diagnostic script. Move it into `probes/`.**
+
+When you write a throwaway file to find a root cause (`.test.ts` with `console.log`, a temp
+script, etc.), the root cause is found **once** — deleting the script throws away the only
+reproducible evidence for it. Move it instead:
+
+| What | Where |
+| --- | --- |
+| Ink UI / TypeScript | `frontends/ink/ui/probes/` |
+| PTY / screen capture / pyte replay (Python) | `tests/probes/python/` |
+| Probe output (logs, raw bytes) | `tests/probes/captures/` (gitignored) |
+
+Strip the `node:test` wrapper so it runs as `npx tsx probes/xxx.ts`. Put four things in the
+header comment: what it measures, the root cause (`file:line`), why it is deterministic, and
+**why it must be kept**. See `docs/20261115-诊断文件与诊断经验留存.md` and
+`frontends/ink/ui/probes/ready_race.ts` for the model.
+
+**2. A probe that only reproduces by luck is not evidence.**
+
+Measuring the real timing and hoping to catch a race produces `failures=0` runs that prove
+nothing — a green run cannot distinguish "fixed" from "not triggered". Build the failing
+condition explicitly and include a control group (e.g. `stale-order` reproduces / 4,
+`correct-order` stays clean / 4), and have the script print its own verdict (`✔` / `✖`).
+
+**3. Wait primitives must throw on timeout.**
+
+In tests, a `waitUntil` / `waitForFrame` that silently returns on timeout is a false-green
+channel: the caller "succeeds" without the condition ever holding, and the failure surfaces
+at a distant assertion. Worse, a `waitForFrame` that returns the last (often empty) frame
+makes `assert.doesNotMatch('', /x/)` pass unconditionally. Always throw with the thing that
+was awaited: `throw new Error(\`timed out after ${ms}ms waiting for: ${what}\`)`. Set the
+timeout as a "is it actually stuck" bound (15s under a 90-file parallel run), not a latency
+budget.
+
+**4. In Ink test harnesses, wait for `ready` before emitting turn events.**
+
+`applyBridgeEvent` resets `status` to `idle` (and clears `activityLabel`, `tokenUsage`) on
+`ready` (`src/state.ts`). Harnesses commonly schedule `ready` on a timer while the test emits
+`running` as soon as `onEvent` is captured — the late `ready` then wipes the state and the
+assertion fails far from the cause. Set a `readyEmitted` flag **after** the emit and await it
+before emitting `running`. Probe: `frontends/ink/ui/probes/ready_race.ts`.
+
+**5. Before trusting a probe's output, check it is stable across repeats.**
+
+A probe that samples a **non-deterministic** behavior once produces confident garbage. Real
+case: `probes/resize_delay_sweep.ts` first ran each delay value once and reported
+`32/48/80/120` safe; a second run reported `0/16/48/120` safe — no overlap. Re-running each
+value N times showed the behavior itself is stochastic at small delays (48ms → 7/10, 64ms →
+4/10, 120ms → 12/12). The fix is to report a **pass rate over N rounds**, never a single
+sample, and to treat "the metric is non-monotonic in the parameter" as a sign that the
+parameter is not the real variable.
+
+**6. When a fix is a timing heuristic, its reasoning belongs in a probe, not only a comment.**
+
+`RESIZE_REMOUNT_DELAY_MS = 120` exists because ink's throttled tail frame replays a
+pre-resize output. `probes/resize_write_timeline.ts` captures the exact mechanism: in a
+failing round, a frame containing static output lands and is then overwritten by an
+`eraseLines(n)` frame that writes only the live region; in a passing round the stale frame
+lands first and the static remount happens afterwards. Because the outcome depends on that
+**ordering**, not on the delay's magnitude, dropping the delay below 120ms has no reliable
+safe value — shrinking the ~140ms blank window needs a different mechanism (taking over the
+stale write), not a smaller constant. Read those two probes before touching that constant.
+
 For Ink UI bugs (cursor/IME, layout, wrapping, duplicate rendering, streaming), prefer program-driven regression tests over eyeballing screenshots. The core idea: terminal UI bugs reduce to deterministic facts in the emitted stdout bytes or the laid-out row/column geometry, both of which are machine-assertable. Reach for the matching technique — virtual-terminal cursor tracker for relative-cursor arithmetic, byte-level ANSI assertions (match + doesNotMatch + indexOf-slice for ordering) for control sequences, in-memory terminal (`CaptureWriteStream`/`FakeReadStream` + `render(<App/>, {debug:true})`) with frame-geometry parsers for layout, pure functions for layout/partition decisions, `string-width` (never `.length`) for CJK/emoji wrapping, and unique-probe counting for duplicate rendering. The full playbook, decision table, and reusable helpers are in `docs/ga_ink_ui_testing_playbook_2026-07-16.md` — read it before adding or debugging Ink UI tests. Its one blind spot: cross-terminal behavior (e.g. IME anchoring to the visible native cursor) can only be caught by real-terminal screenshots, then reduced back into a byte-level contract.
 For real end-to-end self-tests against a real LLM API (a recurring need), follow `docs/20261015-GA-ink-真实LLM-e2e-自测SOP.md`: three tiers (L1 event-level `tests/real_ink_selftest.py`, L2 UI-layout `frontends/ink/ui/scripts/real_ink_team_panel_e2e.ts`, L3 interactive `./ga`), judged by evidence (event stream / logs / artifacts / real UI frames) + invariant assertions, never by fixed expected output. Note `scripts/real_ink_ui_user_input_e2e.ts` is luna-profile hardwired and fails on the default `deepseek-flash` model (subagent never reaches succeeded) — do not use it to judge the default model.
 
