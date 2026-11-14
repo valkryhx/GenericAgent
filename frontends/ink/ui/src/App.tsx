@@ -101,6 +101,24 @@ import {
   type ApprovalPanelState,
 } from './approvalPanel.js'
 import {
+  answersToPayload,
+  createQuestionPanel,
+  currentQuestionAt,
+  isReviewPage,
+  questionFromRequest,
+  questionPanelOnEnter,
+  questionPanelOnEscape,
+  moveOptionSelection,
+  optionRows,
+  questionPanelRows,
+  selectOption,
+  shouldAutoSubmit,
+  toggleMultiOption,
+  unansweredKeys,
+  type QuestionPanelState,
+  type QuestionSpec,
+} from './questionPanel.js'
+import {
   GOAL_PROPOSAL_OPTIONS,
   enqueueGoalProposal,
   goalProposalFromEvent,
@@ -452,6 +470,105 @@ function PermissionPanelView({ panel, theme }: { panel: PermissionPanelState; th
       )}
     </Box>
   )
+}
+
+function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme: InkTheme }) {
+  const review = isReviewPage(panel.questions, panel.currentIndex)
+  const question = currentQuestionAt(panel.questions, panel.currentIndex)
+  const rows = optionRows(panel)
+
+  if (review) {
+    const missing = unansweredKeys(panel.questions, panel.answers)
+    return (
+      <Box flexDirection="column" paddingX={1} flexShrink={0}>
+        <QuestionTabBar panel={panel} theme={theme} />
+        <Text bold color={theme.accent}>Review your answers</Text>
+        {missing.length > 0 ? (
+          <Text color={theme.warning}>You have not answered all questions</Text>
+        ) : null}
+        {panel.questions.map(q => {
+          const value = panel.answers[q.key]
+          if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) {
+            return null
+          }
+          const text = Array.isArray(value) ? value.join(', ') : value
+          return <Text key={q.key} wrap="truncate-end">{`  ${q.question} → ${text}`}</Text>
+        })}
+        <Text color={theme.muted}>Ready to submit your answers?</Text>
+        <Text color={theme.muted}>Enter 提交 · Esc 取消</Text>
+      </Box>
+    )
+  }
+
+  if (!question) return null
+
+  return (
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <QuestionTabBar panel={panel} theme={theme} />
+      <Text bold color={theme.accent}>{question.question}</Text>
+      {rows.map((row, index) => {
+        const selected = index === panel.optionIndex
+        if (row.kind === 'option') {
+          const marker = question.multiSelect
+            ? (isChosen(panel, question, row.label) ? '[x]' : '[ ]')
+            : (isChosen(panel, question, row.label) ? '(o)' : '( )')
+          return (
+            <Text key={`o-${row.label}`} color={selected ? theme.accent : undefined} wrap="truncate-end">
+              {`${selected ? '> ' : '  '}${marker} ${row.label}`}
+            </Text>
+          )
+        }
+        if (row.kind === 'other') {
+          return (
+            <Text key="other" color={selected ? theme.accent : undefined}>
+              {`${selected ? '> ' : '  '}Other (type your own answer)`}
+            </Text>
+          )
+        }
+        return (
+          <Text key="chat" color={selected ? theme.accent : undefined}>
+            {`${selected ? '> ' : '  '}Chat about this`}
+          </Text>
+        )
+      })}
+      <Text color={theme.muted}>
+        {`Enter 选择 · Up/Down 移动 · Esc 取消 · 第 ${panel.currentIndex + 1}/${panel.questions.length} 题`}
+      </Text>
+    </Box>
+  )
+}
+
+function QuestionTabBar({ panel, theme }: { panel: QuestionPanelState; theme: InkTheme }) {
+  return (
+    <Text color={theme.muted} wrap="truncate-end">
+      {panel.questions
+        .map((q, index) => {
+          const done = isChosenAny(panel, q)
+          const label = q.header || `Q${index + 1}`
+          const mark = done ? '[x]' : '[ ]'
+          const here = index === panel.currentIndex
+          return `${here ? '>' : ' '}${mark}${label}`
+        })
+        .join(' ')}
+      {panel.hideSubmitTab ? '' : ` ${panel.currentIndex === panel.questions.length ? '>' : ' '}[Submit]`}
+    </Text>
+  )
+}
+
+function isChosen(
+  panel: QuestionPanelState,
+  question: QuestionSpec,
+  label: string,
+): boolean {
+  const value = panel.answers[question.key]
+  if (Array.isArray(value)) return value.includes(label)
+  return value === label
+}
+
+function isChosenAny(panel: QuestionPanelState, question: QuestionSpec): boolean {
+  const value = panel.answers[question.key]
+  if (Array.isArray(value)) return value.some(v => v !== '')
+  return value !== undefined && value !== ''
 }
 
 function ApprovalPanelView({ panel, theme }: { panel: ApprovalPanelState; theme: InkTheme }) {
@@ -851,6 +968,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [modelPanel, setModelPanel] = useState<ModelPanelState | null>(null)
   const [permissionPanel, setPermissionPanel] = useState<PermissionPanelState | null>(null)
   const [approvalPanel, setApprovalPanel] = useState<ApprovalPanelState | null>(null)
+  const [questionPanel, setQuestionPanel] = useState<QuestionPanelState | null>(null)
   const [goalProposalPanel, setGoalProposalPanel] = useState<GoalProposalPanelState | null>(null)
   const [themePanelSelected, setThemePanelSelected] = useState<number | null>(null)
   const [themeName, setThemeName] = useState<InkThemeName>('default')
@@ -1393,6 +1511,18 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
       if (event.type === 'permission_request_settled') {
         setApprovalPanel(panel => approvalPanelOnSettled(panel, event.requestId))
+        return
+      }
+      if (event.type === 'question_request') {
+        // 提问卡片优先：它也会阻塞工具调用，等于安全关键路径
+        setPermissionPanel(null)
+        permissionPanelOpenRef.current = false
+        permissionPanelPendingRef.current = false
+        setQuestionPanel(createQuestionPanel(questionFromRequest(event)))
+        return
+      }
+      if (event.type === 'question_resolved') {
+        setQuestionPanel(panel => (panel && panel.requestId === event.requestId ? null : panel))
         return
       }
       if (event.type === 'goal_proposal_request') {
@@ -1954,6 +2084,56 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       }
     }
     // 工具审批 overlay 优先于切档面板（安全关键路径抢焦点）
+    // 提问卡片同样阻塞工具调用，所以放在同一优先级层，且在审批之后
+    // （审批是安全门禁，不能让它等在提问后面）。
+    if (questionPanel) {
+      if (key.escape) {
+        const action = questionPanelOnEscape(questionPanel)
+        if (action.type === 'cancel') {
+          bridgeRef.current?.send({
+            type: 'question_response',
+            requestId: action.requestId,
+            answers: {},
+            cancelled: true,
+          })
+          setQuestionPanel(null)
+        }
+        return
+      }
+      if (key.upArrow) {
+        setQuestionPanel(panel => panel ? { ...panel, optionIndex: moveOptionSelection(panel, -1) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        setQuestionPanel(panel => panel ? { ...panel, optionIndex: moveOptionSelection(panel, 1) } : panel)
+        return
+      }
+      if (key.return) {
+        const action = questionPanelOnEnter(questionPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'question_response',
+            requestId: action.requestId,
+            answers: action.answers,
+          })
+          setQuestionPanel(null)
+        } else if (action.type === 'advance') {
+          setQuestionPanel(action.next)
+        } else if (action.type === 'editText') {
+          // 光标移到 Other 行；实际文本输入由 composer 承担（下一步）
+          setQuestionPanel(panel => panel ? { ...panel, optionIndex: 0 } : panel)
+        } else if (action.type === 'chat') {
+          bridgeRef.current?.send({
+            type: 'question_response',
+            requestId: questionPanel.requestId,
+            answers: {},
+            cancelled: true,
+          })
+          setQuestionPanel(null)
+        }
+        return
+      }
+    }
     if (approvalPanel) {
       if (key.escape) {
         const action = approvalPanelOnEscape(approvalPanel)
@@ -2183,7 +2363,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const statusColor = state.status === 'running' ? 'yellow' : state.status === 'idle' ? 'green' : 'gray'
   const columns = terminalSize.columns
   const canvasColumns = terminalCanvasColumns(columns)
-  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || goalProposalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
+  const activePanel = mcpPanel || modelPanel || permissionPanel || approvalPanel || questionPanel || goalProposalPanel || themePanelSelected !== null || selector || footerPanel || workflowPanel || teamPanel || hooksPanel
   const mcpStartupRows = mcpStartupStatus ? mcpStartupStatusRows(mcpStartupStatus) : []
   const showMcpStartupStatus = mcpStartupRows.length > 0 && !activePanel && slashItems.length === 0
   // Reserve the MCP banner row from the very first frame, even before any status
@@ -2247,6 +2427,8 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     ? goalProposalRows(goalProposalPanel)
     : approvalPanel
     ? approvalPanelRows(approvalPanel)
+    : questionPanel
+    ? questionPanelRows(questionPanel)
     : modelPanel
     ? modelPanelRows(modelPanel)
     : permissionPanel
@@ -2566,6 +2748,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (section === 'panel') {
       if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />
       if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
+      if (questionPanel) return <QuestionPanelView key={section} panel={questionPanel} theme={theme} />
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} maxServerRows={mcpServerRowCapacity} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
       if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />

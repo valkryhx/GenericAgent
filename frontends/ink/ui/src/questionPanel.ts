@@ -44,6 +44,8 @@ export type QuestionPanelState = {
   answers: Record<string, AnswerValue>
   /** 当前题正在输入的文本（Other 行）。 */
   textInput: Record<string, string>
+  /** 当前题上的选项光标。 */
+  optionIndex: number
   hideSubmitTab: boolean
 }
 
@@ -87,6 +89,7 @@ export function createQuestionPanel(request: QuestionRequest): QuestionPanelStat
     currentIndex: 0,
     answers: {},
     textInput: {},
+    optionIndex: 0,
     hideSubmitTab: hideSubmitTab(request.questions),
   }
 }
@@ -112,7 +115,40 @@ export function movePage(panel: QuestionPanelState, delta: number): QuestionPane
   const last = lastPageIndex(panel.questions, panel.hideSubmitTab)
   const next = Math.max(0, Math.min(last, panel.currentIndex + delta))
   if (next === panel.currentIndex) return panel
-  return { ...panel, currentIndex: next }
+  return { ...panel, currentIndex: next, optionIndex: 0 }
+}
+
+// ---- 选项行：「Other」与「Chat about this」都是 UI 造的，不是模型给的 ----
+//
+// 提示词明确要求模型不要给 Other（调研 §9.4 / §11.7），因为它是 UI 无条件
+// 提供的。Chat 行同理：它把「我不想选，我想跟你聊」建模成一条正式出口，
+// 而不是让用户被迫二选一（调研 §9.3）。
+
+export type OptionRow =
+  | { kind: 'option'; label: string; description?: string }
+  | { kind: 'other' }
+  | { kind: 'chat' }
+
+export function optionRows(panel: QuestionPanelState): OptionRow[] {
+  if (isReviewPage(panel.questions, panel.currentIndex)) return []
+  const question = currentQuestionAt(panel.questions, panel.currentIndex)
+  if (!question) return []
+
+  const rows: OptionRow[] = (question.options ?? []).map(o => ({
+    kind: 'option' as const,
+    label: o.label,
+    description: o.description,
+  }))
+  rows.push({ kind: 'other' })
+  // 单题时没有「聊一聊」的必要：没有别的问题可聊，答案就在眼前。
+  if (panel.questions.length > 1) rows.push({ kind: 'chat' })
+  return rows
+}
+
+export function moveOptionSelection(panel: QuestionPanelState, delta: number): number {
+  const total = optionRows(panel).length
+  if (total === 0) return 0
+  return Math.max(0, Math.min(total - 1, panel.optionIndex + delta))
 }
 
 /**
@@ -191,4 +227,137 @@ export function shouldAutoSubmit(
 ): boolean {
   if (!panel.hideSubmitTab) return false
   return !Array.isArray(value)
+}
+
+// ---- 键盘动作（纯函数，便于单测；App.tsx 只负责发消息） ----
+
+export type QuestionPanelAction =
+  | { type: 'advance'; next: QuestionPanelState }
+  | { type: 'respond'; requestId: string; answers: Record<string, AnswerValue> }
+  | { type: 'cancel'; requestId: string }
+  | { type: 'editText'; key: string }
+  | { type: 'chat' }
+  | { type: 'noop' }
+
+/** 单选某题：记答案，停在当前页。确认页上不做任何事。 */
+export function selectOption(
+  panel: QuestionPanelState,
+  questionIndex: number,
+  label: string,
+): QuestionPanelState {
+  if (isReviewPage(panel.questions, panel.currentIndex)) return panel
+  const question = panel.questions[questionIndex]
+  if (!question) return panel
+  return applyAnswer(panel, question.key, label)
+}
+
+/**
+ * 多选某题：把 label 加进 / 移出数组。
+ *
+ * 与单选的差别不只是「数组」：多选**不会**因为选了一项就推进，
+ * 用户需要显式按 Enter 才翻页（调研 §9.7.3）。
+ */
+export function toggleMultiOption(
+  panel: QuestionPanelState,
+  questionIndex: number,
+  label: string,
+): QuestionPanelState {
+  if (isReviewPage(panel.questions, panel.currentIndex)) return panel
+  const question = panel.questions[questionIndex]
+  if (!question) return panel
+  const current = panel.answers[question.key]
+  const list = Array.isArray(current) ? current : []
+  const next = list.includes(label) ? list.filter(v => v !== label) : [...list, label]
+  return applyAnswer(panel, question.key, next)
+}
+
+/**
+ * Enter 的语义随位置变化：
+ * - 确认页 → 提交**全部**答案
+ * - 选项行 → 选中该项（单选）或切换该项（多选），再决定要不要推进
+ * - Other 行 → 进入文本输入，不算作答
+ * - Chat 行 → 走「聊一聊」出口（deny + feedback，不伪造答案）
+ *
+ * 「确认页未答全也允许提交」是刻意的（调研 §9.7.5）：
+ * 强行拦住会逼出「随便选一个」。
+ */
+export function questionPanelOnEnter(panel: QuestionPanelState): QuestionPanelAction {
+  if (isReviewPage(panel.questions, panel.currentIndex)) {
+    return {
+      type: 'respond',
+      requestId: panel.requestId,
+      answers: answersToPayload(panel.answers),
+    }
+  }
+
+  const question = currentQuestionAt(panel.questions, panel.currentIndex)
+  if (!question) return { type: 'noop' }
+
+  const row = optionRows(panel)[panel.optionIndex]
+
+  if (row?.kind === 'other') {
+    return { type: 'editText', key: question.key }
+  }
+  if (row?.kind === 'chat') {
+    return { type: 'chat' }
+  }
+
+  if (row?.kind === 'option') {
+    if (question.multiSelect) {
+      // 多选：切换，不推进 —— 用户要显式按 Enter（在最后一项上）才继续
+      const next = toggleMultiOption(panel, panel.currentIndex, row.label)
+      return { type: 'advance', next }
+    }
+    const answered = selectOption(panel, panel.currentIndex, row.label)
+    // 单题单选 → 选中即提交（hideSubmitTab 蕴含的就是这个场景）
+    if (shouldAutoSubmit(answered, row.label)) {
+      return {
+        type: 'respond',
+        requestId: answered.requestId,
+        answers: answersToPayload(answered.answers),
+      }
+    }
+    return { type: 'advance', next: movePage(answered, 1) }
+  }
+
+  // 光标停在已输入的 Other 文本上：把它当成答案
+  const typed = panel.textInput[question.key]
+  if (typed) {
+    const answered = applyAnswer(panel, question.key, typed)
+    if (shouldAutoSubmit(answered, typed)) {
+      return {
+        type: 'respond',
+        requestId: answered.requestId,
+        answers: answersToPayload(answered.answers),
+      }
+    }
+    return { type: 'advance', next: movePage(answered, 1) }
+  }
+
+  const next = movePage(panel, 1)
+  if (next === panel) {
+    return {
+      type: 'respond',
+      requestId: panel.requestId,
+      answers: answersToPayload(panel.answers),
+    }
+  }
+  return { type: 'advance', next }
+}
+
+/** Esc = 取消，走普通 deny 语义（调研 §9.4），不伪造答案。 */
+export function questionPanelOnEscape(panel: QuestionPanelState): QuestionPanelAction {
+  return { type: 'cancel', requestId: panel.requestId }
+}
+
+/** 估算卡片占用的行数，供布局预留。 */
+export function questionPanelRows(panel: QuestionPanelState): number {
+  const base = 4 // 页签条 + 标题 + 底部提示 + 余量
+  if (isReviewPage(panel.questions, panel.currentIndex)) {
+    return base + Math.max(1, panel.questions.length) + 3
+  }
+  const question = currentQuestionAt(panel.questions, panel.currentIndex)
+  const optionCount = question?.options?.length ?? 0
+  // 题目行 + 选项 + Other 行 + Chat 行
+  return base + 1 + optionCount + 2
 }

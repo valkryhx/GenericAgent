@@ -63,6 +63,13 @@ export type BridgeCommand =
   | { type: 'permission_status' }
   | { type: 'set_permission_mode'; mode: PermissionMode; persist?: boolean }
   | { type: 'permission_response'; requestId: string; decision: 'accept' | 'deny' }
+  | {
+      type: 'question_response'
+      requestId: string
+      answers: Record<string, string | string[]>
+      /** true = 用户取消 / 走「聊一聊」出口，不是作答。 */
+      cancelled?: boolean
+    }
   | { type: 'goal_proposal_response'; requestId: string; decision: 'approve' | 'reject' }
   | { type: 'skill_status' }
   | { type: 'skill_invoke'; skill: string; args: string }
