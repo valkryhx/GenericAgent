@@ -13,18 +13,27 @@
 
 产出：tests/probes/captures/ask_q_e2e.txt（原始字节，ANSI 保留）
       tests/probes/captures/ask_q_e2e.clean.txt（去 ANSI 的可见文本）
+
+护栏：开头 `start()` 快照工作树，结尾 `finish()` 校验。这条探针跑真模型，
+模型可能在答完之后顺手改源码（2026-11-14 真实发生过）。
 """
 import os
 import re
 import sys
 import time
+from pathlib import Path
 
 from winpty import PtyProcess
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workspace_guard import finish, start  # noqa: E402
 
 ROOT = r"D:\git_repos\GenericAgent"
 OUT_DIR = os.path.join(ROOT, "tests", "probes", "captures")
 
 SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
+
+_guard = start(ROOT)
 
 env = dict(os.environ)
 # 清掉嵌套标记：本进程可能跑在别的 agent 里，那些环境变量会让被测进程走降级路径
@@ -118,3 +127,5 @@ print("chars raw   :", len(text))
 print("chars clean :", len(clean))
 print("raw   ->", raw_path)
 print("clean ->", clean_path)
+
+finish(_guard)

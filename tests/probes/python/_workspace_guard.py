@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import subprocess
@@ -140,6 +141,7 @@ class WorkspaceGuard:
         self._dirty_before: list[str] = []
         self._tracked: list[str] = []
         self._snapshotted = False
+        self._verified: GuardReport | None = None
         self.report = GuardReport()
 
     # -- 快照 ------------------------------------------------------------
@@ -176,11 +178,21 @@ class WorkspaceGuard:
     # -- 校验 ------------------------------------------------------------
 
     def verify(self) -> GuardReport:
-        """比对并还原探针引入的改动。可重复调用。"""
+        """比对并还原探针引入的改动。
+
+        只真正跑一次；后续调用返回第一次的结论（见 `_verified`）。
+        原因：比对基准是 `self._hashes`（开始时快照），第一次还原之后文件
+        就和快照一致了，再算一次会得出 clean —— 把污染记录抹掉，探针于是
+        以 0 退出。而且重复 checkout 会连带冲掉用户在此之后的新改动。
+        """
+        if self._verified is not None:
+            return self._verified
+
         report = GuardReport()
         if not self._snapshotted:
             report.git_error = self.report.git_error or "snapshot() was not called"
             self.report = report
+            self._verified = report
             return report
 
         before_dirty = set(self._dirty_before)
@@ -217,6 +229,7 @@ class WorkspaceGuard:
             report.patch_path = self._save_patch(report.suspect)
 
         self.report = report
+        self._verified = report
         return report
 
     def _save_patch(self, paths: list[str]) -> str:
@@ -255,3 +268,78 @@ class WorkspaceGuard:
         # 探针抛异常也要校验 —— 异常路径恰恰是最危险的
         self.verify()
         return False
+
+
+# ---------------------------------------------------------------------------
+# 推广用：一行套上护栏
+# ---------------------------------------------------------------------------
+
+#: 污染发生时探针的退出码。选 2 而不是 1，好和「探针自己失败」区分开。
+CONTAMINATED_EXIT = 2
+
+
+def guarded_main(root: str, capture_dir: str | None = None, *, quiet: bool = False):
+    """把 main() 包成「自动快照 → 跑 → 校验 → 定退出码」。
+
+    仓库里 80+ 个探针，逐个手写 with 不现实。用法：
+
+        @guarded_main(ROOT)
+        def main() -> int:
+            ...
+        if __name__ == "__main__":
+            sys.exit(main())
+
+    退出码约定：
+    - 干净          → 原样返回 main() 的返回值
+    - main() 抛异常 → 校验后原样抛出（不吞异常）
+    - 有污染        → 返回 2（`CONTAMINATED_EXIT`），**压过** main() 的返回值。
+      理由：探针自己失败让人去查，污染是「有人动了源码」这种事，
+      两者都发生时应该先看见后者。
+    """
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            guard = WorkspaceGuard(root, capture_dir=capture_dir)
+            with guard:
+                code = fn(*args, **kwargs)
+            wrapper.last_report = guard.report
+            if not quiet:
+                try:
+                    print(guard.report.summary())
+                except (OSError, ValueError):
+                    pass  # 探针可能在奇怪的环境里跑，打印失败不该影响结果
+            if not guard.report.ok:
+                return CONTAMINATED_EXIT
+            return code
+
+        wrapper.last_report = None
+        return wrapper
+
+    return decorate
+
+
+def start(root: str, capture_dir: str | None = None, *, quiet: bool = False) -> WorkspaceGuard:
+    """脚本式探针用：开头快照，结尾 `finish()`。"""
+    guard = WorkspaceGuard(root, capture_dir=capture_dir)
+    guard.snapshot()
+    guard._quiet = quiet  # type: ignore[attr-defined]
+    return guard
+
+
+def finish(guard: WorkspaceGuard, code: int = 0) -> None:
+    """脚本式探针用：校验 + 按需 sys.exit。
+
+    返回 None 表示干净（脚本继续自然结束）；否则抛 SystemExit。
+    有污染时一律 `CONTAMINATED_EXIT`，压过脚本自己的 code。
+    """
+    report = guard.verify()
+    if not getattr(guard, "_quiet", False):
+        try:
+            print(report.summary())
+        except (OSError, ValueError):
+            pass
+    if not report.ok:
+        raise SystemExit(CONTAMINATED_EXIT)
+    if code:
+        raise SystemExit(code)

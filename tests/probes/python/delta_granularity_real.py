@@ -18,11 +18,18 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workspace_guard import guarded_main  # noqa: E402
+
+# 原写法 `Path(__file__).parent` 指向 tests/probes/python，
+# 于是 BRIDGE 被拼成 .../tests/probes/python/frontends/ink/bridge.py（不存在），
+# PYTHONPATH 也指向探针目录 —— 这个探针从探针归入 probes/ 起就跑不起来。
+REPO = Path(__file__).resolve().parents[3]
 BRIDGE = REPO / "frontends" / "ink" / "bridge.py"
 PROMPT = "请写一段 200 字左右的中文，介绍终端 UI 渲染的基本原理。直接给正文，不要用工具。"
 
 
+@guarded_main(str(REPO))
 def main() -> int:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"

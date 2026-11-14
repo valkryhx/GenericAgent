@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
 """用 PTY 启动真正的 `./ga`（Ink TUI），确认它渲染出界面而不是崩掉。
 
-用法：python .tmp_ga_tui_probe.py <秒数>
-产出：.tmp_ga_tui.capture.txt（原始抓包）+ 控制台摘要
+用法：python ga_tui_probe.py <秒数>
+产出：tests/probes/captures/ga_tui.capture.txt（原始抓包）+ 控制台摘要
+
+护栏：开头 `start()` 快照工作树，结尾 `finish()` 校验。真 TUI 会跑真模型，
+模型有可能顺手改源码（2026-11-14 真实发生过），探针期间必须守住。
 """
 import os
 import re
 import sys
 import time
+from pathlib import Path
 
 from winpty import PtyProcess
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workspace_guard import finish, start  # noqa: E402
+
 ROOT = r"D:\git_repos\GenericAgent"
 SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 25.0
+
+_guard = start(ROOT)
 
 env = dict(os.environ)
 # 清掉会干扰的嵌套标记
@@ -75,3 +84,5 @@ for sig in ("?2026h", "?1049h", "GenericAgent", "ga ", ">"):
 print()
 print("--- 可见文本首 800 字符 ---")
 print(plain[:800])
+
+finish(_guard)

@@ -45,7 +45,13 @@ PROBE_LIB = REPO / "tests" / "probes" / "python"
 if str(PROBE_LIB) not in sys.path:
     sys.path.insert(0, str(PROBE_LIB))
 
-from _workspace_guard import WorkspaceGuard  # noqa: E402
+from _workspace_guard import (  # noqa: E402
+    CONTAMINATED_EXIT,
+    WorkspaceGuard,
+    finish,
+    guarded_main,
+    start,
+)
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +346,256 @@ class RepoHygieneTest(unittest.TestCase):
         """反向确认脚本写回时必须指定 newline，否则会把 CRLF 带回来。"""
         src = (PROBE_LIB / "_mutate_workspace_guard.py").read_text(encoding="utf-8")
         self.assertIn('newline="\\n"', src, "写回文件未指定 newline=，Windows 上会翻成 CRLF")
+
+
+class GuardedMainTest(unittest.TestCase):
+    """`guarded_main` 装饰器：任何探针一行套上护栏。
+
+    推广用（仓库里 80+ 个探针，逐个手写 with 不现实）：
+
+        @guarded_main(ROOT)
+        def main() -> int:
+            ...
+        if __name__ == "__main__":
+            sys.exit(main())
+    """
+
+    def _root(self, td):
+        repo = _repo(Path(td))
+        return repo
+
+    def test_clean_run_returns_inner_code(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                return 0
+
+            self.assertEqual(0, probe())
+
+    def test_contamination_overrides_the_inner_return_code(self):
+        """探针自己返回 0，但改了源码 —— 必须返回 2，不能让它冒充成功。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                repo.write("src/app.py", "print('model was here')\n")
+                return 0
+
+            self.assertEqual(2, probe())
+            self.assertEqual("print('hello')\n", repo.read("src/app.py"))
+
+    def test_inner_failure_code_is_preserved_when_clean(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                return 1
+
+            self.assertEqual(1, probe(), "干净时不该改写探针自己的退出码")
+
+    def test_contamination_wins_over_inner_failure_code(self):
+        """两者都发生时报 2 —— 污染比探针自己的失败更需要被看见。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                repo.write("src/util.py", "VALUE = 9\n")
+                return 1
+
+            self.assertEqual(2, probe())
+
+    def test_exception_still_verifies_then_propagates(self):
+        """探针崩了也要校验，而且不能把异常吞掉。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                repo.write("src/app.py", "print('then blew up')\n")
+                raise RuntimeError("probe crashed")
+
+            with self.assertRaises(RuntimeError):
+                probe()
+            self.assertEqual("print('hello')\n", repo.read("src/app.py"))
+
+    def test_args_are_forwarded(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe(a, b=0) -> int:
+                return a + b
+
+            self.assertEqual(3, probe(1, b=2))
+
+    def test_report_is_reachable_after_the_call(self):
+        """调用方要能拿到 report 做进一步处理/打印。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                repo.write("src/util.py", "VALUE = 3\n")
+                return 0
+
+            probe()
+            report = probe.last_report
+            self.assertIsNotNone(report)
+            self.assertIn("src/util.py", report.changed)
+
+    def test_prints_a_summary_line(self):
+        """探针日志里要能看到结论，否则等于没做。"""
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._root(td)
+
+            @guarded_main(str(repo.root))
+            def probe() -> int:
+                return 0
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                probe()
+            self.assertIn("workspace guard", buf.getvalue())
+
+
+class VerifyIdempotenceTest(unittest.TestCase):
+    """verify() 重复调用必须返回同一份结论。
+
+    真 bug（2026-11-14 自查发现）：docstring 写着「可重复调用」，实现却是
+    每次都拿 `self._hashes`（原始快照）重算。第一次 verify 把文件还原了，
+    第二次重算就发现「跟快照一致」→ 报告 clean，**污染记录被第二次调用抹掉**。
+
+    这在 with 语句里就能触发：`__exit__` 调一次，调用方想打印又调一次，
+    于是 `ok` 从 False 翻成 True，探针退出码变成 0。
+    """
+
+    def test_second_verify_keeps_the_contamination_record(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = WorkspaceGuard(str(repo.root))
+            guard.snapshot()
+            repo.write("src/app.py", "print('dirty')\n")
+
+            first = guard.verify()
+            self.assertFalse(first.ok)
+
+            second = guard.verify()
+            self.assertEqual(
+                first.changed, second.changed,
+                "第二次 verify 把污染记录抹掉了 —— 探针会以 0 退出",
+            )
+            self.assertFalse(second.ok)
+
+    def test_verify_after_context_exit_still_reports(self):
+        """with 出来再 verify（很自然的用法）不能变成 clean。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            with WorkspaceGuard(str(repo.root)) as guard:
+                repo.write("src/util.py", "VALUE = 7\n")
+            self.assertFalse(guard.verify().ok)
+
+    def test_restore_happens_only_once(self):
+        """重复 verify 不该再 checkout 一次（那样会把用户之后的新改动也冲掉）。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = WorkspaceGuard(str(repo.root))
+            guard.snapshot()
+            repo.write("src/app.py", "print('dirty')\n")
+            guard.verify()
+            # 用户在探针之后又动手了
+            repo.write("src/util.py", "VALUE = 42\n")
+            guard.verify()
+            self.assertEqual(
+                "VALUE = 42\n", repo.read("src/util.py"),
+                "第二次 verify 不该再还原，那会吃掉之后的新改动",
+            )
+
+
+class ScriptGuardTest(unittest.TestCase):
+    """脚本式探针（无 main()，顶层直接跑）的护栏入口。
+
+    仓库里很多探针是「顶层顺序执行」风格（`ga_tui_probe.py`、
+    `ask_user_question_e2e_probe.py`），把它们整段缩进成 main() 会毁掉
+    git blame。更小的侵入方式是两句：
+
+        guard = start()          # 开头：快照
+        ...
+        finish(guard)            # 结尾：校验 + 定退出码（不返回则 sys.exit）
+
+    `finish` 里自己 `sys.exit`，因为脚本式探针没有返回值可以带出去。
+    """
+
+    def test_start_and_finish_reverts_and_exits_nonzero(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = start(str(repo.root))
+            repo.write("src/app.py", "print('contaminated')\n")
+            with self.assertRaises(SystemExit) as cm:
+                finish(guard)
+            self.assertEqual(CONTAMINATED_EXIT, cm.exception.code)
+            self.assertEqual("print('hello')\n", repo.read("src/app.py"))
+
+    def test_finish_returns_normally_when_clean(self):
+        """干净时不 sys.exit —— 让脚本自然跑完。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = start(str(repo.root))
+            self.assertIsNone(finish(guard))
+
+    def test_finish_can_be_given_an_explicit_code(self):
+        """脚本自己有退出意图时能带出去。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = start(str(repo.root))
+            with self.assertRaises(SystemExit) as cm:
+                finish(guard, code=3)
+            self.assertEqual(3, cm.exception.code)
+
+    def test_contamination_wins_over_explicit_code(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = _repo(Path(td))
+            guard = start(str(repo.root))
+            repo.write("src/util.py", "VALUE = 0\n")
+            with self.assertRaises(SystemExit) as cm:
+                finish(guard, code=3)
+            self.assertEqual(CONTAMINATED_EXIT, cm.exception.code)
 
 
 if __name__ == "__main__":

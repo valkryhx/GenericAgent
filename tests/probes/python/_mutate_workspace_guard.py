@@ -71,6 +71,42 @@ MUTATIONS = [
         "        to_restore = sorted(set(report.changed))  # MUTATED",
         "test_deleted_file_is_restored",
     ),
+    (
+        "guarded_main 污染不覆盖退出码",
+        "            if not guard.report.ok:\n                return CONTAMINATED_EXIT",
+        "            pass  # MUTATED",
+        "test_contamination_overrides_the_inner_return_code",
+    ),
+    (
+        "guarded_main 吞掉异常",
+        "            with guard:\n                code = fn(*args, **kwargs)",
+        "            with guard:\n                try:\n                    code = fn(*args, **kwargs)\n                except Exception:\n                    code = 0  # MUTATED",
+        "test_exception_still_verifies_then_propagates",
+    ),
+    (
+        "guarded_main 不转发参数",
+        "            with guard:\n                code = fn(*args, **kwargs)",
+        "            with guard:\n                code = fn()  # MUTATED",
+        "test_args_are_forwarded",
+    ),
+    (
+        "finish() 有污染也不 sys.exit",
+        "    if not report.ok:\n        raise SystemExit(CONTAMINATED_EXIT)",
+        "    pass  # MUTATED",
+        "test_start_and_finish_reverts_and_exits_nonzero",
+    ),
+    (
+        "finish() 干净时也 sys.exit（会让脚本异常结束）",
+        "    if code:\n        raise SystemExit(code)",
+        "    raise SystemExit(code)  # MUTATED",
+        "test_finish_returns_normally_when_clean",
+    ),
+    (
+        "verify 每次重算（抹掉污染记录）",
+        "        if self._verified is not None:\n            return self._verified",
+        "        pass  # MUTATED",
+        "test_second_verify_keeps_the_contamination_record",
+    ),
 ]
 
 
