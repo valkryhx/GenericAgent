@@ -256,11 +256,21 @@ export function mergeAgentNotices(
   }
 }
 
+/**
+ * `agentNoticeLine` 的纯文本版本，供帧模型使用。
+ *
+ * 两处必须**同源**：渲染画什么，帧模型里就得有什么，否则拖选子代理通知
+ * 那一行只会得到空串（用户实测报的「有些地方不能复制」）。
+ * 所以文字拼接只写一遍，`agentNoticeLine` 也复用它。
+ */
+export function agentNoticeText(notice: AgentNotice): string {
+  return `${notice.ok ? '✓' : '✗'} Subagent ${notice.name} ${notice.word}${
+    notice.detail ? ` · ${notice.detail}` : ''
+  }`
+}
+
 /** The rendered line. Green+bold for success, error+bold for anything else. */
 export function agentNoticeLine(notice: AgentNotice, successColor: string) {
   const color = notice.ok ? successColor : 'red'
-  const text = `${notice.ok ? '✓' : '✗'} Subagent ${notice.name} ${notice.word}${
-    notice.detail ? ` · ${notice.detail}` : ''
-  }`
-  return React.createElement(Text, { color, bold: true }, text)
+  return React.createElement(Text, { color, bold: true }, agentNoticeText(notice))
 }

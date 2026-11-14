@@ -159,7 +159,7 @@ import {
 } from './promptChrome.js'
 import { completedStatusSegments, pickRunningVerb, retryStatusText, runningStatusSegments, shouldShowActivityStatus } from './activityStatus.js'
 import { inputChromeSections, type InputChromeSection } from './inputLayout.js'
-import { agentNoticeLine, mergeAgentNotices, type AgentNotice } from './agentNotice.js'
+import { agentNoticeLine, agentNoticeText, mergeAgentNotices, type AgentNotice } from './agentNotice.js'
 import { footerPanelRows, modelSwitchPanelText, skillsPanelText, statusPanelText, type FooterPanel } from './footerPanel.js'
 import {
   clearLocalCommandOutput,
@@ -188,6 +188,13 @@ import { inputCursorPosition } from './terminalCursor.js'
 import type { CursorParkController } from './stdoutCursorPark.js'
 import type { InputKey } from './inputController.js'
 import { parseTerminalInput } from './terminalInput.js'
+import {
+  autoScrollDirection,
+  focusContentRowAtEdge,
+  projectRangeToScreen,
+  screenRowToContentRow,
+  type SelectionSpace,
+} from './selectionSpace.js'
 import { parseMouseEvent, parseMouseWheel, resolveFullscreenMode, resolveMouseCaptureMode } from './mouseWheel.js'
 import {
   displayColumnEnd,
@@ -835,14 +842,14 @@ function InputView({ viewport, showCursor, columns, theme, selection }: { viewpo
 type CompletedTurnActivity = { durationSeconds: number; completedAt: number }
 
 
-function ActivityView({ seconds, label, tokenUsage, completedTurn, theme }: { seconds: number; label: string; tokenUsage: TokenUsage | null; completedTurn: CompletedTurnActivity | null; theme: InkTheme }) {
+function ActivityView({ seconds, label, tokenUsage, completedTurn, theme, frameIndex }: { seconds: number; label: string; tokenUsage: TokenUsage | null; completedTurn: CompletedTurnActivity | null; theme: InkTheme; frameIndex: number }) {
   // Token counts are the numbers people actually read off this line, so they are
   // rendered bold while the surrounding prose stays normal weight. Bolding the
   // whole line (the easy version) makes "Worked for 2m 11s • Oct 5 at 13:41" and
   // the counts blur into one another.
   const segments = completedTurn
     ? completedStatusSegments(completedTurn.durationSeconds, new Date(completedTurn.completedAt), tokenUsage)
-    : runningStatusSegments(seconds, label, tokenUsage)
+    : runningStatusSegments(seconds, label, tokenUsage, frameIndex)
   return (
     <Box paddingX={1}>
       <Text color={completedTurn ? theme.muted : theme.warning} wrap="truncate-end">
@@ -1040,6 +1047,14 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const [runningLabel, setRunningLabel] = useState(() => pickRunningVerb())
   const [notice, setNotice] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  /**
+   * Spinner 帧计数。
+   *
+   * CC 的帧间隔是 80ms（`It=8` 单位 × 10ms），这里取 120ms —— 再快会让
+   * 静止的终端看起来在抖，再慢就失去「它在动」的信号。用独立计数器而不是
+   * 从 `now` 推算：`now` 是 1s 一跳的，拿它算帧会 1s 才换一次图标。
+   */
+  const [spinnerTick, setSpinnerTick] = useState(0)
   /**
    * In-app selection, in *frame* coordinates: `row` is an absolute screen row and
    * `col` an absolute canvas column, so one drag can run from the transcript into the
@@ -1390,7 +1405,13 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       })
       setNow(Date.now())
       const timer = setInterval(() => setNow(Date.now()), 1000)
-      return () => clearInterval(timer)
+      // 独立的 spinner 动画计时器：120ms 一帧。只在运行时跑，
+      // 空闲时不留一个永远唤不醒的定时器。
+      const spin = setInterval(() => setSpinnerTick(t => (t + 1) % 1_000_000), 120)
+      return () => {
+        clearInterval(timer)
+        clearInterval(spin)
+      }
     }
     // The turn these prompts belonged to is over, so the "queued" badge must not
     // survive into the next turn as a lie about a message that was already delivered.
@@ -1741,9 +1762,38 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
    */
   const selectionPointFromMouse = (x: number, y: number): FramePoint => framePointFromMouse(x, y)
 
+  /**
+   * 当前选区坐标空间（屏幕行 ↔ 内容行）。
+   *
+   * 每个鼠标事件都重读最新值：滚动、窗口尺寸、内容增长都会变，
+   * 用渲染闭包里的旧值会让换算差一行。
+   */
+  const selectionSpaceNow = (): SelectionSpace => ({
+    headerRows: metrics.headerRows,
+    transcriptTotalRows: visibleTranscript.totalRows,
+    transcriptViewportRows: metrics.messageRows,
+    transcriptScrollOffset: visibleTranscript.scrollOffset,
+    bandRows: Math.max(0, inputCursor.row - promptViewport.cursorLine - (metrics.headerRows + metrics.messageRows)),
+  })
+
+  /**
+   * 鼠标屏幕点 → 选区内容点。
+   *
+   * 视口内的行换成内容行号（与滚动无关，所以滚动不会让 anchor 指到别的文本）；
+   * 视口外的行（拖到边缘、或落在 band/composer）也换算得出来。
+   */
+  const contentPointFromMouse = (x: number, y: number): FramePoint => {
+    const screen = framePointFromMouse(x, y)
+    const space = selectionSpaceNow()
+    const contentRow = screenRowToContentRow(space, screen.row)
+    // 落在空白填充行上（内容不足一屏）就贴到最近的有效行
+    return { row: contentRow ?? screen.row, col: screen.col }
+  }
+
   const handleMouseEvent = (event: NonNullable<ReturnType<typeof parseMouseEvent>>) => {
     if (event.kind === 'wheel') return
-    const point = selectionPointFromMouse(event.x, event.y)
+    const screenPoint = selectionPointFromMouse(event.x, event.y)
+    const point = contentPointFromMouse(event.x, event.y)
 
     if (event.kind === 'press') {
       // Middle/right click: never selects. Left button only (SGR button 0).
@@ -1754,11 +1804,11 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       // "Jump to bottom" pill takes the click instead of starting a selection —
       // but only when the pill is actually on screen, which is the only time the
       // user could have aimed at it. The pill's geometry is in transcript-viewport
-      // coordinates; `point` is a frame row, so subtract the rows painted above the
-      // viewport (and the transcript's own gutter) before hit-testing.
+      // coordinates; `screenPoint` is a screen row, so subtract the rows painted
+      // above the viewport (and the transcript's own gutter) before hit-testing.
       const pill = jumpToBottomRef.current
-      const viewportRow = point.row - metrics.headerRows
-      const viewportCol = point.col - TRANSCRIPT_LEFT_GUTTER
+      const viewportRow = screenPoint.row - metrics.headerRows
+      const viewportCol = screenPoint.col - TRANSCRIPT_LEFT_GUTTER
       if (pill && hitTestJumpToBottom(pill.placement, metrics.messageRows - 1, viewportRow, viewportCol)) {
         setTranscriptScrollOffset(0)
         clearSelection()
@@ -1772,6 +1822,29 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       if (!current) return
       // Motion reports for non-held buttons do not reach us (1002h only reports
       // motion while a button is down), so any drag here extends the selection.
+      const space = selectionSpaceNow()
+      const direction = autoScrollDirection(space, screenPoint.row)
+      if (direction) {
+        // 拖到视口外 → 滚一屏内的若干行，并把焦点落到**滚完之后**的边缘行。
+        // 不这样做的话，选区永远长不出视口（用户实测：「无法自动随着滑动来上下扩展」）。
+        const { totalRows, viewportRows } = transcriptRowsRef.current
+        const step = Math.max(1, Math.floor(transcriptWheelStep()))
+        const delta = direction === 'up' ? step : -step
+        setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, delta, totalRows, viewportRows))
+        // 焦点按「滚动后」的窗口算，否则每滚一次慢一行
+        const after: SelectionSpace = {
+          ...space,
+          transcriptScrollOffset: scrollTranscriptBy(
+            space.transcriptScrollOffset,
+            delta,
+            space.transcriptTotalRows,
+            space.transcriptViewportRows,
+          ),
+        }
+        const edgeRow = focusContentRowAtEdge(after, direction)
+        setSelection({ anchor: current.anchor, focus: { row: edgeRow, col: point.col } })
+        return
+      }
       setSelection({ anchor: current.anchor, focus: point })
       return
     }
@@ -1793,7 +1866,9 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   const copyCurrentSelection = (): string | null => {
     const current = selectionRef.current
     if (!current) return null
-    const frame = frameRowsRef.current
+    // 用**内容帧**取文本：选区可能跨出视口（拖到边缘自动滚动、或滚走后再复制），
+    // 那些行不在可见帧里。用可见帧会让复制结果短一截，而且用户看不出来。
+    const frame = contentFrameRowsRef.current
     const range = normalizeFrameSelection(current.anchor, current.focus, frame)
     if (isEmptyFrameSelection(range)) return null
     const payload = selectedFrameText(range, frame)
@@ -2702,6 +2777,95 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
    * （transcript 底 → composer 顶之间的所有行），所以 band 里到底画了什么文字不影响
    * composer 的地址。transcript 的行号是精确的（它是紧接 header 的固定高度视口）。
    */
+  const inputHint = queuedPrompts.length > 0
+    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc sends it now`
+    : (state.status === 'running' || state.status === 'stopping')
+      ? 'Running · type to queue · Enter queues · PgUp/PgDn · Ctrl+O tools · Esc stop'
+      : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
+  const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
+  const activitySeconds = runningStartedAt === null ? lastActivitySeconds : runningSeconds
+  const inputSections = inputChromeSections({
+    hasError: Boolean(state.error),
+    hasPanel: Boolean(activePanel),
+    hasSlashSuggestions: slashItems.length > 0,
+    hasMcpStatus: showMcpStartupStatus || mcpBannerReserved,
+    hasAboveInputStatus: footerPanel?.type === 'status',
+  })
+
+  /**
+   * transcript 与 composer 之间那些行，**逐行**镜像渲染树。
+   *
+   * 为什么必须在这里重复一遍渲染逻辑：选区取文本读的是 `frameRows`，而
+   * `frameRows` 由 `buildFramePlan` 组装。渲染树里画了什么、这里却没列出来，
+   * 那一行就会「看得见、复制不到」。用户的判断很直白：「居然有些地方不能
+   * 复制？？？」—— 所以帧模型必须覆盖屏幕上每一行文本。
+   *
+   * 顺序与渲染树一致：goal 卡 → 重试横幅 / 工作流状态条 / 紧凑 goal 行 /
+   * 活动行。band 的行**数**由 composer 锚点决定，内容不足时补空白即可。
+   */
+  const bandFrameLines = useMemo(() => {
+    if (showGoalCard) return [...goalCardLinesOut, ...goalTerminalLinesOut]
+    if (retryBanner) return [retryBanner]
+    if (showWorkflowStatusBar) return [workflowStatusRows.join(' · ')]
+    if (compactGoalLine) return [compactGoalLine]
+    if (hasActivity) {
+      const segments = completedTurnActivity
+        ? completedStatusSegments(
+            completedTurnActivity.durationSeconds,
+            new Date(completedTurnActivity.completedAt),
+            state.tokenUsage,
+          )
+        : runningStatusSegments(activitySeconds, state.activityLabel ?? runningLabel, state.tokenUsage, spinnerTick)
+      return [segments.map(segment => segment.text).join('')]
+    }
+    return []
+  }, [
+    activitySeconds,
+    compactGoalLine,
+    completedTurnActivity,
+    goalCardLinesOut,
+    goalTerminalLinesOut,
+    hasActivity,
+    retryBanner,
+    runningLabel,
+    showGoalCard,
+    showWorkflowStatusBar,
+    spinnerTick,
+    state.activityLabel,
+    state.tokenUsage,
+    workflowStatusRows,
+  ])
+
+  /**
+   * composer 下方的提示/通知/错误行，同样逐行镜像。
+   *
+   * 只给**确实画了文字**的行填文本；面板这类由各自组件排版的部分只保留
+   * 行数（文本留空）。不为其余 section 猜行数——猜错会让 composer 的地址
+   * 漂移，而 composer 是用户最可能拖的那一行。
+   */
+  const belowFrameLines = useMemo(() => {
+    const lines: string[] = []
+    for (const section of inputSections) {
+      if (section === 'error') {
+        if (state.error) lines.push(state.error)
+        continue
+      }
+      if (section === 'hint') {
+        if (agentNotices.length > 0) {
+          lines.push(...agentNotices.map(item => agentNoticeText(item)))
+        } else if (inputHint) {
+          lines.push(inputHint)
+        }
+        continue
+      }
+      if (section === 'panel') {
+        for (let i = 0; i < panelRows; i += 1) lines.push('')
+        continue
+      }
+    }
+    return lines
+  }, [agentNotices, inputHint, inputSections, panelRows, state.error])
+
   const frameRows = useMemo(() => {
     const composerRow = Math.max(0, inputCursor.row - promptViewport.cursorLine)
     const composerLines = promptViewport.lines.map(line => ({ gutter: line.gutter, text: line.text }))
@@ -2714,8 +2878,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
       transcriptLines: visibleTranscriptText,
       composerRow,
       composerLines,
+      // transcript 与 composer 之间的每一行也必须进帧模型，否则那些行
+      // 「看得见却复制不到」—— 用户实测报了这条（活动行尤其明显）。
+      bandLines: bandFrameLines,
+      // composer 下方的提示行同理。
+      belowLines: belowFrameLines,
     })
   }, [
+    bandFrameLines,
+    belowFrameLines,
     inputCursor.row,
     liveViewportRows,
     metrics.canvasColumns,
@@ -2729,15 +2900,78 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
   frameRowsRef.current = frameRows
 
   /**
+   * **内容帧**：与可见帧同构，但 transcript 段放**全部**行而不是可见的 `v` 行。
+   *
+   * 为什么需要两份：
+   * - 可见帧用于画高亮 —— 它的行号就是屏幕行号，索引即坐标；
+   * - 内容帧用于**取文本** —— 选区可能存在屏幕之外（用户拖到边缘自动滚动、
+   *   或者滚走了再回头复制），那些行不在可见帧里。
+   *
+   * 行号关系：内容帧的 transcript 段比可见帧长 `total - v` 行，
+   * 所以内容行 `c` 与屏幕行 `s` 的换算见 `selectionSpace`。
+   *
+   * 代价：每次渲染多保留一份全量文本行的引用（不复制字符串，只是数组）。
+   * transcript 长到几万行时这个数组本身已存在，这里只是再切一份。
+   */
+  const contentFrameRowsRef = useRef<FrameRow[]>([])
+  const contentFrameRows = useMemo(() => {
+    const composerRow = Math.max(0, inputCursor.row - promptViewport.cursorLine)
+    const composerLines = promptViewport.lines.map(line => ({ gutter: line.gutter, text: line.text }))
+    // 可见帧里 transcript 占 v 行，band 从 header+v 开始；
+    // 内容帧里 transcript 占 total 行，band 要下移 total-v。
+    const shift = Math.max(0, visibleTranscript.totalRows - metrics.messageRows)
+    return buildFramePlan({
+      canvasColumns: metrics.canvasColumns,
+      rows: liveViewportRows + shift,
+      headerRows: metrics.headerRows,
+      header: metrics.headerRows > 0 ? `GenericAgent   ${state.status}` : null,
+      transcriptRows: Math.max(visibleTranscript.totalRows, 1),
+      transcriptLines: transcriptRows.map(line => line.text),
+      composerRow: composerRow + shift,
+      composerLines,
+      bandLines: bandFrameLines,
+      belowLines: belowFrameLines,
+    })
+  }, [
+    bandFrameLines,
+    belowFrameLines,
+    inputCursor.row,
+    liveViewportRows,
+    metrics.canvasColumns,
+    metrics.headerRows,
+    metrics.messageRows,
+    promptViewport.cursorLine,
+    promptViewport.lines,
+    state.status,
+    transcriptRows,
+    visibleTranscript.totalRows,
+  ])
+  contentFrameRowsRef.current = contentFrameRows
+
+  /**
    * 选区在整帧上的归一化范围。
    *
    * `frameSelectionSpans` 返回与**整帧**等长的稀疏数组，索引即绝对屏幕行号；
    * transcript 与 composer 各自按自己的偏移去取，两边看到的是同一份选区，
    * 不会出现「transcript 高亮了、输入框没高亮」。
    */
-  const selectionRange = useMemo<FrameSelectionRange | null>(() => (
-    selection ? normalizeFrameSelection(selection.anchor, selection.focus, frameRows) : null
-  ), [selection, frameRows])
+  const selectionRange = useMemo<FrameSelectionRange | null>(() => {
+    if (!selection) return null
+    // 选区存在**内容坐标**里（滚动不改变它的含义）。画高亮前必须先投影回
+    // 屏幕坐标：滚到窗口外的部分收拢到视口边缘，否则高亮会画到 composer 上。
+    const space: SelectionSpace = {
+      headerRows: metrics.headerRows,
+      transcriptTotalRows: visibleTranscript.totalRows,
+      transcriptViewportRows: metrics.messageRows,
+      transcriptScrollOffset: visibleTranscript.scrollOffset,
+      bandRows: 0,
+    }
+    const projected = projectRangeToScreen(space, {
+      start: selection.anchor.row <= selection.focus.row ? selection.anchor : selection.focus,
+      end: selection.anchor.row <= selection.focus.row ? selection.focus : selection.anchor,
+    })
+    return normalizeFrameSelection(projected.start, projected.end, frameRows)
+  }, [selection, frameRows, metrics.headerRows, metrics.messageRows, visibleTranscript.scrollOffset, visibleTranscript.totalRows])
   const frameRowSpans = useMemo(
     () => frameSelectionSpans(selectionRange, frameRows),
     [selectionRange, frameRows],
@@ -2799,20 +3033,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     }
   }, [mouseMode, transcriptScrollOffset, visibleTranscript.scrollOffset])
 
-  const inputHint = queuedPrompts.length > 0
-    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc sends it now`
-    : (state.status === 'running' || state.status === 'stopping')
-      ? 'Running · type to queue · Enter queues · PgUp/PgDn · Ctrl+O tools · Esc stop'
-      : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
-  const runningSeconds = runningStartedAt === null ? 0 : Math.floor((now - runningStartedAt) / 1000)
-  const activitySeconds = runningStartedAt === null ? lastActivitySeconds : runningSeconds
-  const inputSections = inputChromeSections({
-    hasError: Boolean(state.error),
-    hasPanel: Boolean(activePanel),
-    hasSlashSuggestions: slashItems.length > 0,
-    hasMcpStatus: showMcpStartupStatus || mcpBannerReserved,
-    hasAboveInputStatus: footerPanel?.type === 'status',
-  })
   const renderInputSection = (section: InputChromeSection) => {
     if (section === 'error') return state.error ? <Box key={section} paddingX={1}><Text color={theme.error} wrap="truncate-end">{state.error}</Text></Box> : null
     // Subagent announcements sit above the hint so a finishing child is the last thing
@@ -2912,7 +3132,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
         {renderMessageViewport()}
         <BottomChrome columns={metrics.canvasColumns} height={metrics.bottomRows}>
           {showGoalCard ? <GoalStatusCardView lines={goalCardLinesOut} terminal={goalTerminalLinesOut} theme={theme} /> : null}
-          {retryBanner ? <RetryBannerView text={retryBanner} theme={theme} /> : showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : compactGoalLine ? <Box paddingX={1}><Text color={compactGoalLine.startsWith('✓') ? theme.success : compactGoalLine.startsWith('✗') ? theme.error : theme.accent} wrap="truncate-end">{compactGoalLine}</Text></Box> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} /> : <ActivityPlaceholder />}
+          {retryBanner ? <RetryBannerView text={retryBanner} theme={theme} /> : showWorkflowStatusBar ? <WorkflowStatusBarView rows={workflowStatusRows} theme={theme} /> : compactGoalLine ? <Box paddingX={1}><Text color={compactGoalLine.startsWith('✓') ? theme.success : compactGoalLine.startsWith('✗') ? theme.error : theme.accent} wrap="truncate-end">{compactGoalLine}</Text></Box> : hasActivity ? <ActivityView seconds={activitySeconds} label={state.activityLabel ?? runningLabel} tokenUsage={state.tokenUsage} completedTurn={completedTurnActivity} theme={theme} frameIndex={spinnerTick} /> : <ActivityPlaceholder />}
           {inputSections.map(renderInputSection)}
         </BottomChrome>
       </Box>

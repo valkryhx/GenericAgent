@@ -1,3 +1,5 @@
+import { GLYPHS } from './glyphs.js'
+
 export const RUNNING_VERBS = [
   'Accomplishing',
   'Architecting',
@@ -89,9 +91,46 @@ function tokenUsageSegment(usage: TokenUsage | null | undefined): StatusSegment[
   return text.length > 0 ? [{ text, emphasis: true }] : []
 }
 
-/** 运行中状态，按片段返回（供渲染层分别着色/加粗）。 */
-export function runningStatusSegments(seconds: number, label = 'Hyperspacing', usage?: TokenUsage | null): StatusSegment[] {
-  const head = `✻ ${label} (${formatElapsed(seconds)}`
+/**
+ * 运行图标的帧数。
+ *
+ * 帧表来自 `GLYPHS.spinnerFrames`（CC 319 实测抄本 `lt = · ✢ * ✶ ✻ ✽`）。
+ * 这张表早就在仓库里，但从来没人引用过 —— 状态行一直写死 `✻`，所以
+ * 「运行中的图标不跳」是必然的。
+ */
+export function spinnerFrameCount(): number {
+  return GLYPHS.spinnerFrames.length
+}
+
+/**
+ * 取第 `index` 帧，自动取模（调用方只要一直递增就行）。
+ *
+ * 越界与负数都归一化，动画不会因为计数器溢出而停住。
+ */
+export function spinnerFrameAt(index: number): string {
+  const frames = GLYPHS.spinnerFrames
+  const n = frames.length
+  const i = ((Math.floor(index) % n) + n) % n
+  return frames[i]!
+}
+
+/** 不传帧索引时用这一帧：✻，与旧写死值一致。 */
+const DEFAULT_SPINNER_FRAME_INDEX = 4
+
+/**
+ * 运行中状态，按片段返回（供渲染层分别着色/加粗）。
+ *
+ * `frameIndex` 让行首图标跳动（调用方按动画 tick 递增）。不传时固定落在
+ * `✻` 上 —— 保持旧观感，也让快照与测试稳定。
+ */
+export function runningStatusSegments(
+  seconds: number,
+  label = 'Hyperspacing',
+  usage?: TokenUsage | null,
+  frameIndex?: number,
+): StatusSegment[] {
+  const glyph = spinnerFrameAt(frameIndex ?? DEFAULT_SPINNER_FRAME_INDEX)
+  const head = `${glyph} ${label} (${formatElapsed(seconds)}`
   const segments: StatusSegment[] = [{ text: head }]
   const tokens = tokenUsageSegment(usage)
   if (tokens.length > 0) {
