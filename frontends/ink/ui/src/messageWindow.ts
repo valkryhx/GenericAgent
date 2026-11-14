@@ -124,6 +124,7 @@ export function transcriptLinesWithChannel(
       && compacted.length > 0
       && rows[rows.length - 1]!.text.trim() !== ''
       && !bothResultBlocks(rows, compacted)
+      && !chipContinuesToolGroup(rows, compacted)
     ) {
       rows.push(blankLine(`boundary-${message.id}`))
     }
@@ -157,6 +158,50 @@ function bothResultBlocks(previous: TranscriptLine[], next: TranscriptLine[]): b
   const prev = lastNonBlank(previous)
   const following = firstNonBlank(next)
   return Boolean(prev && following && isResultRow(prev) && isResultRow(following))
+}
+
+/**
+ * True when the last row is a tool chip (`● tool(args)`) and the next block
+ * continues the same tool group: either that tool's own result line
+ * (`  ⎿  ...`) or the next chip of a parallel batch.
+ *
+ * A tool call and its output are one visual block, and so are the calls of one
+ * parallel batch. They are emitted as one message *unless* a stream commit lands
+ * between them. When the live tail fills up (`DEFAULT_STREAM_LIVE_TAIL_LINES = 8`),
+ * the chip is committed to Static as its own segment and the continuation starts the
+ * next one. Without this, the message boundary painted a blank line into the middle
+ * of a single tool call, so the same call looked different depending on whether it
+ * happened to overflow the live tail:
+ *
+ *     ● Write(D:\_rev_audit.py)          ● Write(D:\_rev_audit.py)
+ *                                        ⎿  Overwriting file: _rev_audit.py
+ *       ⎿  Overwriting file: ...
+ *
+ * (left: split, with the unwanted blank; right: unsplit). "Sometimes" in the bug
+ * report is exactly this split/no-split difference -- same call, two renderings.
+ *
+ * The chip is matched by the bullet glyph rather than by `RESULT_PREFIX`, because a
+ * chip row is ordinary assistant text: markdown has already rendered it, and it is
+ * identified only by its leading `● tool(` shape.
+ */
+function chipContinuesToolGroup(previous: TranscriptLine[], next: TranscriptLine[]): boolean {
+  const prev = lastNonBlank(previous)
+  const following = firstNonBlank(next)
+  if (!prev || !following) return false
+  // A chip continues the group after its own result line, and after a sibling chip.
+  if (isToolChipRow(prev)) return isResultRow(following) || isToolChipRow(following)
+  // A result line followed by another chip is still one tool group: a parallel
+  // batch interspersed with its outputs (● A, ⎿ a, ● B, ⎿ b) renders tight as a
+  // single message, so a commit split between the pieces must not open a gap.
+  if (isResultRow(prev)) return isToolChipRow(following)
+  return false
+}
+
+/** `● tool_name(...)`, optionally indented. Normalized from `⏺`/`🛠️` by the formatter. */
+function isToolChipRow(row: TranscriptLine): boolean {
+  const text = row.text.trimStart()
+  if (!text.startsWith(GLYPHS.bullet)) return false
+  return /^[^\s(]+\(/.test(text.slice(GLYPHS.bullet.length).trimStart()) || /^[^\s(]+$/.test(text.slice(GLYPHS.bullet.length).trimStart())
 }
 
 /**
@@ -303,12 +348,20 @@ function appendMessageLines(
   // block must NOT get one, because the next stream-commit segment can still
   // continue the same tool result (`[Status]` then `[Stdout]` body). For
   // result -> prose the separator is added at the start of the next block.
+  //
+  // A message ending in a tool chip (`● tool(args)`) is the same case, for the
+  // same reason: its result line belongs to the *next* stream-commit segment
+  // whenever the chip overflowed the live tail. Giving the chip a trailing blank
+  // here painted a gap into the middle of one tool call, so the identical call
+  // rendered with a blank when it overflowed and without one when it did not --
+  // the "sometimes" in the report. The following block supplies the separator
+  // when it really is a new block (see `chipOwnsFollowingResult`).
   const last = lastNonBlank(rows)
   if (!message.done) {
     // Live message: reserve one row below the body so the viewport tail does not
     // sit flush against the composer. This row is not committed to Static.
     rows.push(blankLine(`${message.id}-streaming-tail`))
-  } else if (!nextChannel && !(last && isResultRow(last))) {
+  } else if (!nextChannel && !(last && (isResultRow(last) || isToolChipRow(last)))) {
     rows.push(blankLine(`${message.id}-blank`))
   }
   return nextChannel

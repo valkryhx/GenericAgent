@@ -612,3 +612,91 @@ test('consecutive stdout commit segments stay contiguous without phantom blanks'
     '      L003',
   ])
 })
+
+test('a tool chip keeps its result tight across a stream-commit split', () => {
+  // The reported symptom: identical tool calls rendered with and without a blank
+  // line between `● Write(...)` and its `⎿` output, depending on whether the block
+  // happened to overflow the 8-line live tail and get committed as its own segment.
+  //
+  // The chip message used to take a trailing blank (`appendMessageLines`), and the
+  // message boundary added another, so a split inside one tool call opened a gap that
+  // the same call never had when it stayed in one segment.
+  const split = transcriptLines([
+    { id: 'a-1-c0', role: 'assistant', text: `${GLYPHS.bullet} Write(_rev_audit.py)`, done: true, taskId: 1 },
+    { id: 'a-1-c1', role: 'assistant', text: '[Action] Overwriting file: _rev_audit.py', done: true, taskId: 1 },
+  ], { expandedTools: false }).map(row => row.text)
+
+  assert.deepEqual(split, [
+    `${GLYPHS.bullet} Write(_rev_audit.py)`,
+    `${RESULT_PREFIX}Overwriting file: _rev_audit.py`,
+  ])
+})
+
+test('a split tool group renders exactly like the unsplit one', () => {
+  // The invariant behind the fix: splitting must be invisible. Every shape a tool
+  // group takes (chip+result, chip+chip, result+chip) is asserted against the same
+  // content in a single message rather than against a hand-written expectation, so
+  // the two renderings cannot drift apart again.
+  const cases: Array<{ name: string; segments: string[]; whole: string }> = [
+    {
+      name: 'chip + its result',
+      segments: [`${GLYPHS.bullet} Write(a.py)`, '[Action] Overwriting file: a.py'],
+      whole: `${GLYPHS.bullet} Write(a.py)\n[Action] Overwriting file: a.py`,
+    },
+    {
+      name: 'chip + chip (parallel batch)',
+      segments: [`${GLYPHS.bullet} code_run(x)`, `${GLYPHS.bullet} code_run(y)`],
+      whole: `${GLYPHS.bullet} code_run(x)\n${GLYPHS.bullet} code_run(y)`,
+    },
+    {
+      name: 'chip + result + chip',
+      segments: [`${GLYPHS.bullet} code_run(x)\n[Action] A`, `${GLYPHS.bullet} code_run(y)`],
+      whole: `${GLYPHS.bullet} code_run(x)\n[Action] A\n${GLYPHS.bullet} code_run(y)`,
+    },
+    {
+      name: 'result + chip',
+      segments: ['[Action] A', `${GLYPHS.bullet} code_run(y)`],
+      whole: '[Action] A\n' + `${GLYPHS.bullet} code_run(y)`,
+    },
+  ]
+
+  for (const item of cases) {
+    const splitRows = transcriptLines(
+      item.segments.map((text, index) => ({ id: `a-1-c${index}`, role: 'assistant' as const, text, done: true, taskId: 1 })),
+      { expandedTools: false },
+    ).map(row => row.text)
+    const wholeRows = transcriptLines(
+      [{ id: 'a-1', role: 'assistant' as const, text: item.whole, done: true, taskId: 1 }],
+      { expandedTools: false },
+    ).map(row => row.text)
+    assert.deepEqual(splitRows, wholeRows, `${item.name}: the commit split changed the rendering`)
+  }
+})
+
+test('an explicit blank line between tool groups survives the split', () => {
+  // The fix must only remove blanks the split invented. GA writes an explicit blank
+  // between separate result lines, and that one has to stay -- in both renderings.
+  const whole = `[Action] A\n\n[Status] B`
+  const splitRows = transcriptLines([
+    { id: 'a-1-c0', role: 'assistant', text: '[Action] A', done: true, taskId: 1 },
+    { id: 'a-1-c1', role: 'assistant', text: '[Status] B', done: true, taskId: 1 },
+  ], { expandedTools: false }).map(row => row.text)
+  const wholeRows = transcriptLines(
+    [{ id: 'a-1', role: 'assistant', text: whole, done: true, taskId: 1 }],
+    { expandedTools: false },
+  ).map(row => row.text)
+
+  assert.deepEqual(splitRows, wholeRows, 'the split invented or removed a blank line')
+})
+
+test('prose is still separated from a following tool chip', () => {
+  // The other half of the rule: a chip after prose is a new block, not a continuation.
+  const rows = transcriptLines([
+    { id: 'a-1-c0', role: 'assistant', text: 'Here is what I found.', done: true, taskId: 1 },
+    { id: 'a-1-c1', role: 'assistant', text: `${GLYPHS.bullet} Write(a.py)`, done: true, taskId: 1 },
+  ], { expandedTools: false }).map(row => row.text)
+
+  assert.equal(rows[0], 'Here is what I found.')
+  assert.equal(rows[1]!.trim(), '', 'prose and a tool call were glued together')
+  assert.equal(rows[2], `${GLYPHS.bullet} Write(a.py)`)
+})
