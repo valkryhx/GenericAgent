@@ -581,6 +581,16 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
         if getattr(self.agent, "is_running", False) or self._is_consuming():
+            # A prompt typed while compaction runs is *queued*, not rejected. CC waits
+            # (`canDeliverOverTurn`), and GA already has the machinery: the mid-turn
+            # queue outlives a turn boundary and core drains it at the turn-start fold
+            # point -- which is exactly when the compaction worker starts the turn this
+            # prompt belongs after.
+            #
+            # Rejecting here was worse than it looked: the composer clears its box
+            # before the bridge answers, so `busy` used to destroy the text.
+            if self._compaction_alive() and self._enqueue_during_compaction(text):
+                return 0
             # Echo the rejected text back: the composer has already cleared its box, so
             # without this the draft is destroyed by a request that was never accepted.
             self.emit({"type": "error", "code": "busy", "message": "agent is running",
@@ -860,6 +870,24 @@ class GenericAgentBridge:
         """Return the bridge to idle after a compaction that will not start a turn."""
         self.emit({"type": "status", "status": "idle"})
         self._compaction_thread = None
+
+    def _enqueue_during_compaction(self, text: str) -> bool:
+        """Hold a prompt until the compaction finishes and its turn starts.
+
+        Uses the same queue mid-turn typing uses, deliberately: it is drained at the
+        turn-start fold point in core (`_drain_carried_prompts`), which is precisely
+        the moment the compaction worker starts this request's turn. Reusing it means
+        there is no second delivery mechanism to keep correct.
+        """
+        queue = getattr(self.agent, "pending_prompts", None)
+        if queue is None:
+            # Without a queue the honest answer is still "busy": pretending to accept
+            # the prompt would promise a delivery that cannot happen.
+            return False
+        if not queue.push(text, source="user"):
+            return False
+        self.emit({"type": "prompt_queued", "text": text, "queued": len(queue)})
+        return True
 
     def _restore_backend_history(self, history: Any) -> None:
         backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)

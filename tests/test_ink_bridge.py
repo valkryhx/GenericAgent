@@ -32,6 +32,7 @@ from genericagent.workflow.runtime import WorkflowRuntime  # noqa: E402
 from genericagent.workflow.scheduler import SchedulerConfig  # noqa: E402
 from genericagent.workflow.store import build_artifact_ownership_index  # noqa: E402
 from genericagent.core.models import AgentCapabilities, AgentEvent, AgentEventBatch, AgentRecord  # noqa: E402
+from genericagent.core.pending_input import PendingPromptQueue  # noqa: E402
 
 
 _CC_META_PREFIX = "export const meta = { name: 'ink-test', description: 'ink test workflow' }\n"
@@ -5098,6 +5099,72 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         with patch("genericagent.core.context._history_fingerprint", return_value="moved-on"):
             self.assertIsNone(_take_precomputed(agent, changed, AUTO_COMPACT_INSTRUCTIONS))
 
+    def test_submit_during_compaction_is_queued_not_rejected(self):
+        """CC queues a prompt typed during compaction instead of dropping it.
+
+        GA used to answer `busy` and lose the text (the composer has already cleared
+        its box by then). Queueing matches both CC's `wait` semantics and GA's own
+        mid-turn queue, which already survives a turn boundary.
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        agent.pending_prompts = PendingPromptQueue()
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            bridge.submit("first")
+            second = bridge.submit("second")
+            queued = len(agent.pending_prompts)
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertNotEqual(-1, second, "a prompt typed during compaction was rejected")
+        self.assertEqual(1, queued, "the prompt was not queued")
+        self.assertEqual([("first", "user", [])], agent.prompts)
+        acks = [event for event in events if event.get("type") == "prompt_queued"]
+        self.assertTrue(acks, "the user was not told the prompt was queued")
+        self.assertEqual("second", acks[0]["text"])
+
+    def test_a_prompt_queued_during_compaction_still_reaches_the_turn(self):
+        """Queueing is only useful if the queued text survives into the turn.
+
+        The compaction worker starts the turn afterwards; the queued prompt must ride
+        along through `pending_prompts` (core drains it at the turn-start fold point)
+        rather than being silently dropped when the worker swaps in the new turn.
+        """
+        events = []
+        agent, bridge = self._bridge(events)
+        agent.pending_prompts = PendingPromptQueue()
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            bridge.submit("first")
+            bridge.submit("second")
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertEqual(1, len(agent.pending_prompts), "the queued prompt was dropped")
+
     def test_compaction_shows_each_phase_it_is_in(self):
         """CC names the phase: PreCompact hooks, then the summary request.
 
@@ -5219,9 +5286,16 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         idle = [event for event in events if event.get("type") == "status" and event.get("status") == "idle"]
         self.assertTrue(idle, "the bridge must return to idle after a failed compaction")
 
-    def test_submit_during_compaction_is_rejected_as_busy(self):
+    def test_submit_during_compaction_falls_back_to_busy_when_it_cannot_queue(self):
+        """With no queue to hold the prompt, busy is still the honest answer.
+
+        The normal path queues (see the queueing tests). This pins the fallback: an
+        agent with no `pending_prompts` must not be told "accepted" -- the text would
+        then be dropped somewhere the user cannot see.
+        """
         events = []
         agent, bridge = self._bridge(events)
+        self.assertFalse(hasattr(agent, "pending_prompts"), "fixture must not have a queue")
         release = threading.Event()
 
         def slow_compact(*args, **kwargs):
@@ -5242,6 +5316,9 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         bridge.wait_for_idle(timeout=5)
         self.assertEqual(-1, second)
         self.assertEqual([("first", "user", [])], agent.prompts)
+        rejection = [e for e in events if e.get("code") == "busy"]
+        self.assertTrue(rejection, "the rejection was not reported")
+        self.assertEqual("second", rejection[0].get("rejectedText"))
 
     def test_stop_during_compaction_cancels_and_preserves_history(self):
         events = []
