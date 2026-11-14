@@ -270,6 +270,13 @@ class GenericAgentBridge:
         # 时每次请求都空打一发（抄 Claude Code 的 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES）。
         self._auto_compact_failures = 0
         self._auto_compact_disabled = False
+        # Pre-turn compaction runs on its own thread so the JSONL command loop stays
+        # readable (see _begin_compaction_gate). ``_pending_turn`` holds the request
+        # that will start once the summary is applied; ``_compaction_cancel`` is the
+        # Esc handle.
+        self._compaction_thread: threading.Thread | None = None
+        self._pending_turn: dict[str, Any] | None = None
+        self._compaction_cancel = threading.Event()
         self._rewind_snapshots: dict[int, dict[str, Any]] = {}
         self._consume_thread: threading.Thread | None = None
         self._workflow_threads: dict[str, threading.Thread] = {}
@@ -631,8 +638,34 @@ class GenericAgentBridge:
                 model_prefix = team_activation_reminder(team)
             elif activation.action == "requested" and text.strip():
                 model_prefix = workflow_opt_in_reminder(activation)
-        if not self._auto_compact_if_needed(text):
+        gate = self._begin_compaction_gate(text, {
+            "text": text,
+            "display_text": display_text,
+            "images": images,
+            "model_prefix": model_prefix,
+            "raw_text": raw_text,
+        })
+        if gate == "busy":
             return -1
+        if gate == "compacting":
+            # The turn starts from the compaction thread once the summary applies.
+            # Returning a real task id here would be a lie: nothing was queued yet.
+            return 0
+        return self._start_turn(
+            text, display_text=display_text, images=images,
+            model_prefix=model_prefix, raw_text=raw_text,
+        )
+
+    def _start_turn(
+        self,
+        text: str,
+        *,
+        display_text: str | None = None,
+        images: list | None = None,
+        model_prefix: str = "",
+        raw_text: str = "",
+    ) -> int:
+        """Emit the turn-start events and hand the request to the agent."""
         self._task_seq += 1
         task_id = self._task_seq
         # The reminder is model-facing only: the transcript keeps the raw request.
@@ -658,6 +691,160 @@ class GenericAgentBridge:
         self._consume_thread.start()
         return task_id
 
+    def _begin_compaction_gate(self, pending_text: str, turn: dict[str, Any] | None = None) -> str:
+        """Decide whether this request needs a pre-turn compaction, and claim it.
+
+        Returns one of:
+
+        - ``"start"``: no compaction needed, the caller starts the turn now.
+        - ``"compacting"``: this call started a compaction; ``turn`` is staged and the
+          worker starts it once the summary is applied.
+        - ``"busy"``: a compaction started by an earlier submit is still running, so
+          this request is rejected exactly as it was before the refactor.
+        - ``"failed"``: compaction was required but failed before any summary request
+          (the bridge already emitted the error); the request is rejected.
+
+        Why a worker at all: ``run_jsonl_loop`` is a single-threaded ``for line in
+        stdin``. Running the summarization request inline held that loop for the whole
+        LLM round trip, so ``stop`` (Esc) and ``queue_prompt`` were unreadable for the
+        duration -- the UI looked dead and the turn could not be cancelled. The
+        decision itself stays on the caller's thread because it is cheap (a token
+        estimate plus a hook), and because ``submit`` must answer ``busy``
+        synchronously while a compaction is in flight.
+        """
+        if self._compaction_alive():
+            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            return "busy"
+        needs, failed = self._compaction_decision(pending_text)
+        if not needs:
+            return "start"
+        if failed:
+            # The attempt failed before any summary request; the old behaviour rejected
+            # the request outright, so keep rejecting rather than dropping it silently.
+            self.emit({"type": "error", "code": "auto_compact_failed", "message": str(failed)})
+            return "failed"
+        self._pending_turn = turn
+        self._compaction_cancel.clear()
+        self._compaction_thread = threading.Thread(
+            target=self._compact_then_start_turn,
+            daemon=True,
+            name="ga-ink-auto-compact",
+        )
+        self._compaction_thread.start()
+        return "compacting"
+
+    def _compaction_decision(self, pending_text: str) -> tuple[bool, str | None]:
+        """``(needs_compaction, early_failure_message)``."""
+        if compact_agent_context is None or should_auto_compact_agent is None:
+            return False, None
+        # 熔断器：连续失败达上限后，本 session 停用自动压缩，避免摘要模型宕机时
+        # 每次请求都空打一发（对齐 Claude Code）。放行请求，让用户仍能继续对话
+        # （硬裁剪安全网在 genericagent.llm.core 层仍生效）。
+        if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+            return False, None
+        try:
+            if not should_auto_compact_agent(self.agent, pending_text=pending_text):
+                return False, None
+            from genericagent.core.context import _run_compact_hook
+            pre = _run_compact_hook(self.agent, "PreCompact", {"trigger": "auto", "custom_instructions": ""})
+            if getattr(pre, "blocked", False):
+                return False, None
+        except Exception as exc:
+            return True, str(exc)
+        return True, None
+
+    def _compact_then_start_turn(self, queued: dict[str, Any] | None = None) -> None:
+        """Run the summary request off the command loop, then start the turn.
+
+        Everything here used to run inline in ``submit``. Moving it to a thread is what
+        keeps ``stop``/``queue_prompt`` readable while the summarizer works.
+        """
+        payload = queued or self._pending_turn
+        self._pending_turn = None
+        self.emit({"type": "status", "status": "running"})
+        self.emit({"type": "activity", "label": "Compacting conversation"})
+        history_before = copy.deepcopy(self._backend_history())
+        start_turn = False
+        try:
+            if compact_agent_context is None:
+                return
+            with backend_output_redirect():
+                result = compact_agent_context(
+                    self.agent,
+                    instructions="Automatic compact before the next user request.",
+                )
+            if self._compaction_cancelled():
+                # Esc arrived while the summarizer was running. CC's rule: a compaction
+                # the user stopped must never replace history, even when the summary
+                # came back fine (``ne.ok && signal.aborted -> ok:!1``). Speculative
+                # summarizers may already have written, so restore explicitly.
+                self._restore_backend_history(history_before)
+                # A system notice, not an error: the user did this on purpose, so no
+                # error banner. What they need to know is that history is untouched.
+                self.emit({"type": "system", "text": "Compaction cancelled; conversation history is unchanged."})
+                return
+            if not result.ok:
+                self._note_compaction_failure(result.message)
+                return
+            self._auto_compact_failures = 0
+            from genericagent.core.context import _run_compact_hook
+            _run_compact_hook(self.agent, "PostCompact",
+                              {"trigger": "auto", "compact_summary": result.message})
+            self._replace_compact_log()
+            self._record_compact_transcript(result, trigger="auto")
+            self._rewind_snapshots.clear()
+            # 与手动 /compact 相同：成功只 emit history_replace，避免 Static 重复行。
+            self.emit({"type": "history_replace", "messages": [
+                {"role": "system", "text": "Auto " + result.message},
+            ]})
+            start_turn = bool(payload and str(payload.get("text") or ""))
+        except Exception as exc:
+            self._restore_backend_history(history_before)
+            self._note_compaction_failure(str(exc))
+            return
+        finally:
+            self.emit({"type": "activity", "label": None})
+            if not start_turn:
+                self.emit({"type": "status", "status": "idle"})
+                self._compaction_thread = None
+        if self._compaction_cancelled():
+            self.emit({"type": "status", "status": "idle"})
+            self._compaction_thread = None
+            return
+        self._start_turn(
+            str(payload.get("text") or ""),
+            display_text=payload.get("display_text"),
+            images=payload.get("images"),
+            model_prefix=str(payload.get("model_prefix") or ""),
+            raw_text=str(payload.get("raw_text") or ""),
+        )
+        # The turn's own consumer thread owns the busy flag from here on.
+        self._compaction_thread = None
+
+    def _compaction_alive(self) -> bool:
+        thread = getattr(self, "_compaction_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _compaction_cancelled(self) -> bool:
+        return self._compaction_cancel.is_set()
+
+    def _finish_compaction(self) -> None:
+        """Return the bridge to idle after a compaction that will not start a turn."""
+        self.emit({"type": "status", "status": "idle"})
+        self._compaction_thread = None
+
+    def _restore_backend_history(self, history: Any) -> None:
+        backend = getattr(getattr(self.agent, "llmclient", None), "backend", None)
+        if backend is not None and hasattr(backend, "history"):
+            backend.history = copy.deepcopy(history)
+
+    def _note_compaction_failure(self, message: str) -> None:
+        self._auto_compact_failures += 1
+        self.emit({"type": "error", "code": "auto_compact_failed", "message": str(message)})
+        if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+            self.emit({"type": "local_command_output",
+                       "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
+
     def _end_hook_session_once(self, reason: str) -> None:
         """Emit SessionEnd at the real session boundary, never on /stop."""
         if getattr(self, "_hook_session_ended", False):
@@ -682,6 +869,19 @@ class GenericAgentBridge:
         With nothing queued the behaviour is unchanged: a plain abort.
         """
         queued_text = self._take_queued_prompt_text()
+        if self._compaction_alive():
+            # Esc during pre-turn compaction. Nothing has started yet, so there is no
+            # turn to abort -- but the compaction must not go on to replace history
+            # either. CC's rule: a stopped compaction never applies its result, even if
+            # the summarizer finished (``ne.ok && signal.aborted -> ok:!1``). The worker
+            # checks this flag and restores the pre-compaction history.
+            self._compaction_cancel.set()
+            self._pending_turn = None
+            if queued_text:
+                # The user typed something and then pressed Esc: that text is still
+                # their next request, so keep it.
+                self._submit_when_idle(queued_text)
+            return
         busy = getattr(self.agent, "is_running", False) or self._is_consuming()
         if busy:
             try:
@@ -2946,50 +3146,6 @@ class GenericAgentBridge:
                 continue
         return runs
 
-    def _auto_compact_if_needed(self, pending_text: str) -> bool:
-        if compact_agent_context is None or should_auto_compact_agent is None:
-            return True
-        # 熔断器：连续失败达上限后，本 session 停用自动压缩，避免摘要模型宕机时
-        # 每次请求都空打一发（对齐 Claude Code）。放行请求（返回 True），让用户
-        # 仍能继续对话（硬裁剪安全网在 genericagent.llm.core 层仍生效）。
-        if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
-            return True
-        try:
-            if not should_auto_compact_agent(self.agent, pending_text=pending_text):
-                return True
-            from genericagent.core.context import _run_compact_hook
-            pre = _run_compact_hook(self.agent, "PreCompact", {"trigger": "auto", "custom_instructions": ""})
-            if getattr(pre, "blocked", False):
-                return True
-            with backend_output_redirect():
-                result = compact_agent_context(self.agent, instructions="Automatic compact before the next user request.")
-            if result.ok:
-                self._auto_compact_failures = 0
-                _run_compact_hook(self.agent, "PostCompact", {"trigger": "auto", "compact_summary": result.message})
-                self._replace_compact_log()
-                self._record_compact_transcript(result, trigger="auto")
-                self._rewind_snapshots.clear()
-                text = "Auto " + result.message
-                # 与手动 /compact 相同：成功只 emit history_replace，避免 Static 重复行。
-                self.emit({"type": "history_replace", "messages": [
-                    {"role": "system", "text": text},
-                ]})
-                return True
-            else:
-                self._auto_compact_failures += 1
-                self.emit({"type": "error", "code": "auto_compact_failed", "message": result.message})
-                if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
-                    self.emit({"type": "local_command_output",
-                               "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
-                return False
-        except Exception as exc:
-            self._auto_compact_failures += 1
-            self.emit({"type": "error", "code": "auto_compact_failed", "message": str(exc)})
-            if self._auto_compact_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
-                self.emit({"type": "local_command_output",
-                           "text": f"[auto-compact disabled after {MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES} consecutive failures this session]"})
-            return False
-
     def _replace_compact_log(self) -> None:
         if replace_log_with_compact_history is None:
             return
@@ -3402,6 +3558,13 @@ class GenericAgentBridge:
                 return None
             return max(0.0, deadline - time.monotonic())
 
+        # A pre-turn compaction runs on its own thread and only *then* starts the turn,
+        # so it has to be waited on first: otherwise the consumer thread does not exist
+        # yet and this would return while the summary is still being requested.
+        compaction = getattr(self, "_compaction_thread", None)
+        if compaction is not None and compaction.is_alive():
+            compaction.join(timeout=remaining())
+
         if self._consume_thread is not None:
             self._consume_thread.join(timeout=remaining())
 
@@ -3412,7 +3575,17 @@ class GenericAgentBridge:
             time.sleep(min(0.01, left) if left is not None else 0.01)
 
     def _is_consuming(self) -> bool:
-        return self._consume_thread is not None and self._consume_thread.is_alive()
+        """True while a turn -- or the pre-turn compaction that precedes one -- is live.
+
+        Compaction belongs here because every caller of this guard is asking the same
+        question: "can another turn start right now?". While the summarizer runs the
+        answer is no: the turn it is preparing has not started, and a second request
+        would race the history swap.
+        """
+        if self._compaction_alive():
+            return True
+        thread = getattr(self, "_consume_thread", None)
+        return thread is not None and thread.is_alive()
 
     def _handle_goal_wake(self, prompt: str) -> bool:
         """Inject a goal auto-wake (2-B check-in / 3 retry) as a new turn.

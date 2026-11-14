@@ -2081,6 +2081,9 @@ class InkBridgeTest(unittest.TestCase):
         self.assertEqual({"type": "status", "status": "idle"}, events[-1])
 
     def test_submit_stops_when_required_auto_compact_fails(self):
+        # Compaction now runs off the command loop, so ``submit`` cannot answer -1 for
+        # a summarizer failure it has not seen yet. The contract that matters is kept:
+        # the turn never starts, and the failure is reported.
         agent = FakeAgent()
         events = []
         bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
@@ -2093,9 +2096,13 @@ class InkBridgeTest(unittest.TestCase):
             compact.return_value.message = "summary failed"
             result = bridge.submit("large prompt")
 
-        self.assertEqual(-1, result)
+        bridge.wait_for_idle(timeout=5)
+        self.assertNotEqual(-1, result)
         self.assertEqual([], agent.prompts)
-        self.assertEqual({"type": "error", "code": "auto_compact_failed", "message": "summary failed"}, events[-1])
+        self.assertIn(
+            {"type": "error", "code": "auto_compact_failed", "message": "summary failed"},
+            events,
+        )
 
     def test_auto_compact_circuit_breaker_disables_after_consecutive_failures(self):
         # 连续失败达上限后，熔断器停用自动压缩：不再调 compact_agent_context，
@@ -2112,10 +2119,12 @@ class InkBridgeTest(unittest.TestCase):
         ):
             compact.return_value.ok = False
             compact.return_value.message = "summary failed"
-            # 前 N 次失败：每次都尝试压缩、返回 -1（拦住请求）。
+            # 前 N 次失败：每次都尝试压缩、请求被拦住（回合不启动）。
             for _ in range(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES):
-                self.assertEqual(-1, bridge.submit("large prompt"))
+                bridge.submit("large prompt")
+                bridge.wait_for_idle(timeout=5)
             self.assertEqual(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, compact.call_count)
+            self.assertEqual([], agent.prompts)
 
             # 熔断后：不再调用 compact，且放行请求（不再是 -1）。
             result = bridge.submit("large prompt")
@@ -2136,15 +2145,18 @@ class InkBridgeTest(unittest.TestCase):
         ):
             compact.return_value.ok = False
             compact.return_value.message = "summary failed"
-            self.assertEqual(-1, bridge.submit("p"))
+            bridge.submit("p")
+            bridge.wait_for_idle(timeout=5)
             self.assertEqual(1, bridge._auto_compact_failures)
+            self.assertEqual([], agent.prompts)
 
             compact.return_value.ok = True
             compact.return_value.message = "Compacted."
             bridge.submit("p2")
+            bridge.wait_for_idle(timeout=5)
             self.assertEqual(0, bridge._auto_compact_failures)
 
-        bridge.wait_for_idle(timeout=1)
+        bridge.wait_for_idle(timeout=5)
 
     def test_submit_auto_compact_replaces_visible_history_before_new_user_message(self):
         agent = FakeAgent()
@@ -2159,9 +2171,11 @@ class InkBridgeTest(unittest.TestCase):
             compact.return_value.message = "Compacted 8 messages into summary context."
             result = bridge.submit("follow up")
 
-        bridge.wait_for_idle(timeout=1)
+        bridge.wait_for_idle(timeout=5)
 
-        self.assertEqual(1, result)
+        # The task id is assigned by the compaction worker, not by submit, so only
+        # "a turn was started" is meaningful here.
+        self.assertNotEqual(-1, result)
         history_replace_index = next(index for index, event in enumerate(events) if event["type"] == "history_replace")
         user_index = next(index for index, event in enumerate(events) if event["type"] == "user")
         self.assertLess(history_replace_index, user_index)
@@ -4900,6 +4914,180 @@ return { marker: child.summary }
             idle_index = next(i for i, event in enumerate(events) if event.get("type") == "status" and event.get("status") == "idle")
             self.assertLess(assistant_done_index, idle_index)
             self.assertEqual("Main LLM final response", events[assistant_done_index]["text"])
+
+
+class AutoCompactionOffLoopTest(unittest.TestCase):
+    """Auto-compaction must not run on the bridge command loop.
+
+    The loop is ``for line in stdin`` (single threaded). Running the summarization
+    request inside ``submit()`` holds it for the whole LLM round trip, so ``stop``
+    (Esc) and ``queue_prompt`` are not read until compaction finishes. These tests
+    pin the fix: ``submit`` returns at once and the turn starts later.
+    """
+
+    def _bridge(self, events):
+        agent = FakeAgent()
+        bridge = GenericAgentBridge(agent_factory=lambda: agent, emit=events.append)
+        return agent, bridge
+
+    def test_submit_returns_before_compaction_finishes(self):
+        events = []
+        agent, bridge = self._bridge(events)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            begin = time.monotonic()
+            task_id = bridge.submit("large prompt")
+            elapsed = time.monotonic() - begin
+            self.assertTrue(started.wait(2), "compaction never started")
+            self.assertLess(elapsed, 0.5, f"submit blocked for {elapsed:.2f}s on compaction")
+            self.assertNotEqual(-1, task_id)
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+
+    def test_turn_starts_only_after_compaction_applies_history(self):
+        events = []
+        agent, bridge = self._bridge(events)
+        done_compacting = threading.Event()
+
+        def compact(*args, **kwargs):
+            done_compacting.set()
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted 8 messages into summary context."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=compact),
+        ):
+            bridge.submit("follow up")
+            self.assertTrue(done_compacting.wait(2))
+
+        bridge.wait_for_idle(timeout=5)
+        kinds = [event["type"] for event in events if event.get("type") != "agent_snapshot"]
+        self.assertIn("history_replace", kinds)
+        self.assertIn("user", kinds)
+        self.assertLess(kinds.index("history_replace"), kinds.index("user"))
+        self.assertEqual([("follow up", "user", [])], agent.prompts)
+
+    def test_compaction_emits_visible_activity(self):
+        events = []
+        agent, bridge = self._bridge(events)
+
+        def compact(*args, **kwargs):
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=compact),
+        ):
+            bridge.submit("large prompt")
+
+        bridge.wait_for_idle(timeout=5)
+        labels = [event.get("label") for event in events if event.get("type") == "activity"]
+        self.assertIn("Compacting conversation", labels)
+
+    def test_compaction_failure_does_not_start_the_turn(self):
+        events = []
+        agent, bridge = self._bridge(events)
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context") as compact,
+        ):
+            compact.return_value.ok = False
+            compact.return_value.message = "summary failed"
+            task_id = bridge.submit("large prompt")
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertNotEqual(-1, task_id)
+        self.assertEqual([], agent.prompts)
+        errors = [event for event in events if event.get("code") == "auto_compact_failed"]
+        self.assertTrue(errors)
+        idle = [event for event in events if event.get("type") == "status" and event.get("status") == "idle"]
+        self.assertTrue(idle, "the bridge must return to idle after a failed compaction")
+
+    def test_submit_during_compaction_is_rejected_as_busy(self):
+        events = []
+        agent, bridge = self._bridge(events)
+        release = threading.Event()
+
+        def slow_compact(*args, **kwargs):
+            release.wait(5)
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=slow_compact),
+        ):
+            bridge.submit("first")
+            second = bridge.submit("second")
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertEqual(-1, second)
+        self.assertEqual([("first", "user", [])], agent.prompts)
+
+    def test_stop_during_compaction_cancels_and_preserves_history(self):
+        events = []
+        agent, bridge = self._bridge(events)
+        original = [
+            {"role": "user", "content": [{"type": "text", "text": "old context"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+        ]
+        agent.llmclient.backend.history = [copy.deepcopy(item) for item in original]
+        in_compact = threading.Event()
+        release = threading.Event()
+
+        def compact_generates_summary(*args, **kwargs):
+            in_compact.set()
+            release.wait(5)
+            agent.llmclient.backend.history = [{"role": "user", "content": "SUMMARY"}]
+            result = unittest.mock.MagicMock()
+            result.ok = True
+            result.message = "Compacted."
+            return result
+
+        with (
+            patch("frontends.ink.bridge.should_auto_compact_agent", return_value=True),
+            patch("frontends.ink.bridge.compact_agent_context", side_effect=compact_generates_summary),
+        ):
+            bridge.submit("large prompt")
+            self.assertTrue(in_compact.wait(2), "compaction never started")
+            bridge.abort_current_turn()
+            release.set()
+
+        bridge.wait_for_idle(timeout=5)
+        self.assertEqual(original, agent.llmclient.backend.history)
+        self.assertEqual([], agent.prompts, "a cancelled compaction must not start the turn")
+        notices = [event.get("text") for event in events if event.get("type") == "system"]
+        self.assertTrue(
+            any("cancelled" in str(text).lower() for text in notices),
+            f"no cancellation notice emitted; system notices were {notices}",
+        )
+        # A deliberate Esc is not an error the user needs to dismiss.
+        errors = [event for event in events if event.get("type") == "error"]
+        self.assertEqual([], errors)
 
 
 class WorkflowToolEntryTest(unittest.TestCase):
