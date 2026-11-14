@@ -47,6 +47,25 @@ export type AppState = {
   agentCursors: Record<string, number>
   agentErrors: Record<string, string>
   /**
+   * Drafts the user has queued and not yet seen delivered.
+   *
+   * Populated from `prompt_queued`, which both paths emit: the App's own
+   * `queue_prompt` command and a submit the bridge accepted into the queue (for
+   * example during compaction). Tracking it here rather than only in App's local
+   * state is what lets the bottom hint reflect a bridge-queued prompt -- otherwise
+   * the only sign it was accepted was one transcript line the user may have
+   * scrolled past, while the hint still said "Enter queues".
+   */
+  queuedPrompts: string[]
+  /**
+   * What the queued prompts above are waiting for, for the hint bar.
+   *
+   * A compaction has no tool boundary to wait for -- its prompts are drained when the
+   * compaction finishes and the turn starts. Showing the mid-turn wording there would
+   * tell the user their message went out at the wrong moment.
+   */
+  queuedWaitHint: string
+  /**
    * Text a `busy` rejection bounced back, waiting to be put back in the composer.
    *
    * The composer clears the input box optimistically, before the bridge answers. When
@@ -80,6 +99,8 @@ export const initialState: AppState = {
   agentCursors: {},
   agentErrors: {},
   restoredDraft: null,
+  queuedPrompts: [],
+  queuedWaitHint: 'sends at the next tool boundary',
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
@@ -99,6 +120,10 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       retryStatus: nextStatus === 'idle' ? null : state.retryStatus,
       goalNudge: nextStatus === 'running' ? null : state.goalNudge,
       tokenUsage: nextStatus === 'running' ? null : state.tokenUsage,
+      // The turn these prompts belonged to is over; keeping them would make the
+      // hint claim messages are still waiting after they have been delivered.
+      queuedPrompts: nextStatus === 'idle' ? [] : state.queuedPrompts,
+      queuedWaitHint: nextStatus === 'idle' ? 'sends at the next tool boundary' : state.queuedWaitHint,
       messages,
       error: null,
     }
@@ -255,14 +280,30 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     if (state.messages.some(message => message.role === 'user' && message.text.includes(event.text))) {
       return state
     }
+    // The marker names what the prompt is actually waiting for. A compaction has no
+    // tool boundary to wait for -- its prompt is drained when the compaction finishes
+    // and the turn starts -- so the mid-turn wording would tell the user their message
+    // went out at the wrong moment.
+    const waitNote = event.reason === 'compaction'
+      ? '(queued — will be sent once compaction finishes)'
+      : '(queued — will be sent at the next tool boundary)'
+    // The hint bar reads `queuedPrompts`; the transcript line alone is easy to miss
+    // (and scrolls away). Deduplicated by text for the same reason the transcript is:
+    // the bridge reports depth on every acceptance, and a repeated frame must not
+    // make the hint claim two waiting messages.
+    const alreadyTracked = state.queuedPrompts.includes(event.text)
     return {
       ...state,
+      queuedPrompts: alreadyTracked ? state.queuedPrompts : [...state.queuedPrompts, event.text],
+      queuedWaitHint: event.reason === 'compaction'
+        ? 'sends when compaction finishes'
+        : 'sends at the next tool boundary',
       messages: [
         ...state.messages,
         {
           id: `q-${state.messages.length}`,
           role: 'user',
-          text: `${event.text}\n(queued — will be sent at the next tool boundary)`,
+          text: `${event.text}\n${waitNote}`,
           done: true,
           queuedPrompt: true,
         },

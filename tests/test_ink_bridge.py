@@ -5134,6 +5134,9 @@ class AutoCompactionOffLoopTest(unittest.TestCase):
         acks = [event for event in events if event.get("type") == "prompt_queued"]
         self.assertTrue(acks, "the user was not told the prompt was queued")
         self.assertEqual("second", acks[0]["text"])
+        # The UI has to explain what the prompt is waiting for. A compaction has no
+        # tool boundary to wait for, so mid-turn wording would be a lie here.
+        self.assertEqual("compaction", acks[0].get("reason"))
 
     def test_a_prompt_queued_during_compaction_still_reaches_the_turn(self):
         """Queueing is only useful if the queued text survives into the turn.

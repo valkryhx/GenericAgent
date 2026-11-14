@@ -886,7 +886,10 @@ class GenericAgentBridge:
             return False
         if not queue.push(text, source="user"):
             return False
-        self.emit({"type": "prompt_queued", "text": text, "queued": len(queue)})
+        # `reason` is what lets the UI say the truth: this prompt waits for the
+        # compaction to finish, not for a tool boundary that a compaction never has.
+        self.emit({"type": "prompt_queued", "text": text, "queued": len(queue),
+                   "reason": "compaction"})
         return True
 
     def _restore_backend_history(self, history: Any) -> None:

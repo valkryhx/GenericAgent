@@ -70,8 +70,30 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: string) => boolean): Promise<string> {
-  const deadline = Date.now() + 2000
+// Under `node --test` with 90 files on 8 cores a render can take seconds, so a tight
+// deadline turns load into a red test that says nothing about the App. This is the
+// "something is actually stuck" bound, not a latency budget.
+const FRAME_TIMEOUT_MS = 15000
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = FRAME_TIMEOUT_MS,
+  what = 'condition',
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await delay(20)
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}`)
+}
+
+async function waitForFrame(
+  stdout: CaptureWriteStream,
+  predicate: (frame: string) => boolean,
+  what = 'a frame matching the predicate',
+): Promise<string> {
+  const deadline = Date.now() + FRAME_TIMEOUT_MS
   let lastFrame = ''
   while (Date.now() < deadline) {
     // Live frames used to always include a "GenericAgent" header; default inline
@@ -86,11 +108,17 @@ async function waitForFrame(stdout: CaptureWriteStream, predicate: (frame: strin
     if (predicate(lastFrame)) return lastFrame
     await delay(20)
   }
-  return lastFrame
+  // Returning `lastFrame` (often '') let a caller's *next* assertion fail instead,
+  // pointing at the symptom rather than at the wait that actually timed out -- and
+  // a predicate like `!frame.includes(x)` passed outright on the empty string.
+  throw new Error(
+    `timed out after ${FRAME_TIMEOUT_MS}ms waiting for ${what}; `
+    + `last matching frame was ${lastFrame ? JSON.stringify(lastFrame.slice(0, 400)) : 'empty'}`,
+  )
 }
 
 async function waitForOutput(stdout: CaptureWriteStream, predicate: (output: string) => boolean): Promise<string> {
-  const deadline = Date.now() + 2000
+  const deadline = Date.now() + FRAME_TIMEOUT_MS
   let output = ''
   while (Date.now() < deadline) {
     output = stdout.chunks.map(stripAnsi).join('')
@@ -1243,14 +1271,17 @@ test('App keeps the input composer visible when the tall help panel opens', asyn
 
 
 test("App shows a Codex-style completion summary only after each turn ends", async () => {
-  const bridge = { emit: null as null | ((event: BridgeEvent) => void) }
+  const bridge = { emit: null as null | ((event: BridgeEvent) => void), ready: false }
   const startBridgeClient = (
     _python: string,
     _bridgeScript: string,
     onEvent: (event: BridgeEvent) => void,
   ): BridgeClient => {
     bridge.emit = onEvent
-    setTimeout(() => onEvent({ type: "ready", version: 1 }), 0)
+    setTimeout(() => {
+      onEvent({ type: "ready", version: 1 })
+      bridge.ready = true
+    }, 0)
     return { send() {}, stop() {} }
   }
   const stdout = new CaptureWriteStream()
@@ -1270,6 +1301,11 @@ test("App shows a Codex-style completion summary only after each turn ends", asy
 
   try {
     await waitForOutput(stdout, output => output.includes("Enter send"))
+    // `Enter send` is the idle hint, so it is painted before `ready` lands. `ready`
+    // resets status/activity/tokenUsage (state.ts:107) — emitting the turn first and
+    // letting ready arrive afterwards silently wiped the token usage this test asserts
+    // on, which showed up as a 1-in-4 flake in full-suite runs.
+    await waitForCondition(() => bridge.ready, 15000, "the bridge ready event to land")
     if (!bridge.emit) throw new Error("bridge emit not ready")
     bridge.emit({ type: "status", status: "running", taskId: 1 })
     bridge.emit({ type: "activity", label: "Calculating" })

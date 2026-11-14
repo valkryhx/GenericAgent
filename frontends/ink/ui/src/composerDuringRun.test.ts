@@ -86,12 +86,22 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+// Under `node --test` with 90 files on 8 cores a render can take seconds, so a tight
+// deadline turns load into a red test that says nothing about the App. This is the
+// "something is actually stuck" bound, not a latency budget.
+const WAIT_TIMEOUT_MS = 15000
+
+async function waitUntil(predicate: () => boolean, timeoutMs = WAIT_TIMEOUT_MS, what = 'condition'): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (predicate()) return
     await delay(10)
   }
+  // Returning silently here was a false-green channel: `setRunning()` "succeeded"
+  // without the running chrome ever appearing, so the follow-up Enter was taken on an
+  // idle App and submitted a turn. The failure then surfaced as "submitted instead of
+  // queueing" -- a symptom far from the cause. Fail where the wait failed.
+  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}`)
 }
 
 type Harness = {
@@ -110,6 +120,12 @@ function mountApp(withPark: boolean): Harness {
   const stdin = new FakeReadStream()
   const sent: string[] = []
   let onEventRef: ((event: BridgeEvent) => void) | null = null
+  // `ready` is what resets the reducer to `idle` (state.ts:107). It is delivered on a
+  // timer, so a test that emits `running` as soon as the client is constructed can
+  // lose the race: `ready` lands afterwards and knocks the App back to idle, leaving
+  // no running chrome to wait for. The flag is set *after* the emit, so waiting on it
+  // also guarantees the ready dispatch has already run.
+  let readyEmitted = false
 
   const startBridgeClient = (
     _python: string,
@@ -117,7 +133,10 @@ function mountApp(withPark: boolean): Harness {
     onEvent: (event: BridgeEvent) => void,
   ): BridgeClient => {
     onEventRef = onEvent
-    setTimeout(() => onEvent({ type: 'ready', version: 1 }), 0)
+    setTimeout(() => {
+      onEvent({ type: 'ready', version: 1 })
+      readyEmitted = true
+    }, 0)
     return {
       send(command: unknown) {
         sent.push(JSON.stringify(command))
@@ -145,12 +164,15 @@ function mountApp(withPark: boolean): Harness {
     stdin,
     instance,
     setRunning: async () => {
-      await waitUntil(() => onEventRef !== null)
+      await waitUntil(() => onEventRef !== null, WAIT_TIMEOUT_MS, 'the bridge client to capture onEvent')
+      await waitUntil(() => readyEmitted, WAIT_TIMEOUT_MS, 'the bridge ready event to land')
       onEventRef!({ type: 'status', status: 'running', taskId: 1 })
       // Wait for the running chrome, not a fixed delay: an assertion that depends on
       // "did the re-render land yet" is flaky, and a flaky RED is not evidence.
-      await waitUntil(() =>
-        stdout.chunks.some(chunk => stripAnsi(chunk).includes('Running ·')),
+      await waitUntil(
+        () => stdout.chunks.some(chunk => stripAnsi(chunk).includes('Running ·')),
+        WAIT_TIMEOUT_MS,
+        'the "Running ·" chrome after status=running',
       )
     },
     sent,
@@ -198,13 +220,17 @@ test('the caret is drawn while running, not only when idle', async () => {
   }
 
   let onEvent: ((event: BridgeEvent) => void) | null = null
+  let readyEmitted = false
   const instance = render(React.createElement(App, {
     python: 'python',
     bridgeScript: 'bridge.py',
     cursorPark,
     startBridgeClient: (_p: string, _b: string, cb: (e: BridgeEvent) => void): BridgeClient => {
       onEvent = cb
-      setTimeout(() => cb({ type: 'ready', version: 1 }), 0)
+      setTimeout(() => {
+        cb({ type: 'ready', version: 1 })
+        readyEmitted = true
+      }, 0)
       return { send() {}, stop() {} }
     },
   }), {
@@ -216,13 +242,16 @@ test('the caret is drawn while running, not only when idle', async () => {
   })
 
   try {
-    await waitUntil(() => onEvent !== null)
-    await waitUntil(() => parks.some(spec => spec !== null))
+    await waitUntil(() => onEvent !== null, WAIT_TIMEOUT_MS, 'the bridge client to capture onEvent')
+    await waitUntil(() => readyEmitted, WAIT_TIMEOUT_MS, 'the bridge ready event to land')
+    await waitUntil(() => parks.some(spec => spec !== null), WAIT_TIMEOUT_MS, 'the first caret park')
 
     const beforeRunning = parks.length
     onEvent!({ type: 'status', status: 'running', taskId: 1 })
-    await waitUntil(() =>
-      stdout.chunks.some(chunk => stripAnsi(chunk).includes('Running ·')),
+    await waitUntil(
+      () => stdout.chunks.some(chunk => stripAnsi(chunk).includes('Running ·')),
+      WAIT_TIMEOUT_MS,
+      'the "Running ·" chrome after status=running',
     )
     await delay(60)
 

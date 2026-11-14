@@ -2845,8 +2845,15 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
    * （transcript 底 → composer 顶之间的所有行），所以 band 里到底画了什么文字不影响
    * composer 的地址。transcript 的行号是精确的（它是紧接 header 的固定高度视口）。
    */
-  const inputHint = queuedPrompts.length > 0
-    ? `Queued ${queuedPrompts.length} message${queuedPrompts.length > 1 ? 's' : ''} · sends at the next tool boundary · Esc sends it now`
+  // Two sources, one count. The App records a draft the moment it sends
+  // `queue_prompt` (instant feedback -- the bridge's echo may not come back for a
+  // fake/older bridge), and `state.queuedPrompts` records what the bridge reported
+  // accepting (a submit queued during compaction has no local counterpart).
+  // Union by text so neither path can double-count the same message.
+  const queuedPromptCount = new Set([...queuedPrompts, ...state.queuedPrompts]).size
+  const queuedWaitHint = state.queuedWaitHint
+  const inputHint = queuedPromptCount > 0
+    ? `Queued ${queuedPromptCount} message${queuedPromptCount > 1 ? 's' : ''} · ${queuedWaitHint} · Esc sends it now`
     : (state.status === 'running' || state.status === 'stopping')
       ? 'Running · type to queue · Enter queues · PgUp/PgDn · Ctrl+O tools · Esc stop'
       : 'Enter send · Alt+Enter newline · PgUp/PgDn · Ctrl+O tools · Ctrl+C exit'
