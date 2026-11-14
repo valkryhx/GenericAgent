@@ -1340,6 +1340,23 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     setSlashSelected(0)
   }, [input])
 
+  // The composer clears the box before the bridge answers, so a `busy` rejection would
+  // otherwise destroy what the user typed. The bridge echoes the rejected text back in
+  // the error event; put it back in the box and clear the hand-off field. Appending to
+  // whatever is there now matters: the user may have started retyping already.
+  useEffect(() => {
+    const rejected = state.restoredDraft
+    if (rejected === null) return
+    dispatch({ type: 'draft_restored' })
+    setInput(current => {
+      const next = current ? `${rejected}\n${current}` : rejected
+      setCursorOffset(next.length)
+      inputSnapshotRef.current = { value: next, cursorOffset: next.length }
+      return next
+    })
+    showNotice('上一轮仍在运行，草稿已放回输入框')
+  }, [state.restoredDraft])
+
   useEffect(() => {
     mcpPanelOpenRef.current = mcpPanel !== null
   }, [mcpPanel])

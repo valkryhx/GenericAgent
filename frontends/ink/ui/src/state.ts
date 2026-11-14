@@ -46,6 +46,16 @@ export type AppState = {
   agentEvents: AgentEvent[]
   agentCursors: Record<string, number>
   agentErrors: Record<string, string>
+  /**
+   * Text a `busy` rejection bounced back, waiting to be put back in the composer.
+   *
+   * The composer clears the input box optimistically, before the bridge answers. When
+   * the bridge rejected the request there was nothing left to recover: the draft was
+   * gone from the box, never reached the agent, and the only trace was a one-line
+   * error. The bridge echoes the text it rejected so it can be restored verbatim; the
+   * App consumes it and dispatches `draft_restored` to clear this field.
+   */
+  restoredDraft: string | null
 }
 
 export const initialState: AppState = {
@@ -69,6 +79,7 @@ export const initialState: AppState = {
   agentEvents: [],
   agentCursors: {},
   agentErrors: {},
+  restoredDraft: null,
 }
 
 export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState {
@@ -129,7 +140,16 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     }
   }
   if (event.type === 'error') {
-    return { ...state, error: event.message }
+    // A busy rejection means "nothing accepted, try again": hand the draft back so the
+    // composer can restore it. Every other code is a real error with no text to keep.
+    const restoredDraft =
+      event.code === 'busy' && typeof event.rejectedText === 'string' && event.rejectedText.trim()
+        ? event.rejectedText
+        : state.restoredDraft
+    return { ...state, error: event.message, restoredDraft }
+  }
+  if (event.type === 'draft_restored') {
+    return state.restoredDraft === null ? state : { ...state, restoredDraft: null }
   }
 
   if (event.type === 'goal_metadata') {

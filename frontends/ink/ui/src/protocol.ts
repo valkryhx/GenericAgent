@@ -511,7 +511,8 @@ export type BridgeEvent =
   | ({ type: 'hooks_status' } & HooksStatusPayload)
   | { type: 'agent_snapshot'; snapshot: AgentSnapshot }
   | { type: 'agent_event'; event: AgentEvent }
-  | { type: 'error'; code: string; message: string; taskId?: number }
+  | { type: 'error'; code: string; message: string; taskId?: number; rejectedText?: string }
+  | { type: 'draft_restored' }
 
 export type ChatMessage = {
   id: string

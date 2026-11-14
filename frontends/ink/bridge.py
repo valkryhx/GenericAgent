@@ -581,7 +581,10 @@ class GenericAgentBridge:
             self.emit({"type": "error", "code": "empty_input", "message": "input is empty"})
             return -1
         if getattr(self.agent, "is_running", False) or self._is_consuming():
-            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            # Echo the rejected text back: the composer has already cleared its box, so
+            # without this the draft is destroyed by a request that was never accepted.
+            self.emit({"type": "error", "code": "busy", "message": "agent is running",
+                       "rejectedText": text})
             return -1
         raw_text = text
         model_prefix = ""
@@ -713,7 +716,8 @@ class GenericAgentBridge:
         synchronously while a compaction is in flight.
         """
         if self._compaction_alive():
-            self.emit({"type": "error", "code": "busy", "message": "agent is running"})
+            self.emit({"type": "error", "code": "busy", "message": "agent is running",
+                       "rejectedText": pending_text})
             return "busy"
         needs, failed = self._compaction_decision(pending_text)
         if not needs:

@@ -628,3 +628,37 @@ test('applyBridgeEvent drops the retry banner when the turn ends', () => {
   state = applyBridgeEvent(state, { type: 'status', status: 'idle' })
   assert.equal(state.retryStatus, null)
 })
+
+test('a rejected submit restores the draft instead of losing it', () => {
+  // The composer clears the input box before the bridge answers, so a `busy`
+  // rejection used to destroy what the user had typed: the text was gone from the
+  // box, never reached the agent, and the only trace was a one-line error.
+  // The bridge now echoes the rejected text back so it can be restored verbatim.
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'error',
+    code: 'busy',
+    message: 'agent is running',
+    rejectedText: 'my carefully typed question',
+  })
+  assert.equal(state.restoredDraft, 'my carefully typed question')
+  assert.equal(state.error, 'agent is running')
+})
+
+test('a non-busy error does not restore a draft', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'error', code: 'empty_input', message: 'input is empty' })
+  assert.equal(state.restoredDraft, null)
+})
+
+test('clearing the restored draft is explicit', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'error',
+    code: 'busy',
+    message: 'agent is running',
+    rejectedText: 'draft',
+  })
+  state = applyBridgeEvent(state, { type: 'draft_restored' })
+  assert.equal(state.restoredDraft, null)
+})

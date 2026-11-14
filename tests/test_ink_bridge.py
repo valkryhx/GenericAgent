@@ -612,7 +612,13 @@ class InkBridgeTest(unittest.TestCase):
 
         self.assertEqual(-1, result)
         self.assertEqual([("first", "user", [])], agent.prompts)
-        self.assertEqual({"type": "error", "code": "busy", "message": "agent is running"}, events[-1])
+        # The rejected text comes back so the composer can restore the draft: it had
+        # already cleared the input box before this answer arrived.
+        self.assertEqual(
+            {"type": "error", "code": "busy", "message": "agent is running",
+             "rejectedText": "second"},
+            events[-1],
+        )
 
     def test_wait_for_idle_waits_until_agent_turn_finally_clears(self):
         agent = FakeAgent()
