@@ -10,12 +10,20 @@ PTY 里用 `\\r` 模拟 Enter 会被 Ink 的粘贴层吞掉（变成
 1. 卡片真的弹出来了吗（收到 question_request）
 2. 提交之后，答案真的到 LLM 那边了吗（模型复述出答案）
 3. 全流程有没有报错
+4. **探针执行期间源码有没有被改动**（模型可能顺手改代码）
+
+第 4 条不是偏执：2026-11-14 用自然语言跑这个探针时，模型在问完问题后
+真的改了 `genericagent/core/pending_input.py`（+87 行），事后靠人工
+`git checkout --` 才救回来。现在用 WorkspaceGuard 自动快照 + 还原 + 报错。
 
 用法：
   python tests/probes/python/ask_q_jsonl_probe.py
 
 产出：tests/probes/captures/ask_q_jsonl.jsonl（完整事件流）
       tests/probes/captures/ask_q_jsonl.txt（可读摘要）
+      tests/probes/captures/workspace-contamination-*.diff（污染补丁，若有）
+
+退出码：0 = 干净；2 = 探针期间源码被改过（已还原，补丁已存盘）
 """
 import json
 import os
@@ -28,6 +36,9 @@ import time
 ROOT = r"D:\git_repos\GenericAgent"
 OUT_DIR = os.path.join(ROOT, "tests", "probes", "captures")
 TIMEOUT_S = 180.0
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _workspace_guard import WorkspaceGuard  # noqa: E402
 
 PROMPT = os.environ.get("__PROMPT__") or (
     "Call the ask_user_question tool right now, before doing anything else. "
@@ -43,6 +54,16 @@ ANSWER_MODE = os.environ.get("__ANSWER_MODE__", "first")
 
 def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
+    # 保护源码：探针跑完自动比对，探针引入的改动会被还原并让退出码非 0
+    with WorkspaceGuard(ROOT, capture_dir=OUT_DIR) as guard:
+        rc = _run_probe()
+    _emit_guard_report(guard.report)
+    if not guard.report.ok:
+        return 2
+    return rc
+
+
+def _run_probe() -> int:
     env = dict(os.environ)
     for k in [k for k in env if k.upper().startswith(("CLAUDE", "ANTHROPIC"))]:
         env.pop(k, None)
@@ -211,6 +232,26 @@ def main() -> int:
         time.sleep(0.5)
 
     return _finish(summary, events, raw_lines, stderr_buf)
+
+
+def _emit_guard_report(report) -> None:
+    """把护栏结论写进摘要文件，并在终端显眼地打出来。"""
+    lines = ["", "---- workspace guard ----", report.summary()]
+    if report.patch_path:
+        lines.append("diff: %s" % report.patch_path)
+    if report.created:
+        lines.append("NEW files (未删除，请自行判断): %s" % ", ".join(report.created))
+    if report.suspect:
+        lines.append(
+            "SUSPECT (探针开始前就已脏、跑完又变了，未还原): %s"
+            % ", ".join(report.suspect)
+        )
+    try:
+        with open(os.path.join(OUT_DIR, "ask_q_jsonl.txt"), "a", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def _finish(summary, events, raw_lines, stderr_buf) -> int:
