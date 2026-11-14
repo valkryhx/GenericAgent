@@ -21,16 +21,27 @@ from typing import Any
 # GA 取同样的量级，避免一次塞进几十道题把卡片撑爆。
 MAX_QUESTIONS = 4
 
-# 无论权限档位如何，都必须走「ask」的工具。
+# 「工具自己就是 UI」的工具：权限层直接放行，不弹 accept/deny 审批卡片。
 #
-# 为什么需要这个特例（实施方案 §4.5）：GA 默认档是 `full_access`，
-# 它对所有工具直接 allow。`ask_user_question` 的价值就在于**弹出卡片并阻塞**——
-# 一旦被 allow 放行，`do_ask_user_question` 就永远不会走到审批路径，
-# 卡片永远不弹，工具静默失效。
+# ## 为什么是 allow 而不是 ask（真机实测订正，2026-11-14）
 #
-# CC 用 `requiresUserInteraction()` 达到同样效果（调研 §2.1），
-# 那是工具声明的一部分；GA 的权限决策集中在 policy 层，所以特例也放在那里。
-ALWAYS_ASK_TOOLS = frozenset({"ask_user_question"})
+# 方案 §4.5 原本写「恒 ask」，本意是防止 full_access 把工具吞掉。
+# 真机跑出来是：
+#
+#     permission_request | toolName: "ask_user_question" (always_ask)
+#     [Permission] waiting for approval: ask_user_question (always_ask)
+#
+# 用户会先看到一张「允许我问你问题吗」的审批卡片，点了「允许」才看到真问题；
+# 点「拒绝」则问题永远不出现。这是**双重询问**。
+#
+# 根因：GA 的 ask 语义是「弹通用审批卡片」，而 CC 的 `requiresUserInteraction()`
+# 让权限层把 ask 理解成「用工具自己的 UI」。GA 权限层没有这个概念。
+#
+# 于是正确做法是 allow —— 让工具自己负责交互：
+# - 提问不改变任何状态，不需要授权；
+# - 用户的「回答」本身就是对这次交互的许可；
+# - 只读档也要能问（问问题不是写操作）。
+SELF_UI_TOOLS = frozenset({"ask_user_question"})
 
 
 def hide_submit_tab(questions: list[dict[str, Any]]) -> bool:

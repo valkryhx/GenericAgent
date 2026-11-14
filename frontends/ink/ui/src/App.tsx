@@ -107,6 +107,7 @@ import {
   createQuestionPanel,
   endTextInput,
   setTextInput,
+  tabBarText,
   currentQuestionAt,
   isReviewPage,
   questionFromRequest,
@@ -477,7 +478,7 @@ function PermissionPanelView({ panel, theme }: { panel: PermissionPanelState; th
   )
 }
 
-function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme: InkTheme }) {
+function QuestionPanelView({ panel, theme, columns }: { panel: QuestionPanelState; theme: InkTheme; columns: number }) {
   const review = isReviewPage(panel.questions, panel.currentIndex)
   const question = currentQuestionAt(panel.questions, panel.currentIndex)
   const rows = optionRows(panel)
@@ -486,7 +487,7 @@ function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme:
     const missing = unansweredKeys(panel.questions, panel.answers)
     return (
       <Box flexDirection="column" paddingX={1} flexShrink={0}>
-        <QuestionTabBar panel={panel} theme={theme} />
+        <QuestionTabBar panel={panel} theme={theme} columns={columns} />
         <Text bold color={theme.accent}>Review your answers</Text>
         {missing.length > 0 ? (
           <Text color={theme.warning}>You have not answered all questions</Text>
@@ -509,7 +510,7 @@ function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme:
 
   return (
     <Box flexDirection="column" paddingX={1} flexShrink={0}>
-      <QuestionTabBar panel={panel} theme={theme} />
+      <QuestionTabBar panel={panel} theme={theme} columns={columns} />
       <Text bold color={theme.accent}>{question.question}</Text>
       {rows.map((row, index) => {
         const selected = index === panel.optionIndex
@@ -547,19 +548,13 @@ function QuestionPanelView({ panel, theme }: { panel: QuestionPanelState; theme:
   )
 }
 
-function QuestionTabBar({ panel, theme }: { panel: QuestionPanelState; theme: InkTheme }) {
+function QuestionTabBar({ panel, theme, columns }: { panel: QuestionPanelState; theme: InkTheme; columns: number }) {
+  // 宽度降级自己算（tabBarText），不能只靠 truncate-end：
+  // 探针实测 40 列时 truncate 会把 [Submit] 截成 [Submi… ——
+  // 那是用户在确认页唯一要做的事。
   return (
     <Text color={theme.muted} wrap="truncate-end">
-      {panel.questions
-        .map((q, index) => {
-          const done = isChosenAny(panel, q)
-          const label = q.header || `Q${index + 1}`
-          const mark = done ? '[x]' : '[ ]'
-          const here = index === panel.currentIndex
-          return `${here ? '>' : ' '}${mark}${label}`
-        })
-        .join(' ')}
-      {panel.hideSubmitTab ? '' : ` ${panel.currentIndex === panel.questions.length ? '>' : ' '}[Submit]`}
+      {tabBarText(panel, columns)}
     </Text>
   )
 }
@@ -2095,6 +2090,41 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     // 工具审批 overlay 优先于切档面板（安全关键路径抢焦点）
     // 提问卡片同样阻塞工具调用，所以放在同一优先级层，且在审批之后
     // （审批是安全门禁，不能让它等在提问后面）。
+    if (approvalPanel) {
+      if (key.escape) {
+        const action = approvalPanelOnEscape(approvalPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'permission_response',
+            requestId: action.requestId,
+            decision: action.decision,
+          })
+          setApprovalPanel(action.next)
+        }
+        return
+      }
+      if (key.upArrow) {
+        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, -1) } : panel)
+        return
+      }
+      if (key.downArrow) {
+        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, 1) } : panel)
+        return
+      }
+      if (key.return) {
+        const action = approvalPanelOnEnter(approvalPanel)
+        if (action.type === 'respond') {
+          bridgeRef.current?.send({
+            type: 'permission_response',
+            requestId: action.requestId,
+            decision: action.decision,
+          })
+          setApprovalPanel(action.next)
+        }
+        return
+      }
+    }
+
     if (questionPanel) {
       // 文本输入态：所有可打印字符进 textInput，Enter 接受、Esc 退出。
       if (questionPanel.editingKey) {
@@ -2189,40 +2219,6 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
             reason: 'chat',
           })
           setQuestionPanel(null)
-        }
-        return
-      }
-    }
-    if (approvalPanel) {
-      if (key.escape) {
-        const action = approvalPanelOnEscape(approvalPanel)
-        if (action.type === 'respond') {
-          bridgeRef.current?.send({
-            type: 'permission_response',
-            requestId: action.requestId,
-            decision: action.decision,
-          })
-          setApprovalPanel(action.next)
-        }
-        return
-      }
-      if (key.upArrow) {
-        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, -1) } : panel)
-        return
-      }
-      if (key.downArrow) {
-        setApprovalPanel(panel => panel ? { ...panel, selected: moveApprovalSelection(panel.selected, 1) } : panel)
-        return
-      }
-      if (key.return) {
-        const action = approvalPanelOnEnter(approvalPanel)
-        if (action.type === 'respond') {
-          bridgeRef.current?.send({
-            type: 'permission_response',
-            requestId: action.requestId,
-            decision: action.decision,
-          })
-          setApprovalPanel(action.next)
         }
         return
       }
@@ -2807,7 +2803,7 @@ export function App({ python, bridgeScript, startBridgeClient = startBridge, cur
     if (section === 'panel') {
       if (goalProposalPanel) return <GoalProposalPanelView key={section} panel={goalProposalPanel} theme={theme} />
       if (approvalPanel) return <ApprovalPanelView key={section} panel={approvalPanel} theme={theme} />
-      if (questionPanel) return <QuestionPanelView key={section} panel={questionPanel} theme={theme} />
+      if (questionPanel) return <QuestionPanelView key={section} panel={questionPanel} theme={theme} columns={columns} />
       if (mcpPanel) return <McpPanelView key={section} panel={mcpPanel} theme={theme} maxServerRows={mcpServerRowCapacity} />
       if (modelPanel) return <ModelPanelView key={section} panel={modelPanel} theme={theme} />
       if (permissionPanel) return <PermissionPanelView key={section} panel={permissionPanel} theme={theme} />

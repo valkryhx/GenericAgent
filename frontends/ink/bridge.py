@@ -221,6 +221,30 @@ except Exception:  # pragma: no cover - transcript resume falls back to legacy r
     session_transcript = None
 
 
+_QUESTION_PAYLOAD_KEYS = frozenset({"answers", "annotations", "response", "followUp"})
+
+
+def _question_payload(payload: object) -> object:
+    """把 UI 发来的答案规整成 admit 认识的 payload。
+
+    UI 的命令形状是 `{"answers": {"task": "x"}}`（protocol.ts 的
+    question_response），但前端把 `answers` 当独立字段发过来时，
+    bridge 收到的是 `{"task": "x"}` —— 少了外层。
+
+    真机实测（2026-11-14）就是这里出的错：`task` 被 admit 当成
+    「未知顶层键」，整个回答被拒，卡片收起但答案没到 LLM。
+    单元测试没抓到，因为它们是直接调 runtime.submit，绕过了 bridge。
+
+    规则：payload 里已有任何一个 admit 认识的顶层键 → 原样透传；
+    否则当成 bare answers 包一层。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if _QUESTION_PAYLOAD_KEYS & set(payload):
+        return payload
+    return {"answers": payload}
+
+
 class GenericAgentBridge:
     def __init__(
         self,
@@ -1067,7 +1091,7 @@ class GenericAgentBridge:
             if cancelled:
                 ok = bool(runtime.cancel(rid, reason=reason))
             else:
-                ok = bool(runtime.submit(rid, payload))
+                ok = bool(runtime.submit(rid, _question_payload(payload)))
             if not ok:
                 self.emit(
                     {

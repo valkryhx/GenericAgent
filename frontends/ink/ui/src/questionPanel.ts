@@ -154,6 +154,93 @@ export function moveOptionSelection(panel: QuestionPanelState, delta: number): n
   return Math.max(0, Math.min(total - 1, panel.optionIndex + delta))
 }
 
+// ---- 页签条：按可用宽度四级降级 ----
+//
+// 探针实测（probes/card_narrow.ts）：只靠 `truncate-end` 时，40 列下
+// 页签条被从尾巴切断，用户看到 `[Submi…` —— 提交入口没了，而那是
+// 用户在确认页唯一要做的事。
+//
+// 所以降级必须自己算，规则（对齐 CC 的 Ok，调研 §9.7.7）：
+//   1. 全部显示（含 [Submit]）
+//   2. 丢弃非当前题的 header（保留其余标记）
+//   3. 只保留当前题 header + [Submit]
+//   4. 只保留序号 + [Submit]
+//
+// **每一档都保留 [Submit]**。它是操作入口，不是装饰。
+
+const SUBMIT_TAB = '[Submit]'
+
+/** 终端显示宽度：CJK / 全角算 2 列。 */
+export function displayWidth(s: string): number {
+  let w = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    const wide =
+      (cp >= 0x1100 && cp <= 0x115f) ||
+      (cp >= 0x2e80 && cp <= 0xa4cf) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6)
+    w += wide ? 2 : 1
+  }
+  return w
+}
+
+function isAnswered(panel: QuestionPanelState, key: string): boolean {
+  const v = panel.answers[key]
+  if (Array.isArray(v)) return v.some(x => x !== '')
+  return v !== undefined && v !== ''
+}
+
+/** 第 n 题的标签，按「详细度」递减。 */
+function tabLabel(panel: QuestionPanelState, index: number, level: number): string {
+  const q = panel.questions[index]
+  const here = index === panel.currentIndex
+  const mark = isAnswered(panel, q.key) ? '[x]' : '[ ]'
+  const cursor = here ? '>' : ' '
+  if (level >= 2) return `${cursor}${mark}${index + 1}`
+  const header = q.header || `Q${index + 1}`
+  return `${cursor}${mark}${header}`
+}
+
+/**
+ * 生成页签条文本，保证不超过 `columns`。
+ *
+ * 从最详细的一档开始试，放不下就降一档。
+ */
+export function tabBarText(panel: QuestionPanelState, columns: number): string {
+  const submit = panel.hideSubmitTab ? '' : SUBMIT_TAB
+  const submitPart = submit ? (submit[0] === ' ' ? submit : ' ' + submit) : ''
+
+  // 档 0：完整
+  const full = panel.questions.map((_, i) => tabLabel(panel, i, 0)).join(' ') + submitPart
+  if (displayWidth(full) <= columns) return full
+
+  // 档 1：非当前题只留序号
+  const mixed =
+    panel.questions
+      .map((_, i) => (i === panel.currentIndex ? tabLabel(panel, i, 0) : tabLabel(panel, i, 2)))
+      .join(' ') + submitPart
+  if (displayWidth(mixed) <= columns) return mixed
+
+  // 档 2：只留当前题的 header
+  const current = panel.questions[panel.currentIndex]
+  if (current) {
+    const only = tabLabel(panel, panel.currentIndex, 0) + submitPart
+    if (displayWidth(only) <= columns) return only
+  }
+
+  // 档 3：只留序号
+  const numeric = tabLabel(panel, panel.currentIndex, 2) + submitPart
+  if (displayWidth(numeric) <= columns) return numeric
+
+  // 档 4：连 Submit 都快放不下时，只留 Submit（它是操作入口）
+  if (submit && displayWidth(submit) <= columns) return submit
+  return ''
+}
+
 /**
  * 记录一个答案。
  *
