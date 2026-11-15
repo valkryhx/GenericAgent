@@ -46,4 +46,5 @@
 | 探针 | 回答什么问题 |
 | --- | --- |
 | `tests/probes/python/_probe_spawn_arg_loss.py` | `spawn_agent` 的实参为什么只剩一个字段？回放 session JSONL + `model_responses` 日志，用三个判据（`_raw` 入参 / 拆分 id / 截断哨兵）区分「模型少发」与「传输丢失」，并列出每次调用的实参键集。 |
+| `tests/probes/python/_probe_workflow_deadline_budget.py` | workflow 超时测试为什么时好时坏？分别测量「node worker 启动开销」与「测试声明的预算」，判断预算是否小于固定启动成本——预算不够时 deadline 会在脚本第一行运行之前触发，job 根本不存在，也就无从取消。 |
 
