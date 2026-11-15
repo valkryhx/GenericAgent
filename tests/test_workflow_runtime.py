@@ -17,6 +17,19 @@ from genericagent.workflow.store import WorkflowStore
 
 _CC_META_PREFIX = "export const meta = { name: 'runtime-test', description: 'runtime test workflow' }\n"
 
+# A workflow budget that leaves room for the worker to start.
+#
+# ``WorkflowRuntime`` starts its deadline before the node worker process exists
+# (``runtime.py:284``), so ``timeout_seconds`` also pays for process spawn and the
+# ``ready`` handshake. Measured: 145–525 ms idle, 1.4 s under CPU load — probe:
+# ``tests/probes/python/_probe_workflow_deadline_budget.py``.
+#
+# Tests that need a child agent to be *running* before the deadline fires must use a
+# budget above that cost, or they end up asserting on a job that never started. Tests
+# that only need the script itself to hang (an async never-resolving promise, a sync
+# infinite loop) keep their small budget: the clock is supposed to start at spawn.
+_WORKFLOW_STARTUP_BUDGET_SECONDS = float(os.environ.get("GA_TEST_WORKFLOW_STARTUP_BUDGET", "2.0"))
+
 
 class WorkflowRun(_WorkflowRun):
     """Test adapter that migrates legacy test bodies to the CC meta contract."""
@@ -2854,16 +2867,32 @@ return [first.summary, second.summary, third.summary]
             self.assertNotIn("1000ms", loaded.error or "")
 
     def test_runtime_timeout_cancels_running_child_agents(self):
+        """On deadline, child agents that are actually running must be cancelled.
+
+        The budget deliberately covers worker startup. ``runtime.py:284`` starts the
+        deadline *before* the node worker process exists, so ``timeout_seconds`` pays for
+        spawn + the ``ready`` handshake too. Measured on a developer machine: 145–525 ms,
+        and 1.4 s under CPU load (probe: ``tests/probes/python/_probe_workflow_deadline_budget.py``).
+
+        With the old 0.2 s budget the deadline frequently fired *before* the script's
+        first line, so the job never started and there was nothing to cancel — the
+        assertion then failed for a reason that had nothing to do with cancellation, and
+        the test flapped at 4–5 failures per 8 runs under load. The budget below is sized
+        for startup so the deadline lands while the job is genuinely running, which is
+        what this test claims to check.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             store = WorkflowStore(root=tmp)
             runner = NeverFinishesRunner()
             script = "return await agent('never finishes')"
             run = store.create_run(WorkflowRun(run_id="wf_test", session_id="session_test", script=script, status="running"))
-            runtime = WorkflowRuntime(store=store, runner=runner, timeout_seconds=0.2)
+            runtime = WorkflowRuntime(store=store, runner=runner, timeout_seconds=_WORKFLOW_STARTUP_BUDGET_SECONDS)
 
             with self.assertRaisesRegex(RuntimeError, "(?i)deadline"):
                 runtime.run(run)
 
+            # The job must have started — otherwise "cancelled" would be vacuous.
+            self.assertTrue(runner.started_job_ids, "the deadline fired before any child agent started")
             self.assertEqual({"agent_1"}, runner.cancelled_job_ids)
             loaded = store.load_run("wf_test")
             self.assertEqual("failed", loaded.status)
