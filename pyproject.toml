@@ -73,6 +73,7 @@ packages = [
     "genericagent",
     "genericagent.agents",
     "genericagent.core",
+    "genericagent.core.ask_user_question",
     "genericagent.core.control",
     "genericagent.core.permissions",
     "genericagent.core.tool_results",

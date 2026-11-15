@@ -109,6 +109,7 @@ if (-not $Wheel) {
 Write-Host "[6/8] Auditing wheel contents..."
 $AuditScript = @'
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -185,6 +186,51 @@ with zipfile.ZipFile(wheel) as archive:
                 print(f"  - {item}", file=sys.stderr)
         raise SystemExit(1)
     print(f"Wheel audit OK: {len(names)} entries")
+
+# ── Import smoke: the only check that catches a package missing from `packages` ──
+#
+# `required` above is a hand-written list, so a NEW package that nobody remembered to
+# add to it is invisible to it. That is exactly how 0.6.0 shipped broken: the
+# `genericagent.core.ask_user_question` package existed in the source tree but was not
+# in `[tool.setuptools] packages`, so it never entered the wheel -- and every
+# `ga` launch died with "No module named 'genericagent.core.ask_user_question'"
+# raised from a *deferred* import inside GenericAgent.__init__.
+#
+# Importing the entry points from the extracted wheel cannot be fooled by a stale
+# checklist: if a module is missing, the import fails here instead of on a user's machine.
+# Note these must be the modules that do the deferred imports -- importing
+# `genericagent.core.app` alone passes, because its own import of the broken module
+# sits inside `__init__` and only runs when an agent is constructed.
+smoke_modules = [
+    "genericagent.core.permissions.policy",  # imports ask_user_question at module level
+    "genericagent.core.ask_user_question",
+    "genericagent.core.app",
+    "genericagent.core.handler",
+    "genericagent.workflow",
+    "ga_cli.cli",
+]
+with tempfile.TemporaryDirectory() as extract_dir:
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(extract_dir)
+    # Prepend so the extracted copy wins over any installed one.
+    sys.path.insert(0, extract_dir)
+    failed = []
+    for module in smoke_modules:
+        try:
+            __import__(module)
+        except Exception as error:  # noqa: BLE001 - report whatever it is
+            failed.append(f"{module}: {type(error).__name__}: {error}")
+    if failed:
+        print("Wheel import smoke FAILED:", file=sys.stderr)
+        for item in failed:
+            print(f"  - {item}", file=sys.stderr)
+        print(
+            "A module the runtime needs is missing from the wheel. Check that its "
+            "package is listed under [tool.setuptools] packages in pyproject.toml.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(f"Wheel import smoke OK: {len(smoke_modules)} module(s)")
 '@
 # Execute the audit from stdin.  A temporary script file is unnecessary and
 # was previously not written before Invoke-Python tried to open it.
