@@ -12,16 +12,34 @@ if str(REPO_ROOT) not in sys.path:
 
 
 class AgentMainMcpToolsTest(unittest.TestCase):
-    def test_load_tool_schema_hides_agent_type_when_no_roles_are_configured(self):
+    def test_spawn_agent_offers_no_closed_set_of_agent_types(self):
+        """The tool must not publish a value menu for role selection.
+
+        `agent_type` used to be the only enum-constrained property on an otherwise
+        all-optional tool (3 role names plus a 304-char catalog injected at runtime).
+        In the 2026-11-15 session that made it the sole output anchor: 15 of 24 calls
+        arrived as `{'agent_type': 'explore'}` with every other key gone. A role only
+        rewrites the child's prompt prefix, which is not worth a closed list.
+        """
         from genericagent.core import app as agentmain
 
-        with patch("genericagent.agents.roles.SubagentRoleRegistry.list_roles", return_value=[]):
-            agentmain.load_tool_schema(include_mcp_tools=False)
+        agentmain.load_tool_schema(include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
-        self.assertNotIn("agent_type", spawn["parameters"]["properties"])
+        properties = spawn["parameters"]["properties"]
+        self.assertNotIn("agent_type", properties)
+        role = properties.get("role")
+        self.assertIsNotNone(role, "spawn_agent must still accept a role")
+        self.assertNotIn("enum", role, "a role is optional guidance, not a closed menu")
 
-    def test_load_tool_schema_enumerates_only_configured_agent_types(self):
+    def test_role_description_names_the_available_roles_without_a_closed_list(self):
+        """A role stays discoverable by name; it just is not a menu the model must fill.
+
+        A bare "role" property with an empty description would be useless (the model
+        cannot guess `explore` exists), so the available names stay in the prose. The
+        difference from `agent_type` is that the value is not an enum and the field is
+        not the only constrained property on the tool.
+        """
         from genericagent.core import app as agentmain
 
         roles = [SimpleNamespace(name="auditor"), SimpleNamespace(name="researcher")]
@@ -29,13 +47,12 @@ class AgentMainMcpToolsTest(unittest.TestCase):
             agentmain.load_tool_schema(include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
-        agent_type = spawn["parameters"]["properties"]["agent_type"]
-        self.assertEqual(agent_type.get("enum"), ["auditor", "researcher"])
-        self.assertIn("auditor", agent_type["description"])
-        self.assertIn("researcher", agent_type["description"])
-        self.assertIn("not a free-form label", agent_type["description"])
+        role = spawn["parameters"]["properties"]["role"]
+        self.assertNotIn("enum", role)
+        self.assertIn("auditor", role["description"])
+        self.assertIn("researcher", role["description"])
 
-    def test_load_chinese_tool_schema_describes_configured_agent_types(self):
+    def test_load_chinese_tool_schema_describes_roles(self):
         from genericagent.core import app as agentmain
 
         roles = [SimpleNamespace(name="researcher")]
@@ -43,24 +60,23 @@ class AgentMainMcpToolsTest(unittest.TestCase):
             agentmain.load_tool_schema("_cn", include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
-        agent_type = spawn["parameters"]["properties"]["agent_type"]
-        self.assertEqual(agent_type.get("enum"), ["researcher"])
-        self.assertIn("不是自由标签", agent_type["description"])
+        role = spawn["parameters"]["properties"]["role"]
+        self.assertIn("researcher", role["description"])
 
     def test_load_tool_schema_publishes_the_builtin_role_catalog(self):
-        """The description must carry per-role notes, not just bare names."""
+        """The builtin roles must stay discoverable from the tool description."""
         from genericagent.core import app as agentmain
 
         agentmain.load_tool_schema(include_mcp_tools=False)
 
         spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
-        agent_type = spawn["parameters"]["properties"]["agent_type"]
-        self.assertEqual(["explore", "plan", "review"], agent_type["enum"])
-        self.assertIn("explore", agent_type["description"])
-        self.assertIn("not a free-form label", agent_type["description"])
+        role = spawn["parameters"]["properties"]["role"]
+        self.assertNotIn("enum", role)
+        for name in ("explore", "plan", "review"):
+            self.assertIn(name, role["description"])
         # The catalog must not imply a role restricts tools: it does not.
-        self.assertIn("does not change which tools", agent_type["description"])
-        self.assertNotIn("read-only", agent_type["description"])
+        self.assertIn("does not change which tools", role["description"])
+        self.assertNotIn("read-only", role["description"])
 
     def test_spawn_agent_schema_declares_task_name_and_message_required(self):
         """An all-optional spawn_agent taught the model nothing about what it must send.

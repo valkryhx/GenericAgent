@@ -420,6 +420,14 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
     one is for. The notes are derived from the roles themselves rather than written by
     hand, so the catalog cannot describe a boundary the runtime does not apply.
 
+    The property is ``role`` and it is deliberately **not** an enum. It used to be
+    ``agent_type`` with an ``enum`` of the configured names, which made it the only
+    constrained property on a tool whose other 18 properties were all optional. In the
+    2026-11-15 session that turned it into the sole output anchor: 15 of 24 calls
+    arrived as ``{'agent_type': 'explore'}`` with every other key gone. A role only
+    rewrites the child's prompt prefix, so the names belong in prose where they help a
+    caller that wants one, not in a closed list that invites filling it and stopping.
+
     Note what this text deliberately does NOT say: that a role restricts tool access.
     Roles shape the child's prompt; the tool surface is decided by
     ``capabilities.build_subagent_capability_profile`` (everything but orchestration,
@@ -438,25 +446,28 @@ def _apply_subagent_role_schema(tools_schema, root_dir, *, language="en"):
         if function.get("name") != "spawn_agent":
             continue
         properties = (function.get("parameters") or {}).get("properties") or {}
+        # The pre-rename spelling is removed unconditionally: a stale `agent_type`
+        # left in a schema file must not survive into the model's tool list.
+        properties.pop("agent_type", None)
         if not role_names:
-            properties.pop("agent_type", None)
+            properties.pop("role", None)
             return
-        agent_type = properties.setdefault("agent_type", {"type": "string"})
-        agent_type["enum"] = role_names
+        role_property = properties.setdefault("role", {"type": "string"})
+        role_property.pop("enum", None)
         configured = ", ".join(role_names)
         catalog = format_role_catalog(roles, language=language)
         if language == "zh":
-            agent_type["description"] = (
-                f"可选的预配置角色名；当前可用值：{configured}。{catalog}"
-                "只能使用此列表中的精确名称，也可省略以启动通用子智能体；该字段不是自由标签。"
+            role_property["description"] = (
+                f"可选的预配置角色名，当前有：{configured}。{catalog}"
+                "省略即启动通用子智能体；这不是必填字段，也不是给子智能体命名的字段。"
                 "角色只决定子智能体收到的提示词（做什么、怎么汇报），不改变它能用哪些工具："
                 "除 agent 编排工具外，子智能体默认拿到与主会话相同的工具。"
             )
         else:
-            agent_type["description"] = (
-                f"Optional preconfigured role name. Available values: {configured}. {catalog} "
-                "Use one exact listed value, or omit this field to spawn a generic subagent; "
-                "this is not a free-form label. A role shapes the prompt the child receives "
+            role_property["description"] = (
+                f"Optional preconfigured role name; available: {configured}. {catalog} "
+                "Omit it to spawn a generic subagent. This is neither a required field nor "
+                "a way to name the child. A role shapes the prompt the child receives "
                 "(what to do and how to report); it does not change which tools the child "
                 "gets. Every child gets the same tools as the main session except the "
                 "agent-orchestration ones."

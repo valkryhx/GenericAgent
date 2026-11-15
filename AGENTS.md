@@ -512,13 +512,15 @@ through a generic subagent. `SubagentRoleRegistry.get()` falls back to a builtin
 lookup misses, and `list_roles()` puts project roles first and appends the builtins they do not
 override — a project role of the same name always wins.
 
-`agentmain._apply_subagent_role_schema()` publishes that catalog inside the `agent_type` description:
-`format_role_catalog()` renders `explore (read-only) — ...` per role, followed by a "prefer a read-only
-role for review, audit or exploration work" line. Listing bare names is not enough, because the choice
-happens before the model can see the directory — the same reason Step-Code renders
-`formatBuiltinAgentGuidance()` into its subagent tool. `role_capability_note()` derives "read-only" /
-"can write" from `permission_profile`, so a role added later is annotated by behaviour rather than by a
-hand-maintained list.
+`agentmain._apply_subagent_role_schema()` publishes that catalog inside the `role` property of
+`spawn_agent`, and **the property must stay a plain string — never an `enum`**. It used to be
+`agent_type` with an `enum` of the configured names, which made it the only constrained property on a
+tool whose other 18 properties were all optional; in the 2026-11-15 session that turned it into the
+sole output anchor and 15 of 24 calls arrived as `{'agent_type': 'explore'}` with every other key
+gone. The names stay in the prose so a caller that wants one can find it, but nothing invites filling
+this field and stopping. (`role` is a request-level parameter; the stored `agent_type` on a registry
+row or agent handle is a different thing — an identity marker such as `subagent` / `workflow_child` —
+and must not be renamed away.)
 
 ## Workflow tool access: full connected surface, role/profile are hints
 

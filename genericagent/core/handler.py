@@ -1747,7 +1747,11 @@ class GenericAgentHandler(BaseHandler):
     def do_spawn_agent(self, args, response):
         '''启动一个后台子智能体。默认使用隔离上下文，并移除子 agent 的编排工具。'''
         task_name = args.get("task_name") or args.get("name")
-        agent_type = args.get("agent_type") or args.get("agentType")
+        # `role` is the parameter; `agent_type` stays accepted as a request alias so an
+        # older caller keeps working. Note that the *stored* `agent_type` on a handle or
+        # registry row is a different thing entirely -- an identity marker such as
+        # 'subagent' or 'workflow_child' -- so it must not be renamed away.
+        agent_type = args.get("role") or args.get("agent_type") or args.get("agentType")
         role = None
         role_source_path = None
         if agent_type:
@@ -1759,32 +1763,32 @@ class GenericAgentHandler(BaseHandler):
                 role = role_registry.get(agent_type)
                 role_source_path = role.source_path
             except FileNotFoundError:
-                available_agent_types = sorted(role.name for role in role_registry.list_roles())
-                if available_agent_types:
-                    available_text = ", ".join(available_agent_types)
+                available_roles = sorted(role.name for role in role_registry.list_roles())
+                if available_roles:
+                    available_text = ", ".join(available_roles)
                     msg = (
-                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label. "
-                        f"Available agent_type values: {available_text}. Retry with one exact available value, "
-                        "or omit agent_type to spawn a generic subagent. Do not probe the filesystem for role names."
+                        f"role {agent_type!r} is not a configured role. Available roles: {available_text}. "
+                        "Retry with one of those names, or omit role entirely to spawn a generic subagent. "
+                        "A role is optional and never required; do not probe the filesystem for role names."
                     )
                 else:
                     msg = (
-                        f"agent_type {agent_type!r} is not configured. agent_type is not a free-form label, "
-                        "and no role definitions are available. Retry the same spawn with task_name and message "
-                        "but omit agent_type. Do not probe the filesystem for role names."
+                        f"role {agent_type!r} is not a configured role, and no role definitions are "
+                        "available at all. Retry the same spawn with task_name and message but omit role. "
+                        "Do not probe the filesystem for role names."
                     )
                 return StepOutcome(
                     {
                         "status": "error",
-                        "reason": "unknown_agent_type",
-                        "requested_agent_type": str(agent_type),
-                        "available_agent_types": available_agent_types,
+                        "reason": "unknown_role",
+                        "requested_role": str(agent_type),
+                        "available_roles": available_roles,
                         "msg": msg,
                     },
                     next_prompt="\n",
                 )
             except Exception as e:
-                return StepOutcome({"status": "error", "msg": f"agent_type {agent_type} could not be loaded: {format_error(e)}"}, next_prompt="\n")
+                return StepOutcome({"status": "error", "msg": f"role {agent_type} could not be loaded: {format_error(e)}"}, next_prompt="\n")
         message = args.get("message") or args.get("prompt") or ""
         # A truncated tool-call argument stream makes ``_try_parse_tool_args`` give up and
         # hand us ``{"_raw": "<half a JSON document>"}``. Reporting that as "message is
@@ -1819,34 +1823,36 @@ class GenericAgentHandler(BaseHandler):
         if missing:
             if len(missing) == 2 and agent_type:
                 # The payload that arrived 15 of 24 times: a role and nothing else.
-                # A role names the child's prompt; it carries no name and no task.
+                # A role only rewrites the child's prompt prefix; it carries no name
+                # and no task.
                 msg = (
-                    "task_name and message are both required. agent_type "
-                    f"{agent_type!r} selects a role -- the prompt the child receives -- and "
-                    "supplies neither: it does not name the agent and it is not a task. Send "
-                    "task_name (unique, lowercase letters/digits/underscores) plus message "
-                    "(the child's whole task contract: goal, scope, paths, and the final answer "
-                    "you need). Nothing was spawned, so retrying is safe."
+                    "task_name and message are both required. role "
+                    f"{agent_type!r} only rewrites the child's prompt -- it supplies neither "
+                    "a name nor a task. Send task_name (unique, lowercase "
+                    "letters/digits/underscores) plus message (the child's whole task "
+                    "contract: goal, scope, paths, and the final answer you need). "
+                    "Nothing was spawned, so retrying is safe."
                 )
                 reason = "task_name_and_message_required"
             elif "message" in missing:
                 msg = (
                     "message is required: it is the child's whole task contract (goal, scope, "
                     "paths, and the final answer you need). No other field can stand in for it "
-                    "-- task_name only labels the agent, and a role only shapes its prompt. "
+                    "-- task_name only labels the agent, and role only rewrites its prompt. "
                     "Nothing was spawned, so retry with the same task_name and add message."
                 )
                 reason = "message_required"
             else:
-                # `agent_type` names a role, not an agent. Filling task_name from it used to
+                # `role` names a prompt, not an agent. Filling task_name from it used to
                 # make every role spawn land on the same path (`/root/explore`), so a second
                 # teammate was refused with a name_conflict that named a path the caller
                 # never chose.
                 if agent_type:
                     msg = (
-                        f"task_name is required. agent_type {agent_type!r} selects a role (the child's "
-                        "prompt); it does not name the agent. Send task_name (lowercase letters, digits, "
-                        "underscores) plus message, keeping agent_type only if you want that role's prompt."
+                        f"task_name is required. role {agent_type!r} only rewrites the child's "
+                        "prompt; it does not name the agent. Send task_name (lowercase letters, "
+                        "digits, underscores) plus message, keeping role only if you want that "
+                        "prompt prefix."
                     )
                 else:
                     msg = (
