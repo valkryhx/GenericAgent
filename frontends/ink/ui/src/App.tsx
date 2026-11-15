@@ -1002,7 +1002,7 @@ export function App({
   resizeRemountDelayMs = RESIZE_REMOUNT_DELAY_MS,
 }: Props) {
   const { exit } = useApp()
-  const { stdout } = useStdout()
+  const { stdout, write: inkWrite } = useStdout()
   const { setRawMode, isRawModeSupported, internal_eventEmitter } = useStdin()
   const [terminalSize, setTerminalSize] = useState(() => ({
     columns: Math.max(1, stdout.columns || 80),
@@ -1172,8 +1172,26 @@ export function App({
   // 整屏重置（清屏 + 清 scrollback + 光标归位）。<Static> 只能追加、无法撤销已写出的行，
   // 所以「历史被替换/裁剪后重印」必须先重置，否则旧行与新行叠加成重复。
   const resetTranscriptViewport = () => {
-    if (cursorPark) cursorPark.resetViewport()
-    else stdout.write(resetViewportSequence())
+    if (!cursorPark) {
+      stdout.write(resetViewportSequence())
+      return
+    }
+    // 全屏模式必须让 ink 自己来清：ink 在 `onRender` 里有一道
+    // `output !== lastOutput` 的短路（`ink.js:132`），而直接往 stdout 写清屏序列不会
+    // 更新 ink 的 `lastOutput`。于是重渲染时 ink 认为「画面没变，不必重画」，屏幕就停在
+    // 清屏后的全空状态 —— 用户报的「最大化后内容不显示，只能重启」。
+    // `useStdout().write` 走 ink 的 `writeToStdout`：先 `log.clear()`、写数据、再
+    // `log(lastOutput)` 把上一帧重画回去（`ink.js:154-155`），正好绕开那道短路。
+    // 全屏模式不使用 `<Static>`，历史全在 live 区，所以「重画上一帧」就是完整恢复。
+    //
+    // 顺序很重要：先丢弃 cursorPark 里属于旧几何的记账，再让 ink 重画 —— 反过来的话
+    // 那次重画会被 resetViewport 当作旧字节清掉（这正是本 bug 的成因）。
+    if (fullscreen) {
+      cursorPark.resetViewport()
+      inkWrite(resetViewportSequence())
+      return
+    }
+    cursorPark.resetViewport()
   }
 
   const cleanupTerminalOnce = () => {
@@ -1462,6 +1480,12 @@ export function App({
       // 延迟到 `resizeRemountDelayMs`（默认 120ms）的重挂会整屏重画一次，把被尾帧擦掉的内容补回来。
       // 这段延迟就是「历史暂时不可见」的窗口长度，实测约 140ms；下限由探针
       // `probes/resize_delay_sweep.ts` 扫出来，改这个值前先跑它。
+      //
+      // ⚠ 上面 `resetTranscriptViewport()` 会丢弃缓冲里未 flush 的那次重画（属于旧几何，
+      // 丢弃是对的），所以必须有东西把画面补回来。inline 模式靠这里重挂 `<Static>`；
+      // **全屏模式不使用 `<Static>`**（`staticTranscript.rows = []`），这个回调对它等于
+      // 什么都不做 —— 全屏的重画由 `resetTranscriptViewport` 自己完成（走 ink 的
+      // `useStdout().write`，让 ink 把上一帧重画回去）。两者不要混为一谈。
       setTimeout(() => {
         if (terminalCleanedRef.current) return
         resetStaticTranscriptOutput()

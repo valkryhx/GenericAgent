@@ -200,6 +200,40 @@ test('resetViewport invalidates an already-scheduled flush', () => {
   assert.equal(w.parkedUp, null)
 })
 
+test('resetViewport drops pending bytes but keeps the last frame for whoever repaints', () => {
+  // 用户报「窗口最大化后内容不显示，只能重启」（2026-11-15）。
+  //
+  // `resetViewport` 会丢掉缓冲里未 flush 的内容 —— 这是**对**的：那些字节是在旧宽度下
+  // 排版的，重置后写出去只会画错位置。问题不在丢，而在「丢掉之后 screen 是全空的」，
+  // 必须有东西重画。
+  //
+  // 重画的职责在 App 层（`resetTranscriptViewport` 在全屏模式改用 ink 的
+  // `useStdout().write`，让 ink 自己 `log.clear()` + `log(lastOutput)` 重画上一帧，
+  // 从而绕开 `ink.js:132` 的 `output !== lastOutput` 短路）。回归测试见
+  // `src/resizeFullscreen.test.ts`。
+  //
+  // 这里锁住 cursorPark 这一侧的契约：丢弃未 flush 的字节，但**发现屏幕上原本有内容**
+  // 时应当留下可重建的依据（本类自身不负责重画）。
+  const out: string[] = []
+  const { schedule, flush } = manualScheduler()
+  const w = plainWriter(out, schedule)
+  w.setPark(null)
+  w.write('VIEWPORT-LINE-A\nVIEWPORT-LINE-B\n')
+  flush()
+  out.length = 0
+
+  // 下一次渲染入缓冲但还没 flush，此时 resize 到来
+  w.write('STALE-OLD-WIDTH-BYTES\n')
+  w.resetViewport('RESET')
+  flush()
+
+  assert.ok(out.some(chunk => chunk.includes('RESET')), 'the reset itself must be written')
+  assert.ok(
+    !out.some(chunk => chunk.includes('STALE-OLD-WIDTH-BYTES')),
+    'bytes laid out for the old width must not be written after the reset',
+  )
+})
+
 // 端到端不变量：用虚拟终端追踪器验证连续多帧下 eraseLines 始终从帧底往上擦。
 test('end-to-end: eraseLines always erases from frame bottom (virtual terminal)', () => {
   const BODY = ['hint', '────────', '> caret']  // 3 行，caret 在末行
