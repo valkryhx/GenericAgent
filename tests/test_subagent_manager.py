@@ -1954,16 +1954,33 @@ class WaitAgentsWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._agent(td, "broken")
             slept = []
+            channel_calls = []
 
             class BrokenChannel:
                 def wait_for_signal(self, timeout):
+                    channel_calls.append(timeout)
                     raise OSError("channel is gone")
 
             manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
             manager._realtime_channels["/root/broken"] = BrokenChannel()
 
-            result = manager.wait_agents(["broken"], timeout_s=0.05, poll_interval_s=0.02)
+            # The budget has to cover at least one whole loop iteration -- probe the
+            # targets, read the bus, read the inbox, reach the channel, fall back,
+            # sleep -- because that is the behaviour under test. At 0.05 s one busy
+            # iteration outran the deadline, so `slept` stayed empty and the failure
+            # read as "a dead channel broke the wait" even though the channel was
+            # never reached. Measured with
+            # tests/probes/python/_probe_wait_budget_wallclock.py: an idle iteration
+            # plus one poll costs ~50 ms, and injecting 30 ms into the per-iteration
+            # helpers made it 0/6 reach the fallback. 0.5 s is 10x that, and this is
+            # a poll wait, so passing runs still return as soon as the deadline hits.
+            result = manager.wait_agents(["broken"], timeout_s=0.5, poll_interval_s=0.02)
 
+            self.assertTrue(
+                channel_calls,
+                "the loop never reached the channel: its budget expired first, so the "
+                "fallback was never exercised",
+            )
             self.assertTrue(result.timed_out)
             self.assertTrue(slept, "a dead channel must degrade to polling, not break the wait")
 

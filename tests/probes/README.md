@@ -49,4 +49,9 @@
 | `tests/probes/python/_probe_workflow_deadline_budget.py` | workflow 超时测试为什么时好时坏？分别测量「node worker 启动开销」与「测试声明的预算」，判断预算是否小于固定启动成本——预算不够时 deadline 会在脚本第一行运行之前触发，job 根本不存在，也就无从取消。 |
 | `tests/probes/python/_probe_test_flakiness_under_load.py` | 并行 / 满负载跑 pytest 时哪些用例会偶发失败？空闲与 6 个 CPU hog 两种条件下各测 N 轮通过率，并打印最常出现的失败断言。判定表见 `docs/20261116-并行pytest下偶发失败的用例清单.md`。 |
 | `tests/probes/python/_probe_ink_bridge_stage_budget.py` | ink bridge 的 workflow 阶段预算够不够？测量 approve → 第二个 `agent()` 启动的真实耗时（自然条件最坏 2.38 s，旧上限 3.0 s）。**同时记录了 `Event.wait(timeout=N)` 不能当秒表用**：CPU 密集的邻线程会让它过冲后返回 True，从而给出假绿结论。 |
+| `tests/probes/python/_probe_wait_agents_iteration_cost.py` | `wait_agents` 一次迭代到底花多少墙钟时间？实测空闲时 51–54 ms，而用例给的预算只有 50 ms，于是"至少要跑完一轮才可能 sleep"这件事本身没有余量。 |
+| `tests/probes/python/_probe_wait_budget_wallclock.py` | 那条 0.05 s 预算的失败是"负载抖动"还是"预算装不下一次迭代"？用**注入固定延迟**构造确定性对照组：50 ms 预算下 0/6 能触达 channel，同样的慢迭代换成 500 ms 预算则 6/6 通过。 |
+| `tests/probes/python/_probe_abort_discovery_latency.py` | `abort()` 到 MCP discovery 停下的真实耗时 vs 到 `is_running` 被清零的耗时。实测前者 11 ms、后者只是碰巧 11 ms；给 teardown 注入 900 ms 后后者变成 915 ms 而前者不动 —— 证明旧断言的 0.75 s 窗口量的是回合收尾，不是"abort 打断 discovery"。 |
+| `tests/probes/python/_slow_iteration_plugin.py` | 反向确认用：pytest 插件，把 `wait_agents` 每轮会调的两个 I/O helper 各加 30 ms，让一次迭代确定性地超出预算。`--slow-iteration-shrink-timeout 0.05` 可验证新守卫指向"预算太小"而不是"回退坏了"。 |
+| `tests/probes/python/_slow_teardown_plugin.py` | 反向确认用：把回合收尾中的一步延迟 900 ms，证明旧断言会报"abort 没有打断 MCP discovery"——而 discovery 明明 11 ms 就停了。 |
 

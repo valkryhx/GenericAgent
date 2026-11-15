@@ -32,6 +32,7 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
 
     def test_abort_stops_mcp_discovery_before_first_model_request(self):
         discovery_started = threading.Event()
+        discovery_noticed_abort = threading.Event()
         release_discovery = threading.Event()
 
         class StubClient:
@@ -79,6 +80,7 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
             while not release_discovery.is_set():
                 stop_signal = _current_stop_signal()
                 if stop_signal is not None and stop_signal.is_set():
+                    discovery_noticed_abort.set()
                     return
                 time.sleep(0.01)
 
@@ -94,16 +96,28 @@ class AgentMainLLMSessionsTest(unittest.TestCase):
             agent.put_task("trigger discovery")
             self.assertTrue(discovery_started.wait(timeout=2), "agent did not enter MCP discovery")
             agent.abort()
-            deadline = time.monotonic() + 0.75
-            while agent.is_running and time.monotonic() < deadline:
-                time.sleep(0.01)
-            stopped_quickly = not agent.is_running
+            # Abort lands on the discovery loop through the stop signal it polls. That
+            # is the behaviour under test, and it is what gets asserted.
+            #
+            # `is_running == False` is NOT that behaviour: it is only cleared in the
+            # `finally` at app.py:2328, after the whole turn unwinds (capability
+            # profile, agent_runner_loop construction, stop-file watcher, stream
+            # drain). Measured with tests/probes/python/_probe_abort_discovery_latency.py:
+            # discovery sees the abort in ~11 ms, but is_running clears at 11 ms only
+            # because the stubbed chat raises immediately. Injecting 900 ms into the
+            # teardown pushed is_running to 915 ms while discovery still stopped in
+            # 11 ms -- so the old 0.75 s window could go red with the behaviour
+            # completely intact. The turn teardown gets its own, larger budget below.
+            self.assertTrue(
+                discovery_noticed_abort.wait(timeout=2),
+                "abort() did not reach the blocking MCP discovery loop",
+            )
             release_discovery.set()
-            cleanup_deadline = time.monotonic() + 2
-            while agent.is_running and time.monotonic() < cleanup_deadline:
+            teardown_deadline = time.monotonic() + 15.0
+            while agent.is_running and time.monotonic() < teardown_deadline:
                 time.sleep(0.01)
 
-        self.assertTrue(stopped_quickly, "GenericAgent.abort() did not interrupt MCP discovery")
+        self.assertFalse(agent.is_running, "the aborted turn did not finish unwinding")
         self.assertEqual(client.chat_calls, 0)
 
     def test_failed_mixin_config_is_not_left_as_default_client(self):
