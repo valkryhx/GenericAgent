@@ -1758,7 +1758,6 @@ class GenericAgentHandler(BaseHandler):
             try:
                 role = role_registry.get(agent_type)
                 role_source_path = role.source_path
-                task_name = task_name or role.name
             except FileNotFoundError:
                 available_agent_types = sorted(role.name for role in role_registry.list_roles())
                 if available_agent_types:
@@ -1812,10 +1811,53 @@ class GenericAgentHandler(BaseHandler):
                 },
                 next_prompt="\n",
             )
-        if not task_name:
-            return StepOutcome({"status": "error", "msg": "task_name is required"}, next_prompt="\n")
-        if not message:
-            return StepOutcome({"status": "error", "msg": "message is required"}, next_prompt="\n")
+        # Both required fields are checked together on purpose. Reporting only the first
+        # one costs the caller a whole round trip to discover the second, and on a real
+        # session (2026-11-15) the model burned 24 calls that way before giving up on the
+        # task. Name everything that is missing, once.
+        missing = [name for name, value in (("task_name", task_name), ("message", message)) if not value]
+        if missing:
+            if len(missing) == 2 and agent_type:
+                # The payload that arrived 15 of 24 times: a role and nothing else.
+                # A role names the child's prompt; it carries no name and no task.
+                msg = (
+                    "task_name and message are both required. agent_type "
+                    f"{agent_type!r} selects a role -- the prompt the child receives -- and "
+                    "supplies neither: it does not name the agent and it is not a task. Send "
+                    "task_name (unique, lowercase letters/digits/underscores) plus message "
+                    "(the child's whole task contract: goal, scope, paths, and the final answer "
+                    "you need). Nothing was spawned, so retrying is safe."
+                )
+                reason = "task_name_and_message_required"
+            elif "message" in missing:
+                msg = (
+                    "message is required: it is the child's whole task contract (goal, scope, "
+                    "paths, and the final answer you need). No other field can stand in for it "
+                    "-- task_name only labels the agent, and a role only shapes its prompt. "
+                    "Nothing was spawned, so retry with the same task_name and add message."
+                )
+                reason = "message_required"
+            else:
+                # `agent_type` names a role, not an agent. Filling task_name from it used to
+                # make every role spawn land on the same path (`/root/explore`), so a second
+                # teammate was refused with a name_conflict that named a path the caller
+                # never chose.
+                if agent_type:
+                    msg = (
+                        f"task_name is required. agent_type {agent_type!r} selects a role (the child's "
+                        "prompt); it does not name the agent. Send task_name (lowercase letters, digits, "
+                        "underscores) plus message, keeping agent_type only if you want that role's prompt."
+                    )
+                else:
+                    msg = (
+                        "task_name is required: pick a unique lowercase name for this child. Reusing a "
+                        "name that is still live is refused, so name each teammate after its own work."
+                    )
+                reason = "task_name_required"
+            return StepOutcome(
+                {"status": "error", "reason": reason, "msg": msg},
+                next_prompt="\n",
+            )
         if role is not None:
             message = build_role_task_message(role, message)
         raw_fork_turns = args.get("fork_turns")

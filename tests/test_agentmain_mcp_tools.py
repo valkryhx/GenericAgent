@@ -62,6 +62,24 @@ class AgentMainMcpToolsTest(unittest.TestCase):
         self.assertIn("does not change which tools", agent_type["description"])
         self.assertNotIn("read-only", agent_type["description"])
 
+    def test_spawn_agent_schema_declares_task_name_and_message_required(self):
+        """An all-optional spawn_agent taught the model nothing about what it must send.
+
+        Real failure (2026-11-15, installed 0.6.1): 15 of 24 `spawn_agent` calls arrived
+        as `{'agent_type': 'explore'}` with every other key missing. The schema declared
+        18 properties and no `required`, so the model only discovered that `message` was
+        mandatory by spending three minutes retrying against `{"msg": "message is
+        required"}`. Declaring the contract on the schema is what stops the loop.
+        """
+        from genericagent.core import app as agentmain
+
+        agentmain.load_tool_schema(include_mcp_tools=False)
+
+        spawn = next(tool["function"] for tool in agentmain.TOOLS_SCHEMA if tool["function"]["name"] == "spawn_agent")
+        required = spawn["parameters"].get("required") or []
+        self.assertIn("message", required)
+        self.assertIn("task_name", required)
+
     def test_load_tool_schema_can_skip_mcp_discovery(self):
         os.environ["GA_MCP_CONFIG"] = str(REPO_ROOT / "temp" / "missing-test-mcp.json")
         from genericagent.core import app as agentmain

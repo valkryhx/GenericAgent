@@ -427,7 +427,11 @@
             "type": "boolean",
             "description": "可选，是否开启子进程 verbose 输出"
           }
-        }
+        },
+        "required": [
+          "task_name",
+          "message"
+        ]
       }
     }
   },

@@ -427,7 +427,11 @@
             "type": "boolean",
             "description": "Optional verbose child output flag"
           }
-        }
+        },
+        "required": [
+          "task_name",
+          "message"
+        ]
       }
     }
   },

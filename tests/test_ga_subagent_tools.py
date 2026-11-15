@@ -668,6 +668,7 @@ class GaSubagentToolsTest(unittest.TestCase):
             outcome = exhaust(
                 handler.do_spawn_agent(
                     {
+                        "task_name": "researcher",
                         "agent_type": "researcher",
                         "message": "Find relevant tests.",
                     },
@@ -689,6 +690,36 @@ class GaSubagentToolsTest(unittest.TestCase):
             state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["agent_type"], "researcher")
             self.assertTrue(state["role_source_path"].endswith("researcher.json"))
+
+    def test_spawn_agent_tool_does_not_silently_use_the_role_name_as_task_name(self):
+        """`agent_type` must not double as `task_name`.
+
+        Real failure (2026-11-15, installed 0.6.1): the model sent
+        `{'agent_type': 'explore', 'message': ...}`. The handler filled the absent
+        `task_name` from `role.name`, so the first child took `/root/explore` and the
+        next three spawns died on `name_conflict` — each reported as an unrelated
+        "already exists and is still live" that named a path the caller never chose.
+        The role is a prompt, not an identity: refuse, and say why.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(
+                td,
+                popen=lambda *_, **__: type("FakeProcess", (), {"pid": 331})(),
+                python_executable="python-test",
+            )
+
+            outcome = exhaust(
+                handler.do_spawn_agent(
+                    {"agent_type": "explore", "message": "Find relevant tests."},
+                    response=None,
+                )
+            )
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data.get("reason"), "task_name_required")
+            self.assertIn("agent_type", outcome.data["msg"])
+            # Nothing may be spawned, and no task dir may be created under the role name.
+            self.assertFalse((Path(td) / "temp" / "explore").exists())
 
     def test_spawn_agent_tool_rejects_unknown_agent_type(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1686,13 +1717,47 @@ class GaSubagentToolsTest(unittest.TestCase):
             self.assertNotIn("task_name is required", msg)
 
     def test_a_genuinely_empty_message_is_still_reported_as_missing(self):
-        """The truncation branch must not swallow the real "you forgot the field" case."""
+        """The truncation branch must not swallow the real "you forgot the field" case.
+
+        `message` is the child's entire task contract -- there is no other field that can
+        stand in for it, and a child spawned without one has nothing to do. The bare
+        `"message is required"` still has to say that, because the caller's next move is
+        either "add a message" or "I thought agent_type/prompt covered it".
+        """
         with tempfile.TemporaryDirectory() as td:
             handler = self.make_handler(td, popen=lambda *_, **__: None, python_executable="python-test")
 
             outcome = exhaust(handler.do_spawn_agent({"task_name": "reviewer"}, response=None))
 
-            self.assertEqual(outcome.data["msg"], "message is required")
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "message_required")
+            msg = outcome.data["msg"]
+            self.assertIn("message is required", msg)
+            # Must say what message is for, not just that it is absent.
+            self.assertIn("task contract", msg)
+            # And that nothing ran, so the retry is safe.
+            self.assertIn("Nothing was spawned", msg)
+
+    def test_agent_type_alone_does_not_explain_away_the_missing_message(self):
+        """`{'agent_type': 'explore'}` must not read as "a role was picked, all set".
+
+        This is the exact payload that reached the handler 15 of 24 times in the
+        2026-11-15 session. A role names the child's prompt; it does not carry a task.
+        The error has to name `message` as the missing piece instead of blaming
+        `task_name` alone, or the caller fixes the wrong field and loops again.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            handler = self.make_handler(td, popen=lambda *_, **__: None, python_executable="python-test")
+
+            outcome = exhaust(handler.do_spawn_agent({"agent_type": "explore"}, response=None))
+
+            self.assertEqual(outcome.data["status"], "error")
+            self.assertEqual(outcome.data["reason"], "task_name_and_message_required")
+            msg = outcome.data["msg"]
+            self.assertIn("task_name", msg)
+            self.assertIn("message", msg)
+            # Both fields are named, and the role is explicitly called out as neither.
+            self.assertIn("agent_type", msg)
 
     def test_spawn_agent_tool_still_reports_other_failures_with_traceback_context(self):
         """Only the name conflict loses the file/line suffix; real crashes still need it."""
