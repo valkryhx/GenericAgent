@@ -228,6 +228,19 @@ class FakeAgentControl:
 
 _REAL_GENERIC_AGENT_BRIDGE = GenericAgentBridge
 
+# How long to wait for a workflow to reach a given point before giving up.
+#
+# `WorkflowRuntime` starts its deadline before the node worker exists
+# (`runtime.py:284`), so every budget here also covers process spawn + the `ready`
+# handshake. Measured on this machine, spawn -> first agent() call: 145-525 ms idle.
+#
+# The specific number that used to flake: a workflow whose first agent succeeds and
+# whose second one starts needed up to **2.97 s** under 6x CPU load against a 3.0 s
+# wait — a 30 ms margin, so the failure was decided by scheduler noise rather than by
+# the resume logic the test is about. These are poll waits, not fixed sleeps, so
+# raising the ceiling does not slow a passing run down.
+WORKFLOW_STAGE_BUDGET_SECONDS = 15.0
+
 
 def make_isolated_bridge(*args, **kwargs):
     kwargs.setdefault("agent_control", FakeAgentControl())
@@ -235,6 +248,26 @@ def make_isolated_bridge(*args, **kwargs):
 
 
 class InkBridgeTest(unittest.TestCase):
+    def test_workflow_stage_budget_leaves_room_for_worker_startup(self):
+        """A workflow stage budget must exceed spawn + ready + the script's own work.
+
+        Real failure (2026-11-16, full-suite run): `second_started.wait(timeout=3.0)`
+        in `test_workflow_resume_cache_hit_replays_prefix_without_restarting_cached_child`
+        lost the race. Measuring the same wait under 6x CPU load gave **2.97 s** against
+        the 3.0 s ceiling — a 30 ms margin, so whether the test passed was decided by
+        scheduler noise, not by the resume behaviour it asserts.
+
+        The ceiling is not a fixed sleep (it is a poll wait that returns as soon as the
+        condition holds), so a larger ceiling costs a passing run nothing. This guard
+        exists so nobody shrinks the constant back toward the measurement.
+        """
+        self.assertGreaterEqual(
+            WORKFLOW_STAGE_BUDGET_SECONDS,
+            10.0,
+            "a workflow stage budget below 10s cannot absorb node worker startup on a "
+            "loaded machine (measured 2.97s just to reach the second agent)",
+        )
+
     def setUp(self):
         bridge_patch = patch(f"{__name__}.GenericAgentBridge", new=make_isolated_bridge)
         bridge_patch.start()
@@ -3786,11 +3819,14 @@ return { marker: 'GA_STOP_RESUME_DONE', first: first.summary, second: second.sum
                 workflow_runtime_factory=runtime_factory,
             )
             source_run_id = bridge.workflow_draft(_cc_script(script))
-            self.assertTrue(bridge.workflow_approve(source_run_id, timeout_seconds=5.0))
-            self.assertTrue(runner.second_started.wait(timeout=3.0))
+            # These are poll waits: a 3.0 s ceiling was measured to be 30 ms short of
+            # what spawn + ready + two agent() calls can take under load (2.97 s), so
+            # the test could fail for a reason unrelated to resume-from-cache.
+            self.assertTrue(bridge.workflow_approve(source_run_id, timeout_seconds=WORKFLOW_STAGE_BUDGET_SECONDS))
+            self.assertTrue(runner.second_started.wait(timeout=WORKFLOW_STAGE_BUDGET_SECONDS))
 
             self.assertTrue(bridge.workflow_stop(source_run_id, reason="user stop after prefix"))
-            bridge.wait_for_workflow_idle(source_run_id, timeout=5)
+            bridge.wait_for_workflow_idle(source_run_id, timeout=WORKFLOW_STAGE_BUDGET_SECONDS)
             source_thread = bridge._workflow_threads[source_run_id]
             self.assertFalse(source_thread.is_alive())
 
@@ -3881,9 +3917,9 @@ return { marker: 'GA_STOP_RESUME_DONE', first: first.summary, second: second.sum
             self.assertEqual(["agent_1", "agent_2"], runner.started_job_ids)
             self.assertEqual(["agent_2"], runner.cancelled_job_ids)
 
-            resumed_run_id = bridge.workflow_resume(source_run_id, timeout_seconds=5.0)
+            resumed_run_id = bridge.workflow_resume(source_run_id, timeout_seconds=WORKFLOW_STAGE_BUDGET_SECONDS)
             self.assertTrue(resumed_run_id)
-            bridge.wait_for_workflow_idle(resumed_run_id, timeout=5)
+            bridge.wait_for_workflow_idle(resumed_run_id, timeout=WORKFLOW_STAGE_BUDGET_SECONDS)
             self.assertFalse(bridge._workflow_threads[resumed_run_id].is_alive())
 
             resumed = bridge.workflow_store.load_run(resumed_run_id)
