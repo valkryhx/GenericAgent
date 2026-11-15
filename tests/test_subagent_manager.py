@@ -19,6 +19,28 @@ from genericagent.agents.state import append_jsonl_event, atomic_write_json, rea
 from genericagent.agents.manager import SubagentManager  # noqa: E402
 
 
+# The budget for the `wait_agents` tests that assert on something the loop only reaches
+# *after* a full iteration: probe the target -> read the event bus -> read the parent
+# inbox -> walk the targets -> `_wait_for_change` (sleep or channel wait).
+#
+# It used to be 0.05 s, which is not a wrong number so much as no margin: measured with
+# tests/probes/python/_probe_wait_budget_sweep.py, one iteration on an idle machine
+# already costs ~53 ms. So the deadline expired first, the loop never reached
+# `_wait_for_change`, and the assertions reported the mechanism as broken ("the file
+# transport lost its poll loop", "wait ignored the live channel") when it had never been
+# exercised. Injecting 30 ms into the per-iteration helpers made all three branches fail
+# 0/5; the same slow iteration passes 5/5 at 0.5 s.
+#
+# The three branches are covered because they fail through different paths:
+#   no channel   -> the blind-sleep branch
+#   live channel -> the wait_for_signal branch
+#   dead channel -> the except fallback that degrades to polling
+#
+# These are poll waits, so a passing run still returns as soon as the deadline hits;
+# a larger budget costs nothing when the machine is fast.
+WAIT_AGENTS_TEST_BUDGET_S = 0.5
+
+
 class SubagentManagerStateRootTest(unittest.TestCase):
     def test_explicit_state_root_keeps_runtime_out_of_project(self):
         class Proc:
@@ -1770,6 +1792,23 @@ class WaitAgentsWatchTest(unittest.TestCase):
     the loop must keep its blind sleep, or the file transport stops working.
     """
 
+    def test_the_budget_covers_a_whole_loop_iteration(self):
+        """Guard the shared budget so it cannot quietly drift back under one iteration.
+
+        One iteration (probe -> bus -> inbox -> walk targets -> _wait_for_change) costs
+        ~53 ms on an idle machine and more under load. ``_probe_wait_budget_sweep.py``
+        shows all three branches failing at 50 ms and passing at 0.5 s once an iteration
+        is slowed on purpose. If someone lowers this again, fail here with the reason
+        attached rather than letting the behaviour tests go intermittently red.
+        """
+        self.assertGreaterEqual(
+            WAIT_AGENTS_TEST_BUDGET_S,
+            0.5,
+            "the wait_agents tests need a budget covering one whole loop iteration "
+            "(~53 ms idle); below that the deadline fires first and the assertions "
+            "blame the mechanism for never being reached",
+        )
+
     def _agent(self, td, name, pid=500):
         task_dir = Path(td) / "temp" / name
         task_dir.mkdir(parents=True)
@@ -1792,10 +1831,24 @@ class WaitAgentsWatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._agent(td, "filed")
             slept = []
+            reached = []
             manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
+            original_change = manager._wait_for_change
 
-            result = manager.wait_agents(["filed"], timeout_s=0.05, poll_interval_s=0.02)
+            def marking_change(targets, poll_interval_s, deadline):
+                reached.append(1)
+                return original_change(targets, poll_interval_s, deadline)
 
+            manager._wait_for_change = marking_change
+
+            result = manager.wait_agents(
+                ["filed"], timeout_s=WAIT_AGENTS_TEST_BUDGET_S, poll_interval_s=0.02)
+
+            self.assertTrue(
+                reached,
+                "the loop never reached _wait_for_change: its budget expired during the "
+                "first iteration, so the blind-sleep branch was never exercised",
+            )
             self.assertTrue(result.timed_out)
             self.assertTrue(slept, "the file transport lost its poll loop")
 
@@ -1899,10 +1952,15 @@ class WaitAgentsWatchTest(unittest.TestCase):
             manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
             manager._realtime_channels["/root/piped"] = FakeChannel()
 
-            result = manager.wait_agents(["piped"], timeout_s=0.05, poll_interval_s=0.02)
+            result = manager.wait_agents(
+                ["piped"], timeout_s=WAIT_AGENTS_TEST_BUDGET_S, poll_interval_s=0.02)
 
+            self.assertTrue(
+                waited,
+                "the loop never reached the channel: its budget expired during the first "
+                "iteration, so the channel branch was never exercised",
+            )
             self.assertTrue(result.timed_out)
-            self.assertTrue(waited, "wait ignored the live channel and fell back to sleeping")
             self.assertEqual(slept, [], "wait both watched the channel and blind-slept")
 
     def test_a_signal_ends_the_wait_early_so_the_change_is_seen_at_once(self):
@@ -1942,11 +2000,16 @@ class WaitAgentsWatchTest(unittest.TestCase):
             manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=lambda _: None)
             manager._realtime_channels["/root/bounded"] = FakeChannel()
 
-            manager.wait_agents(["bounded"], timeout_s=0.05, poll_interval_s=30)
+            budget = WAIT_AGENTS_TEST_BUDGET_S
+            manager.wait_agents(["bounded"], timeout_s=budget, poll_interval_s=30)
 
-            self.assertTrue(waited)
             self.assertTrue(
-                all(value <= 0.05 + 1e-6 for value in waited),
+                waited,
+                "the loop never reached the channel: its budget expired during the first "
+                "iteration, so the deadline bound was never exercised",
+            )
+            self.assertTrue(
+                all(value <= budget + 1e-6 for value in waited),
                 f"wait would have blocked past its own deadline: {waited}",
             )
 
@@ -1964,17 +2027,8 @@ class WaitAgentsWatchTest(unittest.TestCase):
             manager = SubagentManager(root_dir=td, process_exists=lambda _pid: True, sleep=slept.append)
             manager._realtime_channels["/root/broken"] = BrokenChannel()
 
-            # The budget has to cover at least one whole loop iteration -- probe the
-            # targets, read the bus, read the inbox, reach the channel, fall back,
-            # sleep -- because that is the behaviour under test. At 0.05 s one busy
-            # iteration outran the deadline, so `slept` stayed empty and the failure
-            # read as "a dead channel broke the wait" even though the channel was
-            # never reached. Measured with
-            # tests/probes/python/_probe_wait_budget_wallclock.py: an idle iteration
-            # plus one poll costs ~50 ms, and injecting 30 ms into the per-iteration
-            # helpers made it 0/6 reach the fallback. 0.5 s is 10x that, and this is
-            # a poll wait, so passing runs still return as soon as the deadline hits.
-            result = manager.wait_agents(["broken"], timeout_s=0.5, poll_interval_s=0.02)
+            result = manager.wait_agents(
+                ["broken"], timeout_s=WAIT_AGENTS_TEST_BUDGET_S, poll_interval_s=0.02)
 
             self.assertTrue(
                 channel_calls,

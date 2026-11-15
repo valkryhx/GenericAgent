@@ -21,6 +21,18 @@ Acceptance shape:
 The last line is checked with `--slow-iteration-shrink-timeout`, which forces the
 budget back down while the fixed test is in place. If the new guard is worth having,
 that run must fail on the channel-reached assertion rather than on `slept`.
+
+Three tests share this defect and are covered by the same plugin:
+
+    test_wait_blind_sleeps_when_the_agent_has_no_realtime_channel   (no channel)
+    test_wait_sleeps_on_the_channel_when_one_exists                 (live channel)
+    test_the_channel_wait_never_overruns_the_deadline               (deadline bound)
+
+Note the shrink only touches calls that already asked for a short budget (<= 1 s).
+An earlier version shrank *every* call, which also slammed the 5 s and 30 s tests in
+the same class down to 0.05 s and made them fail for a reason unrelated to this probe
+-- a reminder that a control which changes more than the variable under study is not a
+control.
 """
 
 from __future__ import annotations
@@ -59,7 +71,10 @@ def pytest_configure(config):
         return original_inbox(self, offset, targets)
 
     def shrunk_wait(self, targets=None, timeout_s=30, **kwargs):
-        if SHRINK_TIMEOUT_TO is not None and timeout_s > SHRINK_TIMEOUT_TO:
+        # Only shrink calls that already asked for a short budget. Shrinking everything
+        # also collapsed the 5 s / 30 s tests in the same class down to 0.05 s, and they
+        # then failed for a reason that has nothing to do with the budget under study.
+        if SHRINK_TIMEOUT_TO is not None and 0 < timeout_s <= 1.0:
             timeout_s = SHRINK_TIMEOUT_TO
         return original_wait(self, targets, timeout_s, **kwargs)
 
