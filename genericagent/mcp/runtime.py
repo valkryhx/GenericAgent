@@ -26,6 +26,24 @@ _MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 _DISCOVERY_CACHE: dict[tuple, "McpDiscovery"] = {}
 _MCP_LOG_DIR = paths.TEMP_DIR / "mcp_logs"
 _MCP_TOOLS_CACHE_PATH = paths.TEMP_DIR / "mcp_tools_cache.json"
+
+# How long the first MCP server launch in a fresh process spends importing the
+# client stack, before any server work happens.
+#
+# `stdio_client` and `ClientSession` are imported lazily at the point of use
+# (`_open_stdio_session`), and the child fixture scripts import `fastmcp`. Both are
+# expensive the first time and cheap afterwards because the modules are cached:
+#
+#     import fastmcp                   -> 4.03-4.53 s cold
+#     from mcp.client.stdio import ... -> 1.74-2.24 s cold
+#
+# Tests that wait for a server's start marker used to hard-code a 3 s budget, which
+# is *below* that floor: the first launch in a fresh process lost the race and the
+# test failed for a reason unrelated to what it asserted. It read as a flake only
+# because a full-file run warms the import in an earlier test, while running the
+# file alone always lost. Tests derive their budget from this constant so the margin
+# survives on slower machines instead of being re-guessed at each call site.
+MCP_IMPORT_COST_ESTIMATE_SECONDS = 5.0
 # Incomplete discovery (a server failed/timed out) is cached only briefly so a
 # transient remote-server timeout cannot permanently hide its tools. Complete
 # results stay cached as long as the config signature matches (no TTL).

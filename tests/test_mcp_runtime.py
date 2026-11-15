@@ -46,6 +46,7 @@ from genericagent.mcp.runtime import (  # noqa: E402
     _redact_sensitive,
     _write_mcp_tools_cache,
 )
+from genericagent.mcp.runtime import MCP_IMPORT_COST_ESTIMATE_SECONDS as _MCP_IMPORT_COST_ESTIMATE_SECONDS  # noqa: E402
 from genericagent.core.tool_results.limits import clear_tool_result_max_chars  # noqa: E402
 
 
@@ -357,11 +358,58 @@ def _write_named_mcp_config(tmp_path: Path, server_name: str, server_script: Pat
 
 
 class McpRuntimeTest(unittest.TestCase):
+    # Budget for waiting on a fixture's start marker.
+    #
+    # Covers the cold-import cost measured in
+    # `genericagent.mcp.runtime.MCP_IMPORT_COST_ESTIMATE_SECONDS`, plus real headroom.
+    # A hard-coded 3 s was below that floor: the first MCP launch in a fresh process
+    # spends ~4 s importing before the server does anything, so the first such test in
+    # a run lost the race. It only looked like a flake because a full-file run warms
+    # the import in an earlier test. Do not shrink this back toward the measurement --
+    # the point of the margin is that the server's own startup is what gets measured.
+    FIXTURE_START_BUDGET_SECONDS = 3.0 * _MCP_IMPORT_COST_ESTIMATE_SECONDS
+
     def tearDown(self):
         clear_mcp_cache()
         reset_mcp_manager()
         os.environ.pop("GA_MCP_CONFIG", None)
         os.environ.pop("GA_MCP_CALL_TIMEOUT", None)
+
+    def test_fixture_startup_budget_covers_a_cold_mcp_import(self):
+        """The wait for a fixture to start must not also be the first MCP import.
+
+        These tests wait for the fixture's start marker and treat a miss as "the
+        server never launched". But the very first launch in a process also pays for
+        importing the MCP client stack, and that cost is not the behaviour under test:
+
+            import fastmcp                  -> 4.03-4.53 s
+            from mcp.client.stdio import... -> 1.74-2.24 s
+
+        With a 3 s budget the first launch in a fresh process loses the race and the
+        test fails for a reason that has nothing to do with cancellation or
+        discovery. It only looked like a flake because a full-file run warms the
+        import in an earlier test, while running the file alone always loses.
+
+        The budget is therefore derived from a measured cold-import cost rather than
+        hard-coded, so it keeps its margin on slower machines.
+        """
+        from genericagent.mcp import runtime as mcp_runtime
+
+        self.assertTrue(
+            hasattr(mcp_runtime, "MCP_IMPORT_COST_ESTIMATE_SECONDS"),
+            "runtime must publish the cold-import estimate the tests budget against",
+        )
+        estimate = mcp_runtime.MCP_IMPORT_COST_ESTIMATE_SECONDS
+        self.assertGreater(estimate, 0.0)
+
+        budget = self.FIXTURE_START_BUDGET_SECONDS
+        # Must exceed the import cost with real headroom, not equal it.
+        self.assertGreater(
+            budget,
+            estimate * 2,
+            f"fixture start budget {budget}s leaves no headroom over the "
+            f"{estimate}s cold-import cost",
+        )
 
     def test_build_mcp_tool_name_matches_claudecode_normalization(self):
         self.assertEqual(normalize_mcp_name("my server"), "my_server")
@@ -585,7 +633,7 @@ class McpRuntimeTest(unittest.TestCase):
 
             worker = threading.Thread(target=run_dispatch, daemon=True)
             worker.start()
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + self.FIXTURE_START_BUDGET_SECONDS
             while not started_marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(started_marker.exists(), "MCP startup fixture did not launch")
@@ -631,7 +679,7 @@ class McpRuntimeTest(unittest.TestCase):
 
             worker = threading.Thread(target=run_discovery, daemon=True)
             worker.start()
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + self.FIXTURE_START_BUDGET_SECONDS
             while not started_marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(started_marker.exists(), "MCP discovery fixture did not launch")
@@ -663,7 +711,12 @@ class McpRuntimeTest(unittest.TestCase):
             server_script, starts_path = _write_delayed_counting_server(tmp_path)
             config_path = _write_named_mcp_config(tmp_path, "delayed", server_script)
             os.environ["GA_MCP_CONFIG"] = str(config_path)
-            os.environ["GA_MCP_CALL_TIMEOUT"] = "10"
+            # The un-aborted waiter must survive a cold start: the first launch in a
+            # fresh process pays the MCP client import (~4s measured) *before* the
+            # server's own startup delay. A fixed 10s left too little of that for the
+            # call itself when the machine was busy, so the second waiter reported
+            # "error" instead of "success" and the test blamed cancellation.
+            os.environ["GA_MCP_CALL_TIMEOUT"] = str(int(self.FIXTURE_START_BUDGET_SECONDS * 2))
             reset_mcp_manager()
 
             agents = []
@@ -691,7 +744,7 @@ class McpRuntimeTest(unittest.TestCase):
                 workers.append(worker)
                 worker.start()
 
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + self.FIXTURE_START_BUDGET_SECONDS
             while not starts_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(starts_path.exists(), "shared startup fixture did not launch")
@@ -699,7 +752,9 @@ class McpRuntimeTest(unittest.TestCase):
 
             agents[0].abort()
             workers[0].join(timeout=1)
-            workers[1].join(timeout=10)
+            # Must exceed the call timeout above, or this stops waiting while the
+            # second waiter is still legitimately in flight.
+            workers[1].join(timeout=self.FIXTURE_START_BUDGET_SECONDS * 2 + 5)
             starts = int(starts_path.read_text(encoding="utf-8"))
 
         self.assertFalse(workers[0].is_alive())
@@ -736,7 +791,7 @@ class McpRuntimeTest(unittest.TestCase):
 
             short_waiter = threading.Thread(target=call_tool, args=(0, short_timeout), daemon=True)
             short_waiter.start()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + self.FIXTURE_START_BUDGET_SECONDS
             while not starts_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(starts_path.exists(), "shared startup fixture did not launch")
@@ -775,13 +830,20 @@ class McpRuntimeTest(unittest.TestCase):
             boxes = [{}, {}]
 
             def discover(slot):
-                boxes[slot]["tools"] = discover_mcp_tools(timeout=5)
+                # Not 5s: the first discovery in a fresh process also pays the cold
+                # import of the MCP client stack (~4s measured), so a 5s timeout left
+                # almost nothing for the server itself and returned an empty tool set
+                # under load. The discovery timeout must be budgeted like the fixture
+                # waits above -- see FIXTURE_START_BUDGET_SECONDS.
+                boxes[slot]["tools"] = discover_mcp_tools(timeout=self.FIXTURE_START_BUDGET_SECONDS)
 
             workers = [threading.Thread(target=discover, args=(slot,), daemon=True) for slot in range(2)]
             for worker in workers:
                 worker.start()
             for worker in workers:
-                worker.join(timeout=8)
+                # Must exceed the discovery budget above, or the test stops waiting
+                # before discovery can finish and asserts on a half-filled box.
+                worker.join(timeout=self.FIXTURE_START_BUDGET_SECONDS + 5)
             starts = int(starts_path.read_text(encoding="utf-8"))
 
         self.assertTrue(all(not worker.is_alive() for worker in workers))
