@@ -374,8 +374,22 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       retryStatus: startsNewSession ? null : state.retryStatus,
       messages: event.messages.map((message, index) => {
         let id = `h-${index}`
-        if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`
-        if (message.taskId !== undefined && message.role === 'assistant') id = `a-${message.taskId}`
+        // A taskId is not unique per message on resume: one turn can carry the original
+        // prompt, one or more `[mid-turn]` steering rows, and the assistant reply — all
+        // with the same taskId. Deriving the id from taskId+role alone therefore
+        // collided (`u-1` twice), and ink keys children by id, so React duplicated or
+        // dropped those nodes: the "the same block appears twice" report.
+        //
+        // The per-turn slot only holds for the FIRST message of each role in a turn;
+        // every later one gets its array index appended, which is unique by
+        // construction and stable across re-renders of the same payload.
+        const slotTaken = event.messages
+          .slice(0, index)
+          .some(earlier => earlier.taskId === message.taskId && earlier.role === message.role)
+        if (message.taskId !== undefined && !slotTaken) {
+          if (message.role === 'user') id = `u-${message.taskId}`
+          if (message.role === 'assistant') id = `a-${message.taskId}`
+        }
         // Tool calls/outputs survive resume as structured data (CC 319 parity);
         // the renderer turns them into `● tool(args)` / `  ⎿  result` rows.
         const toolUses = message.toolUses?.length ? message.toolUses : undefined

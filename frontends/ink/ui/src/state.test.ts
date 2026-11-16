@@ -740,3 +740,61 @@ test('an empty thinking payload adds no row', () => {
   state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 7, text: '   ' })
   assert.equal(state.messages.filter(m => m.id.includes('thinking')).length, 0)
 })
+
+// ── 消息 id 唯一性 ────────────────────────────────────────────────────
+//
+// 回归（连续两次踩到）：ink 按 id 给 children 建 key，重复 id 会让 React
+// **复制或丢弃**节点，屏幕上表现为「同一块内容出现两遍」。
+//
+//   第一次：有序块重放时每个 thinking 块都传单元素数组，块索引恒为 0，
+//           一回合 7 个块全叫 `a-1-thinking-0`。
+//   第二次：resume 的 steering 行复用了 taskId，和原始提问撞成 `u-1`。
+//
+// 两次都不报错、不崩溃，只是画面错。所以这里对所有事件路径统一断言。
+
+test('history_replace keeps every message id unique when a turn has steering rows', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'history_replace',
+    messages: [
+      { role: 'user', text: '原始提问', taskId: 1 },
+      { role: 'user', text: '[mid-turn] 插入一', taskId: 1 },
+      { role: 'user', text: '[mid-turn] 插入二', taskId: 1 },
+      { role: 'assistant', text: '回答', taskId: 1 },
+      { role: 'user', text: '下一轮提问', taskId: 2 },
+      { role: 'assistant', text: '下一轮回答', taskId: 2 },
+    ],
+  })
+  const ids = state.messages.map(message => message.id)
+  assert.equal(new Set(ids).size, ids.length, `重复 id: ${JSON.stringify(ids)}`)
+  // 每轮第一条仍保留 u-/a- 的槽位 id，方便 rewind/resume 定位。
+  assert.equal(ids[0], 'u-1')
+  assert.equal(ids[3], 'a-1')
+  assert.equal(ids[4], 'u-2')
+})
+
+test('history_replace with repeated roles in one turn never collides', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, {
+    type: 'history_replace',
+    messages: [
+      { role: 'assistant', text: 'a1', taskId: 7 },
+      { role: 'assistant', text: 'a2', taskId: 7 },
+      { role: 'assistant', text: 'a3', taskId: 7 },
+    ],
+  })
+  const ids = state.messages.map(message => message.id)
+  assert.equal(new Set(ids).size, 3, `重复 id: ${JSON.stringify(ids)}`)
+})
+
+test('live turn with interleaved thinking keeps every row id unique', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 3, text: 'q' })
+  for (let step = 1; step <= 4; step += 1) {
+    state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 3, text: `REASON-${step}` })
+    state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 3, text: `\nStep ${step}\n` })
+  }
+  state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 3, text: 'done' })
+  const ids = state.messages.map(message => message.id)
+  assert.equal(new Set(ids).size, ids.length, `重复 id: ${JSON.stringify(ids)}`)
+})
