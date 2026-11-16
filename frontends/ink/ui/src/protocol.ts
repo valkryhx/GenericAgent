@@ -125,6 +125,13 @@ export type HistoryToolResult = {
   isError?: boolean
 }
 
+/** One entry of a turn's flat, ordered block list (see `HistoryBlock`). */
+export type HistoryBlock =
+  | { kind: 'thinking'; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'tool_use'; id: string; tool: string; input: string }
+  | { kind: 'tool_result'; toolUseId: string; text: string; isError?: boolean }
+
 export type HistoryMessage = {
   role: 'user' | 'assistant' | 'system'
   text: string
@@ -135,6 +142,16 @@ export type HistoryMessage = {
   toolResults?: HistoryToolResult[]
   /** The model's reasoning, one entry per thinking block. */
   thinking?: string[]
+  /**
+   * Every block of the turn in the order the API emitted it.
+   *
+   * `toolUses` / `toolResults` / `thinking` answer "which blocks exist"; this
+   * answers "in what order they happened". The order is not recoverable from the
+   * other three — grouping by type paints all reasoning first and all tool chips
+   * last, which is what a resumed session used to look like while the live turn
+   * was correct.
+   */
+  blocks?: HistoryBlock[]
 }
 
 export type HookConfiguredEntry = {
@@ -573,4 +590,11 @@ export type ChatMessage = {
   toolResults?: HistoryToolResult[]
   /** The model's reasoning, shown collapsed as a one-line summary unless Ctrl+O. */
   thinking?: string[]
+  /**
+   * Ordered block list restored from a resumed transcript (see `HistoryMessage`).
+   *
+   * When present the renderer replays this order instead of grouping by type, so a
+   * resumed session looks exactly like the live turn it came from.
+   */
+  blocks?: HistoryBlock[]
 }

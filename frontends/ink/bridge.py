@@ -3646,7 +3646,8 @@ class GenericAgentBridge:
                     tool_uses = list(getattr(turn, "tool_uses", []) or [])
                     tool_results = list(getattr(turn, "tool_results", []) or [])
                     thoughts = list(getattr(turn, "thinking", []) or [])
-                    if turn.assistant_text or tool_uses or thoughts:
+                    ordered = list(getattr(turn, "blocks", []) or [])
+                    if turn.assistant_text or tool_uses or thoughts or ordered:
                         assistant_message = {
                             "role": "assistant",
                             "text": turn.assistant_text,
@@ -3661,6 +3662,13 @@ class GenericAgentBridge:
                         # one-line summary collapsed and the full text on Ctrl+O.
                         if thoughts:
                             assistant_message["thinking"] = copy.deepcopy(thoughts)
+                        # Emission order for the turn. The three arrays above say which
+                        # blocks exist; this says how they interleave. Without it the
+                        # UI has to group by type, which paints every reasoning block
+                        # first and every tool chip last -- the opposite of the live
+                        # turn, which never flattens.
+                        if ordered:
+                            assistant_message["blocks"] = copy.deepcopy(ordered)
                         messages.append(assistant_message)
                 return messages
         backend_history = copy.deepcopy(self._backend_history())

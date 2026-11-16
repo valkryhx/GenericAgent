@@ -613,7 +613,11 @@ class TranscriptV2Test(unittest.TestCase):
             self.assertEqual(
                 [
                     {"role": "user", "content": "read it"},
-                    {"role": "assistant", "content": "done"},
+                    # Every assistant step contributes its prose. This used to keep
+                    # only the last step ("done"), so a resumed multi-step turn
+                    # silently lost the earlier steps' text — the same defect that
+                    # was flattening block order.
+                    {"role": "assistant", "content": "checking\ndone"},
                 ],
                 restored.session.ui_messages,
             )

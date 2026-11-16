@@ -67,6 +67,24 @@ class TranscriptTurn:
     # shows a one-line summary collapsed and the full text on Ctrl+O, matching how
     # tool arguments already behave.
     thinking: list = field(default_factory=list)
+    # Every block of the turn in emission order: ``thinking`` / ``text`` /
+    # ``tool_use`` / ``tool_result``, flattened across the messages of the turn.
+    #
+    # The three lists above answer "which blocks exist"; this one answers "in what
+    # order they happened". Both are needed, and the order is not derivable from
+    # the others: a v2 turn is one assistant message per step
+    # (``thinking -> text -> tool_use``) followed by a tool_result message, so
+    # flattening by *type* loses the interleaving. The UI then has no choice but to
+    # paint all reasoning above everything and all tool chips below everything --
+    # which is exactly what users saw ("all thinking at the front, all tool calls at
+    # the end"), while the live turn, which never flattens, was correct.
+    #
+    # Item shapes (``kind`` discriminates):
+    #   {"kind": "thinking", "text": str}
+    #   {"kind": "text", "text": str}
+    #   {"kind": "tool_use", "id": str, "tool": str, "input": str}      (input is JSON text)
+    #   {"kind": "tool_result", "toolUseId": str, "text": str, "isError": bool}
+    blocks: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -330,6 +348,44 @@ def _thinking_blocks_from_message(event):
         else:
             continue
         out.append(str(text or ""))
+    return out
+
+
+def _ordered_blocks_from_message(event):
+    """Every displayable block of one message, in the order the API emitted them.
+
+    Complements ``_tool_blocks_from_message`` / ``_thinking_blocks_from_message``
+    rather than replacing them: those answer "which blocks exist" for the three
+    type-bucketed lists, this answers "in what order" for the ``blocks`` field.
+
+    Reuses the same per-block shaping so the UI has exactly one item contract —
+    tool ``input`` stays a JSON string (``formatToolBlock`` parses it), and prose
+    is ``text`` blocks only, so it never duplicates content the three lists hold.
+    """
+    raw = event.get("blocks")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for block in raw:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "thinking":
+            out.append({"kind": "thinking", "text": str(block.get("thinking") or "")})
+        elif kind == "redacted_thinking":
+            out.append({"kind": "thinking", "text": ""})
+        elif kind == "text":
+            value = block.get("text")
+            if isinstance(value, str) and value.strip():
+                out.append({"kind": "text", "text": value})
+        elif kind == "tool_use":
+            uses, _ = _tool_blocks_from_message({"blocks": [block]})
+            for use in uses:
+                out.append({"kind": "tool_use", **use})
+        elif kind == "tool_result":
+            _, results = _tool_blocks_from_message({"blocks": [block]})
+            for result in results:
+                out.append({"kind": "tool_result", **result})
     return out
 
 
@@ -1232,6 +1288,26 @@ def load_v2(path):
         thoughts = _thinking_blocks_from_message(event)
         if thoughts:
             turn_tools.setdefault(int(turn_id), {"uses": [], "results": []}).setdefault("thinking", []).extend(thoughts)
+        # Ordered projection. Same messages, one flat list, so the UI can replay the
+        # turn exactly as it happened instead of grouping by type.
+        #
+        # The human prompt is excluded: it is already `user_text`, and re-emitting it
+        # as the turn's first block would draw the question twice (once from the
+        # user message, once from the assistant block list).
+        is_human_prompt = role == "user" and not (
+            isinstance(origin, dict) and origin.get("kind") == "tool_result"
+        )
+        if not is_human_prompt:
+            ordered = _ordered_blocks_from_message(event)
+            if isinstance(origin, dict) and origin.get("kind") == "tool_result":
+                # A tool_result message also carries the model-facing working-memory
+                # preamble as a `text` block. That injection is prompt plumbing, not
+                # something the model said, so it must not appear in the transcript —
+                # and it is already inside the auxiliary text feed that every turn
+                # repeats, so drawing it would bury the real output.
+                ordered = [block for block in ordered if block.get("kind") != "text"]
+            if ordered:
+                turn_tools.setdefault(int(turn_id), {"uses": [], "results": []}).setdefault("blocks", []).extend(ordered)
         if role == "user" and not (isinstance(origin, dict) and origin.get("kind") == "tool_result"):
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
             if value:
@@ -1239,7 +1315,12 @@ def load_v2(path):
         elif role == "assistant":
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
             if value:
-                turn_text.setdefault(int(turn_id), {})["assistant_text"] = value
+                # Join, don't overwrite. A multi-step turn is one assistant message
+                # per step, so assignment kept only the LAST step's prose and the
+                # earlier steps silently vanished from a resumed session.
+                bucket = turn_text.setdefault(int(turn_id), {})
+                prior = bucket.get("assistant_text") or ""
+                bucket["assistant_text"] = (prior + chr(10) + value) if prior else value
 
     loaded_turns, ui_messages = [], []
     for turn_id in turn_order:
@@ -1258,6 +1339,7 @@ def load_v2(path):
             tool_uses=list(tools.get("uses") or []),
             tool_results=list(tools.get("results") or []),
             thinking=list(tools.get("thinking") or []),
+            blocks=list(tools.get("blocks") or []),
         )
         loaded_turns.append(item)
         if item.user_text:
@@ -1295,6 +1377,7 @@ def load_v2(path):
                 tool_uses=list(getattr(turn, "tool_uses", []) or []),
                 tool_results=list(getattr(turn, "tool_results", []) or []),
                 thinking=list(getattr(turn, "thinking", []) or []),
+                blocks=list(getattr(turn, "blocks", []) or []),
             ))
         loaded_turns = merged
         ui_messages = _turns_to_ui_messages(loaded_turns)

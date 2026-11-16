@@ -383,6 +383,9 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
         // Reasoning blocks survive resume the same way; the renderer shows a
         // collapsed summary unless the user has Ctrl+O open.
         const thinking = message.thinking?.length ? message.thinking : undefined
+        // Ordered replay. When the transcript could supply it, the renderer uses it
+        // instead of the three type-bucketed arrays, so resumed and live turns agree.
+        const blocks = message.blocks?.length ? message.blocks : undefined
         const base = message.taskId === undefined
           ? { id, role: message.role, text: message.text, done: true }
           : { id, role: message.role, text: message.text, done: true, taskId: message.taskId }
@@ -391,6 +394,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
           ...(toolUses ? { toolUses } : {}),
           ...(toolResults ? { toolResults } : {}),
           ...(thinking ? { thinking } : {}),
+          ...(blocks ? { blocks } : {}),
         }
       }),
       staticGeneration: state.staticGeneration + 1,

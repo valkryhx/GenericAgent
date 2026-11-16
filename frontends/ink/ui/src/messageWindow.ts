@@ -256,6 +256,103 @@ function isResultRow(row: TranscriptLine): boolean {
   return row.text.startsWith(RESULT_PREFIX) || row.text.startsWith(TOOL_RESULT_CONTINUATION)
 }
 
+/**
+ * Render a resumed turn by replaying its recorded block order.
+ *
+ * Each block goes through the same renderer the type-bucketed path uses, so a
+ * reasoning block and a tool chip look identical no matter which path drew them —
+ * only the *sequence* differs, which is the whole point.
+ *
+ * `tool_result` blocks are skipped: their text is already emitted under the chip of
+ * the `tool_use` they answer (paired by `toolUseId`), and drawing them again would
+ * print every tool output twice. A result whose call is missing from this turn
+ * (compaction can drop the assistant message but keep the result) is still shown,
+ * because losing tool output is worse than an unpaired row.
+ */
+function appendOrderedBlockRows(
+  rows: TranscriptLine[],
+  message: ChatMessage,
+  expandedTools: boolean,
+  theme?: InkTheme,
+  channel: ResultChannel = null,
+): ResultChannel {
+  const blocks = message.blocks ?? []
+  // Results are addressed by id and rendered under their chip, so collect them
+  // first rather than after — a `tool_use` may precede its result in the list.
+  const results = new Map<string, { text: string; isError?: boolean }>()
+  for (const block of blocks) {
+    if (block.kind === 'tool_result') results.set(block.toolUseId, block)
+  }
+  const pairedResultIds = new Set(
+    blocks.filter(block => block.kind === 'tool_use').map(block => (block as { id: string }).id),
+  )
+
+  let nextChannel = channel
+  let index = 0
+  for (const block of blocks) {
+    const key = `${message.id}-b${index++}`
+    if (block.kind === 'thinking') {
+      appendThinkingRows(rows, {
+        ...message,
+        thinking: [block.text],
+        blocks: undefined,
+      }, expandedTools, theme)
+      continue
+    }
+    if (block.kind === 'text') {
+      const body = formatAssistantText(block.text, { expanded: expandedTools, streaming: false })
+      if (body.trim()) nextChannel = appendAssistantBodyRows(rows, key, body, theme, nextChannel)
+      continue
+    }
+    if (block.kind === 'tool_use') {
+      const chip = formatToolBlock(block.tool, block.input, { expanded: expandedTools })
+      chip.split('\n').forEach((line, lineIndex) => {
+        rows.push({
+          id: `${key}-tool-${lineIndex}`,
+          text: normalizeEmoji(line),
+          parts: [{ text: normalizeEmoji(line) }],
+        })
+      })
+      const result = results.get(block.id)
+      if (result) appendStructuredResultRows(rows, key, result, theme)
+      continue
+    }
+    // Unpaired tool_result: its chip was dropped from this turn, but the output is
+    // still information the user needs.
+    if (!pairedResultIds.has(block.toolUseId)) {
+      appendStructuredResultRows(rows, key, block, theme)
+    }
+  }
+  return nextChannel
+}
+
+/** One `⎿ result` row group, shared by the ordered and the bucketed tool paths. */
+function appendStructuredResultRows(
+  rows: TranscriptLine[],
+  key: string,
+  result: { text: string; isError?: boolean },
+  theme?: InkTheme,
+): void {
+  if (!result.text.trim()) return
+  // Keep the body on one logical row like the live result path: collapse the
+  // multi-line tool output into its first non-empty line plus a continuation,
+  // otherwise a 1400-char spawn_agent result would bury the transcript.
+  const lines = result.text.split('\n').filter(line => line.trim() !== '')
+  const head = lines[0] ?? ''
+  rows.push({
+    id: `${key}-result`,
+    text: `${RESULT_PREFIX}${normalizeEmoji(head)}`,
+    parts: mutedResultLine(normalizeEmoji(head), theme),
+  })
+  for (const [extraIndex, extra] of lines.slice(1).entries()) {
+    rows.push({
+      id: `${key}-result-${extraIndex}`,
+      text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`,
+      parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+    })
+  }
+}
+
 function firstNonBlank(rows: TranscriptLine[]): TranscriptLine | null {
   return rows.find(row => row.text.trim() !== '') ?? null
 }
@@ -453,6 +550,23 @@ function appendMessageLines(
   if (message.role === 'system') {
     appendPlainLines(rows, message, message.text || ' ', { color: 'gray', appendBlank: true })
     return null
+  }
+
+  // Ordered replay: when the transcript carried the emission order, follow it.
+  //
+  // The three type-bucketed arrays below (`thinking` / `toolUses` / `toolResults`)
+  // can only support a fixed order — reasoning, prose, then tools — which is right
+  // for one step and wrong for a whole turn. A multi-step turn interleaves
+  // `thinking → text → tool_use → tool_result` repeatedly, so grouping painted
+  // every reasoning block at the top and every tool chip at the bottom: exactly the
+  // "all thinking first, all tool calls last" report, while the live turn (which
+  // never groups) was correct.
+  if (message.blocks?.length) {
+    const nextChannel = appendOrderedBlockRows(rows, message, expandedTools, theme, channel)
+    if (!message.done) {
+      rows.push(blankLine(`${message.id}-streaming-tail`))
+    }
+    return nextChannel
   }
 
   // Reasoning comes first in the turn: it is what led to the prose and tools below.

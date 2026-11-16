@@ -621,5 +621,133 @@ class ResumeThinkingTest(unittest.TestCase):
             self.assertEqual(1, len(turn.thinking))
             self.assertEqual("", turn.thinking[0])
 
+class ResumeBlockOrderTest(unittest.TestCase):
+    """Resume must preserve the *order* of a turn's blocks, not just their presence.
+
+    Regression: `load_v2` bucketed a turn's blocks by type into three lists
+    (`thinking` / `tool_uses` / `tool_results`). Each list was complete, so every
+    existing assertion passed — but a multi-step turn interleaves
+    `thinking → text → tool_use → tool_result` repeatedly, and flat type buckets
+    cannot express that. The renderer had no option but reasoning-first,
+    tools-last, which is exactly what users reported: "all thinking at the front,
+    all tool calls at the end" on resume, while the live turn was correct.
+    """
+
+    def _write(self, tmp, messages):
+        path = session_transcript.create_session(root=tmp, cwd="C:/repo", schema=2)
+        uuids = []
+        for role, blocks, origin in messages:
+            uuids.append(session_transcript.append_message(
+                path, session_id="session_test", role=role, blocks=blocks,
+                origin=origin, turn_id=1,
+            ))
+        if uuids:
+            session_transcript.append_turn_end(
+                path, session_id="session_test", turn_id=1,
+                first_uuid=uuids[0], last_uuid=uuids[-1],
+            )
+        return path
+
+    def _two_step(self):
+        return [
+            ("user", [{"type": "text", "text": "查一下"}], {"kind": "human"}),
+            ("assistant", [
+                {"type": "thinking", "thinking": "THINK-1"},
+                {"type": "text", "text": "先搜一下。"},
+                {"type": "tool_use", "id": "c1", "name": "web_search", "input": {"q": "x"}},
+            ], {"kind": "assistant"}),
+            ("user", [{"type": "tool_result", "tool_use_id": "c1", "content": "RESULT-1"}],
+             {"kind": "tool_result"}),
+            ("assistant", [
+                {"type": "thinking", "thinking": "THINK-2"},
+                {"type": "text", "text": "再查一次。"},
+                {"type": "tool_use", "id": "c2", "name": "web_fetch", "input": {"url": "y"}},
+            ], {"kind": "assistant"}),
+            ("user", [{"type": "tool_result", "tool_use_id": "c2", "content": "RESULT-2"}],
+             {"kind": "tool_result"}),
+        ]
+
+    def test_blocks_preserve_interleaved_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._two_step())
+            turn = session_transcript.load_session(path).turns[0]
+            kinds = [block["kind"] for block in turn.blocks]
+            self.assertEqual(
+                ["thinking", "text", "tool_use", "tool_result",
+                 "thinking", "text", "tool_use", "tool_result"],
+                kinds,
+            )
+
+    def test_blocks_carry_renderable_payloads(self):
+        # The renderer must be able to draw each block without the bucketed lists.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._two_step())
+            turn = session_transcript.load_session(path).turns[0]
+
+            thoughts = [b["text"] for b in turn.blocks if b["kind"] == "thinking"]
+            self.assertEqual(["THINK-1", "THINK-2"], thoughts)
+
+            tools = [b["tool"] for b in turn.blocks if b["kind"] == "tool_use"]
+            self.assertEqual(["web_search", "web_fetch"], tools)
+
+            # `input` stays a JSON string so the UI reuses the live chip formatter.
+            for block in turn.blocks:
+                if block["kind"] == "tool_use":
+                    json.loads(block["input"])
+
+            results = [b["text"] for b in turn.blocks if b["kind"] == "tool_result"]
+            self.assertEqual(["RESULT-1", "RESULT-2"], results)
+
+    def test_human_prompt_is_not_repeated_as_a_block(self):
+        # The prompt is already `user_text`; re-emitting it as the turn's first
+        # block would draw the question twice.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._two_step())
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertNotIn("查一下", [b.get("text") for b in turn.blocks if b["kind"] == "text"])
+
+    def test_tool_result_working_memory_preamble_is_dropped(self):
+        # A tool_result message also carries the model-facing working-memory
+        # injection as a text block. It is prompt plumbing, not transcript content.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}),
+                ("assistant", [
+                    {"type": "tool_use", "id": "c1", "name": "code_run", "input": {}},
+                ], {"kind": "assistant"}),
+                ("user", [
+                    {"type": "tool_result", "tool_use_id": "c1", "content": "OUT"},
+                    {"type": "text", "text": "### [WORKING MEMORY]\n<history>...</history>"},
+                ], {"kind": "tool_result"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            texts = [b.get("text", "") for b in turn.blocks if b["kind"] == "text"]
+            self.assertFalse(any("WORKING MEMORY" in text for text in texts), texts)
+
+    def test_every_assistant_step_contributes_prose(self):
+        # A multi-step turn is one assistant message per step. Assignment kept only
+        # the LAST step's prose, so earlier steps silently vanished on resume.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self._two_step())
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertIn("先搜一下。", turn.assistant_text)
+            self.assertIn("再查一次。", turn.assistant_text)
+
+    def test_single_step_turn_is_unchanged(self):
+        # Control: the ordered path must not alter a turn that was never ambiguous.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}),
+                ("assistant", [
+                    {"type": "thinking", "thinking": "R"},
+                    {"type": "text", "text": "answer"},
+                ], {"kind": "assistant"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual(["thinking", "text"], [b["kind"] for b in turn.blocks])
+            self.assertEqual("answer", turn.assistant_text)
+            self.assertEqual(["R"], turn.thinking)
+
+
 if __name__ == "__main__":
     unittest.main()

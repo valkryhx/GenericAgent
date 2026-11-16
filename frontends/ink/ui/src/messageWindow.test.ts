@@ -860,3 +860,100 @@ test('thinking: a message without thinking gains no thinking row', () => {
 
   assert.ok(!rows.join('\n').includes(GLYPHS.star), `a plain message grew a thinking row: ${JSON.stringify(rows)}`)
 })
+
+// ── resume 块顺序 ─────────────────────────────────────────────────────
+//
+// 回归：`load_v2` 曾把同回合的块按类型压平成 thinking / toolUses / toolResults
+// 三个数组。三个数组各自完整，所以「块在不在」的断言全绿 —— 但多步回合是
+// `thinking → text → tool_use → tool_result` 反复交错，类型分组表达不了，
+// 渲染只能 reasoning 在前、tools 在后。用户报的正是这个：实时顺序对，
+// resume 后「所有 thinking 在最前，所有 toolcall 在最后」。
+
+test('resume blocks replay the recorded order instead of grouping by type', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '先搜一下。\n再查一次。',
+    done: true,
+    taskId: 1,
+    thinking: ['THINK-1', 'THINK-2'],
+    toolUses: [
+      { id: 'c1', tool: 'web_search', input: '{"q":"x"}' },
+      { id: 'c2', tool: 'web_fetch', input: '{"url":"y"}' },
+    ],
+    toolResults: [
+      { toolUseId: 'c1', text: 'RESULT-1' },
+      { toolUseId: 'c2', text: 'RESULT-2' },
+    ],
+    blocks: [
+      { kind: 'thinking', text: 'THINK-1' },
+      { kind: 'text', text: '先搜一下。' },
+      { kind: 'tool_use', id: 'c1', tool: 'web_search', input: '{"q":"x"}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: 'RESULT-1' },
+      { kind: 'thinking', text: 'THINK-2' },
+      { kind: 'text', text: '再查一次。' },
+      { kind: 'tool_use', id: 'c2', tool: 'web_fetch', input: '{"url":"y"}' },
+      { kind: 'tool_result', toolUseId: 'c2', text: 'RESULT-2' },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const at = (needle: string) => rows.findIndex(row => row.includes(needle))
+  // 每轮内部的相对顺序
+  assert.ok(at('THINK-1') < at('先搜一下'), `THINK-1 应在第 1 轮正文之前: ${JSON.stringify(rows)}`)
+  assert.ok(at('先搜一下') < at('web_search'), `第 1 轮正文应在工具之前: ${JSON.stringify(rows)}`)
+  assert.ok(at('web_search') < at('THINK-2'), `THINK-2 应在第 1 轮工具之后: ${JSON.stringify(rows)}`)
+  assert.ok(at('THINK-2') < at('再查一次'), `THINK-2 应在第 2 轮正文之前: ${JSON.stringify(rows)}`)
+  assert.ok(at('再查一次') < at('web_fetch'), `第 2 轮正文应在工具之前: ${JSON.stringify(rows)}`)
+})
+
+test('resume blocks never render a tool result twice', () => {
+  // 结果按 toolUseId 挂在 chip 下面，`tool_result` 块本身不能重复画一遍。
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: 'x',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_use', id: 'c1', tool: 'code_run', input: '{"code":"1"}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: 'OUTPUT-ONCE' },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.equal(rows.filter(row => row.includes('OUTPUT-ONCE')).length, 1, JSON.stringify(rows))
+})
+
+test('resume blocks still render a result whose call was dropped', () => {
+  // 压缩可能丢掉 assistant 消息却留下结果；丢掉工具输出比留一行未配对更糟。
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_result', toolUseId: 'gone', text: 'ORPHAN-OUTPUT' },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.ok(rows.some(row => row.includes('ORPHAN-OUTPUT')), JSON.stringify(rows))
+})
+
+test('a message without blocks keeps the legacy type-grouped order', () => {
+  // 对照：老消息（没有顺序信息）行为必须与修复前逐字节一致。
+  const rows = transcriptLines([{
+    id: 'a-2',
+    role: 'assistant',
+    text: '正文',
+    done: true,
+    taskId: 2,
+    thinking: ['OLD-THINK'],
+    toolUses: [{ id: 'c9', tool: 'code_run', input: '{"code":"1"}' }],
+    toolResults: [{ toolUseId: 'c9', text: 'OLD-RESULT' }],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const at = (needle: string) => rows.findIndex(row => row.includes(needle))
+  assert.ok(at('OLD-THINK') < at('正文'), JSON.stringify(rows))
+  assert.ok(at('正文') < at('code_run'), JSON.stringify(rows))
+  assert.ok(rows.some(row => row.includes('OLD-RESULT')), JSON.stringify(rows))
+})
