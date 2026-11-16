@@ -44,10 +44,17 @@
  * 因此规则是：
  *
  *   needHide = cursorShown && (非同步输出 || 本帧不 park)
- *   needShow = !cursorShown && 本帧 park
+ *   needShow = 本帧 park（**每帧都发**，不记账）
  *
- * 同步输出生效且本帧要 park 时 → 全程不翻转（旧实现实测流式中 8.4~11.2 次翻转对/秒，
- * 肉眼即「光标一直在闪」）。同步输出不可用时退回旧行为（每帧 HIDE → SHOW）。
+ * ⚠️ **不要**把 needShow 改回「只在 cursorShown 为 false 时发一次」——那是本仓库
+ * 2026-11-16 修掉的一个真机缺陷：ConPTY 会在 BSU/ESU 事务边界自行插入 DECTCEM
+ * HIDE，于是「一帧 SHOW 一次」的记账与终端实际状态脱钩，整个会话只 SHOW 了 1 次
+ * （真机实测 show=1 / hide=2），原生光标停在屏幕右下角 (39,119)，中文 preedit 就
+ * 画在那里 —— 用户看到的就是「拼音跑到屏幕下方、不跟输入框的光标」。
+ *
+ * 每帧重发 SHOW **不会**造成闪烁：闪烁来自 HIDE/SHOW 成对翻转，而这里一次 HIDE 都
+ * 不发。证据与对照实验见 `tests/probes/python/_probe_park_config_matrix.py` 与
+ * `docs/20261116-GA-中文输入法光标不跟输入框根因.md`。
  *
  * 不变量：**光标可见 ⟺ 它正停在 caret 上。**
  */
@@ -185,10 +192,15 @@ export class CursorParkWriter {
     let suffix = ''
     if (spec) {
       const up = spec.up > 0 ? `\x1b[${spec.up}A` : ''
-      // 只在「需要变可见」时发 SHOW：同步输出生效时光标全程可见，这里通常一次都不发。
-      const needShow = !this.cursorShown
-      suffix = `${up}\x1b[${spec.col + 1}G${needShow ? SHOW_CURSOR : ''}`
-      if (needShow) this.cursorShown = true
+      // 必须**每帧**重发 SHOW，不能靠 cursorShown 记账省略。
+      //
+      // 记账假设「同步输出生效时光标全程可见，不必重复 SHOW」。真机对照实测推翻：
+      // ConPTY 会在同步输出事务边界自行插入 DECTCEM HIDE（`_probe_park_config_matrix.py`：
+      // 同一次会话 A 组 show=1/hide=2，pyte 读到 cursor.hidden=True 且位置在 (39,119)；
+      // B 组关同步输出后每帧 SHOW，show=17/hide=17，光标精确落在 caret (35,9)）。
+      // 只发 SHOW、不发 HIDE，终端不会闪 —— 闪烁来自 HIDE/SHOW 成对翻转。
+      suffix = `${up}\x1b[${spec.col + 1}G${SHOW_CURSOR}`
+      this.cursorShown = true
       this.parkedUp = spec.up
     }
 

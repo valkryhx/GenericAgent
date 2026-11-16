@@ -115,13 +115,17 @@ test('sync output: the whole burst is bracketed by exactly one BSU/ESU pair', ()
   assert.ok(chunk.includes('\x1b[2A\x1b[6G'))
 })
 
-test('sync output: no per-frame HIDE/SHOW flip while the cursor stays on the caret', () => {
+test('sync output: SHOW is re-emitted every frame (ConPTY hides it at tx boundaries)', () => {
   const out: string[] = []
   const { schedule, flush } = manualScheduler()
   const w = syncWriter(out, schedule)
   w.setPark({ up: 4, col: 3 })
 
-  // 连续 5 帧：光标始终停在 caret，中间态不可见，不该发生任何 DECTCEM 翻转。
+  // 连续 5 帧：光标始终停在 caret。HIDE 一次都不该出现（闪烁源于成对翻转），
+  // 但 SHOW 必须**每帧**都发 —— 真机对照（`_probe_park_config_matrix.py`）证明
+  // ConPTY 会在 BSU/ESU 事务边界自行插入 DECTCEM HIDE，靠 cursorShown 记账省略
+  // SHOW 会让光标在整个会话里可见次数 = 1（实测 show=1/hide=2），原生光标停在屏幕
+  // 右下角 (39,119)，中文 preedit 就画在那里。
   for (let f = 0; f < 5; f += 1) {
     w.write(`frame-${f}`)
     flush()
@@ -130,9 +134,8 @@ test('sync output: no per-frame HIDE/SHOW flip while the cursor stays on the car
   const all = out.join('')
   const hides = all.split('\x1b[?25l').length - 1
   const shows = all.split('\x1b[?25h').length - 1
-  // 只在第一次从「不可见」变「可见」时 SHOW 一次，此后不再翻转。
   assert.equal(hides, 0, `unexpected HIDE while parked on the caret (${hides})`)
-  assert.equal(shows, 1, `expected exactly one SHOW, got ${shows}`)
+  assert.equal(shows, 5, `SHOW must be re-emitted every frame, got ${shows}`)
 })
 
 test('sync output: HIDE is still emitted when the frame ends un-parked', () => {
@@ -185,7 +188,7 @@ test('resetViewport writes the full reset and drops park bookkeeping', () => {
   assert.equal(w.parkedUp, null)
   w.write('frame-2')
   flush()
-  assert.ok(out.at(-1)!.endsWith('frame-2\x1b[2A\x1b[4G'), 'no stale down-move may precede the new frame')
+  assert.ok(out.at(-1)!.endsWith('frame-2\x1b[2A\x1b[4G\x1b[?25h'), 'no stale down-move may precede the new frame')
 })
 
 test('resetViewport invalidates an already-scheduled flush', () => {
