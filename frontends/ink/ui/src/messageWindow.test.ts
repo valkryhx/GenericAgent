@@ -781,3 +781,82 @@ test('resume: a message without toolUses renders exactly as before (no regressio
   assert.equal(rows.find(row => row === 'hi'), 'hi', `assistant line missing: ${JSON.stringify(rows)}`)
   assert.ok(!rows.join('\n').includes(GLYPHS.bullet), 'a plain message grew a tool chip')
 })
+
+// ── thinking（推理过程）──────────────────────────────────────────────────
+//
+// 回归：transcript 里一直有 `thinking` 块，但没有任何渲染路径消费它，所以用户
+// 从来没见过模型的思考过程——resume 看不到，实时也看不到。CC 319 把 thinking
+// 当作独立块渲染（`m0591:214511 lio()`），GA 复用工具 chip 的折叠开关：
+// 折叠时一行摘要，Ctrl+O 展开全文。
+
+test('thinking: collapsed renders a single summary line with the star glyph', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: 'done',
+    done: true,
+    taskId: 1,
+    thinking: ['Wait for A first.\nThen read the result.'],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const summary = rows.find(row => row.includes(GLYPHS.star))
+  assert.ok(summary, `no thinking summary line: ${JSON.stringify(rows)}`)
+  assert.ok(summary!.includes(GLYPHS.triangleRight), `collapsed marker missing: ${JSON.stringify(summary)}`)
+  // Multi-line reasoning collapses onto one line.
+  assert.ok(summary!.includes('Wait for A first. Then read the result.'), `text not flattened: ${JSON.stringify(summary)}`)
+  assert.equal(rows.filter(row => row.includes(GLYPHS.star)).length, 1, 'collapsed thinking must be one line')
+})
+
+test('thinking: expanded shows every line under a disclosure header', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: 'done',
+    done: true,
+    taskId: 1,
+    thinking: ['first line\nsecond line'],
+  }], { expandedTools: true }).map(row => row.text)
+
+  const header = rows.find(row => row.includes('thinking'))
+  assert.ok(header, `no thinking header: ${JSON.stringify(rows)}`)
+  assert.ok(header!.includes(GLYPHS.triangleDown), `expanded marker missing: ${JSON.stringify(header)}`)
+  assert.ok(rows.some(row => row.includes('first line')), `body line 1 missing: ${JSON.stringify(rows)}`)
+  assert.ok(rows.some(row => row.includes('second line')), `body line 2 missing: ${JSON.stringify(rows)}`)
+})
+
+test('thinking: several blocks each get their own row', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    thinking: ['step one', 'step two'],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.equal(rows.filter(row => row.includes(GLYPHS.star)).length, 2, `expected one row per block: ${JSON.stringify(rows)}`)
+})
+
+test('thinking: long reasoning is truncated when collapsed', () => {
+  const long = 'x'.repeat(400)
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    thinking: [long],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const summary = rows.find(row => row.includes(GLYPHS.star))!
+  assert.ok(summary.length < 160, `collapsed summary was not truncated: ${summary.length} chars`)
+  assert.ok(summary.includes('…'), 'truncation marker missing')
+})
+
+test('thinking: a message without thinking gains no thinking row', () => {
+  const rows = transcriptLines([
+    { id: 'a-1', role: 'assistant', text: 'plain answer', done: true, taskId: 1 },
+  ], { expandedTools: false }).map(row => row.text)
+
+  assert.ok(!rows.join('\n').includes(GLYPHS.star), `a plain message grew a thinking row: ${JSON.stringify(rows)}`)
+})

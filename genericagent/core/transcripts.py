@@ -59,6 +59,14 @@ class TranscriptTurn:
     # live turn produces.
     tool_uses: list = field(default_factory=list)
     tool_results: list = field(default_factory=list)
+    # Assistant reasoning, one entry per ``thinking`` block (a turn can have several).
+    #
+    # Also dropped by the text projection before this: the model's reasoning was on
+    # disk but never reached the UI, live or resumed. CC 319 renders thinking as a
+    # collapsible block (``m0591:214511 lio()`` -> ``latestThinkingSummary``), so GA
+    # shows a one-line summary collapsed and the full text on Ctrl+O, matching how
+    # tool arguments already behave.
+    thinking: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -294,6 +302,35 @@ def _tool_blocks_from_message(event):
                 "isError": bool(block.get("is_error")),
             })
     return uses, results
+
+
+def _thinking_blocks_from_message(event):
+    """Extract ``thinking`` / ``redacted_thinking`` text blocks.
+
+    The model's reasoning sits in the transcript alongside prose and tool calls but
+    was dropped by the text projection, so it never reached the UI — not on resume
+    and (as it turned out) not even live. CC 319 renders it as a collapsible block
+    (``m0591:214511 lio()``); GA shows a one-line summary collapsed and the full
+    text on Ctrl+O.
+    """
+    blocks = event.get("blocks")
+    if not isinstance(blocks, list):
+        return []
+    out = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "thinking":
+            text = block.get("thinking")
+        elif kind == "redacted_thinking":
+            # Redacted blocks carry no readable text; keep the marker so the UI can
+            # say "reasoning withheld" instead of silently omitting the step.
+            text = ""
+        else:
+            continue
+        out.append(str(text or ""))
+    return out
 
 
 def _message_text_from_blocks(blocks):
@@ -1190,6 +1227,11 @@ def load_v2(path):
             bucket = turn_tools.setdefault(int(turn_id), {"uses": [], "results": []})
             bucket["uses"].extend(uses)
             bucket["results"].extend(results)
+        # Reasoning rides alongside prose and tools for the same reason: the text
+        # projection cannot carry it, so it has to be collected separately.
+        thoughts = _thinking_blocks_from_message(event)
+        if thoughts:
+            turn_tools.setdefault(int(turn_id), {"uses": [], "results": []}).setdefault("thinking", []).extend(thoughts)
         if role == "user" and not (isinstance(origin, dict) and origin.get("kind") == "tool_result"):
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
             if value:
@@ -1215,6 +1257,7 @@ def load_v2(path):
             last_uuid=str(raw.get('last_uuid') or ''),
             tool_uses=list(tools.get("uses") or []),
             tool_results=list(tools.get("results") or []),
+            thinking=list(tools.get("thinking") or []),
         )
         loaded_turns.append(item)
         if item.user_text:
@@ -1251,6 +1294,7 @@ def load_v2(path):
                 last_uuid=str(getattr(turn, "last_uuid", "") or ""),
                 tool_uses=list(getattr(turn, "tool_uses", []) or []),
                 tool_results=list(getattr(turn, "tool_results", []) or []),
+                thinking=list(getattr(turn, "thinking", []) or []),
             ))
         loaded_turns = merged
         ui_messages = _turns_to_ui_messages(loaded_turns)

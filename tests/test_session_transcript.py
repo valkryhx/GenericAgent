@@ -546,5 +546,80 @@ class ResumeToolUseTest(unittest.TestCase):
             self.assertEqual("", turn.assistant_text)
             self.assertEqual(1, len(turn.tool_uses), "a tool-only turn lost its tool call")
 
+
+class ResumeThinkingTest(unittest.TestCase):
+    """Resume must carry the model's reasoning, not just prose and tools.
+
+    Regression: `thinking` blocks have always been in the v2 transcript, but nothing
+    rendered them -- so a user never saw reasoning, on resume or (checked while
+    fixing this) live either. CC 319 renders thinking as its own collapsible block
+    (`m0591:214511 lio()`); GA shows a one-line summary collapsed and the full text
+    on Ctrl+O, the same switch that expands tool arguments.
+    """
+
+    def _write(self, tmp, messages):
+        path = session_transcript.create_session(root=tmp, cwd="C:/repo", schema=2)
+        uuids = []
+        for role, blocks, origin, turn_id in messages:
+            uuids.append(session_transcript.append_message(
+                path, session_id="session_test", role=role, blocks=blocks,
+                origin=origin, turn_id=turn_id,
+            ))
+        if uuids:
+            session_transcript.append_turn_end(
+                path, session_id="session_test", turn_id=1,
+                first_uuid=uuids[0], last_uuid=uuids[-1],
+            )
+        return path
+
+    def test_thinking_blocks_survive_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "thinking", "thinking": "Both spawned successfully."},
+                    {"type": "text", "text": "ACK"},
+                ], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual(1, len(turn.thinking), "the reasoning block was dropped on load")
+            self.assertIn("spawned", turn.thinking[0])
+
+    def test_multiple_thinking_blocks_keep_their_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [{"type": "thinking", "thinking": "step one"}], {"kind": "assistant"}, 1),
+                ("assistant", [{"type": "thinking", "thinking": "step two"}], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual(["step one", "step two"], turn.thinking)
+
+    def test_thinking_stays_out_of_assistant_text(self):
+        # `assistant_text` is the model's prose; reasoning rides alongside it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "thinking", "thinking": "secret reasoning"},
+                    {"type": "text", "text": "visible answer"},
+                ], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual("visible answer", turn.assistant_text)
+            self.assertNotIn("secret reasoning", turn.assistant_text)
+
+    def test_redacted_thinking_is_kept_as_an_empty_marker(self):
+        # A redacted block carries no readable text; the UI should still know the
+        # step happened rather than silently omitting it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [{"type": "redacted_thinking", "data": "xxx"}], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual(1, len(turn.thinking))
+            self.assertEqual("", turn.thinking[0])
+
 if __name__ == "__main__":
     unittest.main()

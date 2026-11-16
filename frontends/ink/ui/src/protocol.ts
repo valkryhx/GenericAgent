@@ -133,6 +133,8 @@ export type HistoryMessage = {
   toolUses?: HistoryToolUse[]
   /** Tool outputs carried by this user (tool-result) message. */
   toolResults?: HistoryToolResult[]
+  /** The model's reasoning, one entry per thinking block. */
+  thinking?: string[]
 }
 
 export type HookConfiguredEntry = {
@@ -562,4 +564,6 @@ export type ChatMessage = {
    */
   toolUses?: HistoryToolUse[]
   toolResults?: HistoryToolResult[]
+  /** The model's reasoning, shown collapsed as a one-line summary unless Ctrl+O. */
+  thinking?: string[]
 }

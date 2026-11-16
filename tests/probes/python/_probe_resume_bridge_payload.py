@@ -69,23 +69,30 @@ def main() -> int:
 
     messages = B.GenericAgentBridge._resume_ui_messages_with_checkpoints(Stub(), str(path))
 
-    total_uses = total_results = 0
+    total_uses = total_results = total_thinking = 0
     print(f"bridge 产出 {len(messages)} 条 UI 消息:")
     for message in messages:
         uses = message.get("toolUses") or []
         results = message.get("toolResults") or []
+        thoughts = message.get("thinking") or []
         total_uses += len(uses)
         total_results += len(results)
+        total_thinking += len(thoughts)
         tag = ""
         if uses:
             tag = "  ● " + ", ".join(u["tool"] for u in uses[:4])
+        if thoughts:
+            tag += "  ✻ " + str(len(thoughts))
         print(f"  role={message['role']:9s} text={len(message.get('text') or ''):5d}字"
-              f"  toolUses={len(uses)} toolResults={len(results)}{tag}")
+              f"  toolUses={len(uses)} toolResults={len(results)} thinking={len(thoughts)}{tag}")
 
     print("\n=== 判定 ===")
-    print(f"  总 toolUses = {total_uses}   总 toolResults = {total_results}")
+    print(f"  总 toolUses = {total_uses}   总 toolResults = {total_results}"
+          f"   总 thinking = {total_thinking}")
     ok = total_uses > 0
     print("  OK  bridge 已把工具调用发给 UI" if ok else "  NG  bridge 仍然只发纯文本")
+    print("  OK  bridge 已把 thinking 发给 UI" if total_thinking > 0
+          else "  NG  thinking 仍未进入 UI")
 
     # 抽查一条：input 必须是可被前端解析的 JSON 字符串
     for message in messages:

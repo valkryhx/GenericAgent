@@ -136,7 +136,61 @@ export function transcriptLinesWithChannel(
   return { lines: rows, channel }
 }
 
+/**
+ * Render the model's reasoning restored from a resumed transcript.
+ *
+ * The transcript has always carried `thinking` blocks; nothing rendered them, so a
+ * session never showed reasoning — not on resume, and (checked while fixing this)
+ * not live either. CC 319 keeps thinking as its own block type and renders a
+ * summary with a disclosure control (`m0591:214511 lio()` → `latestThinkingSummary`).
+ *
+ * GA follows the same shape the tool chips already use: collapsed shows one dim
+ * summary line prefixed with the thinking star, Ctrl+O expands the full text. Reusing
+ * the tool-expansion switch keeps one knob for "show me the machinery".
+ */
+function appendThinkingRows(
+  rows: TranscriptLine[],
+  message: ChatMessage,
+  expanded: boolean,
+  theme?: InkTheme,
+): void {
+  const blocks = (message.thinking ?? []).filter(text => text.trim() !== '')
+  if (blocks.length === 0) return
+  blocks.forEach((text, index) => {
+    const id = `${message.id}-thinking-${index}`
+    const body = text.trim()
+    if (expanded) {
+      rows.push({
+        id,
+        text: `${GLYPHS.triangleDown} ${GLYPHS.star} thinking`,
+        parts: [{ text: `${GLYPHS.triangleDown} ${GLYPHS.star} thinking`, color: theme?.muted ?? 'gray', dimColor: true }],
+      })
+      for (const [lineIndex, line] of body.split('\n').entries()) {
+        rows.push({
+          id: `${id}-line-${lineIndex}`,
+          text: `  ${normalizeEmoji(line)}`,
+          parts: [{ text: `  ${normalizeEmoji(line)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+        })
+      }
+      return
+    }
+    // Collapsed: one line, truncated. A multi-paragraph thought would otherwise
+    // dominate the transcript; Ctrl+O is the documented way to read it in full.
+    const oneLine = body.replace(/\s+/g, ' ').trim()
+    const summary = oneLine.length > THINKING_SUMMARY_LIMIT
+      ? `${oneLine.slice(0, THINKING_SUMMARY_LIMIT - 1)}…`
+      : oneLine
+    rows.push({
+      id,
+      text: `${GLYPHS.triangleRight} ${GLYPHS.star} ${summary}`,
+      parts: [{ text: `${GLYPHS.triangleRight} ${GLYPHS.star} ${summary}`, color: theme?.muted ?? 'gray', dimColor: true }],
+    })
+  })
+}
+
 export type ResultChannel = { kind: 'stdout'; needsMarker: boolean } | null
+
+const THINKING_SUMMARY_LIMIT = 110
 
 /**
  * Render tool calls restored from a resumed transcript.
@@ -401,6 +455,8 @@ function appendMessageLines(
     return null
   }
 
+  // Reasoning comes first in the turn: it is what led to the prose and tools below.
+  appendThinkingRows(rows, message, expandedTools, theme)
   const body = formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
   const nextChannel = appendAssistantBodyRows(rows, message.id, body, theme, channel)
   // Resume-only path: tool calls carried as structured data become the same

@@ -380,6 +380,9 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
         // the renderer turns them into `● tool(args)` / `  ⎿  result` rows.
         const toolUses = message.toolUses?.length ? message.toolUses : undefined
         const toolResults = message.toolResults?.length ? message.toolResults : undefined
+        // Reasoning blocks survive resume the same way; the renderer shows a
+        // collapsed summary unless the user has Ctrl+O open.
+        const thinking = message.thinking?.length ? message.thinking : undefined
         const base = message.taskId === undefined
           ? { id, role: message.role, text: message.text, done: true }
           : { id, role: message.role, text: message.text, done: true, taskId: message.taskId }
@@ -387,6 +390,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
           ...base,
           ...(toolUses ? { toolUses } : {}),
           ...(toolResults ? { toolResults } : {}),
+          ...(thinking ? { thinking } : {}),
         }
       }),
       staticGeneration: state.staticGeneration + 1,

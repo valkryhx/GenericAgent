@@ -3623,7 +3623,8 @@ class GenericAgentBridge:
                     # (``m0591:45435 jke()`` / ``m0591:46116 zWo()``).
                     tool_uses = list(getattr(turn, "tool_uses", []) or [])
                     tool_results = list(getattr(turn, "tool_results", []) or [])
-                    if turn.assistant_text:
+                    thoughts = list(getattr(turn, "thinking", []) or [])
+                    if turn.assistant_text or tool_uses or thoughts:
                         assistant_message = {
                             "role": "assistant",
                             "text": turn.assistant_text,
@@ -3633,18 +3634,12 @@ class GenericAgentBridge:
                             assistant_message["toolUses"] = copy.deepcopy(tool_uses)
                             if tool_results:
                                 assistant_message["toolResults"] = copy.deepcopy(tool_results)
+                        # Reasoning was on disk all along but never reached the UI.
+                        # CC 319 renders it as a collapsible block; the Ink UI shows a
+                        # one-line summary collapsed and the full text on Ctrl+O.
+                        if thoughts:
+                            assistant_message["thinking"] = copy.deepcopy(thoughts)
                         messages.append(assistant_message)
-                    elif tool_uses:
-                        # A turn whose visible prose was empty still made tool calls
-                        # (e.g. the model answered through a tool). Without this the
-                        # whole turn would vanish from the history.
-                        messages.append({
-                            "role": "assistant",
-                            "text": "",
-                            "taskId": task_id,
-                            "toolUses": copy.deepcopy(tool_uses),
-                            **({"toolResults": copy.deepcopy(tool_results)} if tool_results else {}),
-                        })
                 return messages
         backend_history = copy.deepcopy(self._backend_history())
         messages: list[dict[str, Any]] = []
