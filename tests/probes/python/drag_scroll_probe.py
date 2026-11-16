@@ -55,10 +55,13 @@ from pathlib import Path
 
 from winpty import PtyProcess
 
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _workspace_guard import finish, start  # noqa: E402
 
-ROOT = r"D:\git_repos\GenericAgent"
+ROOT = REPO
 OUT_DIR = os.path.join(ROOT, "tests", "probes", "captures")
 ROWS, COLS = 30, 100
 
@@ -105,7 +108,7 @@ def main() -> int:
     env["GA_TUI_FULLSCREEN"] = "1"        # 全屏才有滚动视口
 
     proc = PtyProcess.spawn(
-        ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+        ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
         dimensions=(ROWS, COLS),
         env=env,
         cwd=ROOT,

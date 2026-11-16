@@ -11,8 +11,12 @@ import time
 
 import pyte
 from winpty import PtyProcess
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
+ROOT = REPO
 
 env = dict(os.environ)
 for k in [k for k in env if k.upper().startswith(("CLAUDE", "ANTHROPIC"))]:
@@ -25,7 +29,7 @@ env["TERM"] = "xterm-256color"
 screen = pyte.Screen(120, 40)
 stream = pyte.Stream(screen)
 p = PtyProcess.spawn(
-    ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+    ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
     dimensions=(40, 120), env=env, cwd=ROOT,
 )
 stop = threading.Event()

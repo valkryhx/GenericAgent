@@ -10,7 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui")
+REPO = str(Path(__file__).resolve().parents[4])
+
+ROOT = Path(REPO) / "frontends" / "ink" / "ui"
 TARGET = "src/agentNotice.ts"
 
 TESTS = ["src/subagentWorkVerdict.test.ts", "src/subagentAnnouncement.test.ts"]

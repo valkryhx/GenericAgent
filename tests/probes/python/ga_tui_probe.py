@@ -15,10 +15,13 @@ from pathlib import Path
 
 from winpty import PtyProcess
 
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _workspace_guard import finish, start  # noqa: E402
 
-ROOT = r"D:\git_repos\GenericAgent"
+ROOT = REPO
 SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 25.0
 
 _guard = start(ROOT)
@@ -33,7 +36,7 @@ env["PYTHONIOENCODING"] = "utf-8"
 env["PYTHONUTF8"] = "1"
 
 p = PtyProcess.spawn(
-    ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+    ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
     dimensions=(40, 120),
     env=env,
     cwd=ROOT,

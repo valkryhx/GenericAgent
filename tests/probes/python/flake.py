@@ -3,7 +3,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-UI = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui")
+REPO = str(Path(__file__).resolve().parents[3])
+
+UI = Path(REPO) / "frontends" / "ink" / "ui"
 runs = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 
 passes = 0

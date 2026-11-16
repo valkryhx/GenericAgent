@@ -12,8 +12,12 @@ import threading
 import time
 
 from winpty import PtyProcess
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
+ROOT = REPO
 COLS, ROWS = 120, 40
 
 env = dict(os.environ)
@@ -30,7 +34,7 @@ stop = threading.Event()
 session = {"t0": None}
 
 p = PtyProcess.spawn(
-    ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+    ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
     dimensions=(ROWS, COLS), env=env, cwd=ROOT,
 )
 

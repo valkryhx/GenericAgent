@@ -12,7 +12,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path(r"D:\git_repos\GenericAgent")
+GA_ROOT = str(Path(__file__).resolve().parents[3])
+
+REPO = Path(GA_ROOT)
 TARGET = REPO / "tests" / "probes" / "python" / "_workspace_guard.py"
 
 # (名字, 原片段, 变异片段, 期望变红的测试)

@@ -1,8 +1,11 @@
 """回滚 writeCoalescer 实验：删除 3 个未跟踪文件（逐个 os.remove，不递归）。"""
 import os
 import subprocess
+from pathlib import Path
 
-base = r"D:\git_repos\GenericAgent\frontends\ink\ui\src"
+REPO = str(Path(__file__).resolve().parents[3])
+
+base = str(Path(REPO) / "frontends" / "ink" / "ui" / "src")
 targets = [
     "writeCoalescer.ts",
     "writeCoalescerTypes.ts",
@@ -17,4 +20,4 @@ for name in targets:
         print("absent ", name)
 
 print(subprocess.run(["git", "checkout", "--", "frontends/ink/ui/src/main.tsx"],
-                     cwd=r"D:\git_repos\GenericAgent", capture_output=True, text=True))
+                     cwd=REPO, capture_output=True, text=True))

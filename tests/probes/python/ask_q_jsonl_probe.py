@@ -32,8 +32,11 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+
+ROOT = REPO
 OUT_DIR = os.path.join(ROOT, "tests", "probes", "captures")
 TIMEOUT_S = 180.0
 

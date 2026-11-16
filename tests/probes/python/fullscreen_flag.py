@@ -9,7 +9,9 @@ mouseMode 现在有三档：off / scroll / full。scroll 与 full 都是全屏�
 import re
 from pathlib import Path
 
-p = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\App.tsx")
+REPO = str(Path(__file__).resolve().parents[3])
+
+p = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "App.tsx"
 text = p.read_text(encoding="utf-8")
 
 before = text

@@ -13,8 +13,12 @@ import threading
 import time
 
 from winpty import PtyProcess
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
+ROOT = REPO
 OUT = ".tmp_ga_chat.capture.txt"
 PROMPT = "Reply with exactly: TUI-OK"
 BOOT_WAIT = 35.0     # 等启动 + MCP 连接
@@ -28,7 +32,7 @@ env["PYTHONIOENCODING"] = "utf-8"
 env["PYTHONUTF8"] = "1"
 
 p = PtyProcess.spawn(
-    ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+    ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
     dimensions=(40, 120),
     env=env,
     cwd=ROOT,

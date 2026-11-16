@@ -10,7 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src")
+REPO = str(Path(__file__).resolve().parents[3])
+
+ROOT = Path(REPO) / "frontends" / "ink" / "ui" / "src"
 PLAN = ROOT / "messageViewportPlan.ts"
 VIEW = ROOT / "App.tsx"
 
@@ -84,7 +86,7 @@ def apply(action: str) -> int:
         return 2
 
     out = subprocess.run(["git", "diff", "--stat", "--", "frontends/ink/ui/src"],
-                         cwd=r"D:\git_repos\GenericAgent", capture_output=True, text=True)
+                         cwd=REPO, capture_output=True, text=True)
     print(out.stdout.strip() or "(no diff)")
     return 0
 

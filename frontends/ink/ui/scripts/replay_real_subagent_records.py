@@ -13,7 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(r"D:\git_repos\GenericAgent")
+GA_ROOT = str(Path(__file__).resolve().parents[4])
+
+REPO = Path(GA_ROOT)
 UI = REPO / "frontends" / "ink" / "ui"
 CAPTURES = REPO / "temp" / "real-subagent-fold-e2e"
 

@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-SRC = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\streamCommit.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+SRC = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "streamCommit.ts"
 ORIG = "export const DEFAULT_STREAM_LIVE_TAIL_LINES = 8"
 TEST = "export const DEFAULT_STREAM_LIVE_TAIL_LINES = 100000"
 MARK = "GA_AB_NOCOMMIT"
@@ -36,6 +38,6 @@ else:
     sys.exit(2)
 
 out = subprocess.run(["git", "diff", "--stat", "--", str(SRC)],
-                     cwd=r"D:\git_repos\GenericAgent",
+                     cwd=REPO,
                      capture_output=True, text=True)
 print(out.stdout.strip() or "(no diff)")

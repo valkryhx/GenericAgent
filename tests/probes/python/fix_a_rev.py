@@ -14,7 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-SRC = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\messageViewportPlan.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+SRC = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "messageViewportPlan.ts"
 
 ORIG = """  if (input.keepLivePlaceholder) {
     // Running with no assistant lines yet: still reserve a short live band so
@@ -55,5 +57,5 @@ else:
     sys.exit(2)
 
 out = subprocess.run(["git", "diff", "--stat", "--", str(SRC)],
-                     cwd=r"D:\git_repos\GenericAgent", capture_output=True, text=True)
+                     cwd=REPO, capture_output=True, text=True)
 print(out.stdout.strip() or "(no diff)")

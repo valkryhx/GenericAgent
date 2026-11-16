@@ -19,8 +19,12 @@ import time
 
 import pyte
 from winpty import PtyProcess
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+REPO_POSIX = "/" + Path(REPO).as_posix()[0].lower() + Path(REPO).as_posix()[2:]
+
+ROOT = REPO
 COLS, ROWS = 120, 40
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "chat"
 PROMPT = "Count from 1 to 20, one number per line."
@@ -37,7 +41,7 @@ screen = pyte.Screen(COLS, ROWS)
 stream = pyte.Stream(screen)
 
 p = PtyProcess.spawn(
-    ["bash", "-lc", "cd /d/git_repos/GenericAgent && ./ga"],
+    ["bash", "-lc", f"cd {REPO_POSIX} && ./ga"],
     dimensions=(ROWS, COLS),
     env=env,
     cwd=ROOT,

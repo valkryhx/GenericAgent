@@ -13,7 +13,9 @@ properties with the same name），整个前端类型检查挂掉。
 from pathlib import Path
 import sys
 
-P = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\terminalInput.test.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+P = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "terminalInput.test.ts"
 
 lines = P.read_text(encoding="utf-8").split("\n")
 out = []

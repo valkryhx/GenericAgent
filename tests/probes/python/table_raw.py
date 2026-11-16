@@ -7,7 +7,9 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(r"D:\git_repos\GenericAgent")
+GA_ROOT = str(Path(__file__).resolve().parents[3])
+
+REPO = Path(GA_ROOT)
 BRIDGE = REPO / "frontends" / "ink" / "bridge.py"
 PROMPT = (
     "请只输出下面这个 markdown 表格，不要任何解释文字、不要代码块围栏：\n"

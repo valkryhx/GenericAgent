@@ -1,5 +1,9 @@
+from pathlib import Path
+
+REPO = str(Path(__file__).resolve().parents[3])
+
 """重写文档尾部：保留前 120 行，接上新的结论段。"""
-path = r"D:\git_repos\GenericAgent\docs\20261108-GA-Ink抖动与滚动优化设计-对标CC319.md"
+path = str(Path(REPO) / "docs" / "20261108-GA-Ink抖动与滚动优化设计-对标CC319.md")
 with open(path, encoding="utf-8", newline="") as f:
     lines = f.readlines()
 

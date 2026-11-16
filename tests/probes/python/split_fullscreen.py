@@ -1,7 +1,9 @@
 """App.tsx：把 fullscreen 拆成独立开关，并同步 terminalCleanup 的调用。"""
 from pathlib import Path
 
-p = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\App.tsx")
+REPO = str(Path(__file__).resolve().parents[3])
+
+p = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "App.tsx"
 text = p.read_text(encoding="utf-8")
 
 # 1) 引入 resolveFullscreenMode

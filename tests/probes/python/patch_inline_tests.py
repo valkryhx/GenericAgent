@@ -5,7 +5,9 @@
 """
 from pathlib import Path
 
-p = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\App.test.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+p = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "App.test.ts"
 text = p.read_text(encoding="utf-8")
 
 # 每个目标测试：在 test(...) 之后的第一行插入显式模式设置 + 恢复

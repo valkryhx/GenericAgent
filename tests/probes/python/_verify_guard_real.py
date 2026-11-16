@@ -13,11 +13,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+REPO = str(Path(__file__).resolve().parents[3])
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _workspace_guard import WorkspaceGuard  # noqa: E402
 
-ROOT = r"D:\git_repos\GenericAgent"
-CAPTURES = r"D:\git_repos\GenericAgent\tests\probes\captures"
+ROOT = REPO
+CAPTURES = str(Path(REPO) / "tests" / "probes" / "captures")
 
 # 拿一个已提交、当前干净的真实源码文件当靶子
 TARGET = Path(ROOT) / "genericagent" / "core" / "pending_input.py"

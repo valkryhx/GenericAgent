@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-PLAN = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\messageViewportPlan.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+PLAN = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "messageViewportPlan.ts"
 
 ORIG = """  if (liveCount > 0) {
     const height = Math.min(liveCount, maxLive, room)
@@ -65,5 +67,5 @@ else:
     sys.exit(2)
 
 out = subprocess.run(["git", "diff", "--stat", "--", "frontends/ink/ui/src"],
-                     cwd=r"D:\git_repos\GenericAgent", capture_output=True, text=True)
+                     cwd=REPO, capture_output=True, text=True)
 print(out.stdout.strip() or "(no diff)")

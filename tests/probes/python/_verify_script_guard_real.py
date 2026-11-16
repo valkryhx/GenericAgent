@@ -9,10 +9,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+REPO = str(Path(__file__).resolve().parents[3])
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _workspace_guard import CONTAMINATED_EXIT, finish, start  # noqa: E402
 
-ROOT = r"D:\git_repos\GenericAgent"
+ROOT = REPO
 TARGET = Path(ROOT) / "genericagent" / "core" / "pending_input.py"
 
 

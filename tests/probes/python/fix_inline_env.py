@@ -1,7 +1,9 @@
 """inline 专用测试改用 GA_INK_FULLSCREEN=off（GA_INK_MOUSE=off 现在只关鼠标捕获）。"""
 from pathlib import Path
 
-UI = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src")
+REPO = str(Path(__file__).resolve().parents[3])
+
+UI = Path(REPO) / "frontends" / "ink" / "ui" / "src"
 
 OLD_MARKER = """  // Inline-mode behaviour: pin the mode explicitly. The shipped default is now
   // fullscreen (CC 319 parity), where this branch is not taken at all.

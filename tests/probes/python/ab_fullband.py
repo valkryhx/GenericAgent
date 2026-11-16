@@ -6,7 +6,9 @@
 import sys
 from pathlib import Path
 
-SRC = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui\src\messageViewportPlan.ts")
+REPO = str(Path(__file__).resolve().parents[3])
+
+SRC = Path(REPO) / "frontends" / "ink" / "ui" / "src" / "messageViewportPlan.ts"
 
 ORIG = """  if (liveCount > 0) {
     const height = Math.min(liveCount, maxLive, room)

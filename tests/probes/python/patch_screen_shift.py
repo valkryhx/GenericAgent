@@ -1,6 +1,9 @@
 import re
+from pathlib import Path
 
-path = r"D:\git_repos\GenericAgent\.tmp_screen_shift.py"
+REPO = str(Path(__file__).resolve().parents[3])
+
+path = str(Path(REPO) / ".tmp_screen_shift.py")
 with open(path, encoding="utf-8", newline="") as f:
     text = f.read()
 

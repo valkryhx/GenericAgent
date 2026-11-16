@@ -9,7 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"D:\git_repos\GenericAgent\frontends\ink\ui")
+REPO = str(Path(__file__).resolve().parents[4])
+
+ROOT = Path(REPO) / "frontends" / "ink" / "ui"
 
 MUTATIONS = [
     (

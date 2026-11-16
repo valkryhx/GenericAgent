@@ -11,8 +11,11 @@ import threading
 import time
 
 from winpty import PtyProcess
+from pathlib import Path
 
-ROOT = r"D:\git_repos\GenericAgent"
+REPO = str(Path(__file__).resolve().parents[3])
+
+ROOT = REPO
 COLS, ROWS = 110, 40
 
 PROBE = r"""
