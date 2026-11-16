@@ -957,3 +957,100 @@ test('a message without blocks keeps the legacy type-grouped order', () => {
   assert.ok(at('正文') < at('code_run'), JSON.stringify(rows))
   assert.ok(rows.some(row => row.includes('OLD-RESULT')), JSON.stringify(rows))
 })
+
+// ── persisted-output 信封 ─────────────────────────────────────────────
+//
+// 回归：`tool_results/budget.py` 把超大结果存盘后返回一个**九行**信封
+// （`<persisted-output>`、大小、绝对路径、相对路径、字符数、truncated、sha256、
+// `Preview:`、预览）。渲染器原本逐行铺开，两个信封就吃掉 18 行，把回合真正的
+// 正文挤出屏幕 —— 用户读到的就是「同一句提示反复出现，看不到正常内容」。
+
+const PERSISTED_ENVELOPE = [
+  '<persisted-output>',
+  'Output too large (74859 chars). Full output saved to: D:\repo\tool-results\call-1.json',
+  'artifactPath: tool-results/session/call-1.json',
+  'originalChars: 74859',
+  'truncated: false',
+  'sha256: ee1c8763216d894f12f78dc252134e523af9671585d4261241af701745adc036',
+  'Preview:',
+  '{"status":"success","_truncated":true}',
+  '</persisted-output>',
+].join('\n')
+
+test('persisted-output envelope collapses to a single summary row', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_use', id: 'c1', tool: 'tavily_search', input: '{"query":"x"}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: PERSISTED_ENVELOPE },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const resultRows = rows.filter(row => row.trim() !== '').slice(-1)
+  assert.equal(resultRows.length, 1, `信封应只占一行: ${JSON.stringify(rows)}`)
+  const row = resultRows[0]!
+  assert.ok(row.includes('saved to file'), `没表达出「存到文件」: ${row}`)
+  assert.ok(row.includes('74859'), `没带字符数: ${row}`)
+  assert.ok(row.includes('tool-results/session/call-1.json'), `没带可直接使用的相对路径: ${row}`)
+  // 元数据行不能漏到正文里
+  assert.ok(!row.includes('sha256'), `sha256 不该占一行: ${row}`)
+  assert.ok(!row.includes('<persisted-output>'), `标记不该画出来: ${row}`)
+})
+
+test('persisted-output envelope never renders the machine-shaped preview', () => {
+  // 预览是 payload 的碎片（`{"status":"success","_truncated":true,...}`），
+  // 对读者零信息量。
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_use', id: 'c1', tool: 'x', input: '{}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: PERSISTED_ENVELOPE },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.ok(!rows.join('\n').includes('_truncated'), `JSON 预览漏出来了: ${JSON.stringify(rows)}`)
+})
+
+test('a truncated envelope says only the first portion was kept', () => {
+  const envelope = PERSISTED_ENVELOPE.replace('truncated: false', 'truncated: true')
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_use', id: 'c1', tool: 'x', input: '{}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: envelope },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const row = rows.filter(line => line.trim() !== '').slice(-1)[0]!
+  assert.ok(row.includes('first portion only'), `没提示只存了前面部分: ${row}`)
+})
+
+test('an ordinary multi-line result is untouched by the envelope collapse', () => {
+  // 对照：非信封结果行为必须与修复前一致。
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'tool_use', id: 'c1', tool: 'x', input: '{}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: 'line one\nline two' },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.ok(rows.some(row => row.includes('line one')), JSON.stringify(rows))
+  assert.ok(rows.some(row => row.includes('line two')), JSON.stringify(rows))
+})

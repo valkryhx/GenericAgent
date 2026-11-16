@@ -334,6 +334,24 @@ function appendStructuredResultRows(
   theme?: InkTheme,
 ): void {
   if (!result.text.trim()) return
+  // A persisted-output envelope is metadata *about* a result, not the result. It is
+  // nine lines of framing (`<persisted-output>`, size, path, path again, char count,
+  // truncation flag, sha256, `Preview:`, the preview itself); drawn row by row, two
+  // of them ate eighteen rows of a 30-row terminal and pushed the turn's actual
+  // content off screen — which reads as "the same line repeated and no real content".
+  const envelope = parsePersistedEnvelope(result.text)
+  if (envelope) {
+    rows.push({
+      id: `${key}-result`,
+      text: `${RESULT_PREFIX}${normalizeEmoji(envelope.summary)}`,
+      parts: mutedResultLine(normalizeEmoji(envelope.summary), theme),
+    })
+    // No preview row. The budget's preview is a machine-shaped fragment of the
+    // payload (`{"status":"success","_truncated":true,...}`), which tells a reader
+    // nothing they did not already learn from "saved to file". The artifact path in
+    // the summary is the actionable part.
+    return
+  }
   // Keep the body on one logical row like the live result path: collapse the
   // multi-line tool output into its first non-empty line plus a continuation,
   // otherwise a 1400-char spawn_agent result would bury the transcript.
@@ -352,6 +370,51 @@ function appendStructuredResultRows(
     })
   }
 }
+
+/**
+ * Parse `genericagent/core/tool_results/budget.py`'s persisted-output envelope.
+ *
+ * Format (mirrored from `_envelope()`):
+ *
+ *     <persisted-output>
+ *     Output too large (N chars). Full output saved to: <abs path>
+ *     artifactPath: <relative path>
+ *     originalChars: N
+ *     truncated: <bool>
+ *     sha256: <hex>
+ *     Preview:
+ *     <preview text>
+ *     </persisted-output>
+ *
+ * The two path lines say the same thing at different resolutions, so the summary
+ * keeps the short `artifactPath` — it is what a user can type or paste back into a
+ * tool call — and the char count is what tells them whether re-reading is worth it.
+ */
+export function parsePersistedEnvelope(text: string): { summary: string; preview: string } | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith(PERSISTED_OPEN) || !trimmed.endsWith(PERSISTED_CLOSE)) return null
+  const body = trimmed.slice(PERSISTED_OPEN.length, trimmed.length - PERSISTED_CLOSE.length)
+  const previewIndex = body.indexOf('Preview:')
+  const header = previewIndex === -1 ? body : body.slice(0, previewIndex)
+  const preview = previewIndex === -1 ? '' : body.slice(previewIndex + 'Preview:'.length)
+
+  const field = (name: string): string => {
+    const match = header.match(new RegExp(`^${name}:\\s*(.+)$`, 'm'))
+    return match ? match[1]!.trim() : ''
+  }
+  const originalChars = field('originalChars')
+  const artifactPath = field('artifactPath')
+  const truncated = field('truncated') === 'true'
+
+  const size = originalChars ? `${originalChars} chars` : 'large'
+  const parts = [`[saved to file] ${size}`]
+  if (artifactPath) parts.push(artifactPath)
+  if (truncated) parts.push('(first portion only)')
+  return { summary: parts.join(' · '), preview }
+}
+
+const PERSISTED_OPEN = '<persisted-output>'
+const PERSISTED_CLOSE = '</persisted-output>'
 
 function firstNonBlank(rows: TranscriptLine[]): TranscriptLine | null {
   return rows.find(row => row.text.trim() !== '') ?? null
