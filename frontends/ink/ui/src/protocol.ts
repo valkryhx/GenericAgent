@@ -475,6 +475,13 @@ export type BridgeEvent =
   | { type: 'user'; taskId: number; text: string }
   | { type: 'prompt_queued'; text: string; queued?: number; reason?: 'compaction' }
   | { type: 'assistant_delta'; taskId: number; text: string }
+  /**
+   * One reasoning block the model finished before writing its reply.
+   *
+   * Sent mid-turn (see bridge `_on_llm_thinking`), never part of `assistant_delta`:
+   * reasoning is not reply text and must not enter the transcript or tool progress.
+   */
+  | { type: 'assistant_thinking'; taskId: number; text: string }
   | { type: 'assistant_done'; taskId: number; text: string }
   | { type: 'system'; text: string }
   | { type: 'local_command_input'; text: string }

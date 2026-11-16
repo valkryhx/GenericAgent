@@ -478,12 +478,34 @@ class GenericAgentBridge:
         # LLM 重试横幅（对齐 CC 的 onRetryStatus）：断链期间底部活动行显示
         # "Retrying in Ns · attempt n/m"，重连成功后自动消失，绝不往对话区写报错。
         self._bind_retry_status(agent)
+        self._bind_thinking(agent)
 
     def _bind_retry_status(self, agent: Any) -> None:
         backend = getattr(getattr(agent, "llmclient", None), "backend", None)
         if backend is None:
             return
         backend.on_retry_status = self._on_llm_retry_status
+
+    def _bind_thinking(self, agent: Any) -> None:
+        """Route live reasoning blocks to the UI as their own message rows.
+
+        Mirrors ``_bind_retry_status``: same handoff point, same reason — the
+        provider layer owns the data, the bridge owns the protocol, and neither
+        has to learn about the other's shape. The block arrives while the turn
+        is still streaming (see ``_notify_thinking``), which is what lets the UI
+        paint it *above* prose that has not been committed yet.
+        """
+        backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+        if backend is None:
+            return
+        backend.on_thinking = self._on_llm_thinking
+
+    def _on_llm_thinking(self, payload: dict) -> None:
+        text = str(payload.get("text") or "")
+        if not text.strip():
+            return
+        task_id = int(self._task_seq)
+        self.emit({"type": "assistant_thinking", "taskId": task_id, "text": text})
 
     def _on_llm_retry_status(self, payload: dict) -> None:
         kind = str(payload.get("kind") or "")

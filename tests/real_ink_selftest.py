@@ -113,8 +113,24 @@ def run():
             done = _wait_for(rec, "assistant_done", 5)
             text = str((done or {}).get("text") or "")
             usage = rec.last("token_usage")
-            turn = {"skipped": False, "taskId": task_id, "prompt": PROMPT, "assistantText": text, "tokenUsage": usage}
+            thinking = [event for event in rec.of("assistant_thinking") if event.get("taskId") == task_id]
+            turn = {"skipped": False, "taskId": task_id, "prompt": PROMPT, "assistantText": text,
+                    "tokenUsage": usage,
+                    "thinkingBlocks": [event.get("text") for event in thinking]}
             record(checks, "real LLM turn produced assistant text", bool(text.strip()), text.strip()[:160])
+            # Live reasoning is opt-in per model: a model without thinking support
+            # legitimately emits nothing, so this is reported as evidence rather
+            # than failed. What must never happen is reasoning leaking into the
+            # reply body — that IS asserted.
+            if thinking:
+                total = sum(len(str(event.get("text") or "")) for event in thinking)
+                record(checks, "live thinking blocks reached the UI", True,
+                       "%d block(s), %d chars" % (len(thinking), total))
+                record(checks, "thinking never leaks into the reply text",
+                       all(str(event.get("text") or "").strip() not in text for event in thinking),
+                       "reply=%d chars" % len(text))
+            else:
+                log("SKIP live thinking (model returned no reasoning block this turn)")
             record(checks, "token usage reported", bool(usage), "total=%s" % (usage or {}).get("totalTokens"))
             record(checks, "no bridge error event", rec.last("error") is None, (rec.last("error") or {}).get("message", ""))
         except Exception as exc:  # noqa: BLE001 - the driver reports, it does not raise

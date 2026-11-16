@@ -420,6 +420,46 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       error: null,
     }
   }
+  if (event.type === 'assistant_thinking') {
+    // Whitespace-only reasoning carries no information and would paint an empty
+    // `✻` row. The bridge filters this too, but the reducer is the last gate:
+    // a protocol consumer that replays recorded events must not depend on it.
+    if (!event.text.trim()) return state
+    // One message per reasoning block, `done` so it commits to Static immediately
+    // and can never be reordered. It is appended at the end, which is also where
+    // the turn is: thinking deltas arrive before the prose they precede, and the
+    // prose is a separate message (`a-{taskId}`) created later, so time order and
+    // `Static` append order agree.
+    //
+    // Riding on the live assistant message instead would break as soon as the
+    // stream-commit splitter overflowed its tail (`a-{taskId}-c0`, …): those
+    // committed segments are emitted before the live message, so the reasoning
+    // row would end up *below* prose that came after it.
+    const openUserHasPendingGrowth = state.messages.some(
+      message => message.role === 'user' && !message.done && message.taskId === event.taskId,
+    )
+    let messages = state.messages
+    if (openUserHasPendingGrowth) {
+      // Mirror `assistant_delta`: close the open prompt first so the `Static`
+      // prefix stays user → assistant and the reasoning row is not painted
+      // between the prompt and its own turn.
+      messages = finalizeOpenUserMessages(messages, event.taskId)
+    }
+    return {
+      ...state,
+      messages: [
+        ...messages,
+        {
+          id: `a-${event.taskId}-thinking-${thinkingSeq(messages, event.taskId)}`,
+          role: 'assistant',
+          text: '',
+          done: true,
+          taskId: event.taskId,
+          thinking: [event.text],
+        },
+      ],
+    }
+  }
   if (event.type === 'assistant_delta') {
     const id = `a-${event.taskId}`
     const idx = state.messages.findIndex(message => message.id === id)
@@ -472,4 +512,15 @@ function finalizeOpenUserMessages(messages: ChatMessage[], taskId?: number): Cha
     return { ...message, done: true }
   })
   return changed ? next : messages
+}
+
+/**
+ * Sequence number for the next reasoning row of a task.
+ *
+ * Ids must be unique and monotonically increasing: a turn can produce several
+ * thinking blocks (one per step), each becomes its own message, and a reused id
+ * would make Ink's keyed reconciliation drop or duplicate rows.
+ */
+function thinkingSeq(messages: ChatMessage[], taskId: number): number {
+  return messages.filter(message => message.id.startsWith(`a-${taskId}-thinking-`)).length
 }

@@ -300,6 +300,10 @@ def _parse_claude_sse(resp_lines, sess=None):
             elif delta.get("type") == "input_json_delta": tool_json_buf += delta.get("partial_json", "")
         elif evt_type == "content_block_stop":
             if current_block:
+                if current_block["type"] == "thinking":
+                    # Block complete: hand the reasoning to the UI now, while the
+                    # reply prose it precedes has not been committed yet.
+                    _notify_thinking(sess, current_block.get("thinking", ""))
                 if current_block["type"] == "tool_use":
                     try: current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
                     except: current_block["input"] = {"_raw": tool_json_buf}
@@ -321,6 +325,11 @@ def _parse_claude_sse(resp_lines, sess=None):
         if not got_message_stop and not stop_reason: warn = "\n\n[!!! 流异常中断，未收到完整响应 !!!]"
         elif stop_reason == "max_tokens": warn = "\n\n[!!! Response truncated: max_tokens !!!]"
     if current_block:
+        if current_block["type"] == "thinking":
+            # Stream broke mid-block (no content_block_stop). The reasoning that
+            # did arrive is still worth showing: the alternative is a turn whose
+            # thinking silently vanishes on every interruption.
+            _notify_thinking(sess, current_block.get("thinking", ""))
         if current_block["type"] == "tool_use":
             try: current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
             except: current_block["input"] = {"_raw": tool_json_buf}
@@ -368,6 +377,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
     content_text = ""
     if api_mode == "responses":
         seen_delta = False; fc_buf = {}; current_fc_idx = None
+        reasoning_text = ""; thinking_emitted = False
         # 和 chat_completions 的 finish_reason 对称：循环里只收集终止状态，
         # 循环外统一判定一次并发哨兵，而不是在循环内就地报错。
         # 截断有三个来源，都必须认：
@@ -413,10 +423,26 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
                 break
             if etype == "response.output_text.delta":
                 delta = evt.get("delta", "")
-                if delta: seen_delta = True; content_text += delta; yield delta
+                if delta:
+                    # First prose delta: the reasoning block above it is finished.
+                    if reasoning_text and not thinking_emitted:
+                        thinking_emitted = True
+                        _notify_thinking(sess, reasoning_text)
+                    seen_delta = True; content_text += delta; yield delta
+            elif etype in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+                # Responses API exposes reasoning as a summary stream (what GPT-5
+                # class models actually send) plus the raw text stream. Both are
+                # reasoning; the summary is the readable one, so concatenating
+                # them would duplicate. Prefer whichever arrives.
+                part = evt.get("delta", "")
+                if part: reasoning_text += part
             elif etype == "response.output_text.done" and not seen_delta:
                 text = evt.get("text", "")
-                if text: content_text += text; yield text
+                if text:
+                    if reasoning_text and not thinking_emitted:
+                        thinking_emitted = True
+                        _notify_thinking(sess, reasoning_text)
+                    content_text += text; yield text
             elif etype == "response.output_item.added":
                 item = evt.get("item", {})
                 if item.get("type") == "function_call":
@@ -450,6 +476,11 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             print(f"[WARN] {trunc.strip()}")
             content_text += trunc; yield trunc
         blocks = []
+        if reasoning_text:
+            blocks.append({"type": "thinking", "thinking": reasoning_text})
+            if not thinking_emitted:
+                # Tool-only turn (no prose delta to trigger it above).
+                _notify_thinking(sess, reasoning_text)
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(fc_buf):
             fc = fc_buf[idx]
@@ -466,6 +497,8 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
         # 不像 Anthropic 还有 message_stop 之类的结构性信号。以前这里完全没读
         # finish_reason，于是 max_tokens 截断会被当成正常结束（end_turn）静默吞掉。
         finish_reason = None
+        # 推理块只发一次：正常情况下在首个 content delta 之前发出，见循环内的说明。
+        thinking_emitted = False
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
@@ -494,6 +527,16 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             if delta_reasoning:
                 reasoning_text += delta_reasoning
             if delta.get("content"):
+                # First content delta: the reasoning block is over. Emit it HERE,
+                # not at the end of the stream — the reply text is yielded from
+                # this point on and the frontend commits it to Static
+                # progressively, so a block delivered afterwards could no longer
+                # be placed above it. Providers that interleave reasoning with
+                # content (rare; interleaved thinking) get the remainder flushed
+                # when the stream ends.
+                if reasoning_text and not thinking_emitted:
+                    thinking_emitted = True
+                    _notify_thinking(sess, reasoning_text)
                 text = delta["content"]; content_text += text; yield text
             for tc in (delta.get("tool_calls") or []):
                 idx = tc.get("index", 0)
@@ -511,7 +554,13 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions", sess=None):
             print(f"[WARN] {warn.strip()}")
             content_text += warn; yield warn
         blocks = []
-        if reasoning_text: blocks.append({"type": "thinking", "thinking": reasoning_text})
+        if reasoning_text:
+            blocks.append({"type": "thinking", "thinking": reasoning_text})
+            if not thinking_emitted:
+                # No content delta arrived (tool-only turn, or a provider that
+                # keeps reasoning after the content). Emit now, still before this
+                # generator returns, so the UI has it before the turn commits.
+                _notify_thinking(sess, reasoning_text)
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(tc_buf):
             tc = tc_buf[idx]
@@ -621,7 +670,22 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
             "length" if (_reason == "max_output_tokens" or (_is_incomplete and not _reason)) else None
         )
         for item in (data.get("output") or []):
-            if item.get("type") == "message":
+            if item.get("type") == "reasoning":
+                # Non-streaming mirror of the SSE reasoning branches: the summary
+                # parts are the readable form; raw reasoning_content is the fallback.
+                parts = [
+                    p.get("text", "")
+                    for p in (item.get("summary") or [])
+                    if p.get("type") in ("summary_text", "text") and p.get("text")
+                ]
+                raw = "\n".join(parts) or "".join(
+                    p.get("text", "") for p in (item.get("content") or [])
+                    if p.get("type") in ("reasoning_text", "text") and p.get("text")
+                )
+                if raw:
+                    blocks.append({"type": "thinking", "thinking": raw})
+                    _notify_thinking(sess, raw)
+            elif item.get("type") == "message":
                 for p in (item.get("content") or []):
                     if p.get("type") in ("output_text", "text") and p.get("text"):
                         blocks.append({"type": "text", "text": p["text"]}); yield p["text"]
@@ -642,6 +706,7 @@ def _parse_openai_json(data, api_mode="chat_completions", sess=None):
         reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
         if reasoning:
             blocks.append({"type": "thinking", "thinking": reasoning})
+            _notify_thinking(sess, reasoning)
         content = msg.get("content", "")
         if content:
             blocks.append({"type": "text", "text": content}); yield content
@@ -729,6 +794,33 @@ def _notify_retry_status(sess, payload):
         return
     try:
         callback(payload)
+    except Exception:
+        pass
+
+
+def _notify_thinking(sess, text):
+    """Hand one finished reasoning block to the frontend, out of band.
+
+    Reasoning never goes through the yielded text stream. ``chat()``'s yield
+    contract is "display text", and a thinking block is not part of the reply
+    body — mixing it in would put raw reasoning into the transcript, tool
+    progress and every compaction summary. The parsed blocks already carry it
+    (``MockResponse.thinking``), so the only missing piece was a way to reach the
+    UI *while the turn is still running*: the reply text is committed to
+    ``<Static>`` in segments as it streams, so a block delivered after the turn
+    could not be inserted above it any more.
+
+    Sent on block completion rather than per delta: a partial block has no
+    meaningful boundary, and the frontend renders one collapsible row per block
+    (matching how ``thinking`` is stored in the transcript).
+    """
+    if not text or not str(text).strip():
+        return
+    callback = getattr(sess, "on_thinking", None)
+    if not callable(callback):
+        return
+    try:
+        callback({"text": str(text)})
     except Exception:
         pass
 
@@ -1039,6 +1131,9 @@ class BaseSession:
         # Frontend hook for the transient "retrying n/m" banner (CC onRetryStatus).
         # None means "no UI attached": retries stay invisible, as before.
         self.on_retry_status = None
+        # Frontend hook for live reasoning blocks (see _notify_thinking). Kept
+        # separate from on_retry_status because it carries content, not status.
+        self.on_thinking = None
         self._init_cancel_state()
     def _init_cancel_state(self):
         self._cancel_event = threading.Event()
@@ -1542,7 +1637,7 @@ class MixinSession:
         self.model = getattr(self._sessions[0], 'model', None)
         self._cur_idx, self._switched_at = 0, 0.0
     def __getattr__(self, name): return getattr(self._sessions[0], name)
-    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort', 'history', 'on_retry_status'})
+    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort', 'history', 'on_retry_status', 'on_thinking'})
     def __setattr__(self, name, value):
         if name in self._BROADCAST_ATTRS:
             for s in self._sessions:

@@ -662,3 +662,76 @@ test('clearing the restored draft is explicit', () => {
   state = applyBridgeEvent(state, { type: 'draft_restored' })
   assert.equal(state.restoredDraft, null)
 })
+
+// ── 实时 thinking ─────────────────────────────────────────────────────
+//
+// 回归：解析层一直把 reasoning 累积进 content_blocks 和 MockResponse.thinking，
+// 但 chat() 的 yield 契约是「显示文本」，所以从来没有任何东西把它送到 UI ——
+// 用户既看不到 resume 的思考，也看不到实时的思考。现在 provider 在**块完成时**
+// 通过 on_thinking 回调发出（见 llm/core.py `_notify_thinking`），bridge 转成
+// `assistant_thinking` 事件，前端每条块落成一则独立消息。
+
+test('assistant_thinking appends a done message ahead of the prose', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 3, text: 'q' })
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 3, text: 'REASON' })
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 3, text: 'answer' })
+
+  const thinkingIdx = state.messages.findIndex(m => m.id === 'a-3-thinking-0')
+  const proseIdx = state.messages.findIndex(m => m.id === 'a-3')
+  assert.ok(thinkingIdx !== -1, `thinking row missing: ${JSON.stringify(state.messages)}`)
+  assert.ok(proseIdx !== -1, 'prose row missing')
+  assert.ok(thinkingIdx < proseIdx, 'reasoning must render above the prose it precedes')
+
+  const row = state.messages[thinkingIdx]!
+  assert.deepEqual(row.thinking, ['REASON'])
+  assert.equal(row.done, true, 'reasoning must be committed immediately, not left live')
+  assert.equal(row.text, '', 'reasoning must never leak into reply text')
+})
+
+test('assistant_thinking closes an open prompt first so Static order stays user → assistant', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 4, text: 'q' })
+  assert.equal(state.messages.find(m => m.id === 'u-4')?.done, false)
+
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 4, text: 'R' })
+  assert.equal(state.messages.find(m => m.id === 'u-4')?.done, true)
+  assert.deepEqual(state.messages.map(m => m.id), ['u-4', 'a-4-thinking-0'])
+})
+
+test('several thinking blocks in one turn each get their own ordered message', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 5, text: 'q' })
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 5, text: 'step one' })
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 5, text: 'tool call' })
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 5, text: 'step two' })
+
+  const ids = state.messages.map(m => m.id)
+  assert.deepEqual(ids, ['u-5', 'a-5-thinking-0', 'a-5', 'a-5-thinking-1'])
+  assert.deepEqual(state.messages[1]?.thinking, ['step one'])
+  assert.deepEqual(state.messages[3]?.thinking, ['step two'])
+})
+
+test('a thinking block that survives the stream-commit split stays above the prose', () => {
+  // The failure this guards: riding thinking on the live assistant message breaks
+  // once the commit splitter overflows its tail, because the committed segments
+  // are emitted before the live message and would push the reasoning below them.
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 6, text: 'q' })
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 6, text: 'REASON' })
+  const many = Array.from({ length: 12 }, (_, i) => `L${i}`).join('\n')
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 6, text: many })
+
+  const ids = state.messages.map(m => m.id)
+  assert.ok(ids.some(id => id.startsWith('a-6-c')), `expected commit segments: ${JSON.stringify(ids)}`)
+  const thinkingIdx = ids.indexOf('a-6-thinking-0')
+  const firstCommitIdx = ids.findIndex(id => id.startsWith('a-6-c'))
+  assert.ok(thinkingIdx !== -1 && thinkingIdx < firstCommitIdx, `reasoning drifted below prose: ${JSON.stringify(ids)}`)
+})
+
+test('an empty thinking payload adds no row', () => {
+  let state = applyBridgeEvent(initialState, { type: 'ready', version: 1 })
+  state = applyBridgeEvent(state, { type: 'user', taskId: 7, text: 'q' })
+  state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 7, text: '   ' })
+  assert.equal(state.messages.filter(m => m.id.includes('thinking')).length, 0)
+})

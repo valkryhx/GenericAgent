@@ -457,8 +457,16 @@ function appendMessageLines(
 
   // Reasoning comes first in the turn: it is what led to the prose and tools below.
   appendThinkingRows(rows, message, expandedTools, theme)
-  const body = formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
-  const nextChannel = appendAssistantBodyRows(rows, message.id, body, theme, channel)
+  // A reasoning-only message (a live `assistant_thinking` row) has no body at all.
+  // The `|| ' '` placeholder below exists to keep a *streaming* message one row
+  // tall before its first token; on a done message it would paint a lone blank
+  // row between the reasoning and the prose that follows it.
+  const hasBody = message.text.trim() !== ''
+  const reasoningOnly = !hasBody && (message.thinking?.some(text => text.trim() !== '') ?? false)
+  const body = reasoningOnly
+    ? ''
+    : formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
+  const nextChannel = reasoningOnly ? channel : appendAssistantBodyRows(rows, message.id, body, theme, channel)
   // Resume-only path: tool calls carried as structured data become the same
   // `● tool(args)` chips a live turn produces, so history and live look identical.
   appendStructuredToolRows(rows, message, expandedTools, theme)
@@ -476,7 +484,11 @@ function appendMessageLines(
   // the "sometimes" in the report. The following block supplies the separator
   // when it really is a new block (see `chipOwnsFollowingResult`).
   const last = lastNonBlank(rows)
-  if (!message.done) {
+  if (reasoningOnly) {
+    // The separator before the next block is supplied by `transcriptLinesWithChannel`
+    // when that block starts. Adding one here too painted two blank rows between
+    // the reasoning and the prose it introduces.
+  } else if (!message.done) {
     // Live message: reserve one row below the body so the viewport tail does not
     // sit flush against the composer. This row is not committed to Static.
     rows.push(blankLine(`${message.id}-streaming-tail`))
