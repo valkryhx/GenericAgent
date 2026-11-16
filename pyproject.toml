@@ -3,7 +3,7 @@
 
 [project]
 name = "genericagent"
-version = "0.7.6"
+version = "0.7.7"
 description = "General-purpose agent harness — a hands-on growing demo"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
