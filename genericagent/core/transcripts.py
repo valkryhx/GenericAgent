@@ -85,6 +85,16 @@ class TranscriptTurn:
     #   {"kind": "tool_use", "id": str, "tool": str, "input": str}      (input is JSON text)
     #   {"kind": "tool_result", "toolUseId": str, "text": str, "isError": bool}
     blocks: list = field(default_factory=list)
+    # Messages the user typed *while this turn was running* ("steering").
+    #
+    # They are not content blocks: the queue hands them to the model by folding them
+    # into a later request, so no human `message` event is ever written for them. The
+    # only surviving copy is the wrapped block inside some later message's text, which
+    # `_collect_steering_prompts()` parses back out.
+    #
+    # Without this a resumed turn read as "the agent answered a question that is
+    # nowhere on screen": the prose and tools were all there, the question was not.
+    steering: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -387,6 +397,55 @@ def _ordered_blocks_from_message(event):
             for result in results:
                 out.append({"kind": "tool_result", **result})
     return out
+
+
+def _strip_steering_wrappers(text):
+    """Remove ``[GA_USER_MIDTURN_MESSAGE]…[/…]`` blocks from display text.
+
+    The wrapper is model-facing framing. A human message that contains one is not
+    showing the user's words verbatim, so the block is cut and the remainder kept.
+    """
+    value = str(text or "")
+    if "[GA_USER_MIDTURN_MESSAGE]" not in value:
+        return value
+    from genericagent.core.pending_input import WRAP_PREFIX, WRAP_SUFFIX
+
+    out = []
+    cursor = 0
+    while True:
+        start = value.find(WRAP_PREFIX, cursor)
+        if start < 0:
+            out.append(value[cursor:])
+            break
+        out.append(value[cursor:start])
+        end = value.find(WRAP_SUFFIX, start)
+        cursor = len(value) if end < 0 else end + len(WRAP_SUFFIX)
+    return "".join(out).strip()
+
+
+def _collect_steering_prompts(event, target, turn_id):
+    """Recover mid-turn user messages that only survive inside a wrapped block.
+
+    Adds them to ``target[turn_id]['steering']`` in emission order. Kept separate from
+    the block projection because a steering prompt is not a content block of the turn —
+    it is a message the user sent *during* it, which the queue folded into a later
+    request instead of creating a human `message` event.
+    """
+    from genericagent.core.pending_input import extract_steering_prompts
+
+    pieces = []
+    text = event.get("text")
+    if isinstance(text, str):
+        pieces.extend(extract_steering_prompts(text))
+    for block in event.get("blocks") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            pieces.extend(extract_steering_prompts(block.get("text")))
+    if not pieces:
+        return
+    bucket = target.setdefault(turn_id, [])
+    for piece in pieces:
+        if piece not in bucket:
+            bucket.append(piece)
 
 
 def _message_text_from_blocks(blocks):
@@ -1269,6 +1328,9 @@ def load_v2(path):
 
     turn_text = {}
     turn_tools = {}
+    # turn_id -> [steering prompt, ...] 用户在该回合进行中插的话。它们不是内容块，
+    # 只在某个 later message 的文本里以包裹形式活着（见 _collect_steering_prompts）。
+    turn_steering = {}
     for event in accepted_messages:
         turn_id = event.get("turn_id")
         if turn_id is None or int(turn_id) in excluded_turns:
@@ -1300,6 +1362,11 @@ def load_v2(path):
         if not is_human_prompt:
             ordered = _ordered_blocks_from_message(event)
             if isinstance(origin, dict) and origin.get("kind") == "tool_result":
+                # A steering message leaves no human `message` event: the queue renders
+                # it into the *next* request as a wrapped block, which lands inside a
+                # later message's text. Recover the user's own words here or a resumed
+                # turn shows the answer to a question that is nowhere on screen.
+                _collect_steering_prompts(event, turn_steering, int(turn_id))
                 # A tool_result message also carries the model-facing working-memory
                 # preamble as a `text` block. That injection is prompt plumbing, not
                 # something the model said, so it must not appear in the transcript —
@@ -1310,8 +1377,20 @@ def load_v2(path):
                 turn_tools.setdefault(int(turn_id), {"uses": [], "results": []}).setdefault("blocks", []).extend(ordered)
         if role == "user" and not (isinstance(origin, dict) and origin.get("kind") == "tool_result"):
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
+            # A wrapped mid-turn prompt is prompt plumbing, not a human message. If it
+            # ever lands in a human event, strip it — `_collect_steering_prompts` has
+            # already turned it into its own row.
+            value = _strip_steering_wrappers(value)
             if value:
-                turn_text.setdefault(int(turn_id), {})["user_text"] = value
+                # Join, don't overwrite — same defect the assistant branch below had.
+                # A turn can carry several human messages: the original prompt plus any
+                # "steering" message the user typed while the turn was running. Those
+                # are separate `message` events with `origin.kind == "human"`, so
+                # assignment kept only the LAST one and the original question vanished
+                # from a resumed session ("the agent answered, but my question is gone").
+                bucket = turn_text.setdefault(int(turn_id), {})
+                prior = bucket.get("user_text") or ""
+                bucket["user_text"] = (prior + chr(10) + value) if prior else value
         elif role == "assistant":
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
             if value:
@@ -1340,6 +1419,7 @@ def load_v2(path):
             tool_results=list(tools.get("results") or []),
             thinking=list(tools.get("thinking") or []),
             blocks=list(tools.get("blocks") or []),
+            steering=list(turn_steering.get(turn_id) or []),
         )
         loaded_turns.append(item)
         if item.user_text:
@@ -1378,6 +1458,7 @@ def load_v2(path):
                 tool_results=list(getattr(turn, "tool_results", []) or []),
                 thinking=list(getattr(turn, "thinking", []) or []),
                 blocks=list(getattr(turn, "blocks", []) or []),
+                steering=list(getattr(turn, "steering", []) or []),
             ))
         loaded_turns = merged
         ui_messages = _turns_to_ui_messages(loaded_turns)

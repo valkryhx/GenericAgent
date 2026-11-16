@@ -749,5 +749,92 @@ class ResumeBlockOrderTest(unittest.TestCase):
             self.assertEqual(["R"], turn.thinking)
 
 
+class ResumeSteeringTest(unittest.TestCase):
+    """Steering messages (typed mid-turn) must survive resume.
+
+    Regression: a mid-turn prompt never becomes a human `message` event. The queue
+    renders it into the *next* request as a `[GA_USER_MIDTURN_MESSAGE]` block, which
+    lands inside a later message's text — in practice a tool_result message, glued to
+    the working-memory preamble. Resuming fed that raw text to the UI, so the user saw
+    the agent answer a question that was nowhere on screen.
+    """
+
+    def _write(self, tmp, messages):
+        path = session_transcript.create_session(root=tmp, cwd="C:/repo", schema=2)
+        uuids = []
+        for role, blocks, origin in messages:
+            uuids.append(session_transcript.append_message(
+                path, session_id="session_test", role=role, blocks=blocks,
+                origin=origin, turn_id=1,
+            ))
+        if uuids:
+            session_transcript.append_turn_end(
+                path, session_id="session_test", turn_id=1,
+                first_uuid=uuids[0], last_uuid=uuids[-1],
+            )
+        return path
+
+    def test_several_human_messages_in_one_turn_all_survive(self):
+        # Assignment kept only the LAST one, so the original question vanished.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "原始问题"}], {"kind": "human"}),
+                ("assistant", [{"type": "text", "text": "回答中"}], {"kind": "assistant"}),
+                ("user", [{"type": "text", "text": "补充要求"}], {"kind": "human"}),
+                ("assistant", [{"type": "text", "text": "一起处理了"}], {"kind": "assistant"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertIn("原始问题", turn.user_text)
+            self.assertIn("补充要求", turn.user_text)
+            self.assertLess(turn.user_text.index("原始问题"), turn.user_text.index("补充要求"))
+
+    def test_steering_prompt_is_recovered_from_the_wrapped_block(self):
+        # The real shape: the prompt is folded into a tool_result message's text.
+        from genericagent.core.pending_input import render_queued_prompts
+        wrapped = render_queued_prompts(["介绍下自己"], when="mid_turn")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "搜一下"}], {"kind": "human"}),
+                ("assistant", [{"type": "tool_use", "id": "c1", "name": "code_run", "input": {}}],
+                 {"kind": "assistant"}),
+                ("user", [
+                    {"type": "tool_result", "tool_use_id": "c1", "content": "OUT"},
+                    {"type": "text", "text": "### [WORKING MEMORY]" + chr(10) + "<history>…</history>" + chr(10) + wrapped},
+                ], {"kind": "tool_result"}),
+                ("assistant", [{"type": "text", "text": "你好，我是 GA"}], {"kind": "assistant"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+
+        self.assertEqual(["介绍下自己"], turn.steering)
+        # The framing text must not leak into the recovered prompt.
+        self.assertNotIn("mid-turn", turn.steering[0])
+        self.assertNotIn("The user sent", turn.steering[0])
+
+    def test_steering_wrapper_never_leaks_into_user_text(self):
+        from genericagent.core.pending_input import render_queued_prompts
+        wrapped = render_queued_prompts(["补充"], when="mid_turn")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "原始提问"}], {"kind": "human"}),
+                ("user", [{"type": "text", "text": wrapped}], {"kind": "human"}),
+                ("assistant", [{"type": "text", "text": "回答"}], {"kind": "assistant"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+
+        self.assertNotIn("GA_USER_MIDTURN_MESSAGE", turn.user_text)
+        self.assertIn("原始提问", turn.user_text)
+
+    def test_no_steering_means_an_empty_list(self):
+        # Control: an ordinary turn must not grow a steering entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                ("user", [{"type": "text", "text": "问题"}], {"kind": "human"}),
+                ("assistant", [{"type": "text", "text": "回答"}], {"kind": "assistant"}),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual([], turn.steering)
+            self.assertEqual("问题", turn.user_text)
+
+
 if __name__ == "__main__":
     unittest.main()

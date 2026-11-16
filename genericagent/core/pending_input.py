@@ -29,6 +29,16 @@ from datetime import datetime, timezone
 WRAP_PREFIX = "[GA_USER_MIDTURN_MESSAGE]"
 WRAP_SUFFIX = "[/GA_USER_MIDTURN_MESSAGE]"
 
+# Distinct enough from any user text to cut on. Kept as separate constants because
+# `extract_steering_prompts()` must know exactly where the instruction frame starts —
+# deriving it from the templates would mean parsing a format string.
+_TEMPLATE_TAIL_ZH = "用户在上一轮执行过程中补充了这条要求"
+_TURN_START_TAIL_ZH = "用户上次请求尚未收尾时补充了这些内容"
+# The English half of the same tail sentence. Identical wording in both templates up to
+# the em dash, so one marker covers the mid-turn case and the tail-start case cuts on
+# its own lead-in above.
+_TEMPLATE_TAIL_EN = "This message arrived mid-turn"
+
 # Mirrors Claude Code's mid-turn wrapper (m0108 `QJe` / m0459 `z4n`). Kept verbatim in
 # English so the wording stays comparable to CC's, with a Chinese line because GA's
 # prompts are authored in Chinese and a bare English instruction inside a Chinese turn
@@ -112,3 +122,56 @@ def render_queued_prompts(items, *, when: str = "mid_turn") -> str:
     body = "\n\n".join(texts)
     template = _TURN_START_TEMPLATE if str(when) == "turn_start" else _TEMPLATE
     return "\n".join([WRAP_PREFIX, template.format(body=body), WRAP_SUFFIX])
+
+
+def extract_steering_prompts(text) -> list[str]:
+    """Pull the user's own words back out of mid-turn wrapper blocks.
+
+    A steering message never becomes a human `message` event in the transcript: the
+    queue renders it into the *next* request as a wrapped block, so the only place it
+    survives is inside some later message's text (in practice a tool_result message,
+    concatenated with the working-memory preamble). Resuming used to show nothing at
+    all, because the raw transcript text was fed straight to the UI — the user saw the
+    agent answer a question whose question was invisible.
+
+    Parsing the wrapper back out is the only way to recover it. The two templates are
+    the fact source; the body sits on the line after the template's first line and runs
+    to the closing marker.
+    """
+    value = str(text or "")
+    if WRAP_PREFIX not in value:
+        return []
+    out = []
+    cursor = 0
+    while True:
+        start = value.find(WRAP_PREFIX, cursor)
+        if start < 0:
+            break
+        end = value.find(WRAP_SUFFIX, start)
+        if end < 0:
+            break
+        block = value[start + len(WRAP_PREFIX):end]
+        cursor = end + len(WRAP_SUFFIX)
+        # Drop the English instruction frame. The user's text is the leading part of
+        # the block, before the template's tail sentence. Cut on whichever marker comes
+        # first — the templates differ in wording, and a miss leaves the agent's
+        # instruction text sitting in the user's question.
+        cut = len(block)
+        for marker in (_TEMPLATE_TAIL_EN, _TEMPLATE_TAIL_ZH, _TURN_START_TAIL_ZH):
+            index = block.find(marker)
+            if index >= 0:
+                cut = min(cut, index)
+        block = block[:cut]
+        lines = [line.rstrip() for line in block.strip().split("\n")]
+        # Drop the template's lead-in line ("The user sent ... working:") and any
+        # blank line it left behind.
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines and lines[0].lstrip().lower().startswith(
+            ("the user sent a new message", "the user sent these messages")
+        ):
+            lines = lines[1:]
+        prompt = "\n".join(lines).strip()
+        if prompt:
+            out.append(prompt)
+    return out

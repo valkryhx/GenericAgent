@@ -3647,6 +3647,21 @@ class GenericAgentBridge:
                     tool_results = list(getattr(turn, "tool_results", []) or [])
                     thoughts = list(getattr(turn, "thinking", []) or [])
                     ordered = list(getattr(turn, "blocks", []) or [])
+                    # Messages the user typed while this turn was running. They never
+                    # became human `message` events (the queue folds them into a later
+                    # request), so a resumed turn used to show the answer with no
+                    # question above it.
+                    steering = list(getattr(turn, "steering", []) or [])
+                    if steering:
+                        # Emit each as its own user row *before* the assistant message,
+                        # which is where it happened in time (the answering prose below
+                        # came after the interjection).
+                        for prompt in steering:
+                            messages.append({
+                                "role": "user",
+                                "text": f"[mid-turn] {prompt}",
+                                "taskId": task_id,
+                            })
                     if turn.assistant_text or tool_uses or thoughts or ordered:
                         assistant_message = {
                             "role": "assistant",
