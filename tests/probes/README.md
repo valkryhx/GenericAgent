@@ -55,4 +55,5 @@
 | `tests/probes/python/_probe_abort_discovery_latency.py` | `abort()` 到 MCP discovery 停下的真实耗时 vs 到 `is_running` 被清零的耗时。实测前者 11 ms、后者只是碰巧 11 ms；给 teardown 注入 900 ms 后后者变成 915 ms 而前者不动 —— 证明旧断言的 0.75 s 窗口量的是回合收尾，不是"abort 打断 discovery"。 |
 | `tests/probes/python/_slow_iteration_plugin.py` | 反向确认用：pytest 插件，把 `wait_agents` 每轮会调的两个 I/O helper 各加 30 ms，让一次迭代确定性地超出预算。`--slow-iteration-shrink-timeout 0.05` 可验证新守卫指向"预算太小"而不是"回退坏了"。 |
 | `tests/probes/python/_slow_teardown_plugin.py` | 反向确认用：把回合收尾中的一步延迟 900 ms，证明旧断言会报"abort 没有打断 MCP discovery"——而 discovery 明明 11 ms 就停了。 |
+| `tests/probes/python/probe_installed_package.py` | **安装版（site-packages）到底能不能跑？** 从仓库外执行，先断言每个模块的来源不在源码树（含检测器自身的对照组），再验证惰性加载的包内资源与 `script_contract.js` 对 vendored acorn 的 `require`，最后启动真实 bridge 取 `model_status`/`team_roster`，可选跑一个真实 LLM 回合。补 `build_release.ps1` 只审计文件清单 + 6 个模块 import smoke 的盲区：资源缺失只在真实启动时才暴露，而源码树永远能找到仓库根的 `node_modules`，测不出 acorn 打包问题。 |
 
