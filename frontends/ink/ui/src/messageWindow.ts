@@ -153,11 +153,18 @@ function appendThinkingRows(
   message: ChatMessage,
   expanded: boolean,
   theme?: InkTheme,
+  idPrefix?: string,
 ): void {
   const blocks = (message.thinking ?? []).filter(text => text.trim() !== '')
   if (blocks.length === 0) return
   blocks.forEach((text, index) => {
-    const id = `${message.id}-thinking-${index}`
+    // Row ids must be unique across the whole transcript: ink keys children by id,
+    // and a duplicate makes React *duplicate or omit* them ("Non-unique keys may
+    // cause children to be duplicated"). The ordered replay passes one block at a
+    // time, so `index` is always 0 there — without `idPrefix` every reasoning block
+    // of a turn collapsed onto the same `${message.id}-thinking-0` and the screen
+    // showed the same rows twice.
+    const id = `${idPrefix ?? `${message.id}-thinking-${index}`}`
     const body = text.trim()
     if (expanded) {
       rows.push({
@@ -296,7 +303,7 @@ function appendOrderedBlockRows(
         ...message,
         thinking: [block.text],
         blocks: undefined,
-      }, expandedTools, theme)
+      }, expandedTools, theme, `${key}-thinking`)
       continue
     }
     if (block.kind === 'text') {

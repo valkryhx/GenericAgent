@@ -1054,3 +1054,69 @@ test('an ordinary multi-line result is untouched by the envelope collapse', () =
   assert.ok(rows.some(row => row.includes('line one')), JSON.stringify(rows))
   assert.ok(rows.some(row => row.includes('line two')), JSON.stringify(rows))
 })
+
+// ── 行 id 唯一性 ──────────────────────────────────────────────────────
+//
+// 回归：`appendOrderedBlockRows` 对每个 thinking 块单独调用
+// `appendThinkingRows(message-with-one-block)`，于是块索引恒为 0，每个块都生成
+// 同一个行 id `a-1-thinking-0`。ink 按 id 给 children 建 key，重复 key 会让 React
+// **重复或丢弃**节点（"Non-unique keys may cause children to be duplicated"）——
+// 用户在 resume 后滚动时看到的「上半屏被重复内容占据」就是它。
+
+test('ordered replay gives every thinking block a unique row id', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: 'answer',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'thinking', text: 'THINK-ONE' },
+      { kind: 'tool_use', id: 'c1', tool: 'code_run', input: '{"code":"1"}' },
+      { kind: 'tool_result', toolUseId: 'c1', text: 'OUT' },
+      { kind: 'thinking', text: 'THINK-TWO' },
+      { kind: 'tool_use', id: 'c2', tool: 'code_run', input: '{"code":"2"}' },
+      { kind: 'tool_result', toolUseId: 'c2', text: 'OUT2' },
+      { kind: 'thinking', text: 'THINK-THREE' },
+    ],
+  }], { expandedTools: false })
+
+  const ids = rows.map(row => row.id)
+  const unique = new Set(ids)
+  assert.equal(unique.size, ids.length, `行 id 有重复: ${JSON.stringify(ids)}`)
+})
+
+test('thinking row ids stay unique when expanded too', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    blocks: [
+      { kind: 'thinking', text: 'first\nline\ntwo' },
+      { kind: 'thinking', text: 'second\nblock' },
+    ],
+  }], { expandedTools: true })
+
+  const ids = rows.map(row => row.id)
+  assert.equal(new Set(ids).size, ids.length, `展开时行 id 有重复: ${JSON.stringify(ids)}`)
+})
+
+test('a turn with many reasoning blocks renders every one of them', () => {
+  // 重复 key 的另一种表现是「节点被丢弃」：条数变少。
+  const blocks = Array.from({ length: 6 }, (_, i) => ({ kind: 'thinking' as const, text: `THINK-${i}` }))
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: 'answer',
+    done: true,
+    taskId: 1,
+    blocks,
+  }], { expandedTools: false })
+
+  for (let i = 0; i < 6; i += 1) {
+    assert.ok(rows.some(row => row.text.includes(`THINK-${i}`)), `THINK-${i} 丢失: ${JSON.stringify(rows.map(r => r.text))}`)
+  }
+  assert.equal(new Set(rows.map(r => r.id)).size, rows.length)
+})
