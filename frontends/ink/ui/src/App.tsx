@@ -236,6 +236,7 @@ import {
 } from './transcriptScroll.js'
 import { splitStaticAndActiveMessages } from './messagePartition.js'
 import { planMessageViewport } from './messageViewportPlan.js'
+import { hitTestThinkingRow, thinkingRowsOf } from './thinkingHitTest.js'
 
 type Props = {
   python: string
@@ -1123,6 +1124,15 @@ export function App({
   const activeTurnStartedAtRef = useRef<number | null>(null)
   const terminalInputHandlerRef = useRef<((rawInput: string, key: InputKey) => void) | null>(null)
   const transcriptRowsRef = useRef({ totalRows: 0, viewportRows: 1 })
+  /**
+   * Visible transcript rows, for click hit-testing.
+   *
+   * A ref rather than a state read because `handleMouseEvent` is defined above the
+   * transcript memos (it also serves key input long before they exist). Same shape
+   * as `jumpToBottomRef`. Each row carries whether it belongs to a thinking block,
+   * so a click can tell a disclosure triangle apart from prose.
+   */
+  const thinkingRowsRef = useRef<{ row: number; kind: 'header' | 'body' }[]>([])
   const liveViewportGeometryRef = useRef({ rows: 1, cursorRow: 0 })
   const terminalCleanedRef = useRef(false)
   const resumePendingRef = useRef(false)
@@ -1929,6 +1939,19 @@ export function App({
       if (pill && hitTestJumpToBottom(pill.placement, metrics.messageRows - 1, viewportRow, viewportCol)) {
         setTranscriptScrollOffset(0)
         clearSelection()
+        return
+      }
+      // A click on a thinking row toggles its disclosure, exactly like Ctrl+O.
+      // Without this the `▸` is a dead affordance: terminals draw it as a
+      // triangle, so users click it, and nothing happened.
+      if (hitTestThinkingRow(thinkingRowsRef.current, viewportRow)) {
+        clearSelection()
+        // Same reasoning as the Ctrl+O handler: expanded/collapsed changes rows
+        // already emitted through <Static>, which can only append, so the whole
+        // transcript has to be re-emitted from the new state.
+        resetTranscriptViewport()
+        resetStaticTranscriptOutput()
+        setExpandedTools(value => !value)
         return
       }
       setSelection({ anchor: point, focus: point })
@@ -2857,6 +2880,12 @@ export function App({
     () => visibleTranscript.lines.map(line => line.text),
     [visibleTranscript],
   )
+  // Which visible rows belong to a thinking block. A click on one toggles the
+  // disclosure, mirroring Ctrl+O for that single block — the triangle is a
+  // disclosure affordance, so it has to respond to a click like one. `header` is
+  // the `▸ ✻ …` / `▾ ✻ thinking` line (the click target); `body` rows are only
+  // recorded so a click anywhere in the block also works.
+  thinkingRowsRef.current = thinkingRowsOf(visibleTranscript.lines)
   transcriptRowsRef.current = fullscreen
     ? { totalRows: visibleTranscript.totalRows, viewportRows: metrics.messageRows }
     : { totalRows: activeTranscriptRows.length, viewportRows: Math.max(1, inlineMessageRows) }

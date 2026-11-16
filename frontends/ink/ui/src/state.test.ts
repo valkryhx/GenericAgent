@@ -706,8 +706,13 @@ test('several thinking blocks in one turn each get their own ordered message', (
   state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 5, text: 'tool call' })
   state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 5, text: 'step two' })
 
+  // The live message's text is cut into a commit segment at the thinking boundary
+  // (`a-5` → `a-5-c0`) so step two's reasoning lands *below* step one's prose and
+  // *above* whatever step two writes next. Appending instead stacked every block
+  // under the whole turn; inserting before the live message put it above the
+  // previous steps' prose. Both ordering bugs are covered by this assertion.
   const ids = state.messages.map(m => m.id)
-  assert.deepEqual(ids, ['u-5', 'a-5-thinking-0', 'a-5', 'a-5-thinking-1'])
+  assert.deepEqual(ids, ['u-5', 'a-5-thinking-0', 'a-5-c0', 'a-5-thinking-1'])
   assert.deepEqual(state.messages[1]?.thinking, ['step one'])
   assert.deepEqual(state.messages[3]?.thinking, ['step two'])
 })

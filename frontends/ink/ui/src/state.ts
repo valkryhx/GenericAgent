@@ -425,16 +425,22 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
     // `✻` row. The bridge filters this too, but the reducer is the last gate:
     // a protocol consumer that replays recorded events must not depend on it.
     if (!event.text.trim()) return state
-    // One message per reasoning block, `done` so it commits to Static immediately
-    // and can never be reordered. It is appended at the end, which is also where
-    // the turn is: thinking deltas arrive before the prose they precede, and the
-    // prose is a separate message (`a-{taskId}`) created later, so time order and
-    // `Static` append order agree.
+    // Reasoning belongs *after* the prose of the previous steps and *before* the
+    // prose it produced. Two naive placements both fail on a multi-step turn:
     //
-    // Riding on the live assistant message instead would break as soon as the
-    // stream-commit splitter overflowed its tail (`a-{taskId}-c0`, …): those
-    // committed segments are emitted before the live message, so the reasoning
-    // row would end up *below* prose that came after it.
+    //   append at the end   → every block piles up below the whole turn
+    //                          (the user's report: 5 blocks all at the bottom)
+    //   insert before live  → lands above the previous steps' prose, because the
+    //                          live message accumulates text across thinking
+    //                          boundaries (it is one continuous display stream)
+    //
+    // The only correct cut is at the thinking boundary itself: close the live
+    // message into a committed segment, then append the reasoning, so the next
+    // `assistant_delta` starts a fresh live message below it.
+    const liveId = `a-${event.taskId}`
+    const liveIndex = state.messages.findIndex(
+      message => message.id === liveId && message.role === 'assistant' && !message.done,
+    )
     const openUserHasPendingGrowth = state.messages.some(
       message => message.role === 'user' && !message.done && message.taskId === event.taskId,
     )
@@ -445,12 +451,35 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
       // between the prompt and its own turn.
       messages = finalizeOpenUserMessages(messages, event.taskId)
     }
+    if (liveIndex !== -1) {
+      messages = messages.slice()
+      const live = messages[liveIndex]!
+      if (live.text) {
+        // Reuse the commit-segment id shape (`a-N-cK`) so the existing accounting
+        // still sees this text as already displayed: `committedAssistantPrefix`
+        // and `remainingAssistantTextAfterCommits` strip it from the final
+        // `assistant_done` payload, which is what prevents the turn rendering
+        // twice. A different id shape would make `assistant_done` re-append the
+        // whole body.
+        const commits = messages.filter(
+          message => message.taskId === event.taskId
+            && message.role === 'assistant'
+            && message.done
+            && message.id.startsWith(`${liveId}-c`),
+        ).length
+        messages[liveIndex] = { ...live, id: `${liveId}-c${commits}`, done: true }
+      } else {
+        // Empty live shell (reasoning arrived before any prose this step): no
+        // text to preserve, and keeping it would paint a stray blank row.
+        messages.splice(liveIndex, 1)
+      }
+    }
     return {
       ...state,
       messages: [
         ...messages,
         {
-          id: `a-${event.taskId}-thinking-${thinkingSeq(messages, event.taskId)}`,
+          id: `${liveId}-thinking-${thinkingSeq(messages, event.taskId)}`,
           role: 'assistant',
           text: '',
           done: true,
