@@ -1909,12 +1909,28 @@ export function App({
    * 视口内的行换成内容行号（与滚动无关，所以滚动不会让 anchor 指到别的文本）；
    * 视口外的行（拖到边缘、或落在 band/composer）也换算得出来。
    */
+  /**
+   * 鼠标屏幕点 → 选区内容点（**内容帧**行号）。
+   *
+   * `screenRowToContentRow` 返回的是**内容行号**（transcript 的第 N 行），而选区坐标
+   * 是**帧行号** —— 内容帧把 transcript 放在 `headerRows` 行之后。全屏模式 headerRows
+   * 恒为 1，两者差一行：点屏幕最后一行取到的是倒数第二行的文本，表现为「从上往下拖
+   * 选不到最后一行」（往下拖时焦点小一行；往上拖时焦点大一行，方向相反恰好能盖住
+   * 末行，所以只有单向失败）。
+   */
   const contentPointFromMouse = (x: number, y: number): FramePoint => {
     const screen = framePointFromMouse(x, y)
     const space = selectionSpaceNow()
+    // header 在可见帧与内容帧里是同一行，原样保留。
+    if (screen.row < space.headerRows) {
+      return { row: screen.row, col: screen.col }
+    }
     const contentRow = screenRowToContentRow(space, screen.row)
-    // 落在空白填充行上（内容不足一屏）就贴到最近的有效行
-    return { row: contentRow ?? screen.row, col: screen.col }
+    if (contentRow === null) {
+      // 落在空白填充行上（内容不足一屏）：屏幕行已经是帧行号。
+      return { row: screen.row, col: screen.col }
+    }
+    return { row: contentRow + space.headerRows, col: screen.col }
   }
 
   const handleMouseEvent = (event: NonNullable<ReturnType<typeof parseMouseEvent>>) => {
@@ -1981,7 +1997,8 @@ export function App({
             space.transcriptViewportRows,
           ),
         }
-        const edgeRow = focusContentRowAtEdge(after, direction)
+        // focusContentRowAtEdge 给的是内容行号；选区坐标是帧行号（内容帧在 header 之后）。
+        const edgeRow = focusContentRowAtEdge(after, direction) + after.headerRows
         setSelection({ anchor: current.anchor, focus: { row: edgeRow, col: point.col } })
         return
       }
@@ -2064,7 +2081,7 @@ export function App({
             space.transcriptViewportRows,
           ),
         }
-        const edgeRow = focusContentRowAtEdge(after, wheel === 'up' ? 'up' : 'down')
+        const edgeRow = focusContentRowAtEdge(after, wheel === 'up' ? 'up' : 'down') + after.headerRows
         setSelection({ anchor: current.anchor, focus: { row: edgeRow, col: current.focus.col } })
         return
       }
@@ -3050,6 +3067,15 @@ export function App({
         continue
       }
       if (section === 'panel') {
+        // Known limitation: selection panels (slash suggestions, /model, /mcp, /team,
+        // /workflow, permission, approval, question) contribute only their row COUNT to
+        // the frame model, so their text is visible but cannot be dragged over. Every
+        // other region — transcript, activity band, composer, hint — does carry text.
+        //
+        // Closing this needs a text mirror per panel (`*View` renders JSX, the frame
+        // model needs strings) and the two must stay in lockstep or every row below
+        // shifts. That is a separate piece of work; padding with '' keeps the composer's
+        // address correct in the meantime, which is why it is not a correctness bug.
         for (let i = 0; i < panelRows; i += 1) lines.push('')
         continue
       }
