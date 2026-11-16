@@ -3614,8 +3614,37 @@ class GenericAgentBridge:
                         snapshot["backend_history"] = copy.deepcopy(turn.backend_history_before)
                         snapshot["session_turn_id"] = max(0, branch_turn_id - 1)
                     self._rewind_snapshots[task_id] = snapshot
+                    # Resume must show the tool calls too, not just the prose. The v2
+                    # transcript stores the API's raw content blocks, so the calls and
+                    # their outputs are already loaded; sending only ``assistant_text``
+                    # (which is built from ``type == "text"`` blocks alone) is what made
+                    # a resumed session look like plain text while the live turn showed
+                    # every tool. CC 319 keeps them structured the same way
+                    # (``m0591:45435 jke()`` / ``m0591:46116 zWo()``).
+                    tool_uses = list(getattr(turn, "tool_uses", []) or [])
+                    tool_results = list(getattr(turn, "tool_results", []) or [])
                     if turn.assistant_text:
-                        messages.append({"role": "assistant", "text": turn.assistant_text, "taskId": task_id})
+                        assistant_message = {
+                            "role": "assistant",
+                            "text": turn.assistant_text,
+                            "taskId": task_id,
+                        }
+                        if tool_uses:
+                            assistant_message["toolUses"] = copy.deepcopy(tool_uses)
+                            if tool_results:
+                                assistant_message["toolResults"] = copy.deepcopy(tool_results)
+                        messages.append(assistant_message)
+                    elif tool_uses:
+                        # A turn whose visible prose was empty still made tool calls
+                        # (e.g. the model answered through a tool). Without this the
+                        # whole turn would vanish from the history.
+                        messages.append({
+                            "role": "assistant",
+                            "text": "",
+                            "taskId": task_id,
+                            "toolUses": copy.deepcopy(tool_uses),
+                            **({"toolResults": copy.deepcopy(tool_results)} if tool_results else {}),
+                        })
                 return messages
         backend_history = copy.deepcopy(self._backend_history())
         messages: list[dict[str, Any]] = []

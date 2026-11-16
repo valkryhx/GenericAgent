@@ -132,7 +132,13 @@ function formatCollapsedTool(name: string, argsText: string): string {
   return summary ? `${GLYPHS.bullet} ${name}(${summary})${hint}` : `${GLYPHS.bullet} ${name}${hint}`
 }
 
-function formatToolBlock(name: string, argsText: string, options: FormatOptions): string {
+/**
+ * Render one tool call as a chip. Exported so the resume path can reuse it: a
+ * transcript's structured `tool_use` block must produce exactly the same
+ * `● tool(args)` row that a live `[Action]` stream produces, including the
+ * expanded/collapsed behaviour driven by `Ctrl+O`.
+ */
+export function formatToolBlock(name: string, argsText: string, options: FormatOptions): string {
   return options.expanded ? formatExpandedTool(name, argsText) : formatCollapsedTool(name, argsText)
 }
 

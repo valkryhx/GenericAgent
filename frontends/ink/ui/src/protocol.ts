@@ -99,10 +99,40 @@ export type ResumeSession = {
   source?: 'project' | 'legacy' | string
 }
 
+/**
+ * One tool call recovered from a resumed transcript.
+ *
+ * Claude Code 319 keeps these as structured arrays instead of flattening them into
+ * text (`m0591:45435 jke()` returns `{ text, toolUses }` and `zWo()` pairs each call
+ * with its result by `tool_use_id`). GA used to drop them here: `load_v2()` collapsed
+ * every assistant message to its `text` blocks, so a resumed session showed prose
+ * only and the user lost the tool calls, MCP calls and their outputs — the most
+ * informative part of the history.
+ *
+ * `input` is the same compact preview CC sends (`mOn(Y.input)`), not the raw args
+ * object: the composer row has one line per call.
+ */
+export type HistoryToolUse = {
+  /** Matches `HistoryToolResult.toolUseId`. */
+  id: string
+  tool: string
+  input: string
+}
+
+export type HistoryToolResult = {
+  toolUseId: string
+  text: string
+  isError?: boolean
+}
+
 export type HistoryMessage = {
   role: 'user' | 'assistant' | 'system'
   text: string
   taskId?: number
+  /** Tool calls made by this assistant message, in emission order. */
+  toolUses?: HistoryToolUse[]
+  /** Tool outputs carried by this user (tool-result) message. */
+  toolResults?: HistoryToolResult[]
 }
 
 export type HookConfiguredEntry = {
@@ -523,4 +553,13 @@ export type ChatMessage = {
   localCommand?: 'input' | 'output'
   /** True for a prompt typed mid-turn, queued for the next tool boundary. */
   queuedPrompt?: boolean
+  /**
+   * Tool calls / outputs restored from a resumed transcript.
+   *
+   * Only `history_replace` populates these; a live turn streams its tool calls as
+   * `[Action]` / `[Status]` text inside `text`, which is why the renderer keeps both
+   * paths (see `messageWindow.appendToolUseRows`).
+   */
+  toolUses?: HistoryToolUse[]
+  toolResults?: HistoryToolResult[]
 }

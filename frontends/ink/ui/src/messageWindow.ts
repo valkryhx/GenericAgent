@@ -1,5 +1,5 @@
 import type { ChatMessage } from './protocol.js'
-import { formatAssistantText, STDOUT_BODY_END, STDOUT_BODY_PREFIX } from './messageFormat.js'
+import { formatAssistantText, formatToolBlock, STDOUT_BODY_END, STDOUT_BODY_PREFIX } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
 import { GLYPHS, RESULT_PREFIX, normalizeEmoji } from './glyphs.js'
@@ -137,6 +137,66 @@ export function transcriptLinesWithChannel(
 }
 
 export type ResultChannel = { kind: 'stdout'; needsMarker: boolean } | null
+
+/**
+ * Render tool calls restored from a resumed transcript.
+ *
+ * Claude Code 319 keeps `toolUses` / `toolResults` as structured arrays through its
+ * history projection (`m0591:45435 jke()`), and pairs them by `tool_use_id`
+ * (`m0591:46116 zWo()`). GA stores the same blocks in its v2 transcript but used to
+ * flatten every assistant message to plain `text` when building UI messages, so a
+ * resumed session showed prose only — tool calls, MCP calls and their outputs, the
+ * most informative part of the history, silently disappeared.
+ *
+ * This renders them into the *same* shapes a live turn produces, so history and
+ * live are indistinguishable:
+ *
+ *     ● tool_name(args)        ← same chip the live `[Action]` path yields
+ *       ⎿  result body         ← same `RESULT_PREFIX` row
+ *
+ * `input` arrives as a JSON string (the raw `tool_use.input`), so `formatToolBlock`
+ * can reuse the live summarizer — expanded vs collapsed behave identically.
+ */
+function appendStructuredToolRows(
+  rows: TranscriptLine[],
+  message: ChatMessage,
+  expandedTools: boolean,
+  theme?: InkTheme,
+): void {
+  const uses = message.toolUses ?? []
+  if (uses.length === 0) return
+  const results = new Map<string, { text: string; isError?: boolean }>()
+  for (const result of message.toolResults ?? []) results.set(result.toolUseId, result)
+  uses.forEach((use, index) => {
+    const chip = formatToolBlock(use.tool, use.input, { expanded: expandedTools })
+    chip.split('\n').forEach((line, lineIndex) => {
+      rows.push({
+        id: `${message.id}-tool-${index}-${lineIndex}`,
+        text: normalizeEmoji(line),
+        parts: [{ text: normalizeEmoji(line) }],
+      })
+    })
+    const result = results.get(use.id)
+    if (!result || !result.text.trim()) return
+    // Keep the body on one logical row like the live result path: collapse the
+    // multi-line tool output into its first non-empty line plus a continuation,
+    // otherwise a 1400-char spawn_agent result would bury the transcript.
+    const lines = result.text.split('\n').filter(line => line.trim() !== '')
+    const head = lines[0] ?? ''
+    rows.push({
+      id: `${message.id}-tool-${index}-result`,
+      text: `${RESULT_PREFIX}${normalizeEmoji(head)}`,
+      parts: mutedResultLine(normalizeEmoji(head), theme),
+    })
+    for (const [extraIndex, extra] of lines.slice(1).entries()) {
+      rows.push({
+        id: `${message.id}-tool-${index}-result-${extraIndex}`,
+        text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`,
+        parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+      })
+    }
+  })
+}
 
 function isResultRow(row: TranscriptLine): boolean {
   return row.text.startsWith(RESULT_PREFIX) || row.text.startsWith(TOOL_RESULT_CONTINUATION)
@@ -343,6 +403,9 @@ function appendMessageLines(
 
   const body = formatAssistantText(message.text, { expanded: expandedTools, streaming: !message.done }) || ' '
   const nextChannel = appendAssistantBodyRows(rows, message.id, body, theme, channel)
+  // Resume-only path: tool calls carried as structured data become the same
+  // `● tool(args)` chips a live turn produces, so history and live look identical.
+  appendStructuredToolRows(rows, message, expandedTools, theme)
   // A plain prose block gets its trailing blank immediately: it is stable and
   // gives the composer breathing room at the end of the transcript. A result
   // block must NOT get one, because the next stream-commit segment can still

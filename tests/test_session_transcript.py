@@ -414,5 +414,137 @@ class SessionTranscriptTest(unittest.TestCase):
             self.assertEqual("temp/sessions/session_test/workflows/wf_test/final-result.json", events[-1]["result_ref"])
 
 
+
+class ResumeToolUseTest(unittest.TestCase):
+    """Resume must carry tool calls, not just prose.
+
+    Regression: `/resume` used to show plain text only. The v2 transcript stores the
+    API's raw content blocks, so `tool_use` / `tool_result` were always on disk with
+    full input and content -- `_message_text_from_blocks()` keeps only `type ==
+    "text"`, and the bridge forwarded just that text, so every tool call, MCP call
+    and output vanished from the history.
+
+    Claude Code 319 keeps the same data structured (`m0591:45435 jke()` returns
+    `{text, toolUses}`, `m0591:46116 zWo()` pairs calls with results by
+    `tool_use_id`). These tests pin GA's equivalent.
+    """
+
+    def _write_session(self, tmp, messages):
+        path = session_transcript.create_session(root=tmp, cwd="C:/repo", schema=2)
+        uuids = []
+        for role, blocks, origin, turn_id in messages:
+            uuids.append(session_transcript.append_message(
+                path,
+                session_id="session_test",
+                role=role,
+                blocks=blocks,
+                origin=origin,
+                turn_id=turn_id,
+            ))
+        # `load_v2` builds turns from `turn_end` events; the real writer always
+        # appends one (see `record_agent_turn`). A transcript without it yields zero
+        # turns, which is why these tests must write it too.
+        if uuids:
+            turn_ids = {turn_id for _role, _blocks, _origin, turn_id in messages}
+            for turn_id in sorted(turn_ids):
+                first = uuids[0]
+                last = uuids[-1]
+                session_transcript.append_turn_end(
+                    path,
+                    session_id="session_test",
+                    turn_id=turn_id,
+                    first_uuid=first,
+                    last_uuid=last,
+                )
+        return path
+
+    def test_tool_uses_survive_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_session(tmp, [
+                ("user", [{"type": "text", "text": "spawn two agents"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "text", "text": "starting them"},
+                    {"type": "tool_use", "id": "call-a", "name": "spawn_agent",
+                     "input": {"task_name": "probe_a"}},
+                ], {"kind": "assistant"}, 1),
+            ])
+            loaded = session_transcript.load_session(path)
+            turn = loaded.turns[0]
+
+            self.assertEqual(1, len(turn.tool_uses), "the tool call was dropped on load")
+            use = turn.tool_uses[0]
+            self.assertEqual("spawn_agent", use["tool"])
+            self.assertEqual("call-a", use["id"])
+            # `input` is the raw JSON string so the Ink UI can run it through the
+            # same summarizer a live `[Action]` chip uses.
+            self.assertEqual({"task_name": "probe_a"}, json.loads(use["input"]))
+
+    def test_tool_results_survive_load_and_keep_their_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_session(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "tool_use", "id": "call-a", "name": "spawn_agent", "input": {}},
+                ], {"kind": "assistant"}, 1),
+                ("user", [
+                    {"type": "tool_result", "tool_use_id": "call-a",
+                     "content": '{"status": "started", "pid": 42}'},
+                ], {"kind": "tool_result"}, 1),
+                ("assistant", [{"type": "text", "text": "done"}], {"kind": "assistant"}, 1),
+            ])
+            loaded = session_transcript.load_session(path)
+            turn = loaded.turns[0]
+
+            self.assertEqual(1, len(turn.tool_results), "the tool result was dropped on load")
+            result = turn.tool_results[0]
+            self.assertEqual("call-a", result["toolUseId"], "the id needed for pairing is gone")
+            self.assertIn("started", result["text"])
+
+    def test_list_form_tool_result_content_is_flattened(self):
+        # An Anthropic tool_result may carry text blocks instead of a plain string.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_session(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "tool_use", "id": "call-a", "name": "read_agent_result", "input": {}},
+                ], {"kind": "assistant"}, 1),
+                ("user", [
+                    {"type": "tool_result", "tool_use_id": "call-a",
+                     "content": [{"type": "text", "text": "line one"},
+                                 {"type": "text", "text": "line two"}]},
+                ], {"kind": "tool_result"}, 1),
+            ])
+            loaded = session_transcript.load_session(path)
+            result = loaded.turns[0].tool_results[0]
+            self.assertEqual("line one" + chr(10) + "line two", result["text"])
+
+    def test_assistant_text_stays_prose_only(self):
+        # The pure-text projection is deliberately unchanged: `assistantText` is
+        # used elsewhere as the model's own prose. Tools ride alongside it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_session(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "text", "text": "starting"},
+                    {"type": "tool_use", "id": "call-a", "name": "spawn_agent", "input": {}},
+                ], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual("starting", turn.assistant_text)
+            self.assertNotIn("spawn_agent", turn.assistant_text)
+
+    def test_turn_with_only_tool_calls_keeps_its_tools(self):
+        # The model answered entirely through a tool: no prose at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_session(tmp, [
+                ("user", [{"type": "text", "text": "go"}], {"kind": "human"}, 1),
+                ("assistant", [
+                    {"type": "tool_use", "id": "call-a", "name": "read_agent_result", "input": {}},
+                ], {"kind": "assistant"}, 1),
+            ])
+            turn = session_transcript.load_session(path).turns[0]
+            self.assertEqual("", turn.assistant_text)
+            self.assertEqual(1, len(turn.tool_uses), "a tool-only turn lost its tool call")
+
 if __name__ == "__main__":
     unittest.main()

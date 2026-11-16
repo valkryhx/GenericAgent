@@ -44,6 +44,21 @@ class TranscriptTurn:
     anchor_uuid: str = ""
     first_uuid: str = ""
     last_uuid: str = ""
+    # Tool calls and their outputs, in emission order.
+    #
+    # A v2 transcript stores the API's raw content blocks, so ``tool_use`` /
+    # ``tool_result`` are already on disk with full ``input`` and ``content``.
+    # They used to be dropped here: ``_message_text_from_blocks`` keeps only
+    # ``type == "text"``, so a resumed session rendered prose and nothing else --
+    # the user lost every tool call, MCP call and their outputs.
+    #
+    # Claude Code 319 keeps the same data structured rather than flattening it
+    # (``m0591:45435 jke()`` returns ``{text, toolUses}``, and ``m0591:46116 zWo()``
+    # pairs calls with results by ``tool_use_id``). These two lists are GA's
+    # equivalent; the Ink UI renders them into the same ``● tool(args)`` chips a
+    # live turn produces.
+    tool_uses: list = field(default_factory=list)
+    tool_results: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -224,6 +239,61 @@ def record_rewind(path, *, session_id, keep_turns, backend_history_after):
         "keep_turns": max(0, int(keep_turns or 0)),
         "backend_history_after": copy.deepcopy(backend_history_after or []),
     })
+
+
+def _tool_blocks_from_message(event):
+    """Extract ``tool_use`` / ``tool_result`` blocks for the UI projection.
+
+    Returns ``(tool_uses, tool_results)``. ``tool_uses`` items are
+    ``{"id", "tool", "input"}`` where ``input`` is the raw JSON string of the
+    call's arguments — the Ink UI's ``formatToolBlock`` parses it exactly the way
+    it parses a live ``[Action]`` chip, so resumed and live rows are identical.
+
+    ``tool_results`` items are ``{"toolUseId", "text", "isError"}``, keyed by
+    ``tool_use_id`` so the UI can pair each call with its output (CC 319 does the
+    same pairing in ``zWo()``, ``m0591:46116``).
+    """
+    blocks = event.get("blocks")
+    if not isinstance(blocks, list):
+        return [], []
+    uses, results = [], []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "tool_use":
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            args = block.get("input")
+            try:
+                args_text = json.dumps(args, ensure_ascii=False) if args is not None else ""
+            except (TypeError, ValueError):
+                args_text = str(args or "")
+            uses.append({
+                "id": str(block.get("id") or ""),
+                "tool": name,
+                "input": args_text,
+            })
+        elif kind == "tool_result":
+            content = block.get("content")
+            if isinstance(content, list):
+                # An Anthropic tool_result may carry text blocks instead of a string.
+                pieces = []
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        pieces.append(part["text"])
+                text = chr(10).join(pieces)
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = "" if content is None else str(content)
+            results.append({
+                "toolUseId": str(block.get("tool_use_id") or ""),
+                "text": text,
+                "isError": bool(block.get("is_error")),
+            })
+    return uses, results
 
 
 def _message_text_from_blocks(blocks):
@@ -1105,12 +1175,21 @@ def load_v2(path):
             warnings.append(f"unsupported v2 event: {kind}")
 
     turn_text = {}
+    turn_tools = {}
     for event in accepted_messages:
         turn_id = event.get("turn_id")
         if turn_id is None or int(turn_id) in excluded_turns:
             continue
         role = str(event.get("role") or "")
         origin = event.get("origin") or {}
+        # Tool calls/results are collected for every message of the turn, whatever
+        # its role: an assistant message carries the `tool_use` blocks and the
+        # following user (origin.kind == "tool_result") message carries the outputs.
+        uses, results = _tool_blocks_from_message(event)
+        if uses or results:
+            bucket = turn_tools.setdefault(int(turn_id), {"uses": [], "results": []})
+            bucket["uses"].extend(uses)
+            bucket["results"].extend(results)
         if role == "user" and not (isinstance(origin, dict) and origin.get("kind") == "tool_result"):
             value = str(event.get("text") or _message_text_from_blocks(event.get("blocks")))
             if value:
@@ -1124,6 +1203,7 @@ def load_v2(path):
     for turn_id in turn_order:
         raw = turns[turn_id]
         text = turn_text.get(turn_id) or {}
+        tools = turn_tools.get(turn_id) or {}
         item = TranscriptTurn(
             turn_id=turn_id,
             user_text=str(text.get("user_text") or ""),
@@ -1133,6 +1213,8 @@ def load_v2(path):
             anchor_uuid=str(raw.get('last_uuid') or ''),
             first_uuid=str(raw.get('first_uuid') or ''),
             last_uuid=str(raw.get('last_uuid') or ''),
+            tool_uses=list(tools.get("uses") or []),
+            tool_results=list(tools.get("results") or []),
         )
         loaded_turns.append(item)
         if item.user_text:
@@ -1167,6 +1249,8 @@ def load_v2(path):
                 anchor_uuid=str(getattr(turn, "anchor_uuid", "") or ""),
                 first_uuid=str(getattr(turn, "first_uuid", "") or ""),
                 last_uuid=str(getattr(turn, "last_uuid", "") or ""),
+                tool_uses=list(getattr(turn, "tool_uses", []) or []),
+                tool_results=list(getattr(turn, "tool_results", []) or []),
             ))
         loaded_turns = merged
         ui_messages = _turns_to_ui_messages(loaded_turns)

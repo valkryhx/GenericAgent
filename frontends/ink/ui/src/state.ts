@@ -376,9 +376,18 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
         let id = `h-${index}`
         if (message.taskId !== undefined && message.role === 'user') id = `u-${message.taskId}`
         if (message.taskId !== undefined && message.role === 'assistant') id = `a-${message.taskId}`
-        return message.taskId === undefined
+        // Tool calls/outputs survive resume as structured data (CC 319 parity);
+        // the renderer turns them into `● tool(args)` / `  ⎿  result` rows.
+        const toolUses = message.toolUses?.length ? message.toolUses : undefined
+        const toolResults = message.toolResults?.length ? message.toolResults : undefined
+        const base = message.taskId === undefined
           ? { id, role: message.role, text: message.text, done: true }
           : { id, role: message.role, text: message.text, done: true, taskId: message.taskId }
+        return {
+          ...base,
+          ...(toolUses ? { toolUses } : {}),
+          ...(toolResults ? { toolResults } : {}),
+        }
       }),
       staticGeneration: state.staticGeneration + 1,
       error: null,

@@ -700,3 +700,84 @@ test('prose is still separated from a following tool chip', () => {
   assert.equal(rows[1]!.trim(), '', 'prose and a tool call were glued together')
   assert.equal(rows[2], `${GLYPHS.bullet} Write(a.py)`)
 })
+
+// ── 结构化工具调用（resume 路径）────────────────────────────────────────────
+//
+// 回归：`/resume` 加载历史时曾只显示纯文本，工具调用、MCP 调用及其输出全部消失。
+// 原因是 `transcripts.py:_message_text_from_blocks` 只收 `type == "text"` 块，
+// 而 `bridge.py` 又只把 `assistant_text` 发给前端。数据一直在 v2 transcript 里
+// （`tool_use` / `tool_result` 块带完整 input 与 content），只是没走到 UI。
+//
+// 这组测试钉住「结构化工具 → 与实时一致的 chip / 结果行」这条不变量。
+
+test('resume: structured toolUses render as the same chip a live turn produces', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '两个子代理已启动。',
+    done: true,
+    taskId: 1,
+    toolUses: [{ id: 'call-a', tool: 'spawn_agent', input: JSON.stringify({ task_name: 'probe_a' }) }],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.equal(rows[0], '两个子代理已启动。')
+  const chip = rows.find(row => row.includes('spawn_agent'))
+  assert.ok(chip, `no tool chip was rendered: ${JSON.stringify(rows)}`)
+  assert.ok(chip!.trimStart().startsWith(GLYPHS.bullet), `chip must start with the bullet glyph: ${JSON.stringify(chip)}`)
+  assert.match(chip!, /spawn_agent\(task_name: probe_a\)/)
+})
+
+test('resume: toolResults are paired to their call by tool_use_id and rendered under it', () => {
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    toolUses: [
+      { id: 'call-a', tool: 'spawn_agent', input: '{}' },
+      { id: 'call-b', tool: 'wait_agent', input: '{}' },
+    ],
+    toolResults: [
+      // Deliberately out of order, and only one of the two has a result: pairing
+      // must follow tool_use_id, not array position.
+      { toolUseId: 'call-b', text: 'satisfied' },
+    ],
+  }], { expandedTools: false }).map(row => row.text)
+
+  const joined = rows.join('\n')
+  assert.match(joined, /spawn_agent/, `first call missing: ${JSON.stringify(rows)}`)
+  assert.match(joined, /wait_agent/, `second call missing: ${JSON.stringify(rows)}`)
+  // The `wait_agent` result belongs to the second chip, and `spawn_agent` got none.
+  const waitIndex = rows.findIndex(row => row.includes('wait_agent'))
+  const resultIndex = rows.findIndex(row => row.includes('satisfied'))
+  assert.ok(resultIndex > waitIndex, `result was not attached to its own call: ${JSON.stringify(rows)}`)
+  assert.equal(rows.filter(row => row.includes('satisfied')).length, 1, 'the result was duplicated onto both calls')
+})
+
+test('resume: a turn with only tool calls and no prose still renders (it is not dropped)', () => {
+  // The model answered entirely through a tool; `assistant_text` is empty, so the
+  // old projection emitted no assistant message at all and the turn vanished.
+  const rows = transcriptLines([{
+    id: 'a-1',
+    role: 'assistant',
+    text: '',
+    done: true,
+    taskId: 1,
+    toolUses: [{ id: 'call-a', tool: 'read_agent_result', input: '{}' }],
+  }], { expandedTools: false }).map(row => row.text)
+
+  assert.ok(rows.some(row => row.includes('read_agent_result')), `turn was dropped: ${JSON.stringify(rows)}`)
+})
+
+test('resume: a message without toolUses renders exactly as before (no regression)', () => {
+  const rows = transcriptLines([
+    { id: 'u-1', role: 'user', text: 'hello', done: true, taskId: 1 },
+    { id: 'a-1', role: 'assistant', text: 'hi', done: true, taskId: 1 },
+  ], { expandedTools: false }).map(row => row.text)
+
+  assert.equal(rows[0], '> hello')
+  // The user block is followed by its own blank separator row, then the assistant.
+  assert.equal(rows.find(row => row === 'hi'), 'hi', `assistant line missing: ${JSON.stringify(rows)}`)
+  assert.ok(!rows.join('\n').includes(GLYPHS.bullet), 'a plain message grew a tool chip')
+})
