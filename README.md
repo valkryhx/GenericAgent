@@ -1,6 +1,6 @@
 # GenericAgent
 
-GenericAgent 是一个面向本地开发与自动化任务的多前端 Agent Runtime。当前 `main` 已经不只是早期的最小 Agent 原型：它把 `llm.yaml` 配置层、React/Ink 终端 UI、动态 workflow、MCP/Skill 接入、权限策略、会话转录与上下文压缩整合到同一个轻量 Python 运行时中，目标是在本地可审计、可恢复、可测试地运行真实 LLM Agent。
+一个通用的 Agent Harness，也是练手用的 growing demo。目标不是做成一个封装好的产品，而是把「让真实 LLM 在本地可靠跑起来」需要的东西一层层长出来：`llm.yaml` 配置层、React/Ink 终端 UI、动态 workflow、MCP/Skill 接入、权限策略、会话转录与上下文压缩，全部长在同一个轻量 Python 运行时里，本地可审计、可恢复、可测试。
 
 > 本 README 以当前 `main` 分支的实际能力为准，重点说明最近一轮大更新后的可用特性、运行方式和测试入口。
 
@@ -200,4 +200,4 @@ GenericAgent 可以调用本地文件、命令、浏览器、MCP 工具和真实
 
 ## 许可证
 
-本项目沿用仓库中的许可证文件。使用第三方前端、MCP server、模型 provider 或外部服务时，请同时遵守对应项目和服务条款。
+本项目使用 MIT 许可证，见仓库根目录 `LICENSE`。使用第三方前端、MCP server、模型 provider 或外部服务时，请同时遵守对应项目和服务条款。

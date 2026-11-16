@@ -4,7 +4,7 @@
 [project]
 name = "genericagent"
 version = "0.6.2"
-description = "Minimalist self-evolving autonomous agent framework"
+description = "General-purpose agent harness — a hands-on growing demo"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
