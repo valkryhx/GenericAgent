@@ -80,6 +80,34 @@ test('up=0 park (caret on frame-bottom row) uses bare CR to unpark', () => {
   assert.equal(out[1], '\x1b[?25l\rf2\x1b[8G\x1b[?25h')
 })
 
+test('flushUnpark writes the buffered cleanup bytes without parking', () => {
+  // 退出清理的真实顺序：写清理序列（含 ESC[?1049l 回主屏）→ flushUnpark → dispose。
+  //
+  // 这条测试钉住两个曾经同时出错的点（`_probe_exit_screen_residue.py` 真机实测）：
+  //   1. 清理序列**必须**写出去 —— 旧实现 dispose 后丢弃 buffer，导致
+  //      ESC[?1049l 出现 0 次、alt-screen 内容留在主屏上；
+  //   2. 写出去时**不能**再 park —— 否则会在回到主屏之后又发 ESC[nA ESC[mG，
+  //      把主屏光标挪走，用户看到的就是「光标没回退到最前面」。
+  const out: string[] = []
+  const { schedule, flush } = manualScheduler()
+  const w = plainWriter(out, schedule)
+  w.setPark({ up: 3, col: 4 })
+  w.write('frame-1')
+  flush()
+  const afterFrame = out.length
+
+  const cleanup = '\x1b[?1049l'
+  w.write(cleanup)
+  w.flushUnpark()               // = flush(false)：写出但不 park
+  w.dispose()
+  flush()                       // dispose 后的调度不产生新写入
+
+  const written = out.slice(afterFrame).join('')
+  assert.ok(written.includes(cleanup), `cleanup sequence must reach the terminal, got ${JSON.stringify(written)}`)
+  assert.doesNotMatch(written, /\x1b\[\d+A\x1b\[\d+G/,
+    `must not park after the cleanup sequence (that moves the main-screen cursor): ${JSON.stringify(written)}`)
+})
+
 test('dispose stops parking and drops buffered bytes', () => {
   const out: string[] = []
   const { schedule, flush } = manualScheduler()

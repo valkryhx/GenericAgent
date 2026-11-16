@@ -157,6 +157,13 @@ export class CursorParkWriter {
   flush(park = true): void {
     this.scheduled = false
     if (this.disposed) {
+      // dispose 之后默认**丢弃**残留字节：那是退出瞬间还没渲染完的帧，写出去只会
+      // 在终端交还后再污染一次屏（单测 `dispose stops parking and drops buffered
+      // bytes` 钉的就是这一条）。
+      //
+      // 退出清理序列走的是另一条路：调用方在 dispose **之前**用
+      // `flushUnpark()`（= flush(false)）把它们冲出去，那时 disposed 还是 false，
+      // 走正常分支、且不 park（所以不会在 `ESC[?1049l` 之后再挪光标）。
       this.buffer = ''
       return
     }
@@ -261,9 +268,12 @@ export class CursorParkWriter {
 
   /** 停止 park（退出清理前调用），并清掉未决 microtask。 */
   dispose(): void {
+    // 注意：这里**不**丢弃 buffer。退出路径的顺序是「写清理序列 → flush(false) →
+    // dispose」，而 flush 在 disposed 时会丢弃 buffer —— 若 dispose 也清 buffer，
+    // 清理序列就永远写不出去（`ESC[?1049l` 丢失，alt-screen 内容留在主屏）。
+    // 缓冲区由 flush 负责清空，dispose 只管停止后续调度与 park 记账。
     this.disposed = true
     this.currentSpec = null
-    this.buffer = ''
     this.prevRows = null
   }
 
