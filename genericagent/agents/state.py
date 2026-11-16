@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -16,6 +17,96 @@ SCHEMA_VERSION = 1
 _WINDOWS_REPLACE_RETRY_DELAYS = (0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8)
 _LOCAL_LOCKS = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
+
+# Windows resolves paths through the Win32 layer, which caps them at MAX_PATH (260) unless
+# the machine has LongPathsEnabled=1 (then 32767). An installed library cannot require that
+# registry change, so the only honest thing to do is say so when a write hits the cap.
+#
+# This matters because the atomic writers append `.<pid>.<tid>.tmp` to the target name: a
+# perfectly legal target can fail purely because the *temp* name crossed the limit, and the
+# raw error for that is `FileNotFoundError: [Errno 2] No such file or directory: '...tmp'`
+# -- which reads as "the caller passed a bad path" or "the directory is missing". Two real
+# causes hide behind it: over-long target directory (WinError 3 / 206 from mkdir) and
+# over-long temp name (ENOENT from open). Both are recorded in
+# tests/test_write_path_diagnostics.py and docs/20261116-CC319长路径处理与GA对比.md.
+_WINDOWS_MAX_PATH = 260
+
+
+class PathTooLongError(OSError):
+    """A write failed because the resulting path exceeds the platform limit.
+
+    Subclasses OSError so every existing ``except OSError`` caller keeps working; the
+    difference is that the message names the actual cause and the numbers involved.
+    """
+
+
+def _is_path_too_long(error: OSError, attempted: str) -> bool:
+    """True when `error` is the name-too-long condition rather than a genuine miss.
+
+    Windows reports this inconsistently, and the most common case carries NO distinguishing
+    error code at all:
+      * `open()` on an over-long temp name -> FileNotFoundError, errno=2, winerror=None
+      * `mkdir` badly past the limit      -> WinError 3 "系统找不到指定的路径"
+      * `mkdir` just past the limit       -> WinError 206 "文件名或扩展名太长"
+
+    The first cannot be told apart from a genuinely missing directory by errno, so the
+    attempted path's length is what decides: on Windows without LongPathsEnabled a path of
+    260+ chars can never resolve, so whichever call failed, length is the real cause.
+    A short path keeps its ordinary error.
+    """
+    if error.errno == errno.ENAMETOOLONG:
+        return True
+    if getattr(error, "winerror", None) in (206, 3):
+        return True
+    return len(attempted) >= _WINDOWS_MAX_PATH
+
+
+def _raise_path_too_long(path, attempted: str, error: OSError, limit: int) -> None:
+    """Re-raise `error` as a PathTooLongError that explains what to do about it."""
+    parent_len = len(str(path.parent))
+    # Do NOT repeat the path in the message: OSError appends the filename argument to
+    # str(), so naming it twice reads as two different paths.
+    raised = PathTooLongError(
+        error.errno,
+        "path too long for this platform: the file to write is %d chars, limit is %d "
+        "(MAX_PATH on Windows, raised only by a machine-wide registry change no installed "
+        "library may require). The atomic write adds a '.<pid>.<tid>.tmp' suffix, so the "
+        "temp name that actually failed is %d chars and its directory is %d. The "
+        "workspace directory is too deep -- point the project/workspace at a shorter "
+        "absolute path."
+        % (len(str(path)), limit, len(attempted), parent_len),
+        attempted,
+    )
+    # OSError takes winerror only positionally on Windows; expose the original so callers
+    # inspecting it still see what the OS reported.
+    original_winerror = getattr(error, "winerror", None)
+    if original_winerror is not None:
+        try:
+            raised.winerror = original_winerror
+        except (AttributeError, TypeError):
+            pass
+    raise raised from error
+
+
+def _write_atomically(path, write_body) -> None:
+    """Shared tmp+replace for the atomic writers, with diagnosable deep-path failures."""
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        if os.name == "nt" and _is_path_too_long(error, str(path.parent)):
+            _raise_path_too_long(path, str(path.parent), error, _WINDOWS_MAX_PATH)
+        raise
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        write_body(tmp)
+    except OSError as error:
+        # The target itself was fine; the temp suffix is what overflowed. Report the temp
+        # name, since that is the path the OS actually rejected.
+        if os.name == "nt" and _is_path_too_long(error, str(tmp)):
+            _raise_path_too_long(path, str(tmp), error, _WINDOWS_MAX_PATH)
+        raise
+    _replace_file(tmp, path)
 
 
 def now_iso():
@@ -74,13 +165,12 @@ def _replace_file(src, dst):
 
 
 def atomic_write_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    _replace_file(tmp, path)
+    def body(tmp):
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+
+    _write_atomically(path, body)
 
 
 def read_json_or_none(path):
@@ -100,13 +190,12 @@ def atomic_write_lines(path, lines):
     Same tmp + os.replace trick as atomic_write_json, but for JSONL-style bodies
     that are rewritten in full (the mailbox) rather than appended to.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        for line in lines:
-            f.write(line if line.endswith("\n") else line + "\n")
-    _replace_file(tmp, path)
+    def body(tmp):
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            for line in lines:
+                f.write(line if line.endswith("\n") else line + "\n")
+
+    _write_atomically(path, body)
 
 
 def read_text_retrying(path):
@@ -142,12 +231,11 @@ def atomic_write_text(path, text):
     Sibling of atomic_write_lines for content that is read back and compared verbatim (the
     workflow `script.js` becomes `run.script`), so it must not append a trailing newline.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    _replace_file(tmp, path)
+    def body(tmp):
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+
+    _write_atomically(path, body)
 
 
 def append_jsonl_event(path, event):
