@@ -109,6 +109,41 @@ def _write_atomically(path, write_body) -> None:
     _replace_file(tmp, path)
 
 
+def ensure_path_budget(path, *, purpose: str = "", suffix_probe: str | None = None) -> None:
+    """Fail early, with a real explanation, when an operation's paths exceed MAX_PATH.
+
+    Catching the overflow inside the atomic writers is not enough: callers such as
+    `WorkflowStore.create_run` call `artifact_dir.mkdir()` on a shallower path first, and
+    *that* raises WinError 206 before any file is written -- naming a directory the user
+    never chose and giving no hint that length is the cause.
+
+    So the check belongs at the entry point, before the first mkdir: build the deepest path
+    the operation will touch and, if it cannot resolve on this platform, say so once with
+    the numbers and the actionable fix.
+
+    `suffix_probe` is the longest filename the operation will create; for the atomic writers
+    that includes the `.<pid>.<tid>.tmp` suffix, which is usually what tips a legal path over
+    the edge. It is appended to `path` for the measurement.
+    """
+    measured = str(path)
+    if suffix_probe:
+        measured = str(Path(measured) / suffix_probe)
+    if os.name != "nt" or len(measured) < _WINDOWS_MAX_PATH:
+        return
+    label = purpose or "this write"
+    # Do not repeat `measured` in the message: OSError appends the filename argument to
+    # str(), so naming it twice makes one path read as two different paths.
+    raise PathTooLongError(
+        errno.ENAMETOOLONG,
+        "%s would exceed this platform's path limit: %d chars, limit is %d (MAX_PATH on "
+        "Windows, raised only by a machine-wide registry change no installed library may "
+        "require). The workspace directory is too deep -- point the project/workspace at a "
+        "shorter absolute path."
+        % (label, len(measured), _WINDOWS_MAX_PATH),
+        measured,
+    )
+
+
 def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 

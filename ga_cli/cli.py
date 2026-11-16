@@ -14,6 +14,39 @@ PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _project_version() -> str:
+    """The version of *this* code, so `ga --version` cannot drift from pyproject.
+
+    Hardcoding this string meant a release bump had to be made in two places and was easy
+    to miss. Order matters:
+
+    1. `pyproject.toml` beside this file, if present. A source checkout must report the
+       version of the code being edited -- reading installed metadata first would report
+       whatever wheel happens to be in site-packages, which is how a dev tree silently
+       claims to be a stale release.
+    2. Installed distribution metadata, for a real installed copy (no pyproject beside it).
+    """
+    try:
+        import re
+
+        text = (PACKAGE_PARENT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("genericagent")
+        except PackageNotFoundError:
+            pass
+    except ImportError:  # pragma: no cover - Python < 3.8
+        pass
+    return "unknown"
+
+
 def _source_project_dir() -> str:
     candidate = PACKAGE_PARENT
     if (candidate / "pyproject.toml").is_file() or (candidate / "ga").is_file():
@@ -342,7 +375,7 @@ def main():
     args, unknown = parser.parse_known_args()
 
     if args.version:
-        print("GenericAgent v0.6.2")
+        print(f"GenericAgent v{_project_version()}")
         return
 
     cmd = args.command

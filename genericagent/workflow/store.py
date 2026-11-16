@@ -4,8 +4,10 @@ import copy
 import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
+import threading
 from pathlib import Path
 
 from genericagent.core.redaction import redact_sensitive_text, sanitize
@@ -13,6 +15,7 @@ from genericagent.agents.state import (
     atomic_write_json,
     atomic_write_text,
     cross_process_lock,
+    ensure_path_budget,
     read_json_retrying,
     read_text_retrying,
 )
@@ -171,6 +174,16 @@ class WorkflowStore:
 
     def create_run(self, run: WorkflowRun) -> WorkflowRun:
         artifact_dir = self._artifact_dir(run.session_id, run.run_id)
+        # Check the budget BEFORE the first mkdir: an over-long tree raises WinError 206
+        # from `mkdir` on a path the user never chose (e.g. `.../workflows`), which reads as
+        # a broken workflow runtime rather than "your workspace path is too deep". The
+        # longest file this method writes is `final-result.json` plus the atomic writer's
+        # `.<pid>.<tid>.tmp` suffix, so that is what the budget must accommodate.
+        ensure_path_budget(
+            artifact_dir,
+            purpose="creating a workflow run directory",
+            suffix_probe=".final-result.json.%d.%d.tmp" % (os.getpid(), threading.get_ident()),
+        )
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = str(artifact_dir)
         self._write_json(artifact_dir / "run.json", sanitize(run.to_dict()))

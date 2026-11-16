@@ -127,5 +127,83 @@ class DeepPathDiagnosticsTest(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(os.name == "nt", "MAX_PATH is a Windows-specific limit")
+class WorkflowRunPathBudgetTest(unittest.TestCase):
+    """`create_run` must reject an over-deep workspace *before* the first mkdir.
+
+    Catching the overflow inside the atomic writers is not enough. `create_run` calls
+    `artifact_dir.mkdir()` on a shallower path first, and that raises WinError 206 naming a
+    directory (`.../workflows`) the user never chose -- which reads as a broken workflow
+    runtime. Measured on 0.6.2: the message was
+    `[WinError 206] 文件名或扩展名太长。: '...\\\\workflows'` with no hint of length.
+    """
+
+    def _store_under(self, td: str, depth: int):
+        from genericagent.workflow.store import WorkflowStore
+
+        workspace = os.path.join(td, "d" * depth)
+        os.makedirs(workspace, exist_ok=True)
+        return WorkflowStore(root=os.path.join(workspace, "data", "projects"))
+
+    @staticmethod
+    def _run():
+        from genericagent.workflow.models import WorkflowRun
+
+        return WorkflowRun(
+            run_id="wf_" + "b" * 32, session_id="session_" + "a" * 32, script="x"
+        )
+
+    def _store_that_must_fail(self, td: str):
+        """Grow the workspace until the deepest path genuinely exceeds MAX_PATH.
+
+        Hardcoding a depth is fragile: the test temp root differs per machine (this repo
+        redirects it to D:\\tmp), so a fixed "d" * 100 can land well under the limit and the
+        test then passes for the wrong reason -- the guard never fires.
+        """
+        from genericagent.workflow.store import WorkflowStore
+
+        depth = 40
+        while depth < 400:
+            workspace = os.path.join(td, "d" * depth)
+            os.makedirs(workspace, exist_ok=True)
+            store = WorkflowStore(root=os.path.join(workspace, "data", "projects"))
+            probe = store._artifact_dir("session_" + "a" * 32, "wf_" + "b" * 32)
+            deepest = len(str(probe)) + len("/.final-result.json.12345.6789.tmp")
+            if deepest >= WINDOWS_MAX_PATH:
+                return store
+            depth += 10
+        self.fail("could not build a workspace deep enough to exceed MAX_PATH")
+
+    def test_deep_workspace_is_rejected_with_an_explanatory_message(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store_that_must_fail(td)
+            with self.assertRaises(OSError) as caught:
+                store.create_run(self._run())
+            message = str(caught.exception)
+            self.assertIn("would exceed", message)
+            self.assertIn("260", message)
+            self.assertIn("workflow run directory", message)
+            # It must name the limiting factor, not a directory the caller never chose.
+            self.assertIn("workspace", message.lower())
+
+    def test_error_is_a_path_too_long_error_not_a_bare_overflow(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store_that_must_fail(td)
+            with self.assertRaises(OSError) as caught:
+                store.create_run(self._run())
+            exc = caught.exception
+            self.assertNotIsInstance(exc, FileNotFoundError)
+            # The numbers must be real, not placeholders.
+            self.assertGreaterEqual(len(str(exc.filename or "")), 260)
+
+    def test_shallow_workspace_still_creates_the_run(self):
+        """The guard must not fire on a normal workspace."""
+        with tempfile.TemporaryDirectory() as td:
+            store = self._store_under(td, depth=0)
+            run = store.create_run(self._run())
+            self.assertTrue(Path(run.artifact_dir).is_dir())
+            self.assertTrue((Path(run.artifact_dir) / "run.json").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
