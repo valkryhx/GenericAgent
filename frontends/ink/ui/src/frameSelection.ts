@@ -62,8 +62,21 @@ export function framePointFromMouse(x: number, y: number): FramePoint {
 }
 
 /** Absolute column at which a row's content ends. */
+/**
+ * Absolute column at which a row's selection ends.
+ *
+ * The full allocated width, not the text width. Clamping to the text made the last
+ * row of a short selection hard to reach: a 3-character final row only accepted clicks
+ * in three columns, so aiming at "the end of that line" usually landed past it and the
+ * click was dropped — the user had to aim one row *below* the line to select it.
+ *
+ * A point past a row's text is still that row's point: dragging through trailing
+ * whitespace is how you select a whole block down to a short final line, which is what
+ * every terminal and editor does. Text extraction is unaffected — it slices by the
+ * row's own text length, so the extra columns produce no characters.
+ */
 function rowEndColumn(row: FrameRow): number {
-  return row.leftGutter + Math.min(displayWidth(row.text), Math.max(1, row.columns))
+  return row.leftGutter + Math.max(1, row.columns)
 }
 
 function clampPoint(point: FramePoint, frame: FrameRow[]): FramePoint {

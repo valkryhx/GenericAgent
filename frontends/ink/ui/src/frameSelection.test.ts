@@ -30,6 +30,7 @@ import {
   type FrameRow,
 } from './frameSelection.js'
 import { partitionByDisplayColumns } from './transcriptSelection.js'
+import { buildFramePlan } from './framePlan.js'
 import { inputContentColumns, inputGutterColumns } from './promptChrome.js'
 
 /** A realistic fullscreen frame: header, transcript, activity band, composer, hint. */
@@ -67,9 +68,14 @@ test('normalizeFrameSelection orders points regardless of drag direction', () =>
 test('normalizeFrameSelection clamps into the frame instead of dropping the selection', () => {
   const range = normalizeFrameSelection({ row: -5, col: -3 }, { row: 99, col: 999 }, FRAME)
   assert.deepEqual(range.start, { row: 0, col: 0 })
-  // The clamp is to the *text's* end, not to the reserved row width: the hint row holds
-  // 30 characters after a 1-column gutter, so the last reachable column is 31.
-  assert.deepEqual(range.end, { row: 5, col: 31 })
+  // The clamp is to the row's *allocated* width, not to its text end. Clamping to the
+  // text was the "last line is hard to select, aim below it instead" bug: a short row
+  // only accepted clicks inside its few characters, so aiming at the line's end landed
+  // past it and was dropped. A point past a row's text is still that row's point.
+  // Extraction is unaffected — it slices each row by that row's own text length.
+  const lastRow = FRAME[FRAME.length - 1]!
+  assert.deepEqual(range.end, { row: FRAME.length - 1, col: lastRow.leftGutter + lastRow.columns })
+  assert.ok(range.end.col > 31, `列上限应是整行宽度: ${JSON.stringify(range.end)}`)
 })
 
 test('a drag that starts in the composer selects the composer text', () => {
@@ -188,4 +194,60 @@ test('a click without a drag paints no highlight either', () => {
   // A real drag on the same row still paints.
   const drag = normalizeFrameSelection({ row: 4, col: 3 }, { row: 4, col: 6 }, FRAME)
   assert.deepEqual(frameSelectionSpans(drag, FRAME)[4], { from: 2, to: 5 })
+})
+
+// ── 短行的可选列范围 ──────────────────────────────────────────────────
+//
+// 回归：`rowEndColumn` 原本把列上限裁到**文本宽度**，于是只有三个字的末行只接受
+// 三列内的点击。用户想「选到最后一行末尾」时会落到文字右侧，那个点被丢弃，
+// 表现为「最后一行很难选中，必须在它下方而不是末尾点」。
+//
+// 修正后列上限是整行分配宽度。取文本仍按各行自身文本切片，所以多出来的列
+// 不产生任何字符。
+
+function frameOf(lines: string[]) {
+  return buildFramePlan({
+    canvasColumns: 80,
+    rows: 12,
+    headerRows: 1,
+    header: 'H',
+    transcriptRows: 5,
+    transcriptLines: lines,
+    composerRow: 7,
+    composerLines: [{ gutter: '> ', text: '' }],
+    bandLines: [''],
+    belowLines: ['hint'],
+  })
+}
+
+test('a click far right of a short row still ends the selection on that row', () => {
+  const frame = frameOf(['短', '中等长度的一行', '末'])
+  // 末行只有 1 个字；点在它右侧 70 列外
+  const range = normalizeFrameSelection({ row: 1, col: 0 }, { row: 3, col: 75 }, frame)
+  assert.equal(range.end.row, 3, `末行右侧的点击应留在末行: ${JSON.stringify(range.end)}`)
+  assert.equal(selectedFrameText(range, frame), '短\n中等长度的一行\n末')
+})
+
+test('trailing columns past a row\'s text add no characters', () => {
+  const frame = frameOf(['abc', 'de'])
+  const range = normalizeFrameSelection({ row: 1, col: 0 }, { row: 2, col: 79 }, frame)
+  assert.equal(selectedFrameText(range, frame), 'abc\nde')
+})
+
+test('an empty filler row is a reachable selection endpoint', () => {
+  // 视口下方常有多条空白填充行；它们以前 col 上限是 1，几乎点不中。
+  const frame = frameOf(['内容'])
+  const range = normalizeFrameSelection({ row: 1, col: 0 }, { row: 4, col: 40 }, frame)
+  assert.equal(range.end.row, 4)
+  // 列上限是整行宽度，不是 0（旧行为：空文本 → 上限 1）。
+  assert.ok(range.end.col > 20, `空白行的列上限应为整行宽度: ${JSON.stringify(range.end)}`)
+})
+
+test('selection through a short final line keeps every line', () => {
+  const frame = frameOf(['第一行', '第二行', '末'])
+  const range = normalizeFrameSelection({ row: 1, col: 0 }, { row: 3, col: 79 }, frame)
+  const text = selectedFrameText(range, frame)
+  assert.ok(text.includes('第一行'), text)
+  assert.ok(text.includes('第二行'), text)
+  assert.ok(text.trimEnd().endsWith('末'), `末行丢失: ${JSON.stringify(text)}`)
 })

@@ -2031,9 +2031,41 @@ export function App({
         const { totalRows, viewportRows } = transcriptRowsRef.current
         const delta = transcriptWheelStep()
         setTranscriptScrollOffset(offset => scrollTranscriptBy(offset, wheel === 'up' ? delta : -delta, totalRows, viewportRows))
-        // Scrolling moves the rows under a fixed screen position, so any existing
-        // highlight would then point at different text. Drop it.
-        clearSelection()
+        // A wheel turn during a drag extends the selection across the scroll instead of
+        // throwing it away. Scrolling moves the rows under a fixed screen position, so
+        // the *pixel* under the cursor now holds different text — but the user is
+        // dragging, and they expect the range to grow to the newly revealed content
+        // (that is how every other terminal/editor behaves). The anchor is stored in
+        // content coordinates (`contentPointFromMouse`), not screen coordinates, so it
+        // keeps pointing at the same text; only the focus has to follow the scroll.
+        //
+        // Not dragging (no selection, or a finished one): the old behaviour was right —
+        // a highlight left behind would point at text the user never dragged over.
+        const current = selectionRef.current
+        if (!current) {
+          clearSelection()
+          return
+        }
+        // While dragging, extend the focus over the newly revealed content. Reuse the
+        // same edge rule the auto-scroll drag path uses (`focusContentRowAtEdge`): the
+        // focus lands on the first/last row of the window *after* the scroll, which is
+        // what keeps one wheel notch from lagging one row behind.
+        //
+        // Anchor and focus live in content-row coordinates, so the anchor keeps pointing
+        // at the same text no matter how far the view moves.
+        const step = Math.max(1, Math.floor(transcriptWheelStep()))
+        const space = selectionSpaceNow()
+        const after: SelectionSpace = {
+          ...space,
+          transcriptScrollOffset: scrollTranscriptBy(
+            space.transcriptScrollOffset,
+            wheel === 'up' ? step : -step,
+            space.transcriptTotalRows,
+            space.transcriptViewportRows,
+          ),
+        }
+        const edgeRow = focusContentRowAtEdge(after, wheel === 'up' ? 'up' : 'down')
+        setSelection({ anchor: current.anchor, focus: { row: edgeRow, col: current.focus.col } })
         return
       }
       const mouseEvent = parseMouseEvent(mouseInput)
