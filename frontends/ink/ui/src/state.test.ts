@@ -61,7 +61,7 @@ test('applyBridgeEvent assistant_done with summary newline rewrite does not dupl
   const parts = [
     '**LLM Running (Step 1) ...**\n\n',
     '<summary>需要当前时间，读取系统钟</summary>\n',
-    '🛠️ Tool: `code_run`  📥 args:\n````text\n{"script":"print(1)"}\n````\n',
+    '⏺ Tool: `code_run` args:\n````text\n{"script":"print(1)"}\n````\n',
     '`````\n[Action] Running python\n[Status] Exit Code: 0\n[Stdout]\n2026-07-14 15:28:09 Tuesday\n`````\n\n',
     '**LLM Running (Step 2) ...**\n\n',
     '<summary>系统时间为15:28</summary>\n\n',

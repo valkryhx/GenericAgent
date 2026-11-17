@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { GLYPHS, RESULT_PREFIX, EXPAND_HINT, normalizeEmoji } from './glyphs.js'
+import { GLYPHS, RESULT_PREFIX, EXPAND_HINT } from './glyphs.js'
 
 test('GLYPHS matches the Claude Code glyph set', () => {
   // Values verified against CC v2.1.283 (m0052 / exe @201043800).
@@ -17,11 +17,4 @@ test('GLYPHS matches the Claude Code glyph set', () => {
 test('RESULT_PREFIX and EXPAND_HINT are the CC-rendered literals', () => {
   assert.equal(RESULT_PREFIX, `  ${GLYPHS.resultPrefix}  `)
   assert.equal(EXPAND_HINT, '(ctrl+o to expand)')
-})
-
-test('normalizeEmoji maps GA status emoji to CC glyphs', () => {
-  assert.equal(normalizeEmoji('\u2705 done'), `${GLYPHS.check} done`)
-  assert.equal(normalizeEmoji('\u274C failed'), `${GLYPHS.cross} failed`)
-  assert.equal(normalizeEmoji('\u26A0\uFE0F warn'), `${GLYPHS.warn} warn`)
-  assert.equal(normalizeEmoji('no emoji here'), 'no emoji here')
 })

@@ -777,7 +777,12 @@ class AgentScheduler:
         last = text.rfind(marker)
         if last >= 0:
             text = text[last:].lstrip('\n ')
-        rows = [line for line in text.splitlines() if not line.lstrip().startswith(("🔨", "Tool call:", "tool_call:"))]
+        # Legacy hammers were the pre-glyph tool marker; keep filtering them so a
+        # historical transcript cannot leak a tool log into a handoff summary.
+        rows = [
+            line for line in text.splitlines()
+            if not line.lstrip().startswith((chr(0x1F528), "Tool call:", "tool_call:"))
+        ]
         cleaned = redact_sensitive_text('\n'.join(rows).strip())
         # Bounding is structure-aware: a structured answer is projected into a
         # valid, smaller JSON value instead of being cut mid-object. A fixed

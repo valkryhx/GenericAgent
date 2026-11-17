@@ -2,7 +2,7 @@ import type { ChatMessage } from './protocol.js'
 import { formatAssistantText, formatToolBlock, STDOUT_BODY_END, STDOUT_BODY_PREFIX } from './messageFormat.js'
 import { renderMarkdownLines, type MarkdownPart } from './markdownRender.js'
 import type { InkTheme } from './theme.js'
-import { GLYPHS, RESULT_PREFIX, normalizeEmoji } from './glyphs.js'
+import { GLYPHS, RESULT_PREFIX } from './glyphs.js'
 import { isStepHeaderLine } from './jumpToBottomPill.js'
 import { terminalSegments, terminalTextWidth } from './terminalText.js'
 
@@ -175,8 +175,8 @@ function appendThinkingRows(
       for (const [lineIndex, line] of body.split('\n').entries()) {
         rows.push({
           id: `${id}-line-${lineIndex}`,
-          text: `  ${normalizeEmoji(line)}`,
-          parts: [{ text: `  ${normalizeEmoji(line)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+          text: `  ${line}`,
+          parts: [{ text: `  ${line}`, color: theme?.muted ?? 'gray', dimColor: true }],
         })
       }
       return
@@ -233,8 +233,8 @@ function appendStructuredToolRows(
     chip.split('\n').forEach((line, lineIndex) => {
       rows.push({
         id: `${message.id}-tool-${index}-${lineIndex}`,
-        text: normalizeEmoji(line),
-        parts: [{ text: normalizeEmoji(line) }],
+        text: line,
+        parts: [{ text: line }],
       })
     })
     const result = results.get(use.id)
@@ -246,14 +246,14 @@ function appendStructuredToolRows(
     const head = lines[0] ?? ''
     rows.push({
       id: `${message.id}-tool-${index}-result`,
-      text: `${RESULT_PREFIX}${normalizeEmoji(head)}`,
-      parts: mutedResultLine(normalizeEmoji(head), theme),
+      text: `${RESULT_PREFIX}${head}`,
+      parts: mutedResultLine(head, theme),
     })
     for (const [extraIndex, extra] of lines.slice(1).entries()) {
       rows.push({
         id: `${message.id}-tool-${index}-result-${extraIndex}`,
-        text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`,
-        parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+        text: `${TOOL_RESULT_CONTINUATION}${extra}`,
+        parts: [{ text: `${TOOL_RESULT_CONTINUATION}${extra}`, color: theme?.muted ?? 'gray', dimColor: true }],
       })
     }
   })
@@ -316,8 +316,8 @@ function appendOrderedBlockRows(
       chip.split('\n').forEach((line, lineIndex) => {
         rows.push({
           id: `${key}-tool-${lineIndex}`,
-          text: normalizeEmoji(line),
-          parts: [{ text: normalizeEmoji(line) }],
+          text: line,
+          parts: [{ text: line }],
         })
       })
       const result = results.get(block.id)
@@ -350,8 +350,8 @@ function appendStructuredResultRows(
   if (envelope) {
     rows.push({
       id: `${key}-result`,
-      text: `${RESULT_PREFIX}${normalizeEmoji(envelope.summary)}`,
-      parts: mutedResultLine(normalizeEmoji(envelope.summary), theme),
+      text: `${RESULT_PREFIX}${envelope.summary}`,
+      parts: mutedResultLine(envelope.summary, theme),
     })
     // No preview row. The budget's preview is a machine-shaped fragment of the
     // payload (`{"status":"success","_truncated":true,...}`), which tells a reader
@@ -366,14 +366,14 @@ function appendStructuredResultRows(
   const head = lines[0] ?? ''
   rows.push({
     id: `${key}-result`,
-    text: `${RESULT_PREFIX}${normalizeEmoji(head)}`,
-    parts: mutedResultLine(normalizeEmoji(head), theme),
+    text: `${RESULT_PREFIX}${head}`,
+    parts: mutedResultLine(head, theme),
   })
   for (const [extraIndex, extra] of lines.slice(1).entries()) {
     rows.push({
       id: `${key}-result-${extraIndex}`,
-      text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`,
-      parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(extra)}`, color: theme?.muted ?? 'gray', dimColor: true }],
+      text: `${TOOL_RESULT_CONTINUATION}${extra}`,
+      parts: [{ text: `${TOOL_RESULT_CONTINUATION}${extra}`, color: theme?.muted ?? 'gray', dimColor: true }],
     })
   }
 }
@@ -478,7 +478,7 @@ function chipContinuesToolGroup(previous: TranscriptLine[], next: TranscriptLine
   return false
 }
 
-/** `● tool_name(...)`, optionally indented. Normalized from `⏺`/`🛠️` by the formatter. */
+/** `● tool_name(...)`, optionally indented, after the formatter collapsed the header. */
 function isToolChipRow(row: TranscriptLine): boolean {
   const text = row.text.trimStart()
   if (!text.startsWith(GLYPHS.bullet)) return false
@@ -711,8 +711,8 @@ function appendResultBodyRow(rows: TranscriptLine[], id: string, body: string, t
   if (!body.trim()) return
   rows.push({
     id,
-    text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(body.trimEnd())}`,
-    parts: [{ text: `${TOOL_RESULT_CONTINUATION}${normalizeEmoji(body.trimEnd())}`, color: theme?.muted ?? 'gray', dimColor: true }],
+    text: `${TOOL_RESULT_CONTINUATION}${body.trimEnd()}`,
+    parts: [{ text: `${TOOL_RESULT_CONTINUATION}${body.trimEnd()}`, color: theme?.muted ?? 'gray', dimColor: true }],
   })
 }
 
@@ -791,7 +791,7 @@ function appendAssistantBodyRows(
       // Prefixed rows are authoritative stdout body rows even when the marker
       // lived in an earlier stream-commit segment.
       inStdout = true
-      const stdoutBody = normalizeEmoji(unprefixed.trimEnd())
+      const stdoutBody = unprefixed.trimEnd()
       if (!stdoutBody) continue
       if (stdoutNeedsMarker) {
         rows.push({
@@ -810,7 +810,7 @@ function appendAssistantBodyRows(
       flushPlain()
       inStdout = marker.kind === 'Stdout'
       stdoutNeedsMarker = inStdout
-      const markerBody = normalizeEmoji(marker.body.trimEnd())
+      const markerBody = marker.body.trimEnd()
       if (markerBody) {
         rows.push({
           id: `${messageId}-${rowIndex++}`,
@@ -828,7 +828,7 @@ function appendAssistantBodyRows(
       continue
     }
     if (inStdout) {
-      const stdoutBody = normalizeEmoji(line.trimEnd())
+      const stdoutBody = line.trimEnd()
       if (!stdoutBody) continue
       if (stdoutNeedsMarker) {
         // Bind the first real stdout line to the `⎿` result row, exactly like
@@ -854,7 +854,7 @@ function styleAssistantTranscriptLine(parts: TranscriptPart[], theme?: InkTheme)
   const text = parts.map(part => part.text).join('')
   const marker = resultMarkerBody(text)
   if (!marker) return parts
-  const body = normalizeEmoji(marker.body.trimEnd())
+  const body = marker.body.trimEnd()
   if (!body) return [{ text: `  ${GLYPHS.resultPrefix}`, color: theme?.muted ?? 'gray', dimColor: true }]
   return mutedResultLine(body, theme)
 }

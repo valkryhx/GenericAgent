@@ -132,7 +132,7 @@ class WeComApp(AgentChatMixin):
                 await self.client.reply_media(frame, media_type, result["media_id"])
             else:
                 await self.client.send_media_message(chat_id, media_type, result["media_id"])
-            _tprint(f"[{_ts()}] 📤 Sent {media_type}: {os.path.basename(file_path)}")
+            _tprint(f"[{_ts()}] {chr(0x1F4E4)} Sent {media_type}: {os.path.basename(file_path)}")
         except Exception as e:
             print(f"[WeCom] send_media error: {e}")
             await self.send_text(chat_id, f"📎 {os.path.basename(file_path)}（发送失败: {e}）")
@@ -177,7 +177,7 @@ class WeComApp(AgentChatMixin):
                 tools = ctx.get("tool_calls") or []
                 parts = [f"⏳ Turn {turn}: {summary}"]
                 if tools:
-                    parts.append(f"🛠 {', '.join(_fmt_tool(tc) for tc in tools[:3])}")
+                    parts.append(f"{chr(0x1F6E0)} {', '.join(_fmt_tool(tc) for tc in tools[:3])}")
                 _tprint(f"[{_ts()}] {parts[0]}")
                 asyncio.run_coroutine_threadsafe(self.send_text(chat_id, "\n".join(parts)), loop)
             except Exception as e:

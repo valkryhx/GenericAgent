@@ -224,7 +224,7 @@ test('transcriptLines repairs legacy inline workflow fence close', () => {
       '',
       '**LLM Running (Step 3) ...**',
       '',
-      '🔨 Tool: `update_working_checkpoint`  📥 args:',
+      '⏺ Tool: `update_working_checkpoint` args:',
       '````text',
     ].join('\n'),
     done: true,

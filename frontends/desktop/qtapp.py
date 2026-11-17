@@ -933,8 +933,8 @@ class _MsgRow(QWidget):
         for line in lines:
             # 检查是否是折叠块开始
             llm_match = re.match(r'^\s*\*\*LLM Running \(Step \d+\) \.\.\.\*\*\s*$', line)
-            tool_match = re.match(r'^\s*🛠️\s*Tool:', line)
-            tool_compact_match = re.match(r'^\s*🛠️\s+\w+\(', line)
+            tool_match = re.match(r'^\s*\U0001F6E0\uFE0F\s*Tool:', line)
+            tool_compact_match = re.match(r'^\s*\U0001F6E0\uFE0F\s+\w+\(', line)
 
             is_foldable_start = llm_match or tool_match or tool_compact_match
 

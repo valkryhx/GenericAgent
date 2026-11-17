@@ -64,7 +64,7 @@ test('subagent MCP transcript keeps a continuous scrollbar cell beside every vis
       '',
       '<summary>开始权威检索与交叉核验</summary>',
       '',
-      '🛠️ mcp__tavily__tavily_search({"topic":"general","query":"FIFA France World Cup record 1930 2022 final rank","search_depth":"basic"})',
+      '⏺ mcp__tavily__tavily_search({"topic":"general","query":"FIFA France World Cup record 1930 2022 final rank","search_depth":"basic"})',
       '',
       '[omitted long output]',
     ].join('\n'),

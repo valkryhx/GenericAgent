@@ -472,7 +472,7 @@ def _build_step_detail(resp, tool_calls):
     if thinking:
         parts.append(f"### 💭 Thinking\n{thinking}")
     if tool_calls:
-        parts.append("### 🛠 Tool Calls\n" + "\n".join(_fmt_tool_call(tc) for tc in tool_calls))
+        parts.append("### " + chr(0x1F6E0) + " Tool Calls\n" + "\n".join(_fmt_tool_call(tc) for tc in tool_calls))
     content = _display_text((getattr(resp, 'content', '') or '')).strip() if resp else ''
     if content and content != '...':
         parts.append(f"### 📝 Output\n{content}")

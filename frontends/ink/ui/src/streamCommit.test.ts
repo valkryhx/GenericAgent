@@ -103,7 +103,7 @@ test('commitStreamingAssistantMessages does not split before a closer after an i
     '[Workflow] launched model-availability-research (wf_test); use /workflows to monitor.`````',
     '',
     '**LLM Running (Step 3) ...**',
-    '🔨 Tool: `update_working_checkpoint`  📥 args:',
+    '⏺ Tool: `update_working_checkpoint` args:',
     '````text',
     '{',
     '  "key_info": "x"',
@@ -134,7 +134,7 @@ test('commitStreamingAssistantMessages keeps committing while a tool-args block 
   // payload before it could reach Static — "the third subagent never showed up".
   const lines: string[] = [
     '`````',
-    '🔨 Tool: `spawn_agent`  📥 args:',
+    '⏺ Tool: `spawn_agent` args:',
     '````text',
     '{',
     ...Array.from({ length: 40 }, (_, i) => `  "field_${i}": "value_${i}",`),
@@ -144,7 +144,7 @@ test('commitStreamingAssistantMessages keeps committing while a tool-args block 
     '[Status] Subagent /root/beta started (pid=2).',
     '`````',
     '`````',
-    '🔨 Tool: `spawn_agent`  📥 args:',
+    '⏺ Tool: `spawn_agent` args:',
     '````text',
     '{',
     ...Array.from({ length: 10 }, (_, i) => `  "still_streaming_${i}": "v",`),

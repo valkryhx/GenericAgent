@@ -358,10 +358,40 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     text = foldOpenStreamingToolBlock(text)
   }
   // Streaming fallback: a tool header whose args fence has not arrived yet still
-  // collapses to the bullet form instead of showing the raw emoji header.
+  // collapses to the bullet form instead of showing the raw protocol header.
+  //
+  // `args:` is optional here because a header can be caught mid-arrival. The
+  // complete-tool regexes above require `args:` at end of line, so every
+  // intermediate state (``Tool: `name``, also with a bare emoji marker, also
+  // with `args` before its colon) matched nothing and fell through to Markdown.
+  // Markdown rendered the backticked tool name as inline code in `theme.code`
+  // (default cyan), which is the "same tool call is black once and cyan another
+  // time" report: whether a call looked cyan depended only on where the stream
+  // was cut, never on the tool being MCP. Probe: `probes/tool_header_fold_race.ts`.
+  //
+  // The prefix is pinned to the actual GA marker (an optional non-word glyph,
+  // then `Tool:`) rather than a blanket `[^\w\s]*`, which used to swallow
+  // ordinary prose such as "最终 Tool: 结论" and paint it as a tool chip.
   text = text.replace(
-    /^[^\S\r\n]*[^\w\s]*[^\S\r\n]*Tool:[^\S\r\n]*`([^`]+)`[^\S\r\n]*[^\w\s]*[^\S\r\n]*args:[^\S\r\n]*$/gm,
+    /^[^\S\r\n]*(?:[●⏺•\p{Extended_Pictographic}️]*[^\S\r\n]*)?Tool:[^\S\r\n]*`([^`\n]+)`[^\n]*$/gmu,
+    (_match, name) => `${GLYPHS.bullet} ${String(name).trim()}`,
+  )
+  // The opening backtick itself may not have arrived yet.
+  text = text.replace(
+    /^[^\S\r\n]*(?:[●⏺•\p{Extended_Pictographic}️]*[^\S\r\n]*)?Tool:[^\S\r\n]*([A-Za-z_][A-Za-z0-9_.]*)[^\s`][^\S\r\n]*$/gmu,
     (_match, name) => `${GLYPHS.bullet} ${String(name)}`,
+  )
+  // Any remaining header whose marker glyph *is* present: the name may still be
+  // mid-arrival (an unterminated `` ` ``, or nothing after `Tool:` yet). The
+  // marker is required here, so a prose line that merely contains the word
+  // "Tool:" (including a CJK one) can never be folded into a chip.
+  text = text.replace(
+    /^[^\S\r\n]*[●⏺•\p{Extended_Pictographic}️️]*[^\S\r\n]*Tool:?[^\n]*$/gmu,
+    (match) => {
+      const name = (match.match(/`([^`\n]*)`?/) ?? [])[1]
+      const clean = String(name ?? '').replace(/`/g, '').trim()
+      return clean ? `${GLYPHS.bullet} ${clean}` : ''
+    },
   )
   text = text.replace(/^[^\S\r\n]*[^\w\s]*[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `${GLYPHS.bullet} ${name}(${args})`)
   // Repair legacy GA status fences whose closing marker was emitted on the

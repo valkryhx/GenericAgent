@@ -295,7 +295,7 @@ def _strip_md(t):
 
 def _clean(t):
     t = re.sub(r'^\s*LLM Running \(Step \d+\) \.{3}\s*$', '', t, flags=re.M)
-    t = re.sub(r'^\s*🛠️\s*[A-Za-z_][A-Za-z0-9_]*\(.*$', '', t, flags=re.M)
+    t = re.sub(r'^\s*\U0001F6E0\uFE0F\s*[A-Za-z_][A-Za-z0-9_]*\(.*$', '', t, flags=re.M)
     for p in _TAG_PATS:
         t = re.sub(p, '', t, flags=re.DOTALL)
     t = re.sub(r'</?summary>', '', t)

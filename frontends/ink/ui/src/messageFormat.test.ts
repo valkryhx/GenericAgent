@@ -9,7 +9,7 @@ test('formatAssistantText renders summary tags as plain text', () => {
 
 test('formatAssistantText hides verbose tool args', () => {
   const raw = [
-    '🛠️ Tool: `code_run`  📥 args:',
+    '⏺ Tool: `code_run` args:',
     '````text',
     '{"script":"print(1)","timeout":60,"type":"python"}',
     '````',
@@ -21,7 +21,7 @@ test('formatAssistantText hides verbose tool args', () => {
 
 test('formatAssistantText expands verbose tool args when transcript mode is enabled', () => {
   const raw = [
-    '🛠️ Tool: `code_run`  📥 args:',
+    '⏺ Tool: `code_run` args:',
     '````text',
     '{"script":"print(1)","timeout":60}',
     '````',
@@ -38,14 +38,14 @@ test('formatAssistantText expands verbose tool args when transcript mode is enab
 })
 
 test('formatAssistantText renders compact tool calls without emoji', () => {
-  const raw = '🛠️ code_run(type=python, script=print(1))\n\n\nDone'
+  const raw = '⏺ code_run(type=python, script=print(1))\n\n\nDone'
 
   assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} code_run(type=python, script=print(1))\n\n\nDone`)
 })
 
 test('formatAssistantText truncates long tool summaries with a ctrl+o hint', () => {
   const raw = [
-    '🛠 Tool: `code_run`  📥 args:',
+    '⏺ Tool: `code_run` args:',
     '````text',
     JSON.stringify({ script: 'x'.repeat(140), timeout: 60 }),
     '````',
@@ -72,7 +72,7 @@ test('formatAssistantText collapses tool fence noise without dropping final bold
     '',
     '<summary>需要当前时间，读取系统钟</summary>',
     '',
-    '🛠️ Tool: `code_run`  📥 args:',
+    '⏺ Tool: `code_run` args:',
     '````text',
     '{"script":"print(1)","type":"python"}',
     '````',
@@ -127,15 +127,42 @@ test('formatAssistantText folds long [Stdout] bodies until transcript mode', () 
   assert.doesNotMatch(expanded, /more lines/)
 })
 
-test('formatAssistantText folds the hammer-emoji tool header too', () => {
-  // agent_loop.py emits a hammer emoji, continue_cmd.py a tools emoji; both must fold.
-  const raw = '🔨 Tool: `load_skill`  📥 args:\n````text\n{"name":"workflow-authoring"}\n````'
-  assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill(name: workflow-authoring)`)
+test('formatAssistantText folds a legacy hammer/emoji tool header too', () => {
+  // Raw transcripts written by older builds carry an emoji marker before `Tool:`.
+  // The formatter must still fold them, and must never let one reach Markdown.
+  const hammer = String.fromCodePoint(0x1F528)
+  const trowel = String.fromCodePoint(0x1F6E0)
+  const inbox = String.fromCodePoint(0x1F4E5)
+  for (const marker of [hammer, trowel, `${trowel}️`]) {
+    const raw = `${marker} Tool: \`load_skill\`  ${inbox} args:\n\`\`\`\`text\n{"name":"workflow-authoring"}\n\`\`\`\``
+    assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill(name: workflow-authoring)`)
+  }
 })
 
 test('formatAssistantText collapses a tool header before its args fence arrives', () => {
-  const raw = '🔨 Tool: `load_skill`  📥 args:'
+  const raw = '⏺ Tool: `load_skill` args:'
   assert.equal(formatAssistantText(raw), `${GLYPHS.bullet} load_skill`)
+})
+
+test('formatAssistantText collapses a tool header that arrived mid-stream, without args yet', () => {
+  // The header streams in pieces: `⏺ Tool: `mcp__exa__web_fetch_exa`` lands before
+  // ` args:` does. The old pattern required `args:` at end of line, so this
+  // intermediate state matched nothing and fell through to Markdown, which paints
+  // a backticked name as inline code (theme.code = cyan). The same tool call then
+  // looked black in a complete segment and cyan in a split one.
+  // Probe: probes/tool_header_fold_race.ts (group B).
+  const argsPending = '⏺ Tool: `mcp__exa__web_fetch_exa`'
+  assert.equal(formatAssistantText(argsPending), `${GLYPHS.bullet} mcp__exa__web_fetch_exa`)
+  assert.doesNotMatch(formatAssistantText(argsPending), /Tool:/)
+
+  // Trailing spaces and a still-open backtick must not reach Markdown either.
+  assert.equal(formatAssistantText('⏺ Tool: `load_skill`   '), `${GLYPHS.bullet} load_skill`)
+  assert.equal(formatAssistantText('⏺ Tool: `load_skill'), `${GLYPHS.bullet} load_skill`)
+  assert.doesNotMatch(formatAssistantText('⏺ Tool: `load_skill'), /`|Tool:/)
+
+  // A complete header + args fence still folds into the summarized chip form.
+  const complete = ['⏺ Tool: `mcp__exa__web_fetch_exa` args:', '````text', '{"maxCharacters": 4000}', '````'].join('\n')
+  assert.equal(formatAssistantText(complete), `${GLYPHS.bullet} mcp__exa__web_fetch_exa(maxCharacters: 4000)`)
 })
 
 test('formatAssistantText streaming folds an open tool args fence to a chip', () => {

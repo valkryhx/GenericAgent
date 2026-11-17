@@ -68,25 +68,3 @@ export const RESULT_PREFIX = `  ${GLYPHS.resultPrefix}  `
 
 /** The `(ctrl+o to expand)` hint CC renders dimmed next to folded blocks. */
 export const EXPAND_HINT = '(ctrl+o to expand)'
-
-/**
- * Common emoji GA's agent emits in status text, mapped to the CC glyph set so
- * the transcript stops showing mixed-aesthetic emoji icons. Applied to tool
- * result lines only (display layer); the raw transcript keeps the original text.
- */
-export const EMOJI_TO_GLYPH: ReadonlyArray<readonly [string, string]> = [
-  ['\u2705', GLYPHS.check],
-  ['\u274C', GLYPHS.cross],
-  ['\u26A0\uFE0F', GLYPHS.warn],
-  ['\u26A0', GLYPHS.warn],
-  ['\u{1F528}', GLYPHS.bullet],
-  ['\u{1F6E0}\uFE0F', GLYPHS.bullet],
-  ['\u{1F6E0}', GLYPHS.bullet],
-  ['\u{1F4E5}', GLYPHS.arrowDown],
-]
-
-export function normalizeEmoji(text: string): string {
-  let out = text
-  for (const [emoji, glyph] of EMOJI_TO_GLYPH) out = out.split(emoji).join(glyph)
-  return out
-}
