@@ -127,6 +127,35 @@ test('formatAssistantText folds long [Stdout] bodies until transcript mode', () 
   assert.doesNotMatch(expanded, /more lines/)
 })
 
+test('formatAssistantText folds every chip of a parallel tool batch, not just the first', () => {
+  // `loop.py:_run_parallel_tools` yields one close fence after *every* header, so a
+  // 2-tool batch folds into `● chip1 / fence / ● chip2 / fence`. The first fence had
+  // no body of its own, so the fence-unwrap (which needs a [Action]/[Status]/[Stdout]
+  // body) could not match it; the surviving fence opened a code block and every chip
+  // after the first was painted with theme.code. Serial calls never emit this shape,
+  // which is why a solo call always looked right and a batch looked half-cyan.
+  const raw = [
+    '⏺ Tool: `mcp__tavily__tavily_search` args:',
+    '````text', '{"query": "忽必烈", "max_results": 8}', '````',
+    '`````',
+    '⏺ Tool: `mcp__exa__web_search_exa` args:',
+    '````text', '{"query": "忽必烈 生平", "numResults": 6}', '````',
+    '`````',
+    '[Action] Calling MCP tool: mcp__tavily__tavily_search',
+    '[Status] MCP success',
+    '[Action] Calling MCP tool: mcp__exa__web_search_exa',
+    '[Status] MCP success',
+  ].join('\n')
+
+  const formatted = formatAssistantText(raw)
+  // Both chips survive, and no fence is left to trap the second one.
+  assert.match(formatted, /^● mcp__tavily__tavily_search\(/)
+  assert.match(formatted, /^● mcp__exa__web_search_exa\(/m)
+  assert.doesNotMatch(formatted, /```/)
+  // A code block would only end up wrapping them if a fence survived.
+  assert.equal(formatted.split('\n').filter(line => line.startsWith('● ')).length, 2)
+})
+
 test('formatAssistantText folds a legacy hammer/emoji tool header too', () => {
   // Raw transcripts written by older builds carry an emoji marker before `Tool:`.
   // The formatter must still fold them, and must never let one reach Markdown.

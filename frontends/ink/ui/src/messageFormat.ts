@@ -322,6 +322,59 @@ function foldToolOutput(text: string, expanded: boolean): string {
   return out.join('\n')
 }
 
+/**
+ * Drop fence pairs whose entire body is already-folded tool chips.
+ *
+ * `_run_parallel_tools` emits a `close` fence after every header, which after
+ * header folding becomes `● chip1 / fence / ● chip2 / fence`. Those fences wrap
+ * nothing but chips, so they must not survive into Markdown — a surviving fence
+ * opens a code block and every chip after it is painted with `theme.code`.
+ *
+ * Anything else inside the fence (real output, a `[Status]` line, prose) keeps
+ * the fence intact for the existing unwrap logic to handle.
+ */
+function dropChipOnlyFences(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const opener = (lines[i] ?? '').trim().match(/^(`{3,})\s*$/)
+    if (!opener) {
+      out.push(lines[i]!)
+      i += 1
+      continue
+    }
+    const fence = opener[1]!.length
+    let close = -1
+    for (let j = i + 1; j < lines.length; j++) {
+      const closer = (lines[j] ?? '').trim().match(/^(`{3,})\s*$/)
+      if (closer && closer[1]!.length >= fence) {
+        close = j
+        break
+      }
+    }
+    if (close === -1) {
+      out.push(lines[i]!)
+      i += 1
+      continue
+    }
+    const body = lines.slice(i + 1, close)
+    const chipOnly = body.length > 0 && body.every(line => {
+      const trimmed = line.trim()
+      return trimmed === '' || trimmed.startsWith(GLYPHS.bullet)
+    })
+    if (chipOnly) {
+      // Keep the chips, drop the fence that was wrapping them.
+      out.push(...body)
+      i = close + 1
+      continue
+    }
+    out.push(lines[i]!)
+    i += 1
+  }
+  return out.join('\n')
+}
+
 export function formatAssistantText(raw: string, options: FormatOptions = {}): string {
   let text = raw || ''
   // Normalize newlines early so fence/tool regexes match Windows CRLF transcripts.
@@ -394,6 +447,23 @@ export function formatAssistantText(raw: string, options: FormatOptions = {}): s
     },
   )
   text = text.replace(/^[^\S\r\n]*[^\w\s]*[^\S\r\n]+([A-Za-z_][A-Za-z0-9_]*)\((.*?)\)[^\S\r\n]*$/gm, (_match, name, args) => `${GLYPHS.bullet} ${name}(${args})`)
+  // A parallel tool batch leaves an orphan fence between its headers.
+  //
+  // `loop.py:_run_parallel_tools` yields one `close` (` ````` `) after *every*
+  // header, so a 2-tool batch is `header1, fence, header2, fence, results…`.
+  // Folding the headers leaves `● chip1, fence, ● chip2, fence`: the first fence
+  // has no body of its own, so the fence-unwrap below (which requires a body
+  // containing `[Action]/[Status]/[Stdout]`) cannot match it. The fence survives,
+  // gets collapsed to ``` and opens a code block — every chip after the first is
+  // rendered inside it with `theme.code` (cyan). That is the "parallel MCP batch
+  // is one black, one cyan while a solo call is fine" report: the same call
+  // renders correctly alone and cyan in a batch, purely because of the extra
+  // fence the parallel path emits. Serial calls never produce this shape, which
+  // is why they were always fine.
+  //
+  // Only fence pairs whose whole body is chip rows are dropped. A fence body with
+  // real content is left for the existing unwrap/`[Stdout]` logic.
+  text = dropChipOnlyFences(text)
   // Repair legacy GA status fences whose closing marker was emitted on the
   // same line as the body. This happens when a tool yields text without a
   // trailing newline (notably the workflow launch result); otherwise the next

@@ -46,16 +46,52 @@ const RESULT = ['`````', '[Action] Calling MCP tool: mcp__exa__web_fetch_exa', '
 
 /** 组 A：完整 header，args 围栏紧随其后。 */
 const COMPLETE = [
-  '🔨 Tool: `mcp__exa__web_fetch_exa`  📥 args:',
+  '⏺ Tool: `mcp__exa__web_fetch_exa` args:',
   ARGS,
   RESULT,
 ].join('\n')
 
 /** 组 B：header 尚未写完（流式中途 / 段被切开），行尾没有 `args:`。 */
 const TRUNCATED = [
-  '🔨 Tool: `mcp__exa__web_fetch_exa`',
+  '⏺ Tool: `mcp__exa__web_fetch_exa`',
   ARGS,
   RESULT,
+].join('\n')
+
+/**
+ * 组 D：并行 MCP 批（用户实测「分别单独搜都正常，并行就一黑一青」）。
+ *
+ * 输入按 loop.py:_run_parallel_tools 的真实 yield 序列还原，工具名与参数取自
+ * 用户报障那次的真实会话：
+ *   %LOCALAPPDATA%\GenericAgent\projects\falcomm_new_mcp-.../
+ *   session_e803a39a...jsonl（"mcp 搜搜 忽必烈"）
+ * 结构特征：每个 header 后面都跟一个 close fence，于是折叠后留下
+ * `● chip1 / fence / ● chip2 / fence`，第一个 fence 没有自己的 body，
+ * 原来的 unwrap 规则（要求 body 含 [Action]/[Status]）匹配不到它，
+ * 围栏存活并开启代码块，把第二个 chip 染成 theme.code。
+ */
+const PARALLEL = [
+  '⏺ Tool: `mcp__tavily__tavily_search` args:',
+  '````text',
+  '{',
+  '  "query": "忽必烈",',
+  '  "max_results": 8,',
+  '  "search_depth": "basic"',
+  '}',
+  '````',
+  '`````',
+  '⏺ Tool: `mcp__exa__web_search_exa` args:',
+  '````text',
+  '{',
+  '  "query": "忽必烈 生平 元世祖 蒙古帝国 元朝建立者",',
+  '  "numResults": 6',
+  '}',
+  '````',
+  '`````',
+  '[Action] Calling MCP tool: mcp__tavily__tavily_search',
+  '[Status] MCP success',
+  '[Action] Calling MCP tool: mcp__exa__web_search_exa',
+  '[Status] MCP success',
 ].join('\n')
 
 type Row = { text: string; colors: string[] }
@@ -81,6 +117,7 @@ let failures = 0
 for (const [label, raw] of [
   ['A 对照：完整 header', COMPLETE],
   ['B 失败条件：header 截断（`args:` 尚未到达）', TRUNCATED],
+  ['D 并行 MCP 批（每个 header 后多一个 close fence）', PARALLEL],
 ] as const) {
   const rows = render(raw)
   const cyan = cyanRows(rows)
@@ -92,8 +129,8 @@ for (const [label, raw] of [
     const flag = cyan.includes(row) ? '  ← CYAN' : ''
     console.log(`  ${JSON.stringify(row.text).padEnd(72)} [${row.colors.join(',')}]${flag}`)
   }
-  const folded = rows.some(row => row.text.startsWith('● '))
-  console.log(`  ${ok ? '✔' : '✖'} 期望无青色，实际${hit ? '有' : '无'}（折叠${folded ? '成功' : '失败'}）`)
+  const chips = rows.filter(row => row.text.trimStart().startsWith('● ')).length
+  console.log(`  ${ok ? '✔' : '✖'} 期望无青色，实际${hit ? '有' : '无'}（折叠出 ${chips} 个 chip）`)
 }
 
 // 展开态（Ctrl+O）：args JSON 里缩进 >=4 空格的行会被 Markdown 当代码块，
