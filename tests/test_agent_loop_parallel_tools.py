@@ -239,6 +239,54 @@ class ToolFenceTest(unittest.TestCase):
         self.assertIn("workflow output\n`````\n", joined)
         self.assertNotIn("workflow output`````", joined)
 
+    def test_parallel_batch_fences_arrive_in_pairs(self):
+        """Every fence a parallel batch emits must be closed.
+
+        A parallel batch used to yield one bare close fence after *every* header
+        (`header1, fence, header2, fence, results…`). That is not a pair: after the
+        UI folds the headers, the surviving opener renders the second chip as a
+        cyan code block until its closer arrives — the reported "second MCP call
+        turns green, then black" flash, seen only in parallel batches and never in
+        a solo call.
+
+        Assert on the shape, not on any specific ordering: fences must be even in
+        number and alternate open/close. Ordering between tools is genuinely
+        nondeterministic (that is what parallel means), so a fixed expected string
+        would be a flaky test.
+        """
+        handler = _Handler(delays={"mcp__s__a": 0.2, "mcp__s__b": 0.1})
+        client = _Client([_Response([
+            _ToolCall("mcp__s__a", call_id="a"),
+            _ToolCall("mcp__s__b", call_id="b"),
+        ])])
+
+        chunks = _run(client, handler, verbose=True)
+
+        # Only the parallel batch. The runner continues to a second turn
+        # (`no_tool`) that emits its own fence pair, which is unrelated here.
+        joined = "".join(str(chunk) for chunk in chunks)
+        batch_text = joined.split("Step 2")[0]
+
+        fence_count = sum(1 for line in batch_text.split("\n") if line.strip() == "`````")
+        self.assertEqual(fence_count % 2, 0, "fences must be paired, got %d" % fence_count)
+        # Two tools, each opening and closing once.
+        self.assertEqual(fence_count, 4)
+
+        # No two headers may sit between a close and its matching open: that is
+        # precisely the orphan-closer shape that trapped the second chip.
+        lines = batch_text.split("\n")
+        header_positions = [
+            index for index, line in enumerate(lines)
+            if line.startswith("⏺ ") or line.startswith("● ")
+        ]
+        fence_positions = [
+            index for index, line in enumerate(lines) if line.strip() == "`````"
+        ]
+        # Headers are contiguous at the top: every header precedes the first fence.
+        if header_positions and fence_positions:
+            self.assertGreater(min(fence_positions), max(header_positions),
+                               "a fence must not sit between two tool headers")
+
 
 if __name__ == "__main__":
     unittest.main()

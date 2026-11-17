@@ -188,12 +188,21 @@ def _run_parallel_tools(handler, response, batch, tool_num, verbose):
     """
     sink = queue.Queue()
     close = "`````\n"
+    # Fences must be emitted in pairs around *content*, exactly like
+    # `_run_single_tool`: open before the first chunk, close after the last.
+    #
+    # This used to yield a bare `close` after every header instead, which is not
+    # a pair — it is an unmatched closer sitting between two headers. After the
+    # UI folds the headers it becomes `● chip1 / ``` / ● chip2 / ``` `, and that
+    # surviving opener renders the *second* chip as a cyan code block until the
+    # matching closer arrives (the reported green-then-black flash in a parallel
+    # MCP batch). Nothing in the UI can fully repair it: mid-stream the closer has
+    # not arrived yet, so the fence is genuinely open and Markdown is right to
+    # paint it. Fix the shape at the source.
     for index, tool_call in batch:
         header = _tool_header(tool_call.get("tool_name"), tool_call.get("args", {}), verbose)
         if header:
             yield header
-        if verbose:
-            yield close
 
     def worker(index, tool_call):
         name = tool_call.get("tool_name")
@@ -216,15 +225,26 @@ def _run_parallel_tools(handler, response, batch, tool_num, verbose):
 
     pending = {index for index, _ in batch}
     outcomes = {}; failures = {}
+    # Per-tool fence state: open before a tool's first chunk, close after its
+    # last. `_run_single_tool` does the same thing, so a parallel batch now emits
+    # the same shape a serial call does, once per tool.
+    open_fence: dict[int, bool] = {}
     while pending:
         kind, index, payload = sink.get()
         if kind == "text":
             if verbose:
+                if not open_fence.get(index):
+                    open_fence[index] = True
+                    yield close
                 yield payload
         elif kind == "outcome":
             outcomes[index] = payload
             if verbose:
-                yield close
+                if open_fence.get(index):
+                    # Close only a fence this tool actually opened: a tool whose
+                    # output never arrived must not leave a bare closer behind.
+                    yield close
+                open_fence[index] = False
             pending.discard(index)
         else:
             failures[index] = payload

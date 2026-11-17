@@ -323,18 +323,50 @@ function foldToolOutput(text: string, expanded: boolean): string {
 }
 
 /**
- * Drop fence pairs whose entire body is already-folded tool chips.
+ * Drop fences whose body is nothing but already-folded tool chips.
  *
  * `_run_parallel_tools` emits a `close` fence after every header, which after
  * header folding becomes `● chip1 / fence / ● chip2 / fence`. Those fences wrap
  * nothing but chips, so they must not survive into Markdown — a surviving fence
  * opens a code block and every chip after it is painted with `theme.code`.
  *
- * Anything else inside the fence (real output, a `[Status]` line, prose) keeps
- * the fence intact for the existing unwrap logic to handle.
+ * The *unterminated* case is the streaming one, and it is what made the fix look
+ * half-done: while the batch is still arriving, chip1's fence has no closer yet,
+ * so the whole-pair rule above cannot fire. Markdown then sees
+ *
+ *     ● mcp__tavily__...(...)
+ *     ```                      ← opener, closer still in flight
+ *     ● mcp__exa__w            ← rendered inside the block → cyan
+ *
+ * and the second chip turns green immediately, only to turn black once the
+ * closer arrives and the pair rule finally applies. That green-then-black flip
+ * is the report; the final state was already correct, which is why a
+ * final-state-only check passed. A fence with a real body (code_run's args JSON,
+ * a `[Status]` block) is still kept in both cases and left to the existing
+ * unwrap / `[Stdout]` logic.
  */
 function dropChipOnlyFences(text: string): string {
   const lines = text.split('\n')
+  const isChip = (line: string): boolean => {
+    const trimmed = line.trim()
+    return trimmed === '' || trimmed.startsWith(GLYPHS.bullet)
+  }
+  // A line that is nothing but backticks but shorter than a full fence is a
+  // fence *arriving* — the stream has delivered `` ` `` or ` `` ` of the next
+  // ````text opener. It carries no content, so it must not veto the drop: at
+  // that instant the tail is `● chip / ``` / ● chip / ` ` and treating the
+  // half-written fence as content kept the opener alive, which is exactly the
+  // green flash.
+  //
+  // The opener's info string arrives character by character too (` ``` `, then
+  // ` ```t `, ` ```te `, … ` ```text `), so a backtick run *followed by a word*
+  // is also a fence in flight, not content.
+  const isPartialFence = (line: string): boolean => {
+    const trimmed = line.trim()
+    if (trimmed === '') return false
+    if (/^`+$/.test(trimmed)) return true
+    return /^`{1,}[A-Za-z]*$/.test(trimmed) && !/^`{3,}[A-Za-z]+\s*$/.test(trimmed)
+  }
   const out: string[] = []
   let i = 0
   while (i < lines.length) {
@@ -354,16 +386,21 @@ function dropChipOnlyFences(text: string): string {
       }
     }
     if (close === -1) {
+      // No closer yet (mid-stream). Drop the fence when everything after it is a
+      // chip row or a half-arrived fence, so an open code_run args block — which
+      // has real content — keeps its fence.
+      const rest = lines.slice(i + 1)
+      const chipsOrPartial = rest.every(line => isChip(line) || isPartialFence(line))
+      if (rest.length > 0 && rest.some(line => line.trim() !== '') && chipsOrPartial) {
+        i += 1
+        continue
+      }
       out.push(lines[i]!)
       i += 1
       continue
     }
     const body = lines.slice(i + 1, close)
-    const chipOnly = body.length > 0 && body.every(line => {
-      const trimmed = line.trim()
-      return trimmed === '' || trimmed.startsWith(GLYPHS.bullet)
-    })
-    if (chipOnly) {
+    if (body.length > 0 && body.every(isChip)) {
       // Keep the chips, drop the fence that was wrapping them.
       out.push(...body)
       i = close + 1
