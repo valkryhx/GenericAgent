@@ -158,7 +158,7 @@ def bridge_main():
     return bridge.main([])
 
 
-def run_trial(mode, real, trial_dir):
+def run_trial(mode, real, trial_dir, *, trace_writes=False):
     from winpty import Backend, PtyProcess
     import pyte
 
@@ -181,6 +181,13 @@ def run_trial(mode, real, trial_dir):
                GA_STREAM_SCHEDULER='frame' if mode == 'candidate' else 'legacy', TERM='xterm-256color',
                PYTHONPATH=str(ROOT), PYTHONUTF8='1')
     env.pop('CI', None)
+    write_trace = trial_dir / 'writes.jsonl' if trace_writes else None
+    if write_trace is not None:
+        if real:
+            raise ValueError('stdout tracing is available for offline fixtures only')
+        preload = ROOT / 'frontends' / 'ink' / 'ui' / 'probes' / 'conpty_write_trace.cjs'
+        env['GA_CONPTY_WRITE_TRACE'] = str(write_trace)
+        env['NODE_OPTIONS'] = (env.get('NODE_OPTIONS', '') + f' --require="{preload.as_posix()}"').strip()
     command = [sys.executable, '-m', 'ga_cli', 'ink', '--', '--python', sys.executable, '--bridge', str(Path(__file__).resolve())]
     proc = PtyProcess.spawn(command, dimensions=(ROWS, COLS), env=env, cwd=str(ROOT), backend=Backend.ConPTY)
     chunks = queue.Queue()
@@ -229,7 +236,7 @@ def run_trial(mode, real, trial_dir):
         observe(5, 'prompt in composer', lambda _, view: 'joined as a single word.' in view)
         submitted = time.perf_counter_ns()
         proc.write(chr(13))
-        return measure_trial(observe, trace, submitted, mode, real)
+        return measure_trial(observe, trace, submitted, mode, real, write_trace)
     finally:
         try:
             if proc.isalive():
@@ -243,7 +250,7 @@ def run_trial(mode, real, trial_dir):
             proc.close(force=True)
 
 
-def measure_trial(observe, trace, submitted, mode, real):
+def measure_trial(observe, trace, submitted, mode, real, write_trace=None):
     visible = {}
     reveals = []
     longest = {}
@@ -261,7 +268,7 @@ def measure_trial(observe, trace, submitted, mode, real):
             reveals.append(at)
         if MARKER in view and final_at is None:
             final_at = at
-        return final_at is not None and trace.is_file()
+        return final_at is not None and trace.is_file() and (write_trace is None or write_trace.is_file())
 
     observe(45, 'final terminal marker and bridge idle', check)
     marks = {}
@@ -278,12 +285,29 @@ def measure_trial(observe, trace, submitted, mode, real):
     assert submitted <= request <= first <= bridge_first <= visible['1'] <= final_at, 'stages out of order'
     gaps = [(end - start) / 1e6 for start, end in zip(reveals, reveals[1:])]
     usage = {k: v for k, v in marks.get('usage', [{}])[-1].items() if k.endswith('Tokens')}
-    return dict(mode=mode, real=real, ok=True, reveals=len(reveals), delta_count=len(marks['bridge_delta']), usage=usage,
+    result = dict(mode=mode, real=real, ok=True, reveals=len(reveals), delta_count=len(marks['bridge_delta']), usage=usage,
                 effort=marks['request'][0]['effort'],
                 ms=dict(submit_to_first=(visible['1'] - submitted) / 1e6,
                         request_to_text=(first - request) / 1e6, text_to_first=(visible['1'] - first) / 1e6,
                         bridge_to_first=(visible['1'] - bridge_first) / 1e6,
                         submit_to_final=(final_at - submitted) / 1e6, max_reveal_gap=max(gaps, default=None)))
+    if write_trace is not None:
+        writes = {}
+        for line in write_trace.read_text(encoding='utf-8').splitlines():
+            row = json.loads(line)
+            for label in row['labels']:
+                writes.setdefault(label, int(row['ns']))
+        assert writes.keys() == visible.keys(), 'each fixture line must have a stdout timing'
+        assert all(writes[label] <= visible[label] for label in writes), 'stdout timestamps must precede visibility'
+        def max_gap(times):
+            return max(b - a for a, b in zip(times, times[1:])) / 1e6
+        labels = sorted(visible)
+        result['ms'].update(
+            first_write_to_screen=(visible['1'] - writes['1']) / 1e6,
+            max_write_gap=max_gap([writes[label] for label in labels]),
+            max_line_screen_gap=max_gap([visible[label] for label in labels]),
+        )
+    return result
 
 
 def read_trace(path):
@@ -293,8 +317,11 @@ def read_trace(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--real', action='store_true')
+    parser.add_argument('--trace-writes', action='store_true', help='Time offline fixture writes before ConPTY')
     parser.add_argument('--rounds', type=int, choices=range(1, 11), default=3)
     args = parser.parse_args()
+    if args.real and args.trace_writes:
+        parser.error('--trace-writes is offline only')
     if args.real:
         resolve_profile(ROOT / 'llm.yaml', PROFILE)
     root = ROOT / 'tests' / 'probes' / 'captures'
@@ -304,7 +331,7 @@ def main():
     print(json.dumps({'capture': str(output.relative_to(ROOT)), 'real': args.real}), flush=True)
     with (output / 'results.jsonl').open('w', encoding='utf-8', newline=chr(10)) as results:
         for round_no, mode in comparison_order(args.rounds):
-            row = run_trial(mode, args.real, output / f'{round_no}-{mode}')
+            row = run_trial(mode, args.real, output / f'{round_no}-{mode}', trace_writes=args.trace_writes)
             row['round'] = round_no
             rows.append(row)
             line = json.dumps(row)
