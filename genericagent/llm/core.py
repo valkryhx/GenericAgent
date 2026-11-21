@@ -1318,7 +1318,14 @@ class NativeClaudeSession(BaseSession):
         assert type(msg) is dict
         with self.lock:
             self.history.append(msg)
-            request_history = copy.deepcopy(self.history)
+            request_history = None
+            if os.environ.get('GA_HISTORY_PROJECTION') == 'incremental':
+                from genericagent.llm.history_projection import NativeHistoryProjection
+                if not hasattr(self, '_history_projection'):
+                    self._history_projection = NativeHistoryProjection()
+                request_history = self._history_projection.normalize(self.history, preserve_strings=True)
+            if request_history is None:
+                request_history = copy.deepcopy(self.history)
         if self.auto_compact_enabled:
             trim_messages_history(request_history, self.hard_limit_tokens, self.last_usage_tokens, owner=self)
         messages = [{"role": m["role"], "content": _content_blocks(m["content"])} for m in request_history]

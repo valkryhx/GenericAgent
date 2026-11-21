@@ -347,7 +347,9 @@ export function committedAssistantPrefix(messages: ChatMessage[], taskId: number
       && message.id.startsWith(`a-${taskId}-c`),
   )
   if (commits.length === 0) return ''
-  return commits.map(message => message.text).join('\n')
+  return commits.map((message, index) => (
+    message.text + (index < commits.length - 1 && !message.endsAtThinkingBoundary ? String.fromCharCode(10) : '')
+  )).join('')
 }
 
 function splitLines(text: string): string[] {

@@ -577,6 +577,8 @@ export type ChatMessage = {
   done: boolean
   taskId?: number
   localCommand?: 'input' | 'output'
+  /** A prose segment cut before thinking consumes no line separator. */
+  endsAtThinkingBoundary?: boolean
   /** True for a prompt typed mid-turn, queued for the next tool boundary. */
   queuedPrompt?: boolean
   /**

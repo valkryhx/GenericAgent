@@ -798,3 +798,15 @@ test('live turn with interleaved thinking keeps every row id unique', () => {
   const ids = state.messages.map(message => message.id)
   assert.equal(new Set(ids).size, ids.length, `重复 id: ${JSON.stringify(ids)}`)
 })
+
+
+test('done reconciles prose split by thinking without inserting newlines into its prefix', () => {
+  let state = initialState
+  for (const text of ['甲', '乙']) {
+    state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 1, text })
+    state = applyBridgeEvent(state, { type: 'assistant_thinking', taskId: 1, text: 'reason' })
+  }
+  state = applyBridgeEvent(state, { type: 'assistant_delta', taskId: 1, text: '丙' })
+  state = applyBridgeEvent(state, { type: 'assistant_done', taskId: 1, text: '甲乙丙' })
+  assert.deepEqual(state.messages.filter(m => m.role === 'assistant').map(m => m.text), ['甲', '', '乙', '', '丙'])
+})
