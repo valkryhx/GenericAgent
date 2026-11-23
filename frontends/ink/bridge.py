@@ -3886,6 +3886,8 @@ class GenericAgentBridge:
 
     def _consume_display_queue(self, task_id: int, display_queue: queue.Queue) -> None:
         last_usage = None
+        next_context_check = 0.0
+        sample_context = os.environ.get('GA_STREAM_SCHEDULER') == 'frame'
         def emit_usage_if_changed() -> None:
             nonlocal last_usage
             usage = self._backend_token_usage()
@@ -3897,7 +3899,12 @@ class GenericAgentBridge:
             while True:
                 item = display_queue.get()
                 emit_usage_if_changed()
-                self._emit_context_usage_if_changed()
+                now = time.monotonic() if sample_context else 0.0
+                # Context estimation can walk the entire history. Keep its cost
+                # independent of provider chunk size and refresh at turn boundaries.
+                if not sample_context or "next" not in item or "done" in item or "system" in item or now >= next_context_check:
+                    self._emit_context_usage_if_changed()
+                    next_context_check = now + 0.05
                 if "system" in item:
                     # Non-terminal system notice emitted mid-turn (e.g. "Goal set").
                     self.emit({"type": "system", "text": str(item.get("system") or "")})

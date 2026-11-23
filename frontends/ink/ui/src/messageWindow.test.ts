@@ -1120,3 +1120,26 @@ test('a turn with many reasoning blocks renders every one of them', () => {
   }
   assert.equal(new Set(rows.map(r => r.id)).size, rows.length)
 })
+
+test('projection of an active tail preserves the complete transcript at a static boundary', () => {
+  const cases = [
+    ['previous answer', 'new answer'],
+    ['[Status] Exit Code: 0\n[Stdout]', 'command output'],
+    ['⏺ Read(file.txt)', '[Status] Exit Code: 0\n[Stdout]\noutput'],
+    ['', 'new answer'],
+  ]
+  for (const [before, after] of cases) {
+    const prefix: ChatMessage = { id: 'before', role: 'assistant', text: before!, done: true }
+    const tail: ChatMessage = { id: 'after', role: 'assistant', text: after!, done: false }
+    if (before === 'previous answer') {
+      prefix.text = ''
+      prefix.thinking = ['completed reasoning']
+    }
+    const options = { expandedTools: true }
+    const staticProjection = transcriptLinesWithChannel([prefix], options)
+    const liveProjection = transcriptLinesWithChannel([tail], {
+      ...options, initialChannel: staticProjection.channel, previousLine: staticProjection.lines.at(-1),
+    })
+    assert.deepEqual([...staticProjection.lines, ...liveProjection.lines], transcriptLines([prefix, tail], options))
+  }
+})

@@ -151,6 +151,25 @@ class ParallelToolExecutionTest(unittest.TestCase):
 
         self.assertLess(elapsed, 0.75, "two 0.4s calls took %.2fs, so they ran serially" % elapsed)
 
+    def test_batch_trace_separates_setup_execution_and_result_packing(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        client = _Client([_Response([_ToolCall("file_read", '{"path":"private-fixture"}')])])
+        handler = _Handler()
+        stderr = io.StringIO()
+        with patch.dict('os.environ', {'GA_LATENCY_TRACE': '1'}), contextlib.redirect_stderr(stderr):
+            _run(client, handler, verbose=True)
+        events = [json.loads(line.removeprefix('[ga-latency] ')) for line in stderr.getvalue().splitlines()
+                  if line.startswith('[ga-latency] ')]
+        batches = [event for event in events if event['stage'] == 'tool_batch']
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['calls'], 1)
+        for key in ('prepare_ms', 'execution_ms', 'pack_ms'):
+            self.assertGreaterEqual(batches[0][key], 0)
+        self.assertNotIn('private-fixture', stderr.getvalue())
+
     def test_parallel_batch_preserves_result_order(self):
         handler = _Handler(delays={"mcp__s__slow": 0.3})
         client = _Client([_Response([

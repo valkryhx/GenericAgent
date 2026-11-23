@@ -24,17 +24,15 @@ export type MessagePartition = {
 export function splitStaticAndActiveMessages(
   messages: ChatMessage[],
   _options: { keepLatestTaskActive?: boolean } = {},
+  previous?: MessagePartition,
 ): MessagePartition {
   const firstOpenIndex = messages.findIndex(message => !message.done)
-  if (firstOpenIndex === -1) {
-    return {
-      staticMessages: messages.filter(message => message.done),
-      activeMessages: [],
-    }
-  }
-
+  const splitAt = firstOpenIndex === -1 ? messages.length : firstOpenIndex
+  const prefix = previous?.staticMessages
   return {
-    staticMessages: messages.slice(0, firstOpenIndex),
-    activeMessages: messages.slice(firstOpenIndex),
+    staticMessages: prefix?.length === splitAt && prefix.every((message, index) => message === messages[index])
+      ? prefix
+      : messages.slice(0, splitAt),
+    activeMessages: messages.slice(splitAt),
   }
 }

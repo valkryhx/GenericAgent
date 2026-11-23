@@ -485,7 +485,7 @@ export function applyBridgeEvent(state: AppState, event: BridgeEvent): AppState 
             && message.done
             && message.id.startsWith(`${liveId}-c`),
         ).length
-        messages[liveIndex] = { ...live, id: `${liveId}-c${commits}`, done: true }
+        messages[liveIndex] = { ...live, id: `${liveId}-c${commits}`, done: true, endsAtThinkingBoundary: true }
       } else {
         // Empty live shell (reasoning arrived before any prose this step): no
         // text to preserve, and keeping it would paint a stray blank row.

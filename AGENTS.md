@@ -1572,3 +1572,12 @@ CC 依据：`claudecode283/extracted/dynamic-workflow-internals.md` §1/§3.4/§
   - 真实 LLM E2E（2026-10-16，目录重构后）：默认 `default/deepseek-flash`，显式 `/workflow` 完成 4/4 job（2 路并行版本探测 + 串行写表 + 独立 verify），runId `wf_18a215a93a2942dcad977d81444c411a`，status `succeeded`，产物 `temp/workflow-runs/wf_18a215a93a2942dcad977d81444c411a/workflow-e2e-version-table.md`。证据见 `docs/20261016-GA-目录重构后真实workflow-e2e.md`。
   - P6 其他前端迁移：`frontends/{common,terminal,desktop,web,bots,acp}/` 已建立并迁移实现；旧 `frontends/*.py|*.pyw` 顶层路径保留 alias shim，`launch.pyw`、`assets/configure_mykey.py`、README/AGENTS/CLAUDE 与结构门禁同步更新。验证：全量 Python 1585 tests OK（3 skipped）、Ink UI 431 pass、`tsc --noEmit` 通过、结构门禁通过；L1 真实 API bridge 自测 5/5 PASS（`default/deepseek-flash`，证据包 `temp/ink-selftest/20261016-181824`）；真实 workflow strict-schema E2E 通过（`wf_strict_schema_e2e`，1/1 job succeeded，`schemaValidation: true`）。
   - 详细实施记录：`docs/20261016-ga-project-structure-reorg-plan.md` §13。
+
+### 中途调研 2026-11-22：Pi 与 GA 响应速度 / token 流畅性对比
+
+- **触发**：用户实测 Pi agent 的 token 输出像流水一样流畅，要求分析 Pi 为什么快、GA 哪些地方可以优化，并选择综合路线 C：先优化显示链路，再优化首 token / 长会话请求链路；真实 API 验收限定使用本项目的 `zhanlu ds` 配置。
+- **源码证据**：Pi `packages/agent/src/agent-loop.ts` 在 provider stream 事件到达时立即发出 `message_update`；`packages/coding-agent/src/modes/interactive/interactive-mode.ts` 更新正在流式显示的 assistant 组件并调用 `ui.requestRender()`；`packages/tui/src/tui.ts` 将多次请求合并到最小渲染间隔（`MIN_RENDER_INTERVAL_MS`）内，再做 TUI 差分渲染。Pi 的关键不是取消所有节流，而是“事件立即入 UI + 约帧率合并 + 差分绘制”。
+- **GA 证据**：`genericagent/core/app.py::_drain_agent_stream` 先以 `STREAM_FLUSH_CHARS = 16` 为阈值向队列投递；`frontends/ink/bridge.py::_consume_display_queue` 再转成 JSONL `assistant_delta`；`frontends/ink/ui/src/App.tsx` 对 delta 额外以 80ms 定时器合并；`state.ts` 更新活动消息后，`App.tsx` 的活动转录仍会重新走文本分区、格式化、换行和视口计算。GA 已有 MCP 后台发现和部分工具并行，但这不消除显示链路的多层等待。
+- **结论**：首要体感瓶颈是多层串行批处理：16 字符门槛 + 80ms 前端窗口；第二类瓶颈是活动消息更新带来的重复转录计算；第三类才是每轮工具 schema / 历史投影 / prompt 构造。不能简单删除所有节流，应对齐 Pi 的“低延迟增量 + 单帧合并 + 差分渲染”。
+- **方案**：调研证据与实现设计分别落在 `docs/20261122-pi-vs-ga-latency-research.md` 和 `docs/20261122-ga-response-speed-optimization-design.md`；后续实施必须先完成显示链路回归，再进入请求链路缓存/增量投影，真实 API 仅使用 `zhanlu ds` 做同一任务的 A/B 测量。
+- **待办**：按设计文档执行路线 C；第一阶段建立显示时间线与程序化帧断言，第二阶段建立首 token / 完成时间 / cache hit / prompt 构造耗时指标；每个优化单独验证，避免把模型速度、网络速度和 UI 延迟混为一谈。

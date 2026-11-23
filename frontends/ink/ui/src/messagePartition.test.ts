@@ -134,3 +134,20 @@ test('after turn finalizes, stop local commands commit to static once with the t
   )
   assert.deepEqual(split.activeMessages, [])
 })
+
+test('reuses completed message identities across 100 active updates and drops reuse on replacement', () => {
+  const history: ChatMessage[] = Array.from({ length: 100 }, (_, i) => ({
+    id: `old-${i}`, text: `Old answer ${i}`, role: 'assistant', done: true,
+  }))
+  const live: ChatMessage = { id: 'a-101', text: 'live', role: 'assistant', done: false }
+  let partition = splitStaticAndActiveMessages([...history, live])
+  const prefix = partition.staticMessages
+  for (let i = 0; i < 100; i++) {
+    const next = splitStaticAndActiveMessages([...history, { ...live, text: `live ${i}` }], {}, partition)
+    assert.equal(next.staticMessages === prefix, true, 'static projection dependency changed on a live delta')
+    assert.equal(next.activeMessages[0]?.text, `live ${i}`)
+    partition = next
+  }
+  history[0] = { ...history[0]!, text: 'Replaced history with the same message ID' }
+  assert.notEqual(splitStaticAndActiveMessages([...history, live], {}, partition).staticMessages, prefix)
+})

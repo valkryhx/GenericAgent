@@ -101,7 +101,7 @@ export function transcriptLines(messages: ChatMessage[], options: { expandedTool
  */
 export function transcriptLinesWithChannel(
   messages: ChatMessage[],
-  options: { expandedTools: boolean; theme?: InkTheme; initialChannel?: ResultChannel },
+  options: { expandedTools: boolean; theme?: InkTheme; initialChannel?: ResultChannel; previousLine?: TranscriptLine },
 ): { lines: TranscriptLine[]; channel: ResultChannel } {
   const rows: TranscriptLine[] = []
   let channel: ResultChannel = options.initialChannel ?? null
@@ -119,12 +119,12 @@ export function transcriptLinesWithChannel(
     // Static append-only: once a message is emitted we never remove its last
     // row to make room for the next one. Consecutive tool-result rows stay
     // contiguous (Status -> Stdout across a stream-commit split).
+    const previous = rows.at(-1) ?? options.previousLine
     if (
-      rows.length > 0
+      previous?.text.trim()
       && compacted.length > 0
-      && rows[rows.length - 1]!.text.trim() !== ''
-      && !bothResultBlocks(rows, compacted)
-      && !chipContinuesToolGroup(rows, compacted)
+      && !bothResultBlocks([previous], compacted)
+      && !chipContinuesToolGroup([previous], compacted)
     ) {
       rows.push(blankLine(`boundary-${message.id}`))
     }

@@ -480,9 +480,13 @@ def load_tool_schema(suffix='', include_mcp_tools=True):
     schema_path = os.path.join(script_dir, f'assets/tools_schema{suffix}.json')
     if not os.path.isfile(schema_path):
         schema_path = str(paths.BUNDLED_ASSETS_DIR / f'tools_schema{suffix}.json')
-    with open(schema_path, 'r', encoding='utf-8') as f:
-        TS = f.read()
-    TOOLS_SCHEMA = json.loads(TS if os.name == 'nt' else TS.replace('powershell', 'bash'))
+    if os.environ.get('GA_SCHEMA_CACHE') == 'on':
+        from genericagent.core.schema_cache import load_static_tool_schema
+        TOOLS_SCHEMA = load_static_tool_schema(schema_path, os.name)
+    else:
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        TOOLS_SCHEMA = json.loads(text if os.name == 'nt' else text.replace('powershell', 'bash'))
     _apply_subagent_role_schema(
         TOOLS_SCHEMA,
         script_dir,

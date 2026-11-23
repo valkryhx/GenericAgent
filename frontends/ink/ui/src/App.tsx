@@ -234,7 +234,8 @@ import {
   transcriptScrollStep,
   transcriptWheelStep,
 } from './transcriptScroll.js'
-import { splitStaticAndActiveMessages } from './messagePartition.js'
+import { splitStaticAndActiveMessages, type MessagePartition } from './messagePartition.js'
+import { createStreamScheduler } from './streamScheduler.js'
 import { planMessageViewport } from './messageViewportPlan.js'
 import { hitTestThinkingRow, thinkingRowsOf } from './thinkingHitTest.js'
 
@@ -250,6 +251,7 @@ type Props = {
    * 测试可以显式钉住它而不是隐式依赖一个模块级常量。默认值仍是 120ms。
    */
   resizeRemountDelayMs?: number
+  onStreamDispatch?: () => void
 }
 
 const STDIN_RESUME_GAP_MS = 5000
@@ -1001,6 +1003,7 @@ export function App({
   startBridgeClient = startBridge,
   cursorPark,
   resizeRemountDelayMs = RESIZE_REMOUNT_DELAY_MS,
+  onStreamDispatch,
 }: Props) {
   const { exit } = useApp()
   const { stdout, write: inkWrite } = useStdout()
@@ -1012,6 +1015,11 @@ export function App({
   /** 与 terminalSize 同步的即时快照：resize 监听里要判断「宽/高是否真的变了」。 */
   const terminalSizeRef = useRef(terminalSize)
   const [state, dispatch] = useReducer(applyBridgeEvent, initialState)
+  const streamDispatchObserver = useRef(onStreamDispatch)
+  const clearPendingStream = useRef<() => void>(() => {})
+  useLayoutEffect(() => {
+    streamDispatchObserver.current = onStreamDispatch
+  }, [onStreamDispatch])
   const [input, setInput] = useState('')
   const [cursorOffset, setCursorOffset] = useState(0)
   const [inputHistory, setInputHistory] = useState(() => createInputHistory())
@@ -1331,6 +1339,7 @@ export function App({
       setFooterPanel(null)
       setTranscriptScrollOffset(0)
       pendingLocalCommandRef.current = null
+      clearPendingStream.current()
       dispatch({ type: 'clear' })
       resetStaticTranscriptOutput()
       dispatch({ type: 'local_command_input', text: localCommandText ?? '/clear' })
@@ -1560,18 +1569,25 @@ export function App({
   }, [runningStartedAt, state.status])
 
   useEffect(() => {
-    let pendingDeltas: { [taskId: string]: string } = {}
-    let throttleTimer: NodeJS.Timeout | null = null
-
-    function flushDeltas() {
-      if (Object.keys(pendingDeltas).length === 0) return
-      for (const [taskId, text] of Object.entries(pendingDeltas)) {
-        dispatch({ type: 'assistant_delta', taskId: Number(taskId), text })
-      }
-      pendingDeltas = {}
-    }
+    const frameStreaming = process.env.GA_STREAM_SCHEDULER === 'frame'
+    const stream = createStreamScheduler({
+      intervalMs: frameStreaming ? 24 : 80,
+      leading: frameStreaming,
+      now: () => performance.now(),
+      schedule: (callback, delay) => setTimeout(callback, delay),
+      cancel: timer => clearTimeout(timer),
+      dispatch: (taskId, text) => {
+        streamDispatchObserver.current?.()
+        dispatch({ type: 'assistant_delta', taskId, text })
+      },
+    })
 
     function onEvent(event: BridgeEvent) {
+      if (frameStreaming && (
+        event.type === 'assistant_thinking' || event.type === 'retry_status'
+        || event.type === 'status' || event.type === 'permission_request' || event.type === 'question_request'
+      )) stream.flush()
+      if (frameStreaming && event.type === 'clear') stream.clear()
       if (event.type === 'ready') {
         bridgeRef.current?.send({ type: 'skill_status' })
         bridgeRef.current?.send({ type: 'mcp_watch_start' })
@@ -1715,7 +1731,8 @@ export function App({
         setSelector(null)
         setFooterPanel(null)
         resumePendingRef.current = false
-        flushDeltas()
+        stream.flush()
+        stream.clear()
         // <Static> can only append. A whole-history replacement must clear the
         // old viewport and scrollback before the reducer remounts <Static>, or
         // old rows remain underneath the replayed transcript. Inline mode also
@@ -1781,7 +1798,8 @@ export function App({
         const commandText = pendingLocalCommandRef.current
         setSelector(null)
         setInput(event.text)
-        flushDeltas()
+        stream.flush()
+        stream.clear()
         // rewind 让历史变短，但 Static 不会撤销已写出的行；先整屏重置再重印，
         // 屏幕上只剩裁剪后的那一份（reducer 里 staticGeneration +1 触发重挂）。
         resetTranscriptViewport()
@@ -1802,28 +1820,13 @@ export function App({
         return
       }
       if (event.type === 'assistant_delta') {
-        const taskIdStr = String(event.taskId)
-        pendingDeltas[taskIdStr] = (pendingDeltas[taskIdStr] || '') + event.text
-        if (!throttleTimer) {
-          throttleTimer = setTimeout(() => {
-            throttleTimer = null
-            flushDeltas()
-          }, 80)
-        }
+        stream.push(event.taskId, event.text)
         return
       }
       if (event.type === 'assistant_done') {
-        // Bridge `done` is already the full assistant_text for the turn.
-        // Flush any throttled deltas first, then finalize with the full text only —
-        // never concatenate pending + done (that double-counts streamed content and
-        // breaks stream-commit prefix stripping → "LLM Running Turn 1" appears twice).
-        if (throttleTimer) {
-          clearTimeout(throttleTimer)
-          throttleTimer = null
-        }
-        flushDeltas()
-        const taskIdStr = String(event.taskId)
-        delete pendingDeltas[taskIdStr]
+        // `done` already has the full turn. Commit pending text first so the
+        // reducer can reconcile existing stream segments against that text.
+        stream.finish(event.taskId)
         dispatch({ type: 'assistant_done', taskId: event.taskId, text: event.text })
         return
       }
@@ -1862,12 +1865,16 @@ export function App({
       dispatch(event)
     }
 
+    clearPendingStream.current = stream.clear
     bridgeRef.current = startBridgeClient(python, bridgeScript, onEvent, code => {
+      stream.flush()
+      stream.clear()
       dispatch({ type: 'error', code: 'bridge_exit', message: `bridge exited: ${code ?? 'signal'}` })
     })
     return () => {
+      stream.clear()
+      clearPendingStream.current = () => {}
       bridgeRef.current?.stop()
-      if (throttleTimer) clearTimeout(throttleTimer)
     }
   }, [bridgeScript, python, startBridgeClient])
 
@@ -2828,21 +2835,27 @@ export function App({
     ))
     : 0
   const keepLatestTaskActive = state.status === 'running' || state.status === 'stopping'
+  const projectActiveTail = process.env.GA_LIVE_TRANSCRIPT_RENDER === 'active_tail'
+  const previousPartition = useRef<MessagePartition>()
   const messagePartition = useMemo(() => (
-    splitStaticAndActiveMessages(state.messages, { keepLatestTaskActive })
-  ), [keepLatestTaskActive, state.messages])
+    splitStaticAndActiveMessages(state.messages, { keepLatestTaskActive }, projectActiveTail ? previousPartition.current : undefined)
+  ), [keepLatestTaskActive, projectActiveTail, state.messages])
+  useLayoutEffect(() => {
+    previousPartition.current = projectActiveTail ? messagePartition : undefined
+  }, [messagePartition, projectActiveTail])
 
   const staticTranscript = useMemo(() => (
-    fullscreen
-      ? { rows: [], channel: null }
+    fullscreen && !projectActiveTail
+      ? { rows: [], channel: null, previousLine: undefined }
       : (() => {
           const rendered = transcriptLinesWithChannel(messagePartition.staticMessages, { expandedTools, theme })
           return {
             rows: wrapTranscriptLines(rendered.lines, transcriptContentColumns(metrics.canvasColumns)),
             channel: rendered.channel,
+            previousLine: rendered.lines.at(-1),
           }
         })()
-  ), [expandedTools, messagePartition.staticMessages, metrics.canvasColumns, fullscreen, theme])
+  ), [expandedTools, messagePartition.staticMessages, metrics.canvasColumns, fullscreen, projectActiveTail, theme])
   const staticTranscriptRows = staticTranscript.rows
   const activeTranscriptRows = useMemo(() => (
     fullscreen
@@ -2876,8 +2889,15 @@ export function App({
   ), [activeTranscriptRows, inlineMessageViewportPlan])
 
   const transcriptRows = useMemo(() => (
-    wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
-  ), [state.messages, expandedTools, metrics.canvasColumns, theme])
+    projectActiveTail
+      ? staticTranscriptRows.concat(wrapTranscriptLines(transcriptLinesWithChannel(messagePartition.activeMessages, {
+          expandedTools,
+          theme,
+          initialChannel: staticTranscript.channel,
+          previousLine: staticTranscript.previousLine,
+        }).lines, transcriptContentColumns(metrics.canvasColumns)))
+      : wrapTranscriptLines(transcriptLines(state.messages, { expandedTools, theme }), transcriptContentColumns(metrics.canvasColumns))
+  ), [projectActiveTail, staticTranscript, staticTranscriptRows, messagePartition.activeMessages, state.messages, expandedTools, metrics.canvasColumns, theme])
   const previousTranscriptTotalRows = transcriptRowsRef.current.totalRows
   const historyReplacementScrollOffset = fullscreen && pendingHistoryReplacementScrollRef.current
     ? scrollOffsetForHistoryReplacement(transcriptRows.length, metrics.messageRows)

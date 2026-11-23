@@ -1,4 +1,4 @@
-import json, re, os, queue, threading
+import json, re, os, queue, sys, threading, time
 from genericagent.core.errors import ContextOverflowError
 
 from genericagent.core.tool_results.budget import budget_tool_result
@@ -415,6 +415,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     # returns, so a failure there replays the same notices instead of losing
     # them.
     pending_notification_ack = None
+    trace_latency = os.environ.get("GA_LATENCY_TRACE") == "1"
     while turn < handler.max_turns:
         turn += 1; turnstr = f'LLM Running (Step {turn}) ...'
         if handler.parent.task_dir: turnstr = f'Step {turn} ...'
@@ -465,6 +466,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             handler.last_assistant_message = _clean_content(response.content)
 
 
+        prepare_start = time.perf_counter() if trace_latency else 0.0
         if not response.tool_calls: tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
         else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}
                           for tc in response.tool_calls]
@@ -472,8 +474,11 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         tool_results = []; next_prompts = set(); exit_reason = {}
         handler.current_turn = turn
         tool_num = len(tool_calls)
-        for mode, batch in _batch_tool_calls(tool_calls):
+        batches = _batch_tool_calls(tool_calls)
+        prepare_ms = (time.perf_counter() - prepare_start) * 1000 if trace_latency else 0.0
+        for mode, batch in batches:
             batch_outcomes = []
+            execution_start = time.perf_counter() if trace_latency else 0.0
             if mode == 'parallel' and len(batch) > 1:
                 # Independent calls (MCP tools, reads) overlap instead of
                 # paying each other's latency one after another.
@@ -483,6 +488,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 for ii, tc in batch:
                     outcome = yield from _run_single_tool(handler, response, tc, ii, tool_num, verbose)
                     batch_outcomes.append((ii, tc, outcome))
+            packing_start = time.perf_counter() if trace_latency else 0.0
             for ii, tc, outcome in batch_outcomes:
                 tool_name, tid = tc.get('tool_name'), tc.get('id', '')
                 if outcome is None:
@@ -509,6 +515,17 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         pass
                     tool_results.append({'tool_use_id': tid, 'content': datastr})
                 next_prompts.add(outcome.next_prompt)
+            if trace_latency and response.tool_calls:
+                metrics = {
+                    "stage": "tool_batch", "turn": turn, "calls": len(batch), "mode": mode,
+                    "prepare_ms": round(prepare_ms, 3),
+                    "execution_ms": round((packing_start - execution_start) * 1000, 3),
+                    "pack_ms": round((time.perf_counter() - packing_start) * 1000, 3),
+                }
+                try:
+                    print("[ga-latency] " + json.dumps(metrics), file=sys.stderr)
+                except (OSError, ValueError):
+                    pass
             if exit_reason:
                 break
         if len(next_prompts) == 0 or exit_reason:
